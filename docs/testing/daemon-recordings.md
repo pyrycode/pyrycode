@@ -1,11 +1,11 @@
 # Captured Claude daemon tests
 
-The pilot runs a real isolated daemon, a loopback relay and an authenticated test
+The recorded suite runs a real isolated daemon, a loopback relay and an authenticated test
 client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Four scenarios run the same assertions in live capture and offline replay:
+Six scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -13,6 +13,9 @@ Four scenarios run the same assertions in live capture and offline replay:
 - `permission-deny`: a real Write permission request surfaces to the client;
   its tool, target path and conversation are checked before explicit rejection
   dismisses that modal with remote attribution and the conversation completes.
+  The shared live driver also rejects bounded retries and requires matching
+  remote dismissals for every decision and exactly one durable deny fact with
+  the asking session.
   Live capture also checks that the denied file does not exist. Replay cannot prove that Claude obeys a denial or performs no IO.
 
 - `reply`: a cold reply passes the same completed-turn drain used by
@@ -27,8 +30,20 @@ Four scenarios run the same assertions in live capture and offline replay:
   answer fact with bounded context and the asking session. A new application turn
   must announce the selected Haiku model and complete.
 
+- `permission-allow`: the matching remote allow dismissal, nonempty continuation
+  then terminal idle, and exactly one durable allow fact with the asking session.
+  The lower capture boundary verifies the actual Write tool and target path;
+  live capture additionally reads back the exact file bytes. Replay cannot prove
+  that a tool actually wrote the file.
+- `question-refuse`: a surfaced batch is explicitly refused, dismissed as
+  `{refused, remote}`, reaches terminal idle and persists exactly one refusal
+  fact with the asking session. The shared driver refuses at most two re-asks
+  and allows at most four post-refusal permissions, requiring matching remote
+  dismissal of every decision. This preserves the live refusal test's independent
+  absence witness: permissions must not silently block forbidden work for it.
+
 `make e2e` includes these cases in the ordinary offline integration selection.
-`make e2e-recorded-claude` runs just the pilot. Missing fixtures fail; nothing
+`make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
 falls back to Claude. Replay removes provider credentials and uses disposable
 HOME and test pairing state. The daemon is expected to execute during replay.
 
@@ -88,7 +103,7 @@ replay and strict outgoing request comparison. Comparison binds observed control
 IDs by producer direction and ordinal; it retains complete ordered requests.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
-stage must execute all four named leaves with no failures or skips. A failing stage
+stage must execute all six named leaves with no failures or skips. A failing stage
 cannot produce a successful compatibility summary, even if the others passed.
 Verification never replaces the reviewed baseline.
 
@@ -107,7 +122,8 @@ preship remains unchanged, and dispatcher routing is unchanged.
 | `TestInteractiveStreamLiveness` | `reply`, same completed-turn driver | Current provider compatibility |
 | `TestInteractiveStreamQuestionAnswer` and stdio counterpart | `question-answer`, same question/model/history driver | Unpredictable question labels and current Claude interpretation |
 | Three-turn memory continuity | None in this batch | Actual Claude context retention |
-| Question refusal and permission filesystem effects | None in this batch | Actual external effects and provider refusal behavior |
+| Question refusal | `question-refuse`, same refusal drain and history checks | Unpredictable question labels, blocked Write absence and actual provider refusal behavior |
+| Permission allow/deny | `permission-allow` and `permission-deny`, same resolution/history drivers | Actual file creation/absence, current approval transport and settings-respawn behavior |
 
 The recorded question trigger supplies a complete fixed AskUserQuestion input so
 fresh daemon requests remain exactly comparable, including question keys and
@@ -117,11 +133,21 @@ The compatibility comparator does not scrub provider prose or loosen request
 comparison for these cases. Dismissal and terminal idle may arrive in either order;
 both are required after the matching continuation.
 
-Next candidates are ordinary reply delivery, permission allow/deny, questions,
-queue actions, model-control messages and thread folding. Each must preserve its
+Next candidates are permission cancellation, queue actions, further model-control
+messages and thread folding. Each must preserve its
 original assertions and account for all external inputs before promotion.
 Crash/restart, session files, real tool effects, signal handling, transport
 recovery, provider compatibility and measured timing retain explicit live or
 other dedicated deterministic integration proof. They cannot be represented by
 playing stdout alone. Desktop and Android daemon-message recordings cannot
 substitute for this lower boundary: doing so would bypass daemon behaviour.
+
+The refusal capture uses the same complete question schema as the answer capture,
+with a fixed instruction for refusal. It exercises daemon routing and persistence;
+the original live refusal trigger still blocks a nonce-named Write behind a real
+answer and retains the non-vacuous filesystem absence check. No live requirement
+is removed or retagged. The shared permission and refusal drains collect dismissal
+and idle in either order, but cannot pass with an unresolved sent decision. Allow
+still needs text before idle; deny and refusal retain their original ability to
+finish silently. Retry caps remain four permission retries, two re-asked questions
+and four post-refusal permission allows.

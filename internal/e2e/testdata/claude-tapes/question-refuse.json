@@ -1,0 +1,2273 @@
+{
+  "version": 1,
+  "scenario": "question-refuse",
+  "producer": {
+    "revision": "368d62eebec1005d3e463c1b04ce259dfe12a2e3",
+    "binary_sha256": "531bb17d9e589abeeddb26c6b742ead2f847f5f74b36528d9fe0526d6fc6e225",
+    "claude_version": "2.1.280 (Claude Code)",
+    "captured_at": "2026-10-19T14:34:02.024797Z"
+  },
+  "args": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--replay-user-messages",
+    "--prompt-suggestions",
+    "--settings",
+    "${PILOT_HOME}/.pyry/test/session-settings/ecda0000-0000-4000-8000-000000000001.json",
+    "--append-system-prompt-file",
+    "${PILOT_HOME}/.pyry/test/system-prompt.txt",
+    "--dangerously-skip-permissions",
+    "--permission-mode",
+    "default",
+    "--permission-prompt-tool",
+    "stdio",
+    "--mcp-config",
+    "${PILOT_MCP_CONFIG}",
+    "--strict-mcp-config",
+    "--session-id",
+    "ecda0000-0000-4000-8000-000000000001"
+  ],
+  "frames": [
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "mode": "default",
+          "subtype": "set_permission_mode"
+        },
+        "request_id": "1",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "perTaskStopAffordance": true,
+          "subtype": "initialize"
+        },
+        "request_id": "2",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "1",
+          "response": {
+            "mode": "default"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "permissionMode": "default",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": null,
+        "subtype": "status",
+        "type": "system",
+        "uuid": "80e6f890-a7e0-440d-8781-ea6bb8836e90"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "pending_permission_requests": [],
+          "pending_user_dialog_requests": [],
+          "request_id": "2",
+          "response": {
+            "account": {
+              "apiProvider": "firstParty",
+              "tokenSource": "CLAUDE_CODE_OAUTH_TOKEN"
+            },
+            "agents": [
+              {
+                "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.",
+                "name": "claude"
+              },
+              {
+                "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
+                "model": "inherit",
+                "name": "Explore"
+              },
+              {
+                "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+                "name": "general-purpose"
+              },
+              {
+                "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
+                "model": "inherit",
+                "name": "Plan"
+              },
+              {
+                "description": "Use this agent to configure the user's Claude Code status line setting.",
+                "model": "sonnet",
+                "name": "statusline-setup"
+              }
+            ],
+            "analytics_disabled": false,
+            "available_output_styles": [
+              "default",
+              "Proactive",
+              "Concise",
+              "Explanatory",
+              "Learning"
+            ],
+            "commands": [
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+                "name": "deep-research"
+              },
+              {
+                "argumentHint": "consent | revoke",
+                "builtin": true,
+                "description": "Grant or revoke Claude agent access to your Design projects",
+                "name": "design"
+              },
+              {
+                "argumentHint": "[\u003cproject hint, e.g. \"Acme DS\"\u003e]",
+                "builtin": true,
+                "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+                "name": "design-sync"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+                "name": "dataviz"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+                "name": "update-config"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+                "name": "verify"
+              },
+              {
+                "argumentHint": "[issue description]",
+                "builtin": true,
+                "description": "Enable debug logging for this session and help diagnose issues",
+                "name": "debug"
+              },
+              {
+                "aliases": [
+                  "review"
+                ],
+                "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [\u003cpr#\u003e|\u003cbranch\u003e|\u003cpath\u003e]",
+                "builtin": true,
+                "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+                "name": "code-review"
+              },
+              {
+                "argumentHint": "[\u003ctarget\u003e]",
+                "builtin": true,
+                "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+                "name": "simplify"
+              },
+              {
+                "argumentHint": "\u003cinstruction\u003e",
+                "builtin": true,
+                "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+                "name": "batch"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+                "name": "fewer-permission-prompts"
+              },
+              {
+                "aliases": [
+                  "checkup"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+                "name": "doctor"
+              },
+              {
+                "aliases": [
+                  "proactive"
+                ],
+                "argumentHint": "[interval] [prompt]",
+                "builtin": true,
+                "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+                "name": "loop"
+              },
+              {
+                "aliases": [
+                  "routines"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+                "name": "schedule"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+                "name": "claude-api"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+                "name": "workflow-authoring"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+                "name": "run"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Author or improve the run-\u003cunit\u003e skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+                "name": "run-skill-generator"
+              },
+              {
+                "argumentHint": "[fable|opus|sonnet|off]",
+                "builtin": true,
+                "description": "Let Claude consult a stronger model at key moments",
+                "name": "advisor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+                "name": "agents"
+              },
+              {
+                "argumentHint": "[--request-id \u003cuuid\u003e] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 \u003c64-hex\u003e --apply-file \u003cpath\u003e)",
+                "builtin": true,
+                "description": "Teach auto mode about your environment, plus optional rule tweaks",
+                "name": "auto-mode-setup"
+              },
+              {
+                "argumentHint": "[auto|\u003ctokens\u003e]",
+                "builtin": true,
+                "description": "Configure the auto-compact window size",
+                "name": "autocompact"
+              },
+              {
+                "aliases": [
+                  "reset",
+                  "new"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+                "name": "clear"
+              },
+              {
+                "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+                "builtin": true,
+                "description": "Set the prompt bar color for this session",
+                "name": "color"
+              },
+              {
+                "argumentHint": "\u003coptional custom summarization instructions\u003e",
+                "builtin": true,
+                "description": "Free up context by summarizing the conversation so far",
+                "name": "compact"
+              },
+              {
+                "aliases": [
+                  "settings"
+                ],
+                "argumentHint": "key=value",
+                "builtin": true,
+                "description": "Set a setting by key",
+                "name": "config"
+              },
+              {
+                "argumentHint": "[style]",
+                "builtin": true,
+                "description": "List output styles or switch to one",
+                "name": "output-style"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show current context usage",
+                "name": "context"
+              },
+              {
+                "argumentHint": "\u003clow|medium|high|xhigh|max|ultracode|auto\u003e",
+                "builtin": true,
+                "description": "Set effort level for model usage",
+                "name": "effort"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle fast mode (Opus 5.5)",
+                "name": "fast"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+                "name": "heapdump"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Initialize a new CLAUDE.md file with codebase documentation",
+                "name": "init"
+              },
+              {
+                "argumentHint": "[reconnect|enable|disable [\u003cserver\u003e|all]]",
+                "builtin": true,
+                "description": "Manage MCP servers",
+                "name": "mcp"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Import config from another AI coding agent",
+                "name": "import"
+              },
+              {
+                "argumentHint": "\u003cmodel\u003e",
+                "builtin": true,
+                "description": "Set the AI model for Claude Code",
+                "name": "model"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+                "name": "__remote-workflow"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+                "name": "workflow-launch-exec"
+              },
+              {
+                "argumentHint": "[--force]",
+                "builtin": true,
+                "description": "Activate pending plugin changes in the current session",
+                "name": "reload-plugins"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Pick up skills added or changed on disk during this session",
+                "name": "reload-skills"
+              },
+              {
+                "aliases": [
+                  "name"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Rename the current conversation",
+                "name": "rename"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Start a cloud agent that finds and verifies bugs in your branch (~15-25 min, $5-$25 USD) · Runs in a cloud session. See https://code.claude.com/docs/en/claude-code-on-the-web",
+                "name": "ultrareview"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Complete a security review of the pending changes on the current branch",
+                "name": "security-review"
+              },
+              {
+                "aliases": [
+                  "cost",
+                  "stats"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show session cost, plan usage, and what's contributing to your limits",
+                "name": "usage"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a report analyzing your Claude Code sessions",
+                "name": "insights"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a one-line session recap now",
+                "name": "recap"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show which loaded skills are unused and costing context",
+                "name": "skill-doctor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Set a goal — keep working until the condition is met",
+                "name": "goal"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Grant Claude agent access to your Design projects",
+                "name": "design-consent"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Revoke Claude agent access to your Design projects",
+                "name": "design-revoke"
+              },
+              {
+                "aliases": [
+                  "peers"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "List subagents, teammates, and other Claude sessions you can message",
+                "name": "list-agents"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Help teammates ramp on Claude Code with a guide from your usage",
+                "name": "team-onboarding"
+              }
+            ],
+            "current_permission_mode": "default",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "fast_mode_state": "off",
+            "ide_rc_auto_enable_gate": true,
+            "models": [
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Default (recommended)",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "default"
+              },
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Sonnet",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "sonnet"
+              },
+              {
+                "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+                "displayName": "Fable",
+                "resolvedModel": "claude-fable-5-1",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "claude-fable-5-1"
+              },
+              {
+                "description": "Opus 5.5 · Best for everyday, complex tasks",
+                "displayName": "Opus",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "opus"
+              },
+              {
+                "description": "Haiku 4.5 · Fastest for quick answers",
+                "displayName": "Haiku",
+                "resolvedModel": "claude-haiku-4-5-20251001",
+                "value": "haiku"
+              }
+            ],
+            "output_style": "default",
+            "pid": 53983,
+            "remote_control_auto_connect_default": false,
+            "remote_control_auto_enable": false,
+            "remote_control_auto_on_by_default": false,
+            "remote_control_available": true,
+            "session_state": "idle",
+            "user_output_styles_dir": "${PILOT_HOME}/.claude/output-styles"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "subtype": "mcp_status"
+        },
+        "request_id": "3",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "3",
+          "response": {
+            "mcpServers": [
+              {
+                "config": {
+                  "args": [
+                    "mcp-approve",
+                    "-pyry-socket",
+                    "${PILOT_SOCKET}"
+                  ],
+                  "command": "${PILOT_DAEMON}",
+                  "type": "stdio"
+                },
+                "name": "pyry_approve",
+                "scope": "dynamic",
+                "serverInfo": {
+                  "name": "pyry_approve",
+                  "version": "dev"
+                },
+                "source": "dynamic",
+                "status": "connected",
+                "tools": [
+                  {
+                    "annotations": {},
+                    "name": "approve"
+                  }
+                ]
+              },
+              {
+                "config": {
+                  "args": [
+                    "mcp-files",
+                    "-pyry-socket",
+                    "${PILOT_SOCKET}"
+                  ],
+                  "command": "${PILOT_DAEMON}",
+                  "type": "stdio"
+                },
+                "name": "pyry_files",
+                "scope": "dynamic",
+                "serverInfo": {
+                  "name": "pyry_files",
+                  "version": "dev"
+                },
+                "source": "dynamic",
+                "status": "connected",
+                "tools": [
+                  {
+                    "annotations": {},
+                    "name": "send_file"
+                  }
+                ]
+              }
+            ]
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "Before writing anything, call AskUserQuestion exactly once with this exact JSON input, preserving all text and option order: {\"questions\":[{\"question\":\"Which cache eviction policy should be used?\",\"header\":\"Policy\",\"multiSelect\":false,\"options\":[{\"label\":\"LRU\",\"description\":\"Evict the least recently used entry.\"},{\"label\":\"LFU\",\"description\":\"Evict the least frequently used entry.\"},{\"label\":\"FIFO\",\"description\":\"Evict the oldest entry.\"},{\"label\":\"Random\",\"description\":\"Evict a random entry.\"}]}]}. After I answer, reply with the label of the option I chose. Do not use other tools. If I refuse to answer, do not retry, do not use other tools, and reply with one short sentence.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": false,
+        "apiKeySource": "none",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.280",
+        "cwd": "${PILOT_HOME}",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [
+          {
+            "name": "pyry_approve",
+            "source": "dynamic",
+            "status": "connected"
+          },
+          {
+            "name": "pyry_files",
+            "source": "dynamic",
+            "status": "connected"
+          }
+        ],
+        "memory_paths": {
+          "auto": "${PILOT_HOME}/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-p-301-3918352894/memory/"
+        },
+        "messaging_socket_path": "/tmp/cc-socks/53983.sock",
+        "model": "claude-sonnet-5",
+        "output_style": "default",
+        "permissionMode": "default",
+        "plugins": [
+          {
+            "name": "telemetry",
+            "path": "builtin",
+            "source": "telemetry@builtin"
+          }
+        ],
+        "product_feedback_disabled": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "skills": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator"
+        ],
+        "slash_commands": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator",
+          "advisor",
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "heapdump",
+          "init",
+          "mcp",
+          "import",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "ultrareview",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "skill-doctor",
+          "goal",
+          "design-consent",
+          "design-revoke",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "doctor",
+          "color",
+          "reload-plugins"
+        ],
+        "tools": [
+          "Task",
+          "AskUserQuestion",
+          "Bash",
+          "CronCreate",
+          "CronDelete",
+          "CronList",
+          "DesignSync",
+          "Edit",
+          "EnterPlanMode",
+          "EnterWorktree",
+          "ExitPlanMode",
+          "ExitWorktree",
+          "ListAgents",
+          "Monitor",
+          "NotebookEdit",
+          "PushNotification",
+          "Read",
+          "RemoteTrigger",
+          "ReportFindings",
+          "ScheduleWakeup",
+          "SendMessage",
+          "Skill",
+          "TaskStop",
+          "ToolSearch",
+          "WebFetch",
+          "WebSearch",
+          "Workflow",
+          "Write",
+          "mcp__pyry_approve__approve",
+          "mcp__pyry_files__send_file"
+        ],
+        "type": "system",
+        "uuid": "1c33100e-b5bc-4979-8177-3e557594c28d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "a0abe52e-3c77-4ddb-9122-d2b64200c34b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "Before writing anything, call AskUserQuestion exactly once with this exact JSON input, preserving all text and option order: {\"questions\":[{\"question\":\"Which cache eviction policy should be used?\",\"header\":\"Policy\",\"multiSelect\":false,\"options\":[{\"label\":\"LRU\",\"description\":\"Evict the least recently used entry.\"},{\"label\":\"LFU\",\"description\":\"Evict the least frequently used entry.\"},{\"label\":\"FIFO\",\"description\":\"Evict the oldest entry.\"},{\"label\":\"Random\",\"description\":\"Evict a random entry.\"}]}]}. After I answer, reply with the label of the option I chose. Do not use other tools. If I refuse to answer, do not retry, do not use other tools, and reply with one short sentence.",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:03.137Z",
+        "type": "user",
+        "uuid": "00c56b49-c5b6-4886-91c9-5c01d25d4947"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBm6S3HdABAucAi22fAf",
+            "input_transformations": [],
+            "model": "claude-sonnet-5",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 9374,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 9374,
+              "cache_read_input_tokens": 20041,
+              "inference_geo": "global",
+              "input_tokens": 2,
+              "output_tokens": 2,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 1974,
+        "type": "stream_event",
+        "uuid": "622201ed-6672-46cc-b59f-4537f632a24e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "67aa354f-7fa5-40bc-9f9a-9c4a52aeb695"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "2bd714fe-484e-44a7-a902-dbe04afd4c3e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1ac879e2-62e2-4c5c-bb46-fa7fa52c322d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "353bca48-e4e2-4d83-8724-be0abd58864e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 276,
+        "estimated_tokens_delta": 226,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "3b636c11-a4dc-4535-b29d-6be5d71878a9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "EsoICusCCBIYAipAKxXb9QSug+sg40d8QxdYY2HOpFc4gCrFgdnlrs5JfsRWETTHDJkCtVGSHm4LfB0plZrsRuUjItmdC+qZybkJNjIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyEMKpEC2s2urmJGaIFOTryHuIAQGaAREKD2NsYXVkZS1zb25uZXQtNagB39TY1gawAQLCAUkICRAAGhsBeb8BjBsB52kC5lIDTzcF8woF2cMRUc8EJq0gBDIEEnHPJToEFOxZkkIEPd+2M0oEruYRNFAMWgTZBeFWYAJoAXAD2gFgChZwcmVmaXhfYmVmb3JlX2Jsb2NrX3YxEiDrrO6czmSO+6n2NQTZO/g29Hy0h0aWc7WE/bWlDLsMriIAMiDCwBPIapyS4i+Wbz2GF3aPi3pEyQKtzAl7+h4JivtOH0gDEgz+mc7T6qpWa7VVoAMaDCwNFGqwVJG6SPddMiIwu2dtkWt0k0eVGhjSowy0PoNHc5K5vkGIw3YLcKIffs2BgCij3qza+YsZAERAGPf7KosFhXSAuR6gmyFswb8X7TCLOwUG5kRZv73/IzHurJIFFX9vOwLbarMkHS4jTyoK5JMGOb3ePwhbatVsMcNR/Cp3C5RMAWmDEgl/Z1s+OlHIDEmOcbGVI/APUgDAK17+m/tgdUqEAjbdffyVqUCrU8zrhrt3V8Ap3Yj0+EGhP9vro4bV0tyTd6JvpGnaD372b4YsohnlVhJW1tmEfQnL4pIhGCnEspA/vT/rPgAu6VuXFoA/gmrkfJqkb/P123OffRcNDaJw7qo1t21MWuyqzxApbJj+3OjL0vhXv1whLGp1DV0+hkm6L9V6SW4GgDjht5O49puM2I5X6IlVBenYSBMB/0HMvFg9iit1ZIglkGyRwcOGIXAGyYtEASwy6rib56GnA9FHlguFnI1+C6DpRSNQf28JXsjQr8+ugkRLiCuHmv87N72JAPDMEQgDacZXqaxieydw4b5G26zPIQQ7HTfTEIV3JsOXjLk/cK4hkT1Ug809DydHn5VE0UaPljKO1mW3PVz/b0tEtNK4Qhln8BqO+bBVE7CQ6YEnE53Kx7iF2c/Kiq/3AYCRJPHnMeytuNqlDjilD747n3VcDDFm99gjeMsvhhjO+Ufi2GBeamT9G+tYP6pl0JLQZEzAIY/kyb0YP8NckQm8ana42zT8YCgUdyEXRobzV04JUV3I4Grfywj/Z5HmjRsdo0SBivwjKOYv2Lg6J/kKIlDzOTOD+SRSciqFq72lEEd84X7sISyk/brjsR0K+pIaAmsraRndEQyaxzHCtr/M1hKcSsFxwE3OCMqpN8tFLGn7f1g8a3Id55ZGL77rGmZsIyB5Xo8m6WwBgb3fCEWli7ld+ifyg41CBit4b5aiSeu+r3/hGAE=",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "894f6f72-91c7-4053-8974-8684820dbd77"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "EsoICusCCBIYAipAKxXb9QSug+sg40d8QxdYY2HOpFc4gCrFgdnlrs5JfsRWETTHDJkCtVGSHm4LfB0plZrsRuUjItmdC+qZybkJNjIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyEMKpEC2s2urmJGaIFOTryHuIAQGaAREKD2NsYXVkZS1zb25uZXQtNagB39TY1gawAQLCAUkICRAAGhsBeb8BjBsB52kC5lIDTzcF8woF2cMRUc8EJq0gBDIEEnHPJToEFOxZkkIEPd+2M0oEruYRNFAMWgTZBeFWYAJoAXAD2gFgChZwcmVmaXhfYmVmb3JlX2Jsb2NrX3YxEiDrrO6czmSO+6n2NQTZO/g29Hy0h0aWc7WE/bWlDLsMriIAMiDCwBPIapyS4i+Wbz2GF3aPi3pEyQKtzAl7+h4JivtOH0gDEgz+mc7T6qpWa7VVoAMaDCwNFGqwVJG6SPddMiIwu2dtkWt0k0eVGhjSowy0PoNHc5K5vkGIw3YLcKIffs2BgCij3qza+YsZAERAGPf7KosFhXSAuR6gmyFswb8X7TCLOwUG5kRZv73/IzHurJIFFX9vOwLbarMkHS4jTyoK5JMGOb3ePwhbatVsMcNR/Cp3C5RMAWmDEgl/Z1s+OlHIDEmOcbGVI/APUgDAK17+m/tgdUqEAjbdffyVqUCrU8zrhrt3V8Ap3Yj0+EGhP9vro4bV0tyTd6JvpGnaD372b4YsohnlVhJW1tmEfQnL4pIhGCnEspA/vT/rPgAu6VuXFoA/gmrkfJqkb/P123OffRcNDaJw7qo1t21MWuyqzxApbJj+3OjL0vhXv1whLGp1DV0+hkm6L9V6SW4GgDjht5O49puM2I5X6IlVBenYSBMB/0HMvFg9iit1ZIglkGyRwcOGIXAGyYtEASwy6rib56GnA9FHlguFnI1+C6DpRSNQf28JXsjQr8+ugkRLiCuHmv87N72JAPDMEQgDacZXqaxieydw4b5G26zPIQQ7HTfTEIV3JsOXjLk/cK4hkT1Ug809DydHn5VE0UaPljKO1mW3PVz/b0tEtNK4Qhln8BqO+bBVE7CQ6YEnE53Kx7iF2c/Kiq/3AYCRJPHnMeytuNqlDjilD747n3VcDDFm99gjeMsvhhjO+Ufi2GBeamT9G+tYP6pl0JLQZEzAIY/kyb0YP8NckQm8ana42zT8YCgUdyEXRobzV04JUV3I4Grfywj/Z5HmjRsdo0SBivwjKOYv2Lg6J/kKIlDzOTOD+SRSciqFq72lEEd84X7sISyk/brjsR0K+pIaAmsraRndEQyaxzHCtr/M1hKcSsFxwE3OCMqpN8tFLGn7f1g8a3Id55ZGL77rGmZsIyB5Xo8m6WwBgb3fCEWli7ld+ifyg41CBit4b5aiSeu+r3/hGAE=",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBm6S3HdABAucAi22fAf",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 9374,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 9374,
+            "cache_read_input_tokens": 20041,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBm6Rpdy4gmJ7CsoFiLj",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:08.047Z",
+        "type": "assistant",
+        "uuid": "086911d4-c566-4f9b-b03a-8860af853b6b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ff294949-02aa-4627-b165-fdfc3558b9fe"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_011yjcFFCE921GVAuHZPzz5G",
+            "input": {},
+            "name": "AskUserQuestion",
+            "type": "tool_use"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6192cdd8-b638-41e2-949b-af0118deae34"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "77d871ec-b3fc-4027-912f-a88bb50b82ed"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "{\"questions\": [{\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f8c8b087-e307-4aaf-9b1d-5254888980ba"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "question\":\"Which c",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "dd289acd-2a04-4a1d-ba77-c6636dd10ab0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ache eviction policy should be",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d07dcc44-4631-43ae-a153-ffac41d8108f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": " used?\",\"header",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "acc65aae-bff0-4e9d-9d7d-773c46567d99"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\":\"Policy\",\"mult",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "fbed3365-0a94-4251-af02-cd959be81904"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "iS",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "20bc8fe2-22da-465c-bb90-edc67655fec4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "elect\":false,\"options\":",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f9bc39da-2114-4a75-b8f3-6ac00a8cbbe5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "[{\"label\":\"LR",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "cdb9d766-3e41-4cc9-9cb2-f1c149b855e1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "U\",\"description\":\"Ev",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "aaf9db09-34b3-467c-8b16-30d836a5773b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ict the least recently used entry",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7d74e963-6388-4c0c-a10c-f05d752ce133"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": ".\"},{\"label\":\"L",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "29c8772d-2cb5-4928-8d90-d5dad3a94ae8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "FU\",\"description\":\"Ev",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ba32ce79-df09-4622-9560-7da1500ab939"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ict the least frequently used ent",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e4e5ece2-f7ac-49b1-92d1-e737fd86101d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ry.\"},{\"label\":\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "89106037-a18f-48a9-8a9d-86ddb2568ca5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "FIFO\",\"description\":\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1d6d25b5-9b6e-491c-9896-501c0c9476e8"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "Evict the oldest ent",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1f81c8c9-a466-489c-870e-97b6bccce777"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ry.\"},{\"label\":\"",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "5d1fdadd-127f-4af0-84c4-c3b306ba5abb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "Random\",\"description\":\"Ev",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b115716b-39d0-4bf0-9417-199157b7e652"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "ict a random entry.\"}]",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c2d083c4-a28c-4139-b473-ede174c12d54"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "}]",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "72ea1981-4595-4f3d-a454-72fe536ecfb0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "}",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "24800808-812d-46ea-be2f-34eaad13c2f7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "caller": {
+                "type": "direct"
+              },
+              "id": "toolu_011yjcFFCE921GVAuHZPzz5G",
+              "input": {
+                "questions": [
+                  {
+                    "header": "Policy",
+                    "multiSelect": false,
+                    "options": [
+                      {
+                        "description": "Evict the least recently used entry.",
+                        "label": "LRU"
+                      },
+                      {
+                        "description": "Evict the least frequently used entry.",
+                        "label": "LFU"
+                      },
+                      {
+                        "description": "Evict the oldest entry.",
+                        "label": "FIFO"
+                      },
+                      {
+                        "description": "Evict a random entry.",
+                        "label": "Random"
+                      }
+                    ],
+                    "question": "Which cache eviction policy should be used?"
+                  }
+                ]
+              },
+              "name": "AskUserQuestion",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBm6S3HdABAucAi22fAf",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 9374,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 9374,
+            "cache_read_input_tokens": 20041,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 2,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBm6Rpdy4gmJ7CsoFiLj",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:09.185Z",
+        "type": "assistant",
+        "uuid": "19060420-4c85-466c-8cce-6d8a0a11f4d2",
+        "wire_tool_inputs": {
+          "toolu_011yjcFFCE921GVAuHZPzz5G": {
+            "questions": [
+              {
+                "header": "Policy",
+                "multiSelect": false,
+                "options": [
+                  {
+                    "description": "Evict the least recently used entry.",
+                    "label": "LRU"
+                  },
+                  {
+                    "description": "Evict the least frequently used entry.",
+                    "label": "LFU"
+                  },
+                  {
+                    "description": "Evict the oldest entry.",
+                    "label": "FIFO"
+                  },
+                  {
+                    "description": "Evict a random entry.",
+                    "label": "Random"
+                  }
+                ],
+                "question": "Which cache eviction policy should be used?"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "request": {
+          "display_name": "AskUserQuestion",
+          "input": {
+            "questions": [
+              {
+                "header": "Policy",
+                "multiSelect": false,
+                "options": [
+                  {
+                    "description": "Evict the least recently used entry.",
+                    "label": "LRU"
+                  },
+                  {
+                    "description": "Evict the least frequently used entry.",
+                    "label": "LFU"
+                  },
+                  {
+                    "description": "Evict the oldest entry.",
+                    "label": "FIFO"
+                  },
+                  {
+                    "description": "Evict a random entry.",
+                    "label": "Random"
+                  }
+                ],
+                "question": "Which cache eviction policy should be used?"
+              }
+            ]
+          },
+          "requires_user_interaction": true,
+          "subtype": "can_use_tool",
+          "tool_name": "AskUserQuestion",
+          "tool_use_id": "toolu_011yjcFFCE921GVAuHZPzz5G"
+        },
+        "request_id": "112f1867-76b3-4d7b-a8bc-fc7ecb4811d8",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "329f44fe-fee6-44f0-b819-0fbb37e20e81"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 9374,
+            "cache_read_input_tokens": 20041,
+            "input_tokens": 2,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 9374,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 9374,
+                "cache_read_input_tokens": 20041,
+                "input_tokens": 2,
+                "output_tokens": 372,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 372,
+            "output_tokens_details": {
+              "thinking_tokens": 183
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "8c8d9a47-7055-43e7-bb61-01b3598b27da"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "response": {
+          "request_id": "112f1867-76b3-4d7b-a8bc-fc7ecb4811d8",
+          "response": {
+            "behavior": "deny",
+            "message": "The user declined to choose an option. They want to discuss this question before answering it: do not answer it yourself, do not assume an answer, and do not continue with the work it was blocking. Stop and wait for their next message."
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "b8bff2e2-7fe7-41e9-9708-3ac34afc8720"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "request_id": "112f1867-76b3-4d7b-a8bc-fc7ecb4811d8",
+          "response": {
+            "behavior": "deny",
+            "message": "The user declined to choose an option. They want to discuss this question before answering it: do not answer it yourself, do not assume an answer, and do not continue with the work it was blocking. Stop and wait for their next message."
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "content": "The user declined to choose an option. They want to discuss this question before answering it: do not answer it yourself, do not assume an answer, and do not continue with the work it was blocking. Stop and wait for their next message.",
+              "is_error": true,
+              "tool_use_id": "toolu_011yjcFFCE921GVAuHZPzz5G",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:09.203Z",
+        "tool_result_meta": [
+          {
+            "id": "toolu_011yjcFFCE921GVAuHZPzz5G",
+            "non_execution_kind": "permission-rule"
+          }
+        ],
+        "tool_use_result": "Error: The user declined to choose an option. They want to discuss this question before answering it: do not answer it yourself, do not assume an answer, and do not continue with the work it was blocking. Stop and wait for their next message.",
+        "type": "user",
+        "uuid": "6bb553bc-c001-4f89-8d07-37f7475e269c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "rate_limit_info": {
+          "isUsingOverage": false,
+          "overageDisabledReason": "org_level_disabled",
+          "overageStatus": "rejected",
+          "rateLimitType": "five_hour",
+          "resetsAt": 1792436400,
+          "status": "allowed",
+          "unifiedWindows": {
+            "five_hour": {
+              "resetsAt": 1792436400,
+              "utilization": 0.13
+            },
+            "seven_day": {
+              "resetsAt": 1792994400,
+              "utilization": 0.11
+            }
+          }
+        },
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "rate_limit_event",
+        "uuid": "1ddc928e-7eb2-49ce-a6e0-3192ecfd3ce9"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "4b00f19c-9ed4-44cc-9591-c5ae1ed26d11"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBm6sqpMDFV54q4A8cNt",
+            "input_transformations": [],
+            "model": "claude-sonnet-5",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 496,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 496,
+              "cache_read_input_tokens": 29415,
+              "inference_geo": "global",
+              "input_tokens": 2,
+              "output_tokens": 1,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 1412,
+        "type": "stream_event",
+        "uuid": "8f63d7ce-d4b2-4cab-85e6-460a05e619d7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "98ca3250-2f46-4972-831a-1fd4efafc97d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "I",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "2604e768-fecc-49c2-aca0-e6ea6da3b5e3"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "'ll",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ab8d4192-bf4d-4e3a-a356-4ddd88c32a86"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " h",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9ff70a0a-b4d6-40af-b3c7-1089561d57e2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "old off here",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "459ffe2e-75af-4928-89d5-77cbf4f174c0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " — no polic",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "cf427090-9b31-489b-b2e4-ee8d3d1adea3"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "y has",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a1873fa2-10bf-45d1-8f30-ac0d000b6ad6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " been chosen y",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1b4cb11c-8cf3-4ad1-9f11-c905db6c0448"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "et.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0ce81a03-2ec6-42d7-8f53-48410169fa28"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " What would you like to discuss",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "131cd58e-03fb-4389-8878-5df6a8d951c5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " before",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "8b77f0ff-7d0b-4daa-ab80-bdf36bbdbe29"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": " de",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4e00045e-196e-47a6-a751-373436712c6c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "ciding?",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "408d7506-0433-48b6-b5a6-154048fe5a51"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "text": "I'll hold off here — no policy has been chosen yet. What would you like to discuss before deciding?",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBm6sqpMDFV54q4A8cNt",
+          "input_transformations": [],
+          "model": "claude-sonnet-5",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 496,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 496,
+            "cache_read_input_tokens": 29415,
+            "inference_geo": "global",
+            "input_tokens": 2,
+            "output_tokens": 1,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBm6saSbXCXFuuiSDx9P",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T14:34:11.127Z",
+        "type": "assistant",
+        "uuid": "c5dba3f0-d8b0-4991-aa60-44693e7e07af"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "18b97588-59ae-445d-8472-b0909e285f2b"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 496,
+            "cache_read_input_tokens": 29415,
+            "input_tokens": 2,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 496,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 496,
+                "cache_read_input_tokens": 29415,
+                "input_tokens": 2,
+                "output_tokens": 34,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 34,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "00ff38f6-d0f2-47f0-941b-d7958b28a18f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "2bf8b99a-1b49-4725-b146-9097aeab0bae"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "api_error_status": null,
+        "duration_api_ms": 8024,
+        "duration_ms": 8072,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 2017,
+        "is_error": false,
+        "modelUsage": {
+          "claude-sonnet-5": {
+            "cacheCreationInputTokens": 9870,
+            "cacheReadInputTokens": 49456,
+            "canonicalModel": "claude-sonnet-5",
+            "contextWindow": 1000000,
+            "costBasis": "list",
+            "costUSD": 0.053439200000000006,
+            "inputTokens": 4,
+            "maxOutputTokens": 64000,
+            "outputTokens": 406,
+            "provider": "firstParty",
+            "thinkingTokens": 183,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 2,
+        "permission_denials": [
+          {
+            "tool_input": {
+              "questions": [
+                {
+                  "header": "Policy",
+                  "multiSelect": false,
+                  "options": [
+                    {
+                      "description": "Evict the least recently used entry.",
+                      "label": "LRU"
+                    },
+                    {
+                      "description": "Evict the least frequently used entry.",
+                      "label": "LFU"
+                    },
+                    {
+                      "description": "Evict the oldest entry.",
+                      "label": "FIFO"
+                    },
+                    {
+                      "description": "Evict a random entry.",
+                      "label": "Random"
+                    }
+                  ],
+                  "question": "Which cache eviction policy should be used?"
+                }
+              ]
+            },
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_011yjcFFCE921GVAuHZPzz5G"
+          }
+        ],
+        "queued_turn_count": 0,
+        "result": "I'll hold off here — no policy has been chosen yet. What would you like to discuss before deciding?",
+        "result_index": 0,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 41,
+        "total_cost_usd": 0.053439200000000006,
+        "ttft_ms": 4921,
+        "ttft_stream_ms": 2016,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 9870,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 9870,
+          "cache_read_input_tokens": 49456,
+          "inference_geo": "global",
+          "input_tokens": 4,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 496,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 496,
+              "cache_read_input_tokens": 29415,
+              "input_tokens": 2,
+              "output_tokens": 34,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 406,
+          "output_tokens_details": {
+            "thinking_tokens": 183
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "4bce31c8-7b03-4e02-bbcd-2eea82b21708"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "detail": "summary",
+          "subtype": "get_context_usage"
+        },
+        "request_id": "4",
+        "type": "control_request"
+      }
+    }
+  ],
+  "files": {
+    "--append-system-prompt-file": "You are running as a supervised child of the pyry daemon. Your replies are not displayed in a terminal: they leave this process as a structured stream and are rendered for the operator by a separate client application, which may be running on a different machine than the one your tools execute on. More than one client can be attached to a session, and which one is attached can change while the session runs.\n",
+    "--mcp-config": {
+      "mcpServers": {
+        "pyry_approve": {
+          "args": [
+            "mcp-approve",
+            "-pyry-socket",
+            "${PILOT_SOCKET}"
+          ],
+          "command": "${PILOT_DAEMON}"
+        },
+        "pyry_files": {
+          "args": [
+            "mcp-files",
+            "-pyry-socket",
+            "${PILOT_SOCKET}"
+          ],
+          "command": "${PILOT_DAEMON}"
+        }
+      }
+    },
+    "--settings": {
+      "enableAllProjectMcpServers": true,
+      "skipDangerousModePermissionPrompt": true
+    }
+  }
+}

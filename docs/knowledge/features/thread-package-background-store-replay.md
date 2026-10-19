@@ -70,6 +70,27 @@ A missing or empty log becomes usable with no items and both `Version` and
 Initial results, private continuation and later tail/retirement match fresh full
 replay. See the [validated load order and read accounting](thread-package-cache-and-epochs.md#store-replay-and-public-touches).
 
+A clean idle unload can preserve live continuity from its saved publication
+boundary V. `Store.start` captures the prior scalar `progressRecord`;
+`Store.run` admits continuity only when `resumeCheckpoint` validates a clean
+checkpoint whose nonempty epoch, version, checksum and last-shown watermark
+exactly match successful retirement. Epoch equality or a scalar certificate
+alone is insufficient. Fresh Stores, failed retirement and missing/mismatched
+evidence use ordinary first-publication initialization.
+
+For a matching boundary, `initialPublicationIndex` reconstructs the saved
+publication before suffix replay, while queries still see `StateRebuilding`.
+`Store.publish` advances that index through the captured suffix and retains
+the first advancing range from V under the normal batch/byte limits. Existing-row
+changes keep the restored `PreviousRev` and actual resulting `Rev`; applying
+them to the prior baseline reproduces replay without loss or duplication.
+Compact advancement refreshes affected roots and dirty ancestors, preserving
+root-removal evidence without sending an unrelated inventory. Initializing the
+index only after replay would lose both removal evidence and coverage from V.
+Unload still frees items, query indexes and retained ranges; this reconstruction
+revives no pre-V batches and grants no coverage to older cursors. See
+[compact interval evidence](thread-package-background-store-queries.md#compact-catch-up-and-live-progress).
+
 The same reader then runs `ForwardReader.Tail`. Registration precedes catch-up,
 so entries committed during replay or the handoff are consumed exactly once in
 ID order; later commits converge through buffered notifications. Successful tail
@@ -171,13 +192,17 @@ previous/resulting item revisions with strict advancement. See
 [daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 **A fresh baseline cannot repair an existing consumer silently.** Unload/reload
-and retry release retained live batches even when clean checkpoint validation
-preserves the epoch. Nonusable state, epoch mismatch, evicted ranges or linked-delivery
-suppression require `RetireLiveState` for affected thread consumers before the
-publisher forgets its cursor and obtains a fresh usable `Observe`. Pending
+and retry release old live batches; only the validated saved-boundary/suffix
+contract above restores continuity across clean idle reload. Nonusable state,
+epoch mismatch, missing/evicted or unmatched boundaries, history gaps and
+linked-delivery suppression still require `RetireLiveState` for affected thread
+consumers before the publisher forgets its cursor and acquires a fresh usable
+publication boundary. Pending
 dependent deltas are quarantined immediately, rather than drained while gap
 teardown waits on relay Run. No `base_rev` is guessed and no partial recovery
-is published. `Store.CatchUp` proves a separate reconstructed query range;
+is published. Compact intervals also reset on unrepresentable root removal;
+unavailable recovery exposes no usable partial output. `Store.CatchUp` proves a
+separate reconstructed query range;
 the [installed daemon providers](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
 serve catch-up/pages from this same store. Reconnect initialization requires
 explicit requests for each open conversation.

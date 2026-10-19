@@ -492,8 +492,13 @@ baseline, and `Store.Changes` proves a range only from retained publication
 boundaries in the current worker, limited to 64 batches and 1 MiB of JSON-encoded
 changes. Retained text suffixes have detached storage so they cannot pin an
 accumulated message beyond that accounting. Unload/reload,
-retry and a new store lifetime retain no old batches, even when recovery
-preserves the epoch. Missing live ranges or a different epoch explicitly return
+retry and a new store lifetime retain no old batches. A clean idle reload in
+the same Store can reconstruct a new suffix range from its saved boundary only
+when the validated checkpoint matches successful scalar retirement evidence
+(epoch, version, checksum and last-shown watermark). This preserves continuity
+at that boundary without restoring older ranges or retaining unloaded rows;
+see [reload publication readiness](thread-package-background-store-replay.md#loading-and-replay-readiness).
+Missing live ranges or a different epoch explicitly return
 `BaselineRequired`; the daemon retires affected consumers and acquires a new
 publisher boundary without broadcasting historical items. Clients recover
 explicitly through bounded catch-up or a newest window after reset, with older
@@ -503,8 +508,9 @@ pages as needed; `Store.Observe` remains a complete-baseline API for other calle
 and the current fold. Clean epoch reuse supports persisted nonzero versions
 within `MaxCatchUpGap = 1024` history IDs only after recovery becomes usable
 and the requested range passes coverage/suppression checks. Compatible
-unload/reload offers the same continuity from restored private facts and suffix
-folding without retained live batches; epoch equality alone remains insufficient.
+unload/reload offers the same query continuity from restored private facts and
+suffix folding independently of retained live batches; epoch equality alone
+remains insufficient.
 Saved versions need not coincide with publication boundaries. Catch-up indexes
 remain disposable query data rebuilt on every load/retry from the validated fold. Checkpoints preserve touches, current/ever-public membership,
 suppression and unproven-gap watermarks; suffix feeds extend them. The scalar
@@ -534,14 +540,14 @@ The compact-v1 projection's catch-up and live progress
 (`Store.CompactCatchUp`/`Store.CompactChanges`, see
 [compact catch-up and live progress](thread-package-background-store-queries.md#compact-catch-up-and-live-progress))
 keep their own evidence rather than borrowing this complete-view proof.
-`queryIndex.compactFrom` and `compactLost` are scoped to roots alone, distinct
-from this section's `unprovenThrough`/`suppressed` watermarks, though both
-pairs share the same `coveredThrough` index-current-with-snapshot check.
-A same-epoch reload or rebuild advances `compactFrom` to its resume version
-even though the epoch, and this section's complete-view continuity, are
-unaffected: a compact reader sitting at an older version resets while a
-complete reader at the same version and epoch can stay usable. Epoch reuse
-establishes compatible item identity, but recovering either projection's
+`queryIndex.compactFrom` and `compactLost` are scoped to roots alone;
+both projections also check `unprovenThrough` for history gaps and
+`coveredThrough` for index-current-with-snapshot agreement. A validated clean
+idle reload reconstructs compact evidence at its saved retirement boundary
+before advancing the suffix. An interval starting before that boundary still
+resets, while complete `CatchUp` may independently prove an older query range.
+Ordinary rebuild initialization starts compact coverage at its first usable
+publication. Epoch reuse establishes compatible item identity, but recovering either projection's
 continuity needs its own separate proof — compact evidence is never replaced
 by equal-epoch recovery, complete-thread certification, retained complete
 changes, or a successful `ChildPage` expansion, including a clean reload

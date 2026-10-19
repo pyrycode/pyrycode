@@ -65,6 +65,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -234,26 +235,7 @@ func driveInteractiveStreamModalResolution(t *testing.T, h *perConvHarness, conv
 	// requires the phone be paired --allow-remote-permissions (the device gate);
 	// startStreamModalResolutionHarness pairs with it.
 	shown := raiseRealPermissionModalPayload(t, h, 2, convID, writeFileTrigger(nonce))
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   3,
-		Type: protocol.TypeModalAnswer,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.ModalAnswerPayload{
-			ModalID:  shown.ModalID,
-			OptionID: string(turnevent.PermissionOptionKindAllowOnce),
-			// A client-minted idempotency key, NOT authorization — an arbitrary
-			// constant is fine (authorization is ModalID validity + the device gate).
-			AnswerToken: "e2e-1154-answer-token",
-		}),
-	})
-
-	// AC #3: the turn makes real progress after the answer — a non-empty
-	// continuation assistant_delta (M1) FOLLOWED BY the terminal turn_state{idle}
-	// (M2). "Modal answered but the turn never resumed" fails at M1; "delta but
-	// never idle" fails at M2. drainForCompletedTurn (#1153) is strictly stronger
-	// than #1030 Phase A's drainForAssistantReply (M1 only) — the tool executing
-	// after the authorized allow is what produces the continuation delta.
-	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	scenario.ResolvePermission(t, modalScenarioWire(t, h, 3), convID, shown, "allow_once", "e2e-1154-answer-token", perTurnReplyBudget)
 	requirePromptAnswerHistory(t, h, convID, shown.ModalID, "allow", len(knownSession) > 0 && knownSession[0])
 }
 
