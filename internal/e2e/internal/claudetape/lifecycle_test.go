@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -186,7 +187,8 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				go func() { v, _ := bufio.NewReader(out).ReadString('\n'); line <- v }()
 				select {
 				case v := <-line:
-					if v != "{\"type\":\"assistant\",\"message\":{\"content\":\"native reply\"}}\n" {
+					var got map[string]any
+					if json.Unmarshal([]byte(v), &got) != nil || len(got) != 2 || got["type"] != "assistant" || !reflect.DeepEqual(got["message"], map[string]any{"content": "native reply"}) {
 						t.Fatal("native/replayed reply changed", v)
 					}
 				case <-time.After(10 * time.Second):
