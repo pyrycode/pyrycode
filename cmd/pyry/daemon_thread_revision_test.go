@@ -17,7 +17,7 @@ func TestDaemonThreadStreamingRevisions(t *testing.T) {
 	rows := make(map[uint64]protocol.ThreadItem)
 	var text string
 	changed, appended := 0, 0
-	deltas := []string{"hello", " 世界\n\"\\", strings.Repeat("x", 300), " tail", " again"}
+	deltas := []string{"hello", " 世界\n\"\\", strings.Repeat("x", 300), "\n\t", "\x1b\x00"}
 	entries := []history.Entry{{ID: 1, Type: "main_turn_opened", Payload: json.RawMessage(`{"turn_id":"t","occurred_at":"2026-01-01T00:00:00Z"}`)}}
 	for i, delta := range deltas {
 		raw, err := json.Marshal(map[string]any{"turn_id": "t", "text": delta, "future": map[string]any{"nested": true}})
