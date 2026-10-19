@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -22,11 +23,11 @@ func TestRealClaude_OrdinaryQueuedPlacement(t *testing.T) {
 		if !ok {
 			t.Fatal("no running Bash turn")
 		}
-		f := classifySendNowFrame(t, env, convID)
-		if f.kind == "turn_end" {
+		f := scenariohelpers.ClassifyQueuePlacementFrame(t, env, convID)
+		if f.Kind == "turn_end" {
 			t.Fatal("turn ended before Bash started")
 		}
-		if f.kind == "tool_use" && f.toolName == "Bash" {
+		if f.Kind == "tool_use" && f.ToolName == "Bash" {
 			break
 		}
 	}
@@ -41,19 +42,19 @@ func TestRealClaude_OrdinaryQueuedPlacement(t *testing.T) {
 		if !ok {
 			t.Fatal("queued reply did not end")
 		}
-		f := classifySendNowFrame(t, env, convID)
-		if f.kind == "queue_state" {
-			for _, item := range f.queued {
+		f := scenariohelpers.ClassifyQueuePlacementFrame(t, env, convID)
+		if f.Kind == "queue_state" {
+			for _, item := range f.Queued {
 				if item.Text == text {
 					queuedID = item.QueuedMsgID
 				}
 			}
 		}
-		if f.kind == "turn_end" {
+		if f.Kind == "turn_end" {
 			ends++
 			continue
 		}
-		if f.kind == "user_message" && f.text == text {
+		if f.Kind == "user_message" && f.Text == text {
 			users++
 			var p protocol.MessagePayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -64,7 +65,7 @@ func TestRealClaude_OrdinaryQueuedPlacement(t *testing.T) {
 			}
 		}
 		if ends == 1 {
-			interactive := f.kind == "delta" || f.kind == "tool_use" || f.kind == "tool_result"
+			interactive := f.Kind == "delta" || f.Kind == "tool_use" || f.Kind == "tool_result"
 			if env.Type == protocol.TypeTurnState {
 				var p protocol.TurnStatePayload
 				if err := json.Unmarshal(env.Payload, &p); err != nil {

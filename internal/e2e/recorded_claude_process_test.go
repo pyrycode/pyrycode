@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 )
 
 type tapeProcessConfig struct {
@@ -287,7 +288,10 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 		}
 		files[arg] = normalized
 	}
-	if len(files) != 3 {
+	// Operator-bypass spawns omit approval MCP configuration. Capture every
+	// supplied known file, and always require settings plus the system prompt;
+	// replay/fresh comparison still rejects any changed file or argv inventory.
+	if len(files["--settings"]) == 0 || len(files["--append-system-prompt-file"]) == 0 {
 		return nil, errors.New("incomplete pilot Claude input files")
 	}
 	return files, nil
@@ -351,6 +355,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 		tape, err = claudetape.Decode(f)
 		_ = f.Close()
 		if err != nil {
+			return 0, err
+		}
+		if err = checkTapeCheckpoint(tape); err != nil {
 			return 0, err
 		}
 		if tape.Scenario != c.Scenario {
@@ -438,6 +445,9 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				if player != nil {
 					return frames, player.Complete()
 				}
+				if err := checkTapeCheckpoint(tape); err != nil {
+					return frames, err
+				}
 				if err := tape.Save(c.Path); err != nil {
 					return frames, err
 				}
@@ -491,4 +501,13 @@ func tapeWrapper(t *testing.T, c tapeProcessConfig) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// The busy-turn scenario must not be promoted unless a real daemon stdin write
+// gates the recorded tool result. Apply the same audit on every replay.
+func checkTapeCheckpoint(tape *claudetape.Tape) error {
+	if tape.Scenario == "send-now-placement" {
+		return tape.RequireMidTurnInput(scenariohelpers.SendNowQueuedText, "Bash")
+	}
+	return nil
 }
