@@ -1429,6 +1429,7 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 		ToolName:  payload.ToolName,
 		Input:     payload.Input,
 		ToolUseID: payload.ToolUseID,
+		SessionID: payload.SessionID,
 	}
 	pending, err := reg.Register(payload.ToolUseID, req, timeout)
 	if err != nil {

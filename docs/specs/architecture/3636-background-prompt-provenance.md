@@ -134,3 +134,23 @@ bindings. Link the regression and document only the demonstrated cause.
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-19
+
+## Revisions
+
+2026-10-19: Both controlled MCP scenarios failed before production edits with
+`fresh modal lost producing session`, confirming the producer omission rather
+than a legacy reconciliation defect. The test drives the actual MCP entry point
+in a helper process, so it also covers reading the inherited session environment.
+It confirms disconnect and snapshot completion explicitly before advancing.
+After repair, the selected Linux race checks passed 33/33 test events (27/27
+leaf tests), with no failures or skips, across `cmd/pyry` and `internal/control`.
+The new producer-identity check covers both bound and empty process identities
+against spoofed tool arguments. Vet and the daemon build also passed.
+
+The managed native request schema has only fixed recipes and no test selector.
+Its Mobile recipe is restricted to Mobile tickets and unrelated scripted checks;
+the Core Android recipe cannot select this FCM method or preserved Mobile source.
+No substitute native check was requested. The exact unchanged Linux FCM method,
+counted XML and supporting transport/binary/source evidence remain pending with
+the dispatcher as specified in Testing strategy. Neither historical failure is
+reclassified. The implementation design and permission gates are unchanged.
