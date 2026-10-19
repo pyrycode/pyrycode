@@ -45,7 +45,7 @@ def scaffold(root, args, audit):
     if output == root or root in output.parents:
         raise ValueError('Scaffold proposals must be outside the checkout')
     output.mkdir(parents=True, exist_ok=False)
-    row = {'name': args.name, 'stdio_permission': args.stdio_permission,
+    row = {'name': args.name, 'stdio_permission': args.stdio_permission, 'claude_args': [],
            'live_tests': args.live_test, 'retained_live': args.retained_live,
            'live_contracts': {name: indexed[name]['contract_sha256'] for name in args.live_test}}
     (output / 'manifest-fragment.json').write_text(json.dumps({'scenario': row, 'batch': {args.name: [args.name]}}, indent=2) + '\n')

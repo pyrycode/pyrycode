@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Seven scenarios run the same assertions in live capture and offline replay:
+Eight scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -51,6 +51,15 @@ Seven scenarios run the same assertions in live capture and offline replay:
   Exactly one durable cancel fact must retain the asking session. Live capture
   and the original live gate also require the denied file to be absent. Replay
   cannot establish actual filesystem effects or elapsed provider time.
+
+- `send-now-placement`: the original foreground Bash trigger starts a busy turn;
+  the client queues the marker text, takes its surfaced queued identity and sends
+  it now. The single arrival log must contain one turn end and one exact user
+  push after the matching Bash result and before final assistant text containing
+  the marker, no parser gaps, and an empty final queue. The three-second late-frame
+  window also rejects delayed duplicate messages or extra turn ends. Both live
+  and recorded callers use this same driver. Real Bash execution, current Claude
+  interpretation and elapsed provider time remain live proof.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
@@ -135,6 +144,7 @@ preship remains unchanged, and dispatcher routing is unchanged.
 | Three-turn memory continuity | None in this batch | Actual Claude context retention |
 | Question refusal | `question-refuse`, same refusal drain and history checks | Unpredictable question labels, blocked Write absence and actual provider refusal behavior |
 | Permission cancellation | `permission-cancel`, same cancellation/history checks | Denied-file absence, real parked-completer timing and current stdio behavior |
+| Send-now queued placement | `send-now-placement`, same queue/action/order driver | Actual foreground Bash execution, current Claude interpretation and elapsed/settle time |
 | Permission allow/deny | `permission-allow` and `permission-deny`, same resolution/history drivers | Actual file creation/absence, current approval transport and settings-respawn behavior |
 
 The recorded question trigger supplies a complete fixed AskUserQuestion input so
@@ -145,7 +155,7 @@ The compatibility comparator does not scrub provider prose or loosen request
 comparison for these cases. Dismissal and terminal idle may arrive in either order;
 both are required after the matching continuation.
 
-Next candidates are queue actions, further model-control messages and thread
+Next candidates are ordinary queued placement, further model-control messages and thread
 folding. Each must preserve its
 original assertions and account for all external inputs before promotion.
 Crash/restart, session files, real tool effects, signal handling, transport
@@ -167,7 +177,8 @@ and four post-refusal permission allows.
 ## Batch migration tooling
 
 `internal/e2e/testdata/claude-scenarios.json` is the shared source of scenario
-names, stdio configuration, original live owners, retained live obligations and
+names, stdio configuration, explicit bootstrap Claude arguments, original live
+owners, retained live obligations and
 named batches. Both the Go tests and Python runner read it. A driver without a
 manifest entry, an entry without an implemented driver, an empty/unknown/duplicate
 selection, or missing/extra/duplicate/skipped execution evidence fails. Default
@@ -176,7 +187,7 @@ recorded coverage. A selected batch never narrows the full regression gate.
 
 ```sh
 python3 scripts/daemon-recordings.py inventory
-python3 scripts/daemon-recordings.py plan --batch permissions
+python3 scripts/daemon-recordings.py plan --batch queue
 python3 scripts/daemon-recordings.py replay --batch permissions --output /outside/new/replay-reports
 python3 scripts/daemon-recordings.py capture --scenario permission-cancel --output /outside/new/capture
 python3 scripts/daemon-recordings.py batch --batch all --agents-repo /path/to/pyrycode-agents --output /outside/new/batch
@@ -249,3 +260,30 @@ provenance and complete inputs, then commit the inspected fixtures and run the
 batch workflow. Capture never overwrites a baseline and neither scaffolding nor
 batching removes or retags a live test. Semantic assertion mapping, physical/time
 witnesses and candidate promotion remain explicit code-review work.
+
+### Send-now input checkpoint
+
+The send-now tape is accepted for capture or replay only if its exact queued
+text appears once on daemon stdin after the first Bash tool-use start and before
+that tool's matching result on stdout. Partial tool-use starts and complete
+assistant blocks are correlated by tool-use ID. This is the causal boundary that
+holds fast replay while the client queues and accelerates the message; a delay
+or recorded timestamp cannot substitute for it. Controls reject early, late,
+missing, duplicated, foreign and output-only substitutes for that input.
+
+The manifest preserves the original live harness's explicit `--model haiku
+--dangerously-skip-permissions` bootstrap arguments. This operator bypass is
+needed for the foreground Bash call to run without a permission modal. All
+previous scenarios retain empty extra arguments. Every supplied settings,
+system-prompt and MCP configuration file is captured and compared; the bypass
+spawn has settings and system prompt but no approval MCP file. Missing a file
+from an existing tape's input inventory still fails replay and fresh comparison.
+The recorded receive adapter returns an empty envelope only on the deadline,
+preserving the shared driver's late-frame window and transport failures.
+
+The live send-now test still supplies a fresh run nonce. Recorded requests use a
+fixed run suffix so their complete stdin contracts remain comparable; the shell
+command, marker and all queue/order assertions are unchanged. The ordinary-queue
+live test uses the extracted classifier with its original assertions intact.
+Ordinary queue admission does not itself write Claude stdin, so its separate
+client-action checkpoint requirement remains unresolved and it is not migrated.

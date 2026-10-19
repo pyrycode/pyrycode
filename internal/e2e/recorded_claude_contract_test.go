@@ -17,7 +17,7 @@ import (
 )
 
 func TestClaudeTapeProcessContract(t *testing.T) {
-	for _, variant := range []string{"complete", "changed-settings", "wrong-request", "incomplete", "extra-request", "extra-at-seal", "partial-at-seal"} {
+	for _, variant := range []string{"complete", "operator-bypass", "missing-mcp", "changed-settings", "wrong-request", "incomplete", "extra-request", "extra-at-seal", "partial-at-seal"} {
 		t.Run(variant, func(t *testing.T) {
 			home := t.TempDir()
 			c := tapeProcessConfig{Mode: "replay", Home: home, Daemon: filepath.Join(home, "pyry"), Socket: filepath.Join(home, "socket"), Scenario: "unit-process", Path: filepath.Join(home, "fixture.json"), Finish: filepath.Join(home, "finish"), Receipt: filepath.Join(home, "receipt"), Claim: filepath.Join(home, "claim")}
@@ -35,6 +35,9 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 				}
 			}
 			args := []string{"--settings", settings, "--append-system-prompt-file", system, "--mcp-config", mcp}
+			if variant == "operator-bypass" {
+				args = []string{"--settings", settings, "--append-system-prompt-file", system, "--dangerously-skip-permissions"}
+			}
 			files, err := tapeFiles(args, &c)
 			if err != nil {
 				t.Fatal(err)
@@ -52,6 +55,9 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 				if err = os.WriteFile(settings, []byte(`{"effort":"high"}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if variant == "missing-mcp" {
+				args = args[:4]
 			}
 			wrapper := tapeWrapper(t, c)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -78,7 +84,7 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 				}
 			}()
 			reader := bufio.NewReader(stdout)
-			if variant != "changed-settings" {
+			if variant != "changed-settings" && variant != "missing-mcp" {
 				first := `{"type":"user","message":{"content":"hello"}}`
 				if variant == "wrong-request" {
 					first = `{"type":"user","message":{"content":"changed"}}`
@@ -133,7 +139,7 @@ func TestClaudeTapeProcessContract(t *testing.T) {
 			if json.Unmarshal(raw, &receipt) != nil {
 				t.Fatal("invalid process receipt")
 			}
-			if variant == "complete" {
+			if variant == "complete" || variant == "operator-bypass" {
 				if waitErr != nil || !receipt.Success || receipt.Frames != len(tape.Frames) {
 					t.Fatal("complete offline exchange failed")
 				}

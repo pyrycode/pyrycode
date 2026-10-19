@@ -27,6 +27,9 @@ class ManifestTest(unittest.TestCase):
                            lambda m: m['batches'].update(broken=['missing']),
                            lambda m: m['scenarios'][0].update(retained_live=[]),
                            lambda m: m['scenarios'][0].update(unexpected=True),
+                           lambda m: m['scenarios'][0].update(claude_args=None),
+                           lambda m: m['scenarios'][0].update(claude_args=['']),
+                           lambda m: m['scenarios'][0].update(claude_args=[1]),
                            lambda m: m['scenarios'][2].update(live_contracts={})):
                 bad = copy.deepcopy(value)
                 mutate(bad)
