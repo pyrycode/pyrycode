@@ -71,3 +71,7 @@ Pending documentation stage: update `docs/knowledge/features/e2e-realclaude-rost
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: Source review found that an unsupported compound invocation could otherwise lend its witness to a later direct-command claim. Any Bash command mentioning the operation through an unsupported form now vetoes attribution; substring occurrence is used only to reject, never to identify. Offline controls verify that a later eligible tool cannot borrow that evidence. Offline Bash controls own a process group so cancellation also stops forked FIFO readers.
