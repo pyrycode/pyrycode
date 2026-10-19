@@ -79,3 +79,7 @@ Pending documentation stage: in `docs/knowledge/features/e2e-realclaude-test-inf
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19, control design review before implementation: early progress narration can itself be nonblank attributed text. Select a completed response only after successful main and correlated child-tool results, while recording earlier response identities so replay cannot move them across that boundary. A genuinely fresh response identity after earlier narration remains eligible; add a control for it. Use explicit full test-name alternatives for admitted checks because the launcher's selection policy rejects regex prefix families.
