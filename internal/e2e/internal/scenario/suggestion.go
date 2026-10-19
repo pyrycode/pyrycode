@@ -12,6 +12,13 @@ import (
 
 const NativeSuggestionClearPrompt = "Sounds good, thank you. Reply with a single short sentence."
 
+// NativeSuggestionPrompts declares the bounded coding prefix used by live and recorded runs.
+func NativeSuggestionPrompts(run string) []string {
+	return []string{"Write a Go function that reverses a string. Reply in chat only, do not create files. Just the code, briefly. run=" + run,
+		"Now add a unit test for it. Just the code.", "Now make it handle unicode correctly. Just the code.",
+		"Now add a benchmark for it. Just the code.", "Now add a doc comment to the function. Just the code.", "Now add an example test for it. Just the code."}
+}
+
 type NativeSuggestionConfig struct {
 	ConversationID     string
 	Prompts            []string

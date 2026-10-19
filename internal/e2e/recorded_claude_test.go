@@ -307,9 +307,28 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 				}
 				return tape
 			}
-			if err := claudetape.SameContract(load(baseline), load(fresh)); err != nil {
+			policy := recordedManifestFor(t).scenario(scenario).ComparisonPolicy
+			left, right := load(baseline), load(fresh)
+			report := map[string]any{"scenario": scenario, "policy": policy}
+			switch policy {
+			case "strict_ordered":
+				if err := claudetape.SameContract(left, right); err != nil {
+					t.Fatal(err)
+				}
+			case "native_coding_prefix":
+				a, b, err := claudetape.SameNativeSuggestionContract(left, right, scenariohelpers.NativeSuggestionPrompts("tape-native-suggestions"), scenariohelpers.NativeSuggestionClearPrompt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				report["baseline_coding_iterations"], report["fresh_coding_iterations"] = a, b
+			default:
+				t.Fatal("unsupported comparison policy")
+			}
+			raw, err := json.Marshal(report)
+			if err != nil {
 				t.Fatal(err)
 			}
+			t.Logf("CLAUDE_COMPARISON %s", raw)
 		})
 	}
 }

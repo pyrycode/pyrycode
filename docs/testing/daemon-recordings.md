@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Twenty-seven scenarios run the same assertions in live capture and offline replay:
+Twenty-six scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -95,14 +95,12 @@ Twenty-seven scenarios run the same assertions in live capture and offline repla
   and no host approval for ordinary tools. Physical Bash effects and unpredictable
   labels/free text remain live proof.
 
-The `workspace-protocol` batch adds ten cases:
+The `workspace-protocol` batch adds nine cases:
 
 - `workspace-change` checks correlated workspace changes, canonical returned and
   persisted directories, and delivery of a second turn in the same conversation.
 - `skill-silence` requires the skill's file-only reply token, the known harness
   drop witness, and absence of the skill body marker from daemon logs.
-- `subagent-text` retains the foreground Agent/Task invocation and independently
-  checks main/child stream identity, sequence ordering and nonempty content.
 - `confirmed-permission-settings` checks initial bypass, correlated confirmation
   of default mode without a child restart, and a real Read permission round trip.
 - `default-outside-read` exercises the default-mode acknowledgement before the
@@ -128,6 +126,10 @@ The `workspace-protocol` batch adds ten cases:
   Native source order must place the refused result before the liveness input.
   Installed user settings, hook script bytes and modes are exact inputs. Actual
   hook execution and original conversation creation remain live proof.
+
+Subagent text retains its live main/child identity and sequence assertions. Its
+recording awaits a first-client-delta checkpoint: burst playback otherwise lets
+the production text coalescer combine all main text into a single delta.
 
 These profiles retain the working directory as an exact input. The skill's full
 `SKILL.md` and native non-stream rejection policy and enable setting are captured
@@ -193,8 +195,18 @@ invalid provenance and loss all fail. Diagnostics contain positions and counts,
 not application payloads. Original timing is not replayed.
 
 Verification separately reports fresh live capture, committed replay, fresh
-replay and strict outgoing request comparison. Comparison binds observed control
-IDs by producer direction and ordinal; it retains complete ordered requests.
+replay and outgoing request comparison under each explicit manifest policy.
+`strict_ordered` binds observed control IDs by producer direction and ordinal and
+retains complete ordered requests. Only `native-suggestions` declares
+`native_coding_prefix`: initialize, one to six exact source-declared coding
+prompts each immediately followed by one context query, then the exact clear
+input. The policy validates both entire traces independently and compares full
+initialize, user and context-query templates, including unknown fields. Only
+unique nonempty top-level control IDs and the checked prompt text slot vary;
+extra, missing, reordered or malformed requests fail. Reports name this policy
+and both coding iteration counts. It does not claim identical request counts.
+Replay itself still matches every stored input exactly, and the native source
+suggestion and client set/clear assertions remain required.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
 stage must execute every selected named leaf with no failures or skips; default
@@ -274,7 +286,7 @@ python3 scripts/daemon-recordings.py batch --batch all --agents-repo /path/to/py
 ```
 
 `batch` audits the manifest, performs fresh capture, committed replay, fresh
-replay and strict request comparison, then runs `make check-common` **once for
+replay and declared-policy request comparison, then runs `make check-common` **once for
 the entire selected group**, its mapped live test roots once, the complete
 201-cut restoration proof once, and citation/documentation guards once. Live
 roots and restoration cuts are counted from Go JSON events: exit zero, skipped

@@ -31,7 +31,6 @@ var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContex
 	"mcp-reconnect":                   runTapeMCPReconnect,
 	"workspace-change":                runTapeWorkspace,
 	"skill-silence":                   runTapeSkill,
-	"subagent-text":                   runTapeSubagent,
 	"confirmed-permission-settings":   runTapeConfirmedSettings,
 	"default-outside-read":            runTapeDefaultRead,
 	"family-alias":                    runTapeFamily,

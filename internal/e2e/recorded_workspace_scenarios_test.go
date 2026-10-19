@@ -19,7 +19,7 @@ import (
 
 func prepareRecordedWorkspace(t *testing.T, name, home string) string {
 	switch name {
-	case "hook-banner", "workspace-change", "skill-silence", "subagent-text", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
+	case "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
 		dir := filepath.Join(home, "work")
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
@@ -54,9 +54,6 @@ func runTapeWorkspace(t *testing.T, c recordedScenarioContext) {
 }
 func runTapeSkill(t *testing.T, c recordedScenarioContext) {
 	scenario.SkillSilence(t, c.Wire, tapeConversation, "Use the pyry-probe skill, then do exactly what it says. run=tape-skill", 180*time.Second, c.DaemonLog)
-}
-func runTapeSubagent(t *testing.T, c recordedScenarioContext) {
-	scenario.SubagentText(t, c.Wire, tapeConversation, "Use the Agent tool exactly once and wait for it in the foreground. Ask the agent to write exactly twelve numbered paragraphs about reliable process supervision, with at least two complete sentences per paragraph, and not to use tools. After it returns, write your own distinct twelve numbered paragraphs on the same topic, again with at least two complete sentences each. Do not use any other tools. run=tape-subagent", 180*time.Second)
 }
 func recordedOutsideReadFixture(t *testing.T, c recordedScenarioContext) (string, string) {
 	const token = "70c3e196250bb904a85d624f"
@@ -151,7 +148,7 @@ func runTapePermissionContext(t *testing.T, c recordedScenarioContext, outside b
 }
 
 func runTapeNativeSuggestions(t *testing.T, c recordedScenarioContext) {
-	prompts := []string{"Write a Go function that reverses a string. Reply in chat only, do not create files. Just the code, briefly. run=tape-native-suggestions", "Now add a unit test for it. Just the code.", "Now make it handle unicode correctly. Just the code.", "Now add a benchmark for it. Just the code.", "Now add a doc comment to the function. Just the code.", "Now add an example test for it. Just the code."}
+	prompts := scenario.NativeSuggestionPrompts("tape-native-suggestions")
 	scenario.NativeSuggestions(t, c.Wire, scenario.NativeSuggestionConfig{ConversationID: tapeConversation, Prompts: prompts, TurnBudget: 120 * time.Second, Window: 30 * time.Second, CheckNative: func() {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {

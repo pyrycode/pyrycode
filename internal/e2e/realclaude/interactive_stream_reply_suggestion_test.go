@@ -230,14 +230,7 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 	// Coding steps with an obvious next one: claude's suggestion prompt stays
 	// silent when the next step is not obvious, so open questions to the user
 	// (the first version of this test) drew no suggestion in six turns.
-	prompts := []string{
-		fmt.Sprintf("Write a Go function that reverses a string. Reply in chat only, do not create files. Just the code, briefly. run=%d", nonce),
-		"Now add a unit test for it. Just the code.",
-		"Now make it handle unicode correctly. Just the code.",
-		"Now add a benchmark for it. Just the code.",
-		"Now add a doc comment to the function. Just the code.",
-		"Now add an example test for it. Just the code.",
-	}
+	prompts := scenario.NativeSuggestionPrompts(strconv.FormatInt(nonce, 10))
 
 	next := func(deadline time.Time) protocol.Envelope {
 		timer := time.NewTimer(time.Until(deadline))

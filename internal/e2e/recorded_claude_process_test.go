@@ -304,7 +304,7 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 		return nil, errors.New("incomplete pilot Claude input files")
 	}
 	switch c.Scenario {
-	case "hook-banner", "workspace-change", "skill-silence", "subagent-text", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
+	case "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
 		cwd, err := os.Getwd()
 		if err != nil {
 			return nil, errors.New("scenario cwd unavailable")
