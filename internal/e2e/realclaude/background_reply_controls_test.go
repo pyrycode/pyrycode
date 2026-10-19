@@ -50,6 +50,7 @@ func TestBackgroundReplyWitness(t *testing.T) {
 		{"wrong tool", backgroundReplyWait, "other", "agent", "private-witness", false, false},
 		{"wrong child", backgroundReplyWait, "wait", "other", "private-witness", false, false},
 		{"wrong output", backgroundReplyWait, "wait", "agent", "release", false, false},
+		{"async launch notice", backgroundReplyWait, "wait", "agent", "Command running in background", false, false},
 		{"failed", backgroundReplyWait, "wait", "agent", "private-witness", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,6 +60,10 @@ func TestBackgroundReplyWitness(t *testing.T) {
 				`{"type":"result","subtype":"success"}`,
 				fmt.Sprintf(`{"type":"user","parent_tool_use_id":%q,"message":{"content":[{"type":"tool_result","tool_use_id":%q,"content":%q,"is_error":%t}]}}`, tc.parent, tc.tool, tc.output, tc.failed),
 				`{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"final","role":"assistant","content":[{"type":"text","text":"pyry-3589-finished"}]}}`,
+			}
+			if tc.name == "async launch notice" {
+				// A different tool's later token cannot complete the held Bash call.
+				frames = append(frames[:4], `{"type":"user","parent_tool_use_id":"agent","message":{"content":[{"type":"tool_result","tool_use_id":"other","content":"private-witness"}]}}`, frames[4])
 			}
 			lines := backgroundReplyTestLines(frames)
 			_, end, final, _, result, _ := backgroundReplyBoundary(lines, "private-witness")

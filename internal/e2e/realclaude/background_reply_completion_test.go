@@ -38,7 +38,7 @@ func TestRealClaude_BackgroundReplyCompletion(t *testing.T) {
 	argvHandler, _ := newDropcapArgvHandler()
 	runner, err := streamsup.New(streamsup.Config{
 		ClaudeBin: bin, WorkDir: work, SessionID: "35890000-0000-4000-8000-000000000001",
-		Args: ptucArgs, Stdout: recorder, Logger: slog.New(argvHandler),
+		Args: backgroundReplySyncArgs(t, work), Stdout: recorder, Logger: slog.New(argvHandler),
 	})
 	if err != nil {
 		t.Fatal("create runner")
