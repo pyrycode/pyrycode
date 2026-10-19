@@ -107,3 +107,9 @@ are allowed and dismissal and continuation may arrive in either order.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-19
+
+## Revisions
+
+- 2026-10-19: terminal idle must follow the last response delta. The accumulator
+  clears idle when more text arrives; the stale-idle control rejects a leading
+  idle as completion evidence. Idle may still precede a delayed dismissal.

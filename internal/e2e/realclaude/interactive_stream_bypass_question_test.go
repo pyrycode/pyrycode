@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -42,6 +43,7 @@ func TestInteractiveStreamBypassQuestions(t *testing.T) {
 				h, convID, _ := startObservedPermissionHarnessWithOperatorBypass(t,
 					askQuestionCaptureModel, stdio, configure, operator, prepare)
 				nextID := uint64(2)
+				var prior strings.Builder
 				for _, multi := range []bool{false, true} {
 					selection := "allow only a single choice (multiSelect false)"
 					if multi {
@@ -49,48 +51,41 @@ func TestInteractiveStreamBypassQuestions(t *testing.T) {
 					}
 					prompt := fmt.Sprintf("Before doing anything else, use AskUserQuestion to ask exactly one question "+
 						"about cache eviction policy. Offer four distinct short labels, explicitly include multiSelect, and %s. "+
-						"After I answer, reply with each answer value exactly as received, including any free text, and nothing else. "+
+						"After I answer, confirm your interpretation of my selections and include the supplied answer witness verbatim. "+
 						"Do not use another tool. run=%d", selection, time.Now().UnixNano())
-					batch := raiseRealQuestionBatch(t, h, nextID, convID, prompt)
+					batch := raiseRealQuestionBatch(t, h, nextID, convID, prompt, &prior)
 					nextID++
 					if batch.ConversationID != convID || len(batch.Questions) != 1 || batch.Questions[0].MultiSelect != multi {
 						t.Fatal("real batch did not match the requested conversation/selection variant")
 					}
-					options := batch.Questions[0].Options
-					values := []string{options[len(options)-1].Label}
-					if multi {
-						if values[0] == options[len(options)-2].Label {
-							t.Fatal("multiselect offered indistinguishable labels")
-						}
-						values = append(values, options[len(options)-2].Label, fmt.Sprintf("custom-%d", time.Now().UnixNano()))
+					entries, choice := chooseQuestionAnswers(t, batch, multi)
+					if err := checkQuestionWitness(choice.witness, batch, prompt, prior.String()); err != nil {
+						t.Fatal(err)
 					}
 					sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 						ID: nextID, Type: protocol.TypeQuestionAnswer, TS: time.Now().UTC(),
 						Payload: mustJSON(t, protocol.QuestionAnswerPayload{
 							QuestionBatchID: batch.QuestionBatchID, AnswerToken: fmt.Sprintf("bypass-answer-%d", nextID),
-							Answers: []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: values}},
+							Answers: entries,
 						}),
 					})
 					nextID++
-					text := drainAnsweredQuestionTurn(t, h, convID, batch.QuestionBatchID, perTurnReplyBudget)
-					for _, value := range values {
+					text := drainAnsweredQuestionTurn(t, h, convID, batch.QuestionBatchID, choice.witness, perTurnReplyBudget)
+					prior.WriteString(text)
+					selectedCount := 1
+					if multi {
+						selectedCount = 2
+					}
+					options := batch.Questions[0].Options
+					for _, option := range options[len(options)-selectedCount:] {
+						value := option.Label
 						if !strings.Contains(strings.ToLower(text), strings.ToLower(value)) {
 							t.Fatalf("resumed reply omitted an answer; reply=%q", truncateString(text, questionTextLogCap))
 						}
 					}
-					if !multi {
-						_, choice := chooseQuestionAnswers(t, batch)
-						requireContinuationNamesChoice(t, text, choice)
-					} else {
-						var unchosen []string
-						for _, option := range options[:len(options)-2] {
-							unchosen = append(unchosen, option.Label)
-						}
-						for _, value := range values[:2] {
-							requireContinuationNamesChoice(t, text, questionChoice{chosen: value, unchosen: unchosen})
-						}
-					}
-					requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "answer", false)
+					requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "answer", true, func(e history.Entry) error {
+						return checkQuestionAnswerHistory(e, batch, entries)
+					})
 				}
 
 				// This tool must actually run. A tool-free reply cannot satisfy the witness.
