@@ -556,14 +556,15 @@ func (r *contextUsageResolver) fly(f *contextUsageFlight, querier contextUsageQu
 	defer func() {
 		remembered := false
 		if ok {
-			liveResolveSource(r.live, string(canonicalID), "", func(src daemonLiveSource) (struct{}, bool) {
-				f.reading, _ = f.op.result(protocol.TypeContextUsage, payload)
+			_, ok, _ = liveResolveSource(r.live, string(canonicalID), "", func(src daemonLiveSource) (struct{}, bool) {
 				r.mu.Lock()
 				current := r.flights[canonicalID] == f && src == f.op.source
 				r.mu.Unlock()
-				if current {
-					remembered = r.rec.remember(canonicalID, usage, f.op.source)
+				if !current {
+					return struct{}{}, false
 				}
+				f.reading, _ = f.op.result(protocol.TypeContextUsage, payload)
+				remembered = r.rec.remember(canonicalID, usage, f.op.source)
 				return struct{}{}, true
 			})
 		}

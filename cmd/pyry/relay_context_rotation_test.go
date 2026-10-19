@@ -63,7 +63,7 @@ func rotationUsageRunner(t *testing.T, providers ...streamsup.AccountTokenProvid
 	return streamRunner{r: r}
 }
 
-func rotationUsageResolver(t *testing.T, base context.Context, runner contextUsageQuerier) (*contextUsageResolver, *daemonLiveBindings) {
+func rotationUsageResolver(t *testing.T, base context.Context, runner contextUsageQuerier, memory ...bool) (*contextUsageResolver, *daemonLiveBindings) {
 	t.Helper()
 	b := testControlBindings(t, "conv", "a")
 	r := newContextUsageResolver(base, func(id string) (contextUsageQuerier, conversations.ConversationID, bool) {
@@ -74,7 +74,9 @@ func rotationUsageResolver(t *testing.T, base context.Context, runner contextUsa
 	}, nil, nil)
 	r.live = b
 	r.rec = &contextUsageRecorder{reg: b.reg, path: filepath.Join(t.TempDir(), "registry.json"), logger: discardLogger()}
-	r.rec.record("conv", turnevent.ContextUsage{Model: "predecessor", TotalTokens: 90, MaxTokens: 100, Percentage: 90}, b.capture("conv", "a", false))
+	if len(memory) == 0 || memory[0] {
+		r.rec.record("conv", turnevent.ContextUsage{Model: "predecessor", TotalTokens: 90, MaxTokens: 100, Percentage: 90}, b.capture("conv", "a", false))
+	}
 	return r, b
 }
 
@@ -284,8 +286,12 @@ func TestContextUsageRotationStaleFlight(t *testing.T) {
 	var current contextUsageQuerier = first
 	r, b := rotationUsageResolver(t, t.Context(), first)
 	r.resolve = func(string) (contextUsageQuerier, conversations.ConversationID, bool) { return current, "conv", true }
-	oldDone := make(chan struct{})
-	go func() { r.Get(t.Context(), "conv"); close(oldDone) }()
+	type answer struct {
+		payload protocol.ContextUsagePayload
+		ok      bool
+	}
+	oldDone := make(chan answer, 1)
+	go func() { payload, ok := r.Get(t.Context(), "conv"); oldDone <- answer{payload, ok} }()
 	<-first.details
 	second := newFakeContextUsageQuerier(true)
 	second.usage.Model = "successor"
@@ -298,13 +304,74 @@ func TestContextUsageRotationStaleFlight(t *testing.T) {
 		t.Fatal("successor joined predecessor")
 	}
 	close(first.block)
-	<-oldDone
+	old := <-oldDone
 	// Settlement includes memory mutation, so completion is a barrier for this assertion.
 	reading, source, ok := r.rec.snapshot("conv")
 	if !ok || reading.Model != "successor" || source.provenance.SessionID != "b" {
 		t.Fatalf("predecessor overwrote memory: %+v %+v", reading, source)
 	}
+	if !old.ok || old.payload.Model != reading.Model || old.payload.AsOf == nil || !old.payload.AsOf.Equal(reading.AsOf) {
+		t.Errorf("overtaken legacy caller did not receive remembered successor: %+v", old)
+	}
 	rotationUsagePersisted(t, r, "conv", "successor")
+}
+
+type rotationUsageAfterQuery struct {
+	contextUsageQuerier
+	after func()
+}
+
+func (q rotationUsageAfterQuery) QueryContextUsage(ctx context.Context, detail string) (turnevent.ContextUsage, bool) {
+	usage, ok := q.contextUsageQuerier.QueryContextUsage(ctx, detail)
+	if ok {
+		q.after()
+	}
+	return usage, ok
+}
+
+func TestContextUsageRotationBeforeSettlement(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		for _, supplied := range []bool{false, true} {
+			name := map[bool]string{false: "unavailable", true: "remembered"}[memory] + "/" + map[bool]string{false: "legacy", true: "supplied"}[supplied]
+			t.Run(name, func(t *testing.T) {
+				query := newFakeContextUsageQuerier(true)
+				r, b := rotationUsageResolver(t, t.Context(), query, memory)
+				stored, source, found := r.rec.snapshot("conv")
+				// Reset after query success, before the resolver can settle it. No
+				// successor request replaces the flight: the source check must reject it.
+				querier := rotationUsageAfterQuery{query, func() { rotateUsageBinding(b, "a", "b") }}
+				r.resolve = func(string) (contextUsageQuerier, conversations.ConversationID, bool) { return querier, "conv", true }
+				cfg := relay.V2SessionConfig{ContextUsageFor: r.Get}
+				installDaemonLiveRelay(&cfg, relayWiring{streamSink: b.sink}, r)
+				var payload protocol.ContextUsagePayload
+				var reading relay.LiveState
+				var ok bool
+				if supplied {
+					reading, ok = cfg.ContextUsageReadingFor(t.Context(), "conv")
+					if ok {
+						if err := json.Unmarshal(reading.Envelope.Payload, &payload); err != nil {
+							t.Fatal(err)
+						}
+					}
+				} else {
+					payload, ok = cfg.ContextUsageFor(t.Context(), "conv")
+				}
+				if ok != memory || (memory && (payload.Model != stored.Model || payload.AsOf == nil || !payload.AsOf.Equal(stored.AsOf))) {
+					t.Fatalf("overtaken response = %+v, ok=%v; memory=%v", payload, ok, memory)
+				}
+				if supplied && memory && (string(reading.Envelope.SessionID) != `"a"` || reading.SessionGeneration != source.SessionGeneration || cfg.LiveStateCurrent(reading)) {
+					t.Fatalf("fallback lost predecessor source or became current: %+v", reading)
+				}
+				after, producer, exists := r.rec.snapshot("conv")
+				if exists != found || after != stored || producer != source {
+					t.Fatal("overtaken query changed remembered bytes or producer")
+				}
+				if retained, found := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeContextUsage, ""}]; found && !retained.Envelope.SessionStateCleared {
+					t.Fatal("overtaken query published as successor live state")
+				}
+			})
+		}
+	}
 }
 
 func TestContextUsageRotationTimeout(t *testing.T) {
