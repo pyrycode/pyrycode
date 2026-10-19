@@ -47,7 +47,7 @@ func questionAnswerTrigger(nonce int64) string {
 
 func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 	runParallel(t)
-	h, convID := startStreamModalResolutionHarness(t, askQuestionCaptureModel)
+	h, convID := startStdioModalResolutionHarness(t, askQuestionCaptureModel)
 	driveSharedQuestionAnswer(t, h, convID)
 }
 
@@ -111,10 +111,10 @@ func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 		}),
 	})
 
-	drainAnsweredQuestionTurn(t, h, convID, batch.QuestionBatchID, choice.witness, perTurnReplyBudget)
 	requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "answer", true, func(e history.Entry) error {
 		return checkQuestionAnswerHistory(e, batch, entries)
 	})
+	drainAnsweredQuestionTurn(t, h, convID, batch.QuestionBatchID, choice.witness, perTurnReplyBudget)
 
 	// A fresh application turn proves the parked-question update changed the
 	// child's model rather than merely persisting it and reporting success.
@@ -189,7 +189,7 @@ func chooseQuestionAnswers(t *testing.T, batch protocol.QuestionShownPayload, mu
 			selected = strings.Join(values, ", ")
 		}
 		if i == 0 {
-			answer := fmt.Sprintf("%s (answer witness: %s)", selected, choice.witness)
+			answer := fmt.Sprintf("%s. In your reply, confirm this selection and include the answer witness verbatim: %s", selected, choice.witness)
 			if multiple {
 				values = append(values, answer)
 			} else {
@@ -198,6 +198,7 @@ func chooseQuestionAnswers(t *testing.T, batch protocol.QuestionShownPayload, mu
 		}
 		entries = append(entries, protocol.QuestionAnswerEntry{QuestionIndex: i, Values: values})
 	}
+	t.Logf("generated answer values: %q", truncateString(string(mustJSON(t, entries)), questionTextLogCap))
 	return entries, choice
 }
 
@@ -274,6 +275,7 @@ func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID,
 			t.Fatal(err)
 		}
 		if proof.complete() {
+			t.Logf("answered continuation: %q", truncateString(proof.text.String(), questionTextLogCap))
 			return proof.text.String()
 		}
 	}

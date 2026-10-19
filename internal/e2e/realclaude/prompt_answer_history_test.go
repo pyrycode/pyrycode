@@ -43,6 +43,7 @@ func requirePromptAnswerHistory(t *testing.T, h *perConvHarness, convID, id, dec
 			continue
 		}
 		count++
+		t.Logf("correlated answer fact: %q", truncateString(string(e.Payload), questionTextLogCap))
 		for _, check := range checks {
 			if err := check(e); err != nil {
 				t.Fatal(err)

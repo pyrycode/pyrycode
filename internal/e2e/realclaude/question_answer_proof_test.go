@@ -4,6 +4,9 @@ package realclaude
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,35 @@ import (
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
+
+// The provenance proof must exercise the non-bypass stdio approval transport.
+func TestQuestionAnswerTransport(t *testing.T) {
+	t.Parallel()
+	file, err := parser.ParseFile(token.NewFileSet(), "interactive_stream_question_answer_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"TestInteractiveStreamQuestionAnswer", "TestInteractiveStreamStdioQuestionAnswer"} {
+		found := false
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != name {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "startStdioModalResolutionHarness" {
+						found = true
+					}
+				}
+				return true
+			})
+		}
+		if !found {
+			t.Errorf("%s must use the non-bypass stdio harness for asking-session provenance", name)
+		}
+	}
+}
 
 func TestQuestionAnswerTurnProof(t *testing.T) {
 	t.Parallel()
@@ -77,6 +109,9 @@ func TestQuestionAnswerWitness(t *testing.T) {
 		}
 		seen[choice.witness] = true
 		values := entries[0].Values
+		if !strings.Contains(values[len(values)-1], "include the answer witness verbatim: "+choice.witness) {
+			t.Error("free-text answer must explicitly request its witness in the reply")
+		}
 		if (!multi && len(values) != 1) || (multi && len(values) != 3) || !strings.Contains(strings.Join(values, " "), choice.witness) {
 			t.Fatal("answer lost witness or selection cardinality")
 		}
@@ -113,7 +148,7 @@ func TestQuestionAnswerHistoryProof(t *testing.T) {
 	batch := testQuestionProofBatch()
 	batch.Questions = append(batch.Questions, protocol.Question{Text: "Second question?", MultiSelect: true})
 	answers := []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{"LRU-K; answer-witness-71bc"}}, {QuestionIndex: 1, Values: []string{"one", "two"}}}
-	for _, change := range []string{"valid", "conversation", "batch", "session", "index", "question", "answer", "selection", "missing", "truncated"} {
+	for _, change := range []string{"valid", "conversation", "batch", "session", "missing session", "missing provenance", "wrong provenance", "index", "question", "answer", "selection", "missing", "truncated"} {
 		t.Run(change, func(t *testing.T) {
 			ts := time.Now().UTC()
 			questions := []map[string]any{
@@ -128,6 +163,8 @@ func TestQuestionAnswerHistoryProof(t *testing.T) {
 				fact["correlation_id"] = "other"
 			case "session":
 				fact["session_id"] = "other"
+			case "missing session":
+				delete(fact, "session_id")
 			case "index":
 				questions[0]["index"] = 1
 			case "question":
@@ -146,6 +183,11 @@ func TestQuestionAnswerHistoryProof(t *testing.T) {
 				t.Fatal(err)
 			}
 			e := history.Entry{Payload: raw, TS: ts, Session: &history.SessionProvenance{Kind: "claude", SessionID: streamModalBootstrapUUID}}
+			if change == "missing provenance" {
+				e.Session = nil
+			} else if change == "wrong provenance" {
+				e.Session.SessionID = "other"
+			}
 			if err := checkQuestionAnswerHistory(e, batch, answers); (err == nil) != (change == "valid") {
 				t.Fatalf("validation=%v for %s", err, change)
 			}
