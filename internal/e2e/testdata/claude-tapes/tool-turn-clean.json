@@ -1,0 +1,2331 @@
+{
+  "version": 1,
+  "scenario": "tool-turn-clean",
+  "producer": {
+    "revision": "848af605046138b7301225728ca4db53696fedfe",
+    "binary_sha256": "57b5be6a979cb47f74954266c16881bcdca5e2314fdcf79fc408c693ca8e06f7",
+    "claude_version": "2.1.280 (Claude Code)",
+    "captured_at": "2026-10-19T17:26:37.868007Z"
+  },
+  "args": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--forward-subagent-text",
+    "--replay-user-messages",
+    "--prompt-suggestions",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--settings",
+    "${PILOT_HOME}/.pyry/test/session-settings/ecda0000-0000-4000-8000-000000000001.json",
+    "--append-system-prompt-file",
+    "${PILOT_HOME}/.pyry/test/system-prompt.txt",
+    "--permission-mode",
+    "default",
+    "--permission-prompt-tool",
+    "stdio",
+    "--session-id",
+    "ecda0000-0000-4000-8000-000000000001"
+  ],
+  "frames": [
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "perTaskStopAffordance": true,
+          "subtype": "initialize"
+        },
+        "request_id": "1",
+        "type": "control_request"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "text": "Use the Write tool to create a file called probe.txt containing the single word banana, then use the Read tool to read it back. Reply with one short word. run=tape-tool-turn",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "type": "user"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "response": {
+          "pending_permission_requests": [],
+          "pending_user_dialog_requests": [],
+          "request_id": "1",
+          "response": {
+            "account": {
+              "apiProvider": "firstParty",
+              "tokenSource": "CLAUDE_CODE_OAUTH_TOKEN"
+            },
+            "agents": [
+              {
+                "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed.",
+                "name": "claude"
+              },
+              {
+                "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
+                "model": "inherit",
+                "name": "Explore"
+              },
+              {
+                "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+                "name": "general-purpose"
+              },
+              {
+                "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
+                "model": "inherit",
+                "name": "Plan"
+              },
+              {
+                "description": "Use this agent to configure the user's Claude Code status line setting.",
+                "model": "sonnet",
+                "name": "statusline-setup"
+              }
+            ],
+            "analytics_disabled": false,
+            "available_output_styles": [
+              "default",
+              "Proactive",
+              "Concise",
+              "Explanatory",
+              "Learning"
+            ],
+            "commands": [
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+                "name": "deep-research"
+              },
+              {
+                "argumentHint": "consent | revoke",
+                "builtin": true,
+                "description": "Grant or revoke Claude agent access to your Design projects",
+                "name": "design"
+              },
+              {
+                "argumentHint": "[\u003cproject hint, e.g. \"Acme DS\"\u003e]",
+                "builtin": true,
+                "description": "Push a React design system to claude.ai/design. This runs a converter that bundles the real component code (from Storybook or a bare package) and uploads it. Use when the user runs /design-sync or says \"sync my design system to Claude Design\".",
+                "name": "design-sync"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill whenever you are about to create ANY chart, graph, plot, dashboard, or data visualization, in ANY output medium — an HTML or React artifact, inline SVG, plotting code in any library (matplotlib, plotly, d3, Recharts, …), an image/PNG you will render and upload, or a chart shared into Slack. Read it BEFORE writing the first line of chart code, choosing chart colors, building a stat tile / meter / KPI row, or laying out a dashboard. When the destination is a first-party document connector (host-designated, never self-described) that renders live charts, hand it the rows (inline, or as an uploaded data file the chart cites) rather than a rendered PNG/SVG — a picture of a chart loses hover, data inspection and per-value comments. Produces visualizations that read as one system — elegant, accessible, consistent in light and dark — using a brand-neutral placeholder palette you swap for your own. Teaches a design-system-agnostic method: a form heuristic, a color formula with a runnable validator, mark specs, and interaction rules. A validated default palette is documented in `references/palette.md` — swap that file's values for your brand's. Triggers on: \"chart\", \"graph\", \"plot\", \"data viz\", \"visualization\", \"dashboard\", \"analytics\", \"visualize data\", \"categorical colors\", \"sequential / diverging palette\", \"stat tile\", \"sparkline\", \"heatmap\", \"legend\", \"axis\", \"tooltip\", \"chart colors\", \"color by series\".",
+                "name": "dataviz"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Use this skill to configure the Claude Code harness via settings.json. Automated behaviors (\"from now on when X\", \"each time X\", \"whenever X\", \"before/after X\") require hooks configured in settings.json - the harness executes these, not Claude, so memory/preferences cannot fulfill them. Also use for: permissions (\"allow X\", \"add permission\", \"move permission to\"), env vars (\"set X=Y\"), hook troubleshooting, or any changes to settings.json/settings.local.json files. Examples: \"allow npm commands\", \"add bq permission to global settings\", \"move permission to user settings\", \"set DEBUG=true\", \"when claude stops show X\". For simple settings like theme/model, suggest the /config command.",
+                "name": "update-config"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior — drive the affected flow, not just tests or typecheck. Run before committing nontrivial changes; bootstraps this repo's project verify skill if none exists yet. Don't invoke it on a diff that only touches tests, docs, or other code with no runtime surface to drive (a change to product source always has one) — there's nothing to observe.",
+                "name": "verify"
+              },
+              {
+                "argumentHint": "[issue description]",
+                "builtin": true,
+                "description": "Enable debug logging for this session and help diagnose issues",
+                "name": "debug"
+              },
+              {
+                "aliases": [
+                  "review"
+                ],
+                "argumentHint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [\u003cpr#\u003e|\u003cbranch\u003e|\u003cpath\u003e]",
+                "builtin": true,
+                "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level (low/medium: fewer, high-confidence findings; high→max: broader coverage, may include uncertain findings; ultra: deep multi-agent review in the cloud); with no level given, it reuses the level you typed last. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review. For ultra on a GitHub.com PR target, --post asks to post the finished review’s findings to the PR as a single comment from the user’s GitHub account (not a review; the launch dialog still confirms in interactive sessions, while non-interactive mode posts on the flag alone) and --no-post hides that option.",
+                "name": "code-review"
+              },
+              {
+                "argumentHint": "[\u003ctarget\u003e]",
+                "builtin": true,
+                "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that.",
+                "name": "simplify"
+              },
+              {
+                "argumentHint": "\u003cinstruction\u003e",
+                "builtin": true,
+                "description": "Research and plan a large-scale change, then execute it in parallel across 5–30 isolated worktree agents that each open a PR.",
+                "name": "batch"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Scan your transcripts for common read-only Bash and MCP tool calls, then add a prioritized allowlist to project .claude/settings.json to reduce permission prompts.",
+                "name": "fewer-permission-prompts"
+              },
+              {
+                "aliases": [
+                  "checkup"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health — what the `claude doctor` terminal diagnostics cover — from local data (duplicate or leftover installs, PATH, unparseable settings files, broken or colliding agent definitions, skills whose frontmatter fails to parse); find unused skills, MCP servers, and plugins versus their context cost and disable dead weight; deduplicate local CLAUDE.md files against checked-in ones; trim checked-in CLAUDE.md files by cutting content a session could derive from the codebase (directory layouts, tech-stack lists, architecture overviews) while keeping gotchas, rationale, and non-standard conventions; migrate always-loaded CLAUDE.md guidance into lazy skills and nested CLAUDE.md files; flag slow hooks and context-heavy extensions; check the installed version is current; make auto mode the default permission mode; and pre-approve frequently denied read-only commands. Use when the user asks for a doctor run, checkup, audit, tune-up, or cleanup of their Claude Code setup or configuration.",
+                "name": "doctor"
+              },
+              {
+                "aliases": [
+                  "proactive"
+                ],
+                "argumentHint": "[interval] [prompt]",
+                "builtin": true,
+                "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.",
+                "name": "loop"
+              },
+              {
+                "aliases": [
+                  "routines"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+                "name": "schedule"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for the Claude API / Anthropic SDK — model ids, pricing, params, streaming, tool use, MCP, agents, caching, token counting, model migration.\nTRIGGER — read BEFORE opening the target file; don't skip because it \"looks like a one-liner\" — whenever: the prompt names Claude/Anthropic in any form (Claude, Anthropic, Fable, Opus, Sonnet, Haiku, `anthropic`, `@anthropic-ai`, `claude-*`, `us.anthropic.*`, `[1m]`); the user asks about an LLM (pricing/model choice/limits/caching) — never answer from memory; OR the task is LLM-shaped with provider unstated (agent/MCP/tool-definition/multi-agent/RAG/LLM-judge/computer-use; generate/summarize/extract/classify/rewrite/converse over NL; debugging refusals/cutoffs/streaming/tool-calls/tokens).\nSKIP only when another provider is being worked on (overrides all triggers): OpenAI/GPT/Gemini/Llama/Mistral/Cohere/Ollama named in the query; OR `grep -rE 'openai|langchain_openai|google.generativeai|genai|mistralai|cohere|ollama'` over the project hits (run this grep FIRST if no provider named — don't Read the file).",
+                "name": "claude-api"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Reference for writing a Workflow tool script (script API and gotchas, resume, quality patterns, worked examples). Load before authoring a script for a workflow the user already opted into; it does not itself authorize running one.",
+                "name": "workflow-authoring"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Launch and drive this project's app to see a change working. Use when asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests). First looks for a project skill that already covers launching the app; otherwise falls back to built-in patterns per project type (CLI, server, TUI, Electron, browser-driven, library).",
+                "name": "run"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Author or improve the run-\u003cunit\u003e skill - a per-project skill that tells agents how to build, launch, and drive this project's app. Use when the user asks to set up the project, get it running, write run instructions, or verify build/run steps work from a clean environment.",
+                "name": "run-skill-generator"
+              },
+              {
+                "argumentHint": "[fable|opus|sonnet|off]",
+                "builtin": true,
+                "description": "Let Claude consult a stronger model at key moments",
+                "name": "advisor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "(removed) Ask Claude to create/manage subagents, or edit .claude/agents/",
+                "name": "agents"
+              },
+              {
+                "argumentHint": "[--request-id \u003cuuid\u003e] (--wizard posture=… scope=… depth=… --propose | --expect-sha256 \u003c64-hex\u003e --apply-file \u003cpath\u003e)",
+                "builtin": true,
+                "description": "Teach auto mode about your environment, plus optional rule tweaks",
+                "name": "auto-mode-setup"
+              },
+              {
+                "argumentHint": "[auto|\u003ctokens\u003e]",
+                "builtin": true,
+                "description": "Configure the auto-compact window size",
+                "name": "autocompact"
+              },
+              {
+                "aliases": [
+                  "reset",
+                  "new"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+                "name": "clear"
+              },
+              {
+                "argumentHint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]",
+                "builtin": true,
+                "description": "Set the prompt bar color for this session",
+                "name": "color"
+              },
+              {
+                "argumentHint": "\u003coptional custom summarization instructions\u003e",
+                "builtin": true,
+                "description": "Free up context by summarizing the conversation so far",
+                "name": "compact"
+              },
+              {
+                "aliases": [
+                  "settings"
+                ],
+                "argumentHint": "key=value",
+                "builtin": true,
+                "description": "Set a setting by key",
+                "name": "config"
+              },
+              {
+                "argumentHint": "[style]",
+                "builtin": true,
+                "description": "List output styles or switch to one",
+                "name": "output-style"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show current context usage",
+                "name": "context"
+              },
+              {
+                "argumentHint": "\u003clow|medium|high|xhigh|max|auto\u003e",
+                "builtin": true,
+                "description": "Set effort level for model usage",
+                "name": "effort"
+              },
+              {
+                "argumentHint": "[on|off]",
+                "builtin": true,
+                "description": "Toggle fast mode (Opus 5.5)",
+                "name": "fast"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Dump the JS heap to the Desktop; on Linux with no Desktop folder, the home directory",
+                "name": "heapdump"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Initialize a new CLAUDE.md file with codebase documentation",
+                "name": "init"
+              },
+              {
+                "argumentHint": "[reconnect|enable|disable [\u003cserver\u003e|all]]",
+                "builtin": true,
+                "description": "Manage MCP servers",
+                "name": "mcp"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Import config from another AI coding agent",
+                "name": "import"
+              },
+              {
+                "argumentHint": "\u003cmodel\u003e",
+                "builtin": true,
+                "description": "Set the AI model for Claude Code",
+                "name": "model"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Run the workflow script delivered in this session environment (server-launched sessions only)",
+                "name": "__remote-workflow"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Execute a server-launched workflow handoff (workflow_launch event sessions only)",
+                "name": "workflow-launch-exec"
+              },
+              {
+                "argumentHint": "[--force]",
+                "builtin": true,
+                "description": "Activate pending plugin changes in the current session",
+                "name": "reload-plugins"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Pick up skills added or changed on disk during this session",
+                "name": "reload-skills"
+              },
+              {
+                "aliases": [
+                  "name"
+                ],
+                "argumentHint": "[name]",
+                "builtin": true,
+                "description": "Rename the current conversation",
+                "name": "rename"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Start a cloud agent that finds and verifies bugs in your branch (~15-25 min, $5-$25 USD) · Runs in a cloud session. See https://code.claude.com/docs/en/claude-code-on-the-web",
+                "name": "ultrareview"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Complete a security review of the pending changes on the current branch",
+                "name": "security-review"
+              },
+              {
+                "aliases": [
+                  "cost",
+                  "stats"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show session cost, plan usage, and what's contributing to your limits",
+                "name": "usage"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a report analyzing your Claude Code sessions",
+                "name": "insights"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Generate a one-line session recap now",
+                "name": "recap"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Show which loaded skills are unused and costing context",
+                "name": "skill-doctor"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Set a goal — keep working until the condition is met",
+                "name": "goal"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Grant Claude agent access to your Design projects",
+                "name": "design-consent"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Revoke Claude agent access to your Design projects",
+                "name": "design-revoke"
+              },
+              {
+                "aliases": [
+                  "peers"
+                ],
+                "argumentHint": "",
+                "builtin": true,
+                "description": "List subagents, teammates, and other Claude sessions you can message",
+                "name": "list-agents"
+              },
+              {
+                "argumentHint": "",
+                "builtin": true,
+                "description": "Help teammates ramp on Claude Code with a guide from your usage",
+                "name": "team-onboarding"
+              }
+            ],
+            "current_permission_mode": "bypassPermissions",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "fast_mode_state": "off",
+            "ide_rc_auto_enable_gate": true,
+            "models": [
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Default (recommended)",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "default"
+              },
+              {
+                "description": "Sonnet 5 · Efficient for routine tasks",
+                "displayName": "Sonnet",
+                "resolvedModel": "claude-sonnet-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "sonnet"
+              },
+              {
+                "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks",
+                "displayName": "Fable",
+                "resolvedModel": "claude-fable-5-1",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "value": "claude-fable-5-1"
+              },
+              {
+                "description": "Opus 5.5 · Best for everyday, complex tasks",
+                "displayName": "Opus",
+                "resolvedModel": "claude-opus-5-5",
+                "supportedEffortLevels": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "supportsAdaptiveThinking": true,
+                "supportsAutoMode": true,
+                "supportsEffort": true,
+                "supportsFastMode": true,
+                "value": "opus"
+              },
+              {
+                "description": "Haiku 4.5 · Fastest for quick answers",
+                "displayName": "Haiku",
+                "resolvedModel": "claude-haiku-4-5-20251001",
+                "value": "haiku"
+              }
+            ],
+            "output_style": "default",
+            "pid": 20576,
+            "remote_control_auto_connect_default": false,
+            "remote_control_auto_enable": false,
+            "remote_control_auto_on_by_default": false,
+            "remote_control_available": true,
+            "session_state": "idle",
+            "user_output_styles_dir": "${PILOT_HOME}/.claude/output-styles"
+          },
+          "subtype": "success"
+        },
+        "type": "control_response"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "agents": [
+          "claude",
+          "Explore",
+          "general-purpose",
+          "Plan",
+          "statusline-setup"
+        ],
+        "analytics_disabled": false,
+        "apiKeySource": "none",
+        "capabilities": [
+          "interrupt_receipt_v1",
+          "interrupt_cancel_queued_v1",
+          "msg_lifecycle_v1",
+          "mcp_read_resource_v1",
+          "mcp_tool_ui_meta_v1"
+        ],
+        "claude_code_version": "2.1.280",
+        "cwd": "${PILOT_HOME}",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "mcp_servers": [],
+        "memory_paths": {
+          "auto": "${PILOT_HOME}/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-p-301-3068255551/memory/"
+        },
+        "messaging_socket_path": "/tmp/cc-socks/20576.sock",
+        "model": "claude-haiku-4-5-20251001",
+        "output_style": "default",
+        "permissionMode": "bypassPermissions",
+        "plugins": [
+          {
+            "name": "telemetry",
+            "path": "builtin",
+            "source": "telemetry@builtin"
+          }
+        ],
+        "product_feedback_disabled": false,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "skills": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator"
+        ],
+        "slash_commands": [
+          "deep-research",
+          "design",
+          "design-sync",
+          "dataviz",
+          "update-config",
+          "verify",
+          "debug",
+          "code-review",
+          "simplify",
+          "batch",
+          "fewer-permission-prompts",
+          "doctor",
+          "loop",
+          "schedule",
+          "claude-api",
+          "workflow-authoring",
+          "run",
+          "run-skill-generator",
+          "advisor",
+          "agents",
+          "auto-mode-setup",
+          "autocompact",
+          "clear",
+          "color",
+          "compact",
+          "config",
+          "output-style",
+          "context",
+          "effort",
+          "fast",
+          "heapdump",
+          "init",
+          "mcp",
+          "import",
+          "model",
+          "__remote-workflow",
+          "workflow-launch-exec",
+          "reload-plugins",
+          "reload-skills",
+          "rename",
+          "ultrareview",
+          "security-review",
+          "usage",
+          "insights",
+          "recap",
+          "skill-doctor",
+          "goal",
+          "design-consent",
+          "design-revoke",
+          "list-agents",
+          "team-onboarding"
+        ],
+        "subtype": "init",
+        "terminal_slash_commands": [
+          "doctor",
+          "color",
+          "reload-plugins"
+        ],
+        "tools": [
+          "Task",
+          "AskUserQuestion",
+          "Bash",
+          "CronCreate",
+          "CronDelete",
+          "CronList",
+          "DesignSync",
+          "Edit",
+          "EnterPlanMode",
+          "EnterWorktree",
+          "ExitPlanMode",
+          "ExitWorktree",
+          "ListAgents",
+          "Monitor",
+          "NotebookEdit",
+          "PushNotification",
+          "Read",
+          "RemoteTrigger",
+          "ReportFindings",
+          "ScheduleWakeup",
+          "SendMessage",
+          "Skill",
+          "TaskCreate",
+          "TaskGet",
+          "TaskList",
+          "TaskStop",
+          "TaskUpdate",
+          "ToolSearch",
+          "WebFetch",
+          "WebSearch",
+          "Workflow",
+          "Write"
+        ],
+        "type": "system",
+        "uuid": "84d5199a-d676-4e58-b455-016977ca38e0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "c6ee1b8d-b75c-48c3-a4be-8596af00c1ef"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "isReplay": true,
+        "message": {
+          "content": [
+            {
+              "text": "Use the Write tool to create a file called probe.txt containing the single word banana, then use the Read tool to read it back. Reply with one short word. run=tape-tool-turn",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:38.754Z",
+        "type": "user",
+        "uuid": "c8dd8660-c1a4-465f-87a4-720f5b2074fb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBzFnzsqVbbjGdAxyLVw",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 7151,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 7151,
+              "cache_read_input_tokens": 14716,
+              "inference_geo": "not_available",
+              "input_tokens": 10,
+              "output_tokens": 6,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 2088,
+        "type": "stream_event",
+        "uuid": "33e4f868-8807-4dcb-a787-5c46d25ea7e2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "44792b3b-2042-4bf4-ad73-63fd2fe33589"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "9d64f9ba-f379-47eb-93d4-c55e9ce45d4e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "afabea85-eae2-4631-89a9-e88b6e317ca7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 100,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "2a5d1569-d9b3-4f34-b9a6-b0d7df9b6dcb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1c7d5abb-2345-440e-be46-759b3e025f21"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4cdfc7a9-a594-4c81-83c1-522a4d3cd154"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 214,
+        "estimated_tokens_delta": 114,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "0909f476-a913-4852-b0dc-57bb72165661"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "EtAGCtABCBIYAipAn2ZUK1k/u4jEiRlNT8CdLWr07qmgWDMJejKJDaheE8UjwNj+Xx9S8PApfxOhqefaRgEoQzLCjEH5+lC7OnKuTTIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chB/RpxqDzMMRf3N7rAhnJRkiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHSpdnWBrABAhIMxeNhfjojXlVFpIQYGgyHyU2Cwf2ECKs8lZUiMFBvTKC302uld8RzqNYdHKKbqZblHvjQvzY6zzR5NgFUbmUaJgNqn+kukq+ihKoKviqsBIN4qFssyvxRVfjq2kUR8NxFNEpYRPXhYTBuIwqb/BfkTvJxPkjWAql1CKJFghCdo6d7nQKm3x0tHAi9t6tgGSD6dBRZGBhFy43jhHZvdw54H1Nx6OwXym6gSahWSg48c95h5tBl24kpro92il/HPlnycHahxh2J58rUgB6sxMipmXKFKZjQnuzqaYVzSIzDJP1RNwdzsh4cIMm1U11LDQ2n7IhyzH49wFGFQ9MH52RgfsvSTFgmbFOjk7AXN6ezdzvbrJAqFTpA1S2R0Jp2kFVBoVqq3LF+7jEp6F2DOanxmmTfwzLvDDINVj4p//liaIpIZ6ImQux1oZamDlrTYeu8T5YGgOXm8K6riDYJq34QZ1wZIV/N57MLQw95QFxVt/3JYtSThSmncEY2bUCHjYuynxaKYR+f2RlmRiBUOwPIozlvOp+3dHi15fVX5qr3CqyZRTDqd/OFSUSeBwuNCD/9Qcgu3CztTVBV9oXveoyLuU1bEH9dY/Wxj07bAua3XVO3DBuzGv3ZIwnZfcmKq2iw8OEWbtTdPuvIHRNOy0vK9vBGaIOp7hKuldUlmz5c3n33tAFoM2UJzFI5vVTGzWXrSSjqw7WXgjDTgsONoWbcaeBbg83MmUfSi57yNmv7ZCUiEVeorZEAzsIj+bOpdqrOLacDtR7WJOFRJQ9iYsL+NSni/jh/tgoOPYGXbefXuI+g1O9nC0RdUsayLk5WQ9vHK9scZ9I+PstEVcwYAQ==",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "68adce84-ff36-42bf-8123-60d656350058"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "EtAGCtABCBIYAipAn2ZUK1k/u4jEiRlNT8CdLWr07qmgWDMJejKJDaheE8UjwNj+Xx9S8PApfxOhqefaRgEoQzLCjEH5+lC7OnKuTTIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chB/RpxqDzMMRf3N7rAhnJRkiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHSpdnWBrABAhIMxeNhfjojXlVFpIQYGgyHyU2Cwf2ECKs8lZUiMFBvTKC302uld8RzqNYdHKKbqZblHvjQvzY6zzR5NgFUbmUaJgNqn+kukq+ihKoKviqsBIN4qFssyvxRVfjq2kUR8NxFNEpYRPXhYTBuIwqb/BfkTvJxPkjWAql1CKJFghCdo6d7nQKm3x0tHAi9t6tgGSD6dBRZGBhFy43jhHZvdw54H1Nx6OwXym6gSahWSg48c95h5tBl24kpro92il/HPlnycHahxh2J58rUgB6sxMipmXKFKZjQnuzqaYVzSIzDJP1RNwdzsh4cIMm1U11LDQ2n7IhyzH49wFGFQ9MH52RgfsvSTFgmbFOjk7AXN6ezdzvbrJAqFTpA1S2R0Jp2kFVBoVqq3LF+7jEp6F2DOanxmmTfwzLvDDINVj4p//liaIpIZ6ImQux1oZamDlrTYeu8T5YGgOXm8K6riDYJq34QZ1wZIV/N57MLQw95QFxVt/3JYtSThSmncEY2bUCHjYuynxaKYR+f2RlmRiBUOwPIozlvOp+3dHi15fVX5qr3CqyZRTDqd/OFSUSeBwuNCD/9Qcgu3CztTVBV9oXveoyLuU1bEH9dY/Wxj07bAua3XVO3DBuzGv3ZIwnZfcmKq2iw8OEWbtTdPuvIHRNOy0vK9vBGaIOp7hKuldUlmz5c3n33tAFoM2UJzFI5vVTGzWXrSSjqw7WXgjDTgsONoWbcaeBbg83MmUfSi57yNmv7ZCUiEVeorZEAzsIj+bOpdqrOLacDtR7WJOFRJQ9iYsL+NSni/jh/tgoOPYGXbefXuI+g1O9nC0RdUsayLk5WQ9vHK9scZ9I+PstEVcwYAQ==",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBzFnzsqVbbjGdAxyLVw",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 7151,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 7151,
+            "cache_read_input_tokens": 14716,
+            "inference_geo": "not_available",
+            "input_tokens": 10,
+            "output_tokens": 6,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBzFnnU42iu5xrpDnUpS",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:42.795Z",
+        "type": "assistant",
+        "uuid": "bbd6e4c7-64a2-4990-99b0-2a59bb9ba0db"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "6491f0cb-39ed-4817-a434-c3cdfdd163e4"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_01GttTBTbwbeAjRW1z3CDjfQ",
+            "input": {},
+            "name": "Write",
+            "type": "tool_use"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f535a1b9-81aa-494d-8b34-14d16111d8cd"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9506a019-70d7-43ab-b463-b51c990fc18a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "{\"file_path\": \"/private/",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "f6b8548e-4229-4d70-bba0-bbf9c064823a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "var/folders/k0",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "fecc5225-7d87-4ee4-934d-f12bdff09f1d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/gc07w9ws",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0844016e-89b4-41e8-9f54-bfac581ca856"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "319b07n0pl",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a3e485cf-9208-4e69-b6e1-39f16f95eb05"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "nw6y8r",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e1bb74de-501c-40a1-b4be-d747123891d1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "0000gn/T",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "398bc6b8-36c6-4ac4-a3d9-62456785ea88"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/p-301-3",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "97fe3bb4-e830-4763-8300-f1d214ca3e07"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "068255551/probe.",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7a77b400-54ca-43ba-aa12-cf8e2380796f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "txt",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "13b3bb58-7058-4b6e-93fe-a103e4456622"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\", \"content\": \"banana",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4144e41e-e0e8-4985-9208-a6cc68ea83a6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\"}",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "fcf5e921-bfd3-43cd-9f0b-2aa0e2dedda7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "caller": {
+                "type": "direct"
+              },
+              "id": "toolu_01GttTBTbwbeAjRW1z3CDjfQ",
+              "input": {
+                "content": "banana",
+                "file_path": "${PILOT_HOME}/probe.txt"
+              },
+              "name": "Write",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBzFnzsqVbbjGdAxyLVw",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 7151,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 7151,
+            "cache_read_input_tokens": 14716,
+            "inference_geo": "not_available",
+            "input_tokens": 10,
+            "output_tokens": 6,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBzFnnU42iu5xrpDnUpS",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:43.223Z",
+        "type": "assistant",
+        "uuid": "772fee3d-5c20-435c-9728-7872036fabf1",
+        "wire_tool_inputs": {
+          "toolu_01GttTBTbwbeAjRW1z3CDjfQ": {
+            "content": "banana",
+            "file_path": "${PILOT_HOME}/probe.txt"
+          }
+        }
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "74655da9-ff4f-419e-a806-db1e731a4e35"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "content": "File created successfully at: ${PILOT_HOME}/probe.txt (file state is current in your context — no need to Read it back)",
+              "tool_use_id": "toolu_01GttTBTbwbeAjRW1z3CDjfQ",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:43.239Z",
+        "tool_use_result": {
+          "content": "banana",
+          "filePath": "${PILOT_HOME}/probe.txt",
+          "originalFile": null,
+          "structuredPatch": [],
+          "type": "create",
+          "userModified": false
+        },
+        "type": "user",
+        "uuid": "ed4206a9-150b-4353-b641-915513a27f7d"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 7151,
+            "cache_read_input_tokens": 14716,
+            "input_tokens": 10,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 7151,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 7151,
+                "cache_read_input_tokens": 14716,
+                "input_tokens": 10,
+                "output_tokens": 307,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 307,
+            "output_tokens_details": {
+              "thinking_tokens": 189
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "267dd146-5f66-4c19-be32-adbe1f4057b1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e14f4109-9b41-46cf-bbb9-b0a240d83a5c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "rate_limit_info": {
+          "isUsingOverage": false,
+          "overageDisabledReason": "org_level_disabled",
+          "overageStatus": "rejected",
+          "rateLimitType": "five_hour",
+          "resetsAt": 1792436400,
+          "status": "allowed",
+          "unifiedWindows": {
+            "five_hour": {
+              "resetsAt": 1792436400,
+              "utilization": 0.49
+            },
+            "seven_day": {
+              "resetsAt": 1792994400,
+              "utilization": 0.15
+            }
+          }
+        },
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "rate_limit_event",
+        "uuid": "d119f163-5cbd-4394-828c-528e33451822"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "64e56c5b-868e-4c6e-8572-fd3a57af7e00"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBzG7zdUAYoe9XkhrUx4",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 423,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 423,
+              "cache_read_input_tokens": 21867,
+              "inference_geo": "not_available",
+              "input_tokens": 8,
+              "output_tokens": 1,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 787,
+        "type": "stream_event",
+        "uuid": "2ea2a011-87ae-4dd6-bc2c-331db4a65d5a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d6eff2a2-7b28-401b-8372-2ee804a4dab0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "1380635b-3565-4cbc-aae5-b96971fc1861"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "Et8CCtABCBIYAipAPm3Vw+eFJXeyPpAZwQq1Pk+CJU2CJrnnFGstj37MbUTfTpslD5essCp3O8z8r0noSXBgLSHCfLRemUCJkc1gODIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chB/RpxqDzMMRf3N7rAhnJRkiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHUpdnWBrABAhIMa+sAOHrMxCE1V4VKGgzVLjshIxGRPhLl7v0iMHLOZpkhSOspZNsqhRjJIYONilWR5ybzzXC3p31NE6O0y4XXOvJ2oAWgoCmZ9O7gmio8WWW5wvfDiy5ftMbiBHnxwqWtd+/ITdZv6FvMG2/30M2EYRbru52lJFPEWMShSqL823vQ55ppmzAnlqimGAE=",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c161b946-5939-4817-9d59-d9b2115f3eb2"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "Et8CCtABCBIYAipAPm3Vw+eFJXeyPpAZwQq1Pk+CJU2CJrnnFGstj37MbUTfTpslD5essCp3O8z8r0noSXBgLSHCfLRemUCJkc1gODIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chB/RpxqDzMMRf3N7rAhnJRkiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHUpdnWBrABAhIMa+sAOHrMxCE1V4VKGgzVLjshIxGRPhLl7v0iMHLOZpkhSOspZNsqhRjJIYONilWR5ybzzXC3p31NE6O0y4XXOvJ2oAWgoCmZ9O7gmio8WWW5wvfDiy5ftMbiBHnxwqWtd+/ITdZv6FvMG2/30M2EYRbru52lJFPEWMShSqL823vQ55ppmzAnlqimGAE=",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBzG7zdUAYoe9XkhrUx4",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 423,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 423,
+            "cache_read_input_tokens": 21867,
+            "inference_geo": "not_available",
+            "input_tokens": 8,
+            "output_tokens": 1,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBzG7gmGZXVPfZxeoXhX",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:44.243Z",
+        "type": "assistant",
+        "uuid": "251a1900-6b6b-4792-8c1f-4b83cb87375e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3fcf49de-a3f0-4812-9031-efc32e4c39e5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "caller": {
+              "type": "direct"
+            },
+            "id": "toolu_01KLUfKq9kvGL5D1Q8HaoMtL",
+            "input": {},
+            "name": "Read",
+            "type": "tool_use"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d245055f-0a8e-419b-b1f7-1ef116796570"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "5e86878a-d38a-4708-b959-784f7984fa3a"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "{\"file_path\": \"/private/var/folders",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "504ea9df-bd61-4cda-8052-de60015563d3"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/k0/gc07",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "cfc4f3e8-6b5f-4d3c-932b-bceec8700fec"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "w9ws319b07",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "50b75ba2-cdee-4a99-a10e-13502a3693a7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "n0plnw6",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3503472c-4847-4afd-b855-1a81a93df0db"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "y8r0000g",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "92e9f2cc-e487-4c16-aa17-7ad714e91054"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "n/T/p-",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c5b66b19-e491-4187-8553-be6c3cdbc112"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "301-3068255551",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "0861c201-f3cd-41a4-b000-3a8f5a5c19bb"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "/probe.txt",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "5b1dedc8-5343-4469-9093-fa517565ffc1"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "partial_json": "\"}",
+            "type": "input_json_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4e0cb9bc-6caa-4c76-9fb6-b612b46ce207"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "caller": {
+                "type": "direct"
+              },
+              "id": "toolu_01KLUfKq9kvGL5D1Q8HaoMtL",
+              "input": {
+                "file_path": "${PILOT_HOME}/probe.txt"
+              },
+              "name": "Read",
+              "type": "tool_use"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBzG7zdUAYoe9XkhrUx4",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 423,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 423,
+            "cache_read_input_tokens": 21867,
+            "inference_geo": "not_available",
+            "input_tokens": 8,
+            "output_tokens": 1,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBzG7gmGZXVPfZxeoXhX",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:44.595Z",
+        "type": "assistant",
+        "uuid": "34e3425a-5c9e-4820-95aa-06e334722abf",
+        "wire_tool_inputs": {
+          "toolu_01KLUfKq9kvGL5D1Q8HaoMtL": {
+            "file_path": "${PILOT_HOME}/probe.txt"
+          }
+        }
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "4ee0e62c-1587-4e44-96b6-4229bd02ee45"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "tool_use",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 423,
+            "cache_read_input_tokens": 21867,
+            "input_tokens": 8,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 423,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 423,
+                "cache_read_input_tokens": 21867,
+                "input_tokens": 8,
+                "output_tokens": 117,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 117,
+            "output_tokens_details": {
+              "thinking_tokens": 16
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "2d100fef-9483-48f8-8255-953a8f630582"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "00ec234b-bac1-4481-926a-7f9b6f3ba9a5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "content": [
+            {
+              "content": "1\tbanana",
+              "tool_use_id": "toolu_01KLUfKq9kvGL5D1Q8HaoMtL",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:44.616Z",
+        "tool_use_result": {
+          "file": {
+            "content": "banana",
+            "filePath": "${PILOT_HOME}/probe.txt",
+            "numLines": 1,
+            "startLine": 1,
+            "totalLines": 1
+          },
+          "type": "text"
+        },
+        "type": "user",
+        "uuid": "97516f75-1f0a-4ea8-b248-ba1405f3ffae"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "status": "requesting",
+        "subtype": "status",
+        "type": "system",
+        "uuid": "b3475b52-db36-4e32-9d76-0ccb2a199384"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "message": {
+            "container": null,
+            "content": [],
+            "context_management": null,
+            "diagnostics": null,
+            "id": "msg_011CgBzGDocmLK5K9YhXZUnM",
+            "input_transformations": [],
+            "model": "claude-haiku-4-5-20251001",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 167,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 167,
+              "cache_read_input_tokens": 22290,
+              "inference_geo": "not_available",
+              "input_tokens": 8,
+              "output_tokens": 5,
+              "service_tier": "standard",
+              "speed": "standard"
+            }
+          },
+          "type": "message_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "ttft_ms": 849,
+        "type": "stream_event",
+        "uuid": "76d341f0-c198-4b1b-a14f-88e6c543c9e5"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "signature": "",
+            "thinking": "",
+            "type": "thinking"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d1c5d3de-8a6e-4ba2-9402-ef3e18f3f97e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 50,
+        "estimated_tokens_delta": 50,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "ba9a4155-0e94-4ae7-8f9b-82f196072a4f"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": 50,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3ba7371e-d785-484a-a268-3c8b42950c28"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "estimated_tokens": null,
+            "thinking": "",
+            "type": "thinking_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "c8cec294-edfe-4de1-9fb4-07fb9179293e"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "estimated_tokens": 133,
+        "estimated_tokens_delta": 83,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "subtype": "thinking_tokens",
+        "type": "system",
+        "uuid": "e7d92a33-910d-402a-8819-75a92957876c"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "signature": "Eo4ECtABCBIYAipAlY5IW0RbdW3LSRC7Jmsy3MUgDEgKW16XTF/xLBe1Pt8xD6fK+Dw20CcSIWUptRIaXTtOWQUxBwQ6fifELw24ezIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chB/RpxqDzMMRf3N7rAhnJRkiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHWpdnWBrABAhIMfxP7zrDdGRiJcZROGgy4sA5QsR0I2et4DA8iMJQ/AYvljRaTB7XI8Dbe81yESPvvvA6sw/SG/2gUxDgl0XGhoiOU0OcClMaiJAA2yyrqAb1V4RyuTdIqCL4Tuu4sOt1RoI8kiwFuzq52cXdlaIVbPMVvZG8xCvtkQp98Vp8vQDIUuL3Kz3i2loPlIzt4VK9lNkCupDyeDe2oJN+V454zeLWtWF73DefQSgBTVMpHR+b1Z7ROKjAKpZp6xtJZnrlTj4mofBRz5MxtLSeNAPTF26c+KRuVGiA2gGPJ/MwdBOXbH3mevJ2sCXnlGJTSEXJEN3TRAL025+nn9gCpWywYinemgcnWgMvi/DR2jNUgytYHLKrLEPZ+1EStnhrvz6XFwdBIwMFNik6cYKzzmBPKl0AADe8FYi2OBxgB",
+            "type": "signature_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "9fecb8ee-56f7-4495-b7dd-4092a34564af"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "signature": "Eo4ECtABCBIYAipAlY5IW0RbdW3LSRC7Jmsy3MUgDEgKW16XTF/xLBe1Pt8xD6fK+Dw20CcSIWUptRIaXTtOWQUxBwQ6fifELw24ezIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chB/RpxqDzMMRf3N7rAhnJRkiAEBmgEbChljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxqAHWpdnWBrABAhIMfxP7zrDdGRiJcZROGgy4sA5QsR0I2et4DA8iMJQ/AYvljRaTB7XI8Dbe81yESPvvvA6sw/SG/2gUxDgl0XGhoiOU0OcClMaiJAA2yyrqAb1V4RyuTdIqCL4Tuu4sOt1RoI8kiwFuzq52cXdlaIVbPMVvZG8xCvtkQp98Vp8vQDIUuL3Kz3i2loPlIzt4VK9lNkCupDyeDe2oJN+V454zeLWtWF73DefQSgBTVMpHR+b1Z7ROKjAKpZp6xtJZnrlTj4mofBRz5MxtLSeNAPTF26c+KRuVGiA2gGPJ/MwdBOXbH3mevJ2sCXnlGJTSEXJEN3TRAL025+nn9gCpWywYinemgcnWgMvi/DR2jNUgytYHLKrLEPZ+1EStnhrvz6XFwdBIwMFNik6cYKzzmBPKl0AADe8FYi2OBxgB",
+              "thinking": "",
+              "type": "thinking"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBzGDocmLK5K9YhXZUnM",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 167,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 167,
+            "cache_read_input_tokens": 22290,
+            "inference_geo": "not_available",
+            "input_tokens": 8,
+            "output_tokens": 5,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBzGDaUZerZDJniPWqHm",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:46.052Z",
+        "type": "assistant",
+        "uuid": "91f57fda-4f98-4193-96c8-65ceed6cf176"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3bb50468-7952-4f7f-85ea-29b50ea47833"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 1,
+          "type": "content_block_start"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "ca36a524-5d74-44b3-9059-18e2747a4c33"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": "Banana",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "d5758f19-a3cf-4bfc-825a-7636668f13d0"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "delta": {
+            "text": ".",
+            "type": "text_delta"
+          },
+          "index": 1,
+          "type": "content_block_delta"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "7de38400-d1e6-432d-a4f4-07614b2cc6c7"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "message": {
+          "container": null,
+          "content": [
+            {
+              "text": "Banana.",
+              "type": "text"
+            }
+          ],
+          "context_management": null,
+          "diagnostics": null,
+          "id": "msg_011CgBzGDocmLK5K9YhXZUnM",
+          "input_transformations": [],
+          "model": "claude-haiku-4-5-20251001",
+          "role": "assistant",
+          "stop_details": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "type": "message",
+          "usage": {
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 167,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "cache_creation_input_tokens": 167,
+            "cache_read_input_tokens": 22290,
+            "inference_geo": "not_available",
+            "input_tokens": 8,
+            "output_tokens": 5,
+            "service_tier": "standard",
+            "speed": "standard"
+          }
+        },
+        "parent_tool_use_id": null,
+        "request_id": "req_011CgBzGDaUZerZDJniPWqHm",
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "timestamp": "2026-10-19T17:26:46.078Z",
+        "type": "assistant",
+        "uuid": "1e119a47-b270-4a7c-8fff-169cc401e4a6"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "index": 1,
+          "type": "content_block_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "a615a786-9bb9-42d3-bf76-f63ab0170263"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "context_management": {
+            "applied_edits": []
+          },
+          "delta": {
+            "container": null,
+            "stop_details": null,
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "cache_creation_input_tokens": 167,
+            "cache_read_input_tokens": 22290,
+            "input_tokens": 8,
+            "iterations": [
+              {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 167,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 167,
+                "cache_read_input_tokens": 22290,
+                "input_tokens": 8,
+                "output_tokens": 66,
+                "type": "message"
+              }
+            ],
+            "output_tokens": 66,
+            "output_tokens_details": {
+              "thinking_tokens": 57
+            }
+          }
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "e7d23d8a-a2a7-42ab-a6bd-0aca35704df3"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "event": {
+          "type": "message_stop"
+        },
+        "parent_tool_use_id": null,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "type": "stream_event",
+        "uuid": "3a7422aa-82bd-4d49-9a26-ea7a4f7b39ad"
+      }
+    },
+    {
+      "direction": "stdout",
+      "data": {
+        "api_error_status": null,
+        "duration_api_ms": 7326,
+        "duration_ms": 7368,
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_state": "off",
+        "first_content_frame_ms": 2110,
+        "is_error": false,
+        "modelUsage": {
+          "claude-haiku-4-5-20251001": {
+            "cacheCreationInputTokens": 7741,
+            "cacheReadInputTokens": 58873,
+            "canonicalModel": "claude-haiku-4-5",
+            "contextWindow": 200000,
+            "costBasis": "list",
+            "costUSD": 0.0238453,
+            "inputTokens": 26,
+            "maxOutputTokens": 32000,
+            "outputTokens": 490,
+            "provider": "firstParty",
+            "thinkingTokens": 262,
+            "webSearchRequests": 0
+          }
+        },
+        "num_turns": 3,
+        "permission_denials": [],
+        "queued_turn_count": 0,
+        "result": "Banana.",
+        "result_index": 0,
+        "session_id": "ecda0000-0000-4000-8000-000000000001",
+        "stop_reason": "end_turn",
+        "subagent_stats": {
+          "by_type": {},
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "system": 0,
+            "user": 0
+          },
+          "max_depth": 0,
+          "refused": {
+            "budget": 0,
+            "concurrency_limit": 0,
+            "depth_limit": 0
+          },
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "spawned": 0,
+          "spawned_by_subagents": 0,
+          "started_in_background": 0
+        },
+        "subtype": "success",
+        "terminal_reason": "completed",
+        "time_to_request_ms": 20,
+        "total_cost_usd": 0.0238453,
+        "ttft_ms": 4050,
+        "ttft_stream_ms": 2109,
+        "type": "result",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 7741,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 7741,
+          "cache_read_input_tokens": 58873,
+          "inference_geo": "not_available",
+          "input_tokens": 26,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 167,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 167,
+              "cache_read_input_tokens": 22290,
+              "input_tokens": 8,
+              "output_tokens": 66,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 490,
+          "output_tokens_details": {
+            "thinking_tokens": 262
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "uuid": "e5aa1961-f1ca-4202-8d33-9fc84f4b9167"
+      }
+    },
+    {
+      "direction": "stdin",
+      "data": {
+        "request": {
+          "detail": "summary",
+          "subtype": "get_context_usage"
+        },
+        "request_id": "2",
+        "type": "control_request"
+      }
+    }
+  ],
+  "files": {
+    "--append-system-prompt-file": "You are running as a supervised child of the pyry daemon. Your replies are not displayed in a terminal: they leave this process as a structured stream and are rendered for the operator by a separate client application, which may be running on a different machine than the one your tools execute on. More than one client can be attached to a session, and which one is attached can change while the session runs.\n",
+    "--settings": {
+      "enableAllProjectMcpServers": true,
+      "skipDangerousModePermissionPrompt": true
+    }
+  }
+}
