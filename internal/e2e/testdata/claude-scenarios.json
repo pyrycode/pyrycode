@@ -470,7 +470,11 @@
       "name": "hook-banner",
       "stdio_permission": false,
       "initial_yolo": false,
-      "claude_args": [],
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
       "live_tests": [
         "TestInteractiveStreamHookBlockedBannerReachesTheClient"
       ],
