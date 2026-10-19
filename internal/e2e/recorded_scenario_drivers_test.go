@@ -25,6 +25,12 @@ type recordedScenarioContext struct {
 }
 
 var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContext){
+	"question-answer-witness":       runTapeWitnessQuestion,
+	"bypass-witness-mcp-stored":     runTapeWitnessBypass,
+	"bypass-witness-mcp-operator":   runTapeWitnessBypass,
+	"bypass-witness-stdio-stored":   runTapeWitnessBypass,
+	"bypass-witness-stdio-operator": runTapeWitnessBypass,
+
 	"ordinary-queue-placement": runTapeOrdinaryQueue,
 	"interrupt-running":        func(t *testing.T, c recordedScenarioContext) { runTapeInterrupt(t, c, false) },
 	"interrupt-thinking":       func(t *testing.T, c recordedScenarioContext) { runTapeInterrupt(t, c, true) },

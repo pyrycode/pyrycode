@@ -17,7 +17,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
-	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -62,101 +61,20 @@ func TestInteractiveStreamStdioQuestionAnswer(t *testing.T) {
 func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 	t.Helper()
 	nonce := time.Now().UnixNano()
-
-	// AC 1: a real batch surfaced, and non-vacuous BEFORE anything is answered.
-	trigger := questionAnswerTrigger(nonce)
-	var prior strings.Builder
-	batch := raiseRealQuestionBatch(t, h, 2, convID, trigger, &prior)
-
-	// Change the live child's model while AskUserQuestion is parked. The reply
-	// proves the daemon accepted the update; the original batch id remains the
-	// subject of the answer and dismissal below, which proves it was not replaced.
-	targetModel := "haiku"
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   3,
-		Type: protocol.TypeSetSessionSettings,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.SetSessionSettingsPayload{
-			SessionID: streamModalBootstrapUUID,
-			Model:     &targetModel,
-		}),
+	scenario.WitnessQuestionAnswer(t, modalScenarioWire(t, h, 2), scenario.WitnessQuestionConfig{
+		Home: h.home, ConversationID: convID, SessionID: streamModalBootstrapUUID, Prompt: questionAnswerTrigger(nonce),
+		SurfaceBudget: questionSurfaceBudget, UpdateBudget: questionModelUpdateBudget, TurnBudget: perTurnReplyBudget,
 	})
-	updated := awaitQuestionControl(t, h, protocol.TypeSessionSettingsUpdated, questionModelUpdateBudget, &prior, &batch)
-	if updated.InReplyTo == nil || *updated.InReplyTo != 3 {
-		t.Fatalf("session_settings_updated in_reply_to = %v, want 3", updated.InReplyTo)
-	}
-	var updatedPayload protocol.SessionSettingsUpdatedPayload
-	if err := json.Unmarshal(updated.Payload, &updatedPayload); err != nil {
-		t.Fatalf("decode session_settings_updated: %v", err)
-	}
-	if updatedPayload.SessionID != streamModalBootstrapUUID {
-		t.Fatalf("session_settings_updated session_id = %q, want %q", updatedPayload.SessionID, streamModalBootstrapUUID)
-	}
-
-	// AC 4's first half: the choice is made from the surfaced batch.
-	entries, choice := chooseQuestionAnswers(t, batch, false)
-	if err := checkQuestionWitness(choice.witness, batch, trigger, prior.String()); err != nil {
-		t.Fatal(err)
-	}
-
-	// AC 2: answer through the daemon's own inbound path. handleQuestionAnswer
-	// emits no reply and no broadcast of its own, so there is nothing to correlate
-	// on — the dismissal below is what reports the outcome.
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   4,
-		Type: protocol.TypeQuestionAnswer,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.QuestionAnswerPayload{
-			QuestionBatchID: batch.QuestionBatchID,
-			AnswerToken:     "e2e-1987-answer-token",
-			Answers:         entries,
-		}),
-	})
-
-	requirePromptAnswerHistory(t, h, convID, batch.QuestionBatchID, "answer", true, func(e history.Entry) error {
-		return checkQuestionAnswerHistory(e, batch, entries)
-	})
-	drainAnsweredQuestionTurn(t, h, convID, batch.QuestionBatchID, choice.witness, perTurnReplyBudget)
-
-	// A fresh application turn proves the parked-question update changed the
-	// child's model rather than merely persisting it and reporting success.
-	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change",
-		fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
-	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, targetModel), perTurnReplyBudget)
+	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change", fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
+	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, "haiku"), perTurnReplyBudget)
 }
 
 func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration) {
 	t.Helper()
-	var announced protocol.ModelAnnouncedPayload
-	seen := false
-	next := func(deadline time.Time) protocol.Envelope {
+	scenario.WitnessModelTurn(t, func(deadline time.Time) protocol.Envelope {
 		env, _ := receiveQuestionEnvelope(t, phone, cs, deadline)
-		switch env.Type {
-		case protocol.TypeModalShown:
-			t.Fatalf("unexpected modal_shown during post-question turn: %q", truncateString(string(env.Payload), questionTextLogCap))
-		case protocol.TypeRateLimited:
-			// The receiver has validated this warning; do not log provider fields.
-			return protocol.Envelope{}
-		case protocol.TypeModelAnnounced:
-			if !seen {
-				var p protocol.ModelAnnouncedPayload
-				if json.Unmarshal(env.Payload, &p) != nil {
-					t.Fatalf("invalid model announcement: %q", truncateString(string(env.Payload), questionTextLogCap))
-				}
-				if p.ConversationID == convID {
-					announced, seen = p, true
-				}
-			}
-		}
 		return env
-	}
-	scenario.CompletedTurn(t, next, convID, timeout, true)
-	if !seen {
-		t.Fatalf("the post-question turn emitted no model_announced frame")
-	}
-	if announced.Model != expected {
-		t.Errorf("post-question model = %q, want %q", truncateString(announced.Model, questionTextLogCap), expected)
-	}
+	}, convID, expected, timeout)
 }
 
 // raiseRealQuestionBatch asserts a nonempty batch before any answer is sent.
@@ -204,43 +122,13 @@ func chooseQuestionAnswers(t *testing.T, batch protocol.QuestionShownPayload, mu
 		t.Fatal(err)
 	}
 	choice := questionChoice{witness: fmt.Sprintf("answer-witness-%x", random)}
-	var entries []protocol.QuestionAnswerEntry
-	for i, q := range batch.Questions {
-		if len(q.Options) == 0 {
-			t.Fatal("question offers no options")
-		}
-		selected := q.Options[len(q.Options)-1].Label
-		values := []string{selected}
-		if multiple {
-			if !q.MultiSelect || len(q.Options) < 2 || selected == q.Options[len(q.Options)-2].Label {
-				t.Fatal("question cannot prove multiple selections")
-			}
-			values = append(values, q.Options[len(q.Options)-2].Label)
-			selected = strings.Join(values, ", ")
-		}
-		if i == 0 {
-			answer := fmt.Sprintf("%s for the cache named %s. In your reply, confirm this selection and include the answer witness verbatim: %s", selected, choice.witness, choice.witness)
-			if multiple {
-				values = append(values, answer)
-			} else {
-				values[0] = answer
-			}
-		}
-		entries = append(entries, protocol.QuestionAnswerEntry{QuestionIndex: i, Values: values})
-	}
+	entries := scenario.ChooseWitnessAnswers(t, batch, multiple, choice.witness)
 	t.Logf("generated answer values: %q", truncateString(string(mustJSON(t, entries)), questionTextLogCap))
 	return entries, choice
 }
 
 func checkQuestionWitness(witness string, batch protocol.QuestionShownPayload, trigger, prior string) error {
-	raw, err := json.Marshal(batch)
-	if err != nil {
-		return err
-	}
-	if witness == "" || strings.Contains(trigger, witness) || strings.Contains(prior, witness) || strings.Contains(string(raw), witness) {
-		return errors.New("answer witness is empty or already present before answering")
-	}
-	return nil
+	return scenario.CheckQuestionWitness(witness, batch, trigger, prior)
 }
 
 const questionLabelLogCap = 256
@@ -255,41 +143,11 @@ type questionAnswerTurn struct {
 }
 
 func (p *questionAnswerTurn) observe(env protocol.Envelope) error {
-	switch env.Type {
-	case protocol.TypeQuestionDismissed:
-		var d protocol.QuestionDismissedPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return err
-		}
-		if d.QuestionBatchID != p.batchID || d.Source != wantQuestionSource || d.Outcome != wantQuestionOutcome {
-			return errors.New("question dismissal does not match original remote answer")
-		}
-		p.dismissed = true
-	case protocol.TypeAssistantDelta:
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return err
-		}
-		if d.ConversationID == p.convID {
-			p.text.WriteString(d.Text)
-			if d.Text != "" {
-				p.idle = false
-			}
-		}
-	case protocol.TypeTurnState:
-		var st protocol.TurnStatePayload
-		if err := json.Unmarshal(env.Payload, &st); err != nil {
-			return err
-		}
-		if st.ConversationID == p.convID {
-			p.idle = st.State == "idle"
-		}
-	}
-	return nil
+	return scenario.ObserveWitnessAnswer(env, p.convID, p.batchID, &p.text, &p.dismissed, &p.idle)
 }
 
 func (p *questionAnswerTurn) complete() bool {
-	return p.dismissed && p.idle && p.witness != "" && strings.Contains(p.text.String(), p.witness)
+	return scenario.WitnessAnswerComplete(p.witness, p.text.String(), p.dismissed, p.idle)
 }
 
 func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID, witness string, timeout time.Duration) string {
@@ -369,16 +227,7 @@ func checkQuestionEnvelopeAlarm(env protocol.Envelope) error {
 }
 
 func checkQuestionControl(env protocol.Envelope, parked *protocol.QuestionShownPayload) error {
-	if env.Type == protocol.TypeQuestionDismissed {
-		return errors.New("question resolved before the answer was sent")
-	}
-	if parked != nil && env.Type == protocol.TypeQuestionShown {
-		var repeated protocol.QuestionShownPayload
-		if json.Unmarshal(env.Payload, &repeated) != nil || repeated.QuestionBatchID != parked.QuestionBatchID || repeated.ConversationID != parked.ConversationID {
-			return errors.New("parked question was replaced or malformed during model update")
-		}
-	}
-	return nil
+	return scenario.CheckWitnessQuestionControl(env, parked)
 }
 
 // Retain pre-answer prose and reject resolution while the question must remain

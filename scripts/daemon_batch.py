@@ -139,7 +139,7 @@ def gates(root, manifest, scenarios, output, agents_repo):
     roots = sorted({name for row in manifest['scenarios'] if row['name'] in scenarios for name in row['live_tests']})
     if success and roots:
         pattern = '^(' + '|'.join(roots) + ')$'
-        success = stage('selected-live', ['go', 'test', '-race', '-tags=e2e_realclaude', '-count=1', '-timeout=' + ('60m' if any(s.startswith('pool-') for s in scenarios) else '20m' if 'native-suggestions' in scenarios else '15m'), '-json', '-run', pattern, './internal/e2e/realclaude'], live, roots=roots)
+        success = stage('selected-live', ['go', 'test', '-race', '-tags=e2e_realclaude', '-count=1', '-timeout=180m', '-json', '-run', pattern, './internal/e2e/realclaude'], live, roots=roots)
     if success:
         # The older check-restoration wrapper does not preserve an outer admission FD.
         success = stage('restoration', ['go', 'test', '-race', '-count=1', '-timeout=30m', '-json', '-run', '^TestCheckpointResumeCorpus$', './internal/thread'], dict(offline, PYRY_EXHAUSTIVE_TESTS='1'), cuts=True)

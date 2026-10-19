@@ -5,16 +5,20 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Thirty-four scenarios run the same assertions in live capture and offline replay:
+Thirty-nine scenarios run the same assertions in live capture and offline replay:
 
-The manifest currently associates 29 original live roots with these recordings.
-The legacy `question-answer` and four bypass-question recordings still run their
-original capture/replay assertions, but no longer own current live roots:
-PR #3622 introduced stronger answer-only named-cache witnesses, exact answer
-history and turn ownership checks. Fingerprint drift exposed that change during
-integration. The three affected live roots remain enabled and are explicit
-`candidate` backlog until a new shared witness driver and reviewed fresh
-captures establish equivalence. Existing fixtures are not silently refreshed.
+The manifest associates 32 original live roots with these recordings.
+The legacy `question-answer` and four bypass-question recordings retain their
+original assertions and fixtures without owning current live roots. Five new
+witness profiles share the stronger proof introduced by PR #3622: a fresh
+answer-only named-cache witness, exact durable question/answer values, final
+owned idle state and a controlled post-model turn. The two primary question roots
+use non-bypass stdio permissions. All five new profiles use the original explicit
+Sonnet model; the parked question changes to Haiku before the follow-up turn.
+Live runs generate unpredictable witnesses and check physical Bash effects;
+recordings use fixed witnesses for exact request comparison. The original
+negative controls for transport, history, witness leakage, model ownership and
+parked-question preservation remain enabled and unchanged.
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -478,9 +482,9 @@ replay matching and output delivery. Before save or successful receipt, the
 helper requires complete input consumption and exactly one accepted action,
 atomically revokes the publisher's directory pathname and audits the frozen
 exact ready/ack inventory. Missing, extra, partial or changed action evidence
-fails. The helper allows ten minutes for checkpoint profiles, preserving all
-original cumulative phase budgets; a selected checkpoint recording run permits
-thirty minutes for the serial suite.
+fails. The daemon pipe helper allows thirty minutes, preserving all original
+cumulative phase budgets. The selected serial recording and live cohorts allow
+180 minutes overall; individual driver phase deadlines remain unchanged.
 
 Physical Bash execution, measured queue duration, actual provider interruption
 and latency remain live obligations. Every original live root stays enabled
@@ -529,3 +533,13 @@ original-root JSON events are retained alongside each stage's reports. The four
 serial pool roots receive adequate whole-run limits; bounded native pipe helpers
 allow twenty minutes per root. Real provider application of the controls remains
 an explicit live obligation.
+
+### Combined migration batch
+
+`--batch remaining-protocol` groups the nine workspace cases, four client
+checkpoints, four pool controls and five stronger question witness profiles.
+The automation checks all 22 fresh captures, saved and fresh replay, exact
+request contracts, original mapped live roots, the full common regression,
+201 restoration cuts and documentation guards once per stable source revision.
+Fresh candidates require independent privacy, provenance and boundary review
+before fixture promotion. A failed run remains separate evidence.

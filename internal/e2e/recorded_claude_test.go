@@ -355,6 +355,10 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 	}
 	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Checkpoint: checkpoint, Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
 
+	if t.Failed() {
+		return
+	}
+
 	if err = os.WriteFile(c.Finish, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

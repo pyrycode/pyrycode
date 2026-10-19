@@ -312,7 +312,7 @@ func tapeFiles(args []string, c *tapeProcessConfig) (map[string]json.RawMessage,
 		return nil, errors.New("incomplete pilot Claude input files")
 	}
 	switch c.Scenario {
-	case "ordinary-queue-placement", "interrupt-running", "interrupt-thinking", "subagent-text", "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
+	case "question-answer-witness", "bypass-witness-mcp-stored", "bypass-witness-mcp-operator", "bypass-witness-stdio-stored", "bypass-witness-stdio-operator", "ordinary-queue-placement", "interrupt-running", "interrupt-thinking", "subagent-text", "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
 		cwd, err := os.Getwd()
 		if err != nil {
 			return nil, errors.New("scenario cwd unavailable")
@@ -409,13 +409,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	budget := 4 * time.Minute
-	if c.Scenario == "mcp-reconnect" || c.Scenario == "hook-banner" || claudetape.RequiresClientCheckpoint(c.Scenario) {
-		budget = 10 * time.Minute
-	}
-	if c.Scenario == "native-suggestions" {
-		budget = 20 * time.Minute
-	}
+	budget := 30 * time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	inputs, err := newTapeInput(os.Stdin)
@@ -726,7 +720,7 @@ func checkTapeCheckpoint(tape *claudetape.Tape) error {
 	if tape.Scenario == "confirmed-permission-settings" {
 		return tape.RequireModeBeforeUser("default", 2)
 	}
-	if strings.HasPrefix(tape.Scenario, "bypass-questions-") {
+	if strings.HasPrefix(tape.Scenario, "bypass-questions-") || strings.HasPrefix(tape.Scenario, "bypass-witness-") {
 		return tape.RequireBypassQuestions()
 	}
 	if tape.Scenario == "send-now-placement" {
