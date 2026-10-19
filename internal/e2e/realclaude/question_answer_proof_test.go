@@ -97,6 +97,59 @@ func testQuestionProofBatch() protocol.QuestionShownPayload {
 	}}
 }
 
+func TestQuestionAnswerParkedSurface(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, payload string
+		wantError     bool
+	}{
+		{"same identity", `{"conversation_id":"conv","question_batch_id":"batch"}`, false},
+		{"replacement batch", `{"conversation_id":"conv","question_batch_id":"replacement"}`, true},
+		{"other conversation", `{"conversation_id":"other","question_batch_id":"batch"}`, true},
+		{"missing identity", `{}`, true},
+		{"null", `null`, true},
+		{"malformed", `{"conversation_id":"conv","question_batch_id":`, true},
+		{"wrong field type", `{"conversation_id":"conv","question_batch_id":7}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batch := testQuestionProofBatch()
+			env := protocol.Envelope{Type: protocol.TypeQuestionShown, Payload: json.RawMessage(tc.payload)}
+			if err := checkQuestionControl(env, &batch); (err != nil) != tc.wantError {
+				t.Fatalf("parked surface validation = %v, want error %v", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestQuestionAnswerEnvelopeAlarm(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, kind, payload string
+		wantError           bool
+	}{
+		{"ordinary frame", protocol.TypeAssistantDelta, `{}`, false},
+		{"recognized warning", protocol.TypeRateLimited, `{"status":"allowed_warning"}`, false},
+		{"error", protocol.TypeError, `{}`, true},
+		{"unrecognized message", protocol.TypeUnrecognizedMessage, `{}`, true},
+		{"unknown status", protocol.TypeRateLimited, `{"status":"unknown"}`, true},
+		{"missing status", protocol.TypeRateLimited, `{}`, true},
+		{"null status", protocol.TypeRateLimited, `{"status":null}`, true},
+		{"wrong status type", protocol.TypeRateLimited, `{"status":7}`, true},
+		{"malformed rate limit", protocol.TypeRateLimited, `{`, true},
+		{"bounded quoted diagnostics", protocol.TypeUnrecognizedMessage, "\n" + strings.Repeat("x", questionTextLogCap*2), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkQuestionEnvelopeAlarm(protocol.Envelope{Type: tc.kind, Payload: json.RawMessage(tc.payload)})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("alarm validation = %v, want error %v", err, tc.wantError)
+			}
+			if err != nil && (len(err.Error()) > questionTextLogCap+200 || strings.Contains(err.Error(), "\n")) {
+				t.Fatal("alarm diagnostics must be capped and quoted")
+			}
+		})
+	}
+}
+
 func TestQuestionAnswerWitness(t *testing.T) {
 	t.Parallel()
 	batch := testQuestionProofBatch()

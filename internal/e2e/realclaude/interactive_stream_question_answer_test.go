@@ -80,7 +80,7 @@ func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 			Model:     &targetModel,
 		}),
 	})
-	updated := awaitQuestionControl(t, h, protocol.TypeSessionSettingsUpdated, questionModelUpdateBudget, &prior)
+	updated := awaitQuestionControl(t, h, protocol.TypeSessionSettingsUpdated, questionModelUpdateBudget, &prior, &batch)
 	if updated.InReplyTo == nil || *updated.InReplyTo != 3 {
 		t.Fatalf("session_settings_updated in_reply_to = %v, want 3", updated.InReplyTo)
 	}
@@ -138,7 +138,7 @@ func raiseRealQuestionBatch(t *testing.T, h *perConvHarness, reqID uint64, convI
 	if len(prior) > 0 {
 		collected = prior[0]
 	}
-	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, collected)
+	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, collected, nil)
 
 	var batch protocol.QuestionShownPayload
 	if err := json.Unmarshal(env.Payload, &batch); err != nil {
@@ -316,17 +316,45 @@ func receiveQuestionEnvelope(t *testing.T, h *perConvHarness, deadline time.Time
 		if err := json.Unmarshal(plain, &env); err != nil {
 			t.Fatal(err)
 		}
-		if env.Type == protocol.TypeError {
-			t.Fatalf("question error envelope: %q", truncateString(string(env.Payload), questionTextLogCap))
+		if err := checkQuestionEnvelopeAlarm(env); err != nil {
+			t.Fatal(err)
 		}
 		return env, true
 	}
 	return protocol.Envelope{}, false
 }
 
+func checkQuestionEnvelopeAlarm(env protocol.Envelope) error {
+	switch env.Type {
+	case protocol.TypeError:
+		return fmt.Errorf("question error envelope: %q", truncateString(string(env.Payload), questionTextLogCap))
+	case protocol.TypeUnrecognizedMessage:
+		return fmt.Errorf("question exposed an unrecognized provider message: %q", truncateString(string(env.Payload), questionTextLogCap))
+	case protocol.TypeRateLimited:
+		var p protocol.RateLimitedPayload
+		if json.Unmarshal(env.Payload, &p) != nil || p.Status != scenario.WarnRateLimitStatus {
+			return fmt.Errorf("question rate-limit status is malformed or unknown: %q", truncateString(string(env.Payload), questionTextLogCap))
+		}
+	}
+	return nil
+}
+
+func checkQuestionControl(env protocol.Envelope, parked *protocol.QuestionShownPayload) error {
+	if env.Type == protocol.TypeQuestionDismissed {
+		return errors.New("question resolved before the answer was sent")
+	}
+	if parked != nil && env.Type == protocol.TypeQuestionShown {
+		var repeated protocol.QuestionShownPayload
+		if json.Unmarshal(env.Payload, &repeated) != nil || repeated.QuestionBatchID != parked.QuestionBatchID || repeated.ConversationID != parked.ConversationID {
+			return errors.New("parked question was replaced or malformed during model update")
+		}
+	}
+	return nil
+}
+
 // Retain pre-answer prose and reject resolution while the question must remain
 // outstanding, including during an in-band model update.
-func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, prior *strings.Builder) protocol.Envelope {
+func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, prior *strings.Builder, parked *protocol.QuestionShownPayload) protocol.Envelope {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -334,8 +362,8 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 		if !ok {
 			t.Fatalf("no %s within %s", want, timeout)
 		}
-		if env.Type == protocol.TypeQuestionDismissed {
-			t.Fatal("question resolved before the answer was sent")
+		if err := checkQuestionControl(env, parked); err != nil {
+			t.Fatal(err)
 		}
 		if env.Type == protocol.TypeAssistantDelta && prior != nil {
 			var p protocol.AssistantDeltaPayload
