@@ -223,6 +223,23 @@ path's decoder and bounds, but not its unrelated MCP eligibility. Its `cmd/pyry`
 resolver waits for turn idle, collapses nearby asks, and owns `detail:"full"`;
 the post-turn path owns `"summary"`.
 
+`WaitContextUsageReady` observes the existing
+[rotation admission gate](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md)
+and returns the admitted child generation; `QueryContextUsageGeneration` checks
+that generation before registration and again at completion. Reset completion
+only schedules a restart, and `WaitForPTY` on the adapter is a no-op: neither
+proves a successor can receive a query. An ineligible intermediate `setStdin`
+must leave readiness pending. The resolver owns one 30-second readiness/query
+budget after turn idle, so repeated rotation cannot renew it. The capability
+stays concrete and optional beside its single consumer, rather than widening
+`sessions.Runner`. See the [on-demand wire contract](../../protocol-mobile.md#asking-for-a-context-usage-reading-on-demand).
+
+`TestContextUsageRotationDelivery` holds the real successor launch before
+binding, seeds distinct predecessor memory, and exercises both wired resolver
+delivery paths. A fake querier that waits itself cannot expose immediate refusal
+at the real runner admission boundary. `TestContextUsageReadinessRotation`
+separately proves an intermediate bind cannot release a newer rotation arm.
+
 `QueryAppliedSettings` requires a caller deadline. In its
 `(AppliedSettings, bool)` result, non-nil `Effort` preserves a bounded string,
 nil with `bool=true` preserves explicit JSON `null`, and `bool=false` means

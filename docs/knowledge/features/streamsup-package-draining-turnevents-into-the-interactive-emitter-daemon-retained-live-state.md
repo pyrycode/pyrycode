@@ -121,6 +121,29 @@ Requested and reconnect model catalogs may answer from foreign/predecessor
 vocabulary without installing it in the target's retained singleton, as described
 below.
 
+For context usage, capturing the source before an asynchronous readiness wait
+can label a successor answer as predecessor data. `contextUsageResolver.fly`
+re-resolves the canonical conversation and stable runner identity under
+`liveResolveSource` after readiness, then reserves successor ordering before
+querying. `prepare` permits cross-transition joiners only before querying starts
+and only for the same underlying runner pointer; the adapter contains a function
+field and cannot itself serve as a comparable interface identity. Once querying
+starts, flights and the two-second completed-result window stay source-scoped.
+
+Settlement must reject an overtaken result **before accepting the reply**, not
+merely suppress its persistence and publication: the legacy caller has no later
+source check. `TestContextUsageRotationStaleFlight` asserts the original caller's
+response as well as successor memory; discarding that response left this defect
+invisible. `TestContextUsageRotationBeforeSettlement` rotates after query success
+and covers legacy/supplied answers with and without memory. Source validation
+and `contextUsageRecorder.remember` share the transition boundary; `save` runs
+afterward so disk I/O cannot hold source transitions. Remembered fallback keeps
+its original timestamp and producer evidence, never renewing or promoting it to
+successor live state. Reset snapshots also contain intentional clear markers:
+tests must reject a stale reading rather than assert the family key is absent.
+See [runner readiness and its discriminating regression](streamsup-package-turn-io-envelope-write-stdout-parser.md)
+and the [protocol contract](../../protocol-mobile.md#asking-for-a-context-usage-reading-on-demand).
+
 Relay prompt snapshots hold only outstanding eligible prompts with their
 existing answer IDs; missing or false captured eligibility withholds shows.
 `Answerable` is separate from the unchanged payload: permission eligibility is
