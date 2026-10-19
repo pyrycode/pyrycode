@@ -19,6 +19,10 @@ type Change struct {
 	Addition                      *Item
 	Fields                        map[string]json.RawMessage
 	TextAppend                    string
+	// ResultContent is the complete resulting content for a combined field/text
+	// change. It lets consumers publish one atomic replacement without changing
+	// the Fields-then-TextAppend application contract. Suffix-only changes omit it.
+	ResultContent json.RawMessage
 }
 
 // Observation is either a complete baseline (Items) or progress from FromVersion
@@ -202,6 +206,12 @@ func itemDifference(before, after Snapshot, shared bool) Observation {
 			if item.Rev == prior.Rev && len(c.Fields) == 0 && c.TextAppend == "" {
 				continue
 			}
+			if len(c.Fields) > 0 && c.TextAppend != "" {
+				c.ResultContent = item.Content
+				if !shared {
+					c.ResultContent = append(json.RawMessage(nil), item.Content...)
+				}
+			}
 		}
 		o.Changes = append(o.Changes, c)
 	}
@@ -218,6 +228,7 @@ func copyObservation(o Observation) Observation {
 	copy(changes, o.Changes)
 	for i := range changes {
 		c := &changes[i]
+		c.ResultContent = append(json.RawMessage(nil), c.ResultContent...)
 		if c.Addition != nil {
 			item := *c.Addition
 			item.Content = append(json.RawMessage(nil), item.Content...)

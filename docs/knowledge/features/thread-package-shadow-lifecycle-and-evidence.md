@@ -144,9 +144,14 @@ families; publisher stop cancels and joins in-flight publication and reads.
 `daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
 tags. Copying `EndedOrder` or `NoChild` directly would produce unusable wire
 patches instead of `ended_order` or `no_child`. A combined field/text change
-emits replacements first, using `PreviousRev` as `base_rev` and the final `Rev`,
-then the suffix with that same final revision as both `base_rev` and `rev`.
-Both carry the same consumed version; no intermediate history revision exists.
+emits one atomic `thread_item_changed` containing all replacements and complete
+`Change.ResultContent`, with the suffix already included. Suffix-only changes
+emit one `thread_text_append`. Both use `PreviousRev` as `base_rev` and the actual
+resulting `Rev`, requiring held-revision equality and `rev > base_rev`. A patch
+followed by an equal-revision append would truncate text for strict clients;
+inventing an extra revision would diverge from full-item reads. The
+[internal observation contract](thread-package-background-store-replay.md#loading-and-replay-readiness)
+still applies `Fields` before `TextAppend`; the wire replacement is already final.
 Every logical update uses `EncodeThreadUpdate`, with consecutive continuation
 parts before the next update. Discovery and following each wait at most 50 ms;
 store batches coalesce text without an additional timer. Ordered updates flush
@@ -220,10 +225,10 @@ are the diagnostic boundary; content, payloads and host paths are excluded.
 
 `TestDaemonThreadPublication` decrypts simultaneous authenticated thread and
 legacy peers, reconstructing complete fold items after additions, field/text
-changes, dropped sends, dividers and channel posts. It checks combined
-replacement-before-append delivery, both base revisions, the waiting bound,
-escaping-heavy continuation assembly and retained current readings, while
-legacy traffic keeps its expected shape. Mapper-only assertions would miss
+changes, dropped sends, dividers and channel posts. It checks atomic combined
+replacements with complete text at the source revision, strict revision
+advancement, the waiting bound, escaping-heavy continuation assembly and retained
+current readings, while legacy traffic keeps its expected shape. Mapper-only assertions would miss
 wire ordering or recipient projection errors. `TestDaemonThreadReadiness`,
 `TestDaemonThreadUnusable` and `TestDaemonThreadContinuity` cover usable zero,
 missing providers/views and lost ranges. `TestDaemonThreadQueriesReadiness`
@@ -236,6 +241,17 @@ nonusable failure, reset evidence and the 1024/1025 gap boundary.
 committed entries after recovery, measuring preparation separately from adapter
 allocations. `TestDaemonThreadQueriesJoin` reconstructs full current states
 through race refusal, successful retry and subsequent real publisher updates.
+
+`TestDaemonThreadStreamingRevisions` applies encoded updates from real
+`Fold.FeedChanges` under strict revision checks and compares every row, including
+Summary, with full fold reads after each delta and metadata-only completion.
+Both changed and append counts must be nonzero: frame-presence checks alone
+would miss truncated text. Summary accumulates normalized text without length
+truncation, so a long prefix cannot force suffix-only updates. Trailing
+whitespace/control-only deltas leave Summary unchanged while extending exact
+content bytes. `TestDaemonThreadChanges` checks additions, field-only changes,
+unknown content and explicit clears; `TestDaemonThreadCombinedAssembly` proves
+an oversized combined replacement stays atomic through bounded assembly.
 
 `TestDaemonThreadExpansionWire` uses installed providers and authenticated
 synthetic history for exact ordinary tool and agent-launch bodies, captured kind,

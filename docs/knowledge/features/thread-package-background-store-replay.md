@@ -136,6 +136,19 @@ contiguous range to its stated baseline reproduces `Fold.Items`, including
 multiple affected rows and newly publishable children. Progress carries changes
 rather than full `Items`.
 
+For a combined field/text change, `Fields["Content"]`, if present, contains the
+replacement's non-text facts with the previous text; it can also be absent.
+Sending that replacement alone loses the suffix. `Change.ResultContent` carries
+the complete final rendered content for consumers that need an atomic content
+replacement; appending `TextAppend` to it again would duplicate the suffix.
+`itemDifference` supplies it only for combined changes. Suffix-only changes keep
+just the detached suffix: retaining full content per delta would pin accumulated
+messages and defeat bounded retention. Public fold results and `copyObservation`
+detach result bytes; internal shared publications remain immutable.
+`TestObservationResultContent` checks both replacement shapes, the existing
+Fields-then-TextAppend contract and byte ownership;
+`TestStoreObservationRetainedSuffixMemory` protects suffix retention.
+
 An unprovable range returns `BaselineRequired` with no applicable changes or
 items: acquire a new `Observe` baseline. This includes missing/evicted boundaries,
 a requested version ahead of publication, epoch mismatch and suppression of a
@@ -152,8 +165,10 @@ The daemon's installed `daemonThreadPublisher.publish` uses these observations
 as its only item source: full additions from a usable baseline, then ordered
 changes from its saved epoch/version. It never reconstructs items from legacy
 emitter facts. Field replacements are translated to `ThreadItem` JSON keys;
-combined replacements/text become consecutive changed/append messages with the
-same final revision. See [daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+combined replacements/text become one atomic changed message with complete
+`ResultContent`, while suffix-only changes become one append. Both use the actual
+previous/resulting item revisions with strict advancement. See
+[daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 **A fresh baseline cannot repair an existing consumer silently.** Unload/reload
 and retry release retained live batches even when clean checkpoint validation
