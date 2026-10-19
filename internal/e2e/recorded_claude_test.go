@@ -191,7 +191,7 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		return protocol.Envelope{}
 	}
 
-	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Home: home, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence})
+	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Home: home, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
 
 	if err = os.WriteFile(c.Finish, nil, 0o600); err != nil {
 		t.Fatal(err)
