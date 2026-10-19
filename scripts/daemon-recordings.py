@@ -42,8 +42,18 @@ def run(mode, directory, report_dir, compare=None):
     cmd = [sys.executable, str(ROOT / 'scripts/test-admission.py'), '--', 'go', 'test',
            '-tags=e2e', '-count=1', '-timeout=10m', '-json', '-run', '^' + name + '$', './internal/e2e']
     started = time.monotonic()
-    process = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    leaves, events = {}, []
+    # Preserve the admission descriptor when an operator reserves one slot for
+    # the whole compatibility command. The nested launcher validates its inode.
+    inherited = ()
+    try:
+        descriptor = int(env.get('PYRY_TEST_ADMISSION_FD', '-1'))
+        os.fstat(descriptor)
+        inherited = (descriptor,)
+    except (ValueError, OSError):
+        pass
+    process = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, pass_fds=inherited)
+    leaves, events, durations = {}, [], {}
     for line in process.stdout:
         try:
             event = json.loads(line)
@@ -53,13 +63,14 @@ def run(mode, directory, report_dir, compare=None):
         events.append(event)
         if event.get('Action') in ('pass', 'fail', 'skip') and event.get('Test', '').startswith(name + '/'):
             leaves[event['Test']] = event['Action']
+            durations[event['Test']] = event.get('Elapsed')
         if event.get('Action') == 'output':
             print(event.get('Output', ''), end='', flush=True)
     code = process.wait()
     expected = {name + '/' + scenario for scenario in SCENARIOS}
     success = code == 0 and set(leaves) == expected and all(result == 'pass' for result in leaves.values())
     report = {'mode': 'compare' if compare else mode, 'success': success,
-              'seconds': round(time.monotonic() - started, 3), 'results': leaves, 'exit_code': code}
+              'seconds': round(time.monotonic() - started, 3), 'results': leaves, 'scenario_seconds': durations, 'exit_code': code}
     if report_dir:
         report_dir.mkdir(parents=True, exist_ok=True)
         label = report['mode'] + '-' + directory.name
