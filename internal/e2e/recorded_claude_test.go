@@ -147,7 +147,9 @@ func runRecordedClaude(t *testing.T, scenario string) {
 		for time.Now().Before(deadline) {
 			if raw, e := os.ReadFile(c.Receipt); e == nil {
 				var receipt tapeReceipt
-				_ = json.Unmarshal(raw, &receipt)
+				if json.Unmarshal(raw, &receipt) != nil {
+					t.Fatal("invalid Claude tape receipt")
+				}
 				if !receipt.Success {
 					t.Fatalf("Claude tape failed: %s", receipt.Error)
 				}

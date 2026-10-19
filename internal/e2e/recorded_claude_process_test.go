@@ -65,7 +65,10 @@ func TestClaudeTapeProcess(t *testing.T) {
 		receipt.Error = err.Error()
 	}
 	data, _ := json.Marshal(receipt)
-	if os.WriteFile(c.Receipt, data, 0o600) != nil {
+	if os.WriteFile(c.Receipt+".tmp", data, 0o600) != nil {
+		os.Exit(2)
+	}
+	if os.Rename(c.Receipt+".tmp", c.Receipt) != nil {
 		os.Exit(2)
 	}
 	if err != nil {
