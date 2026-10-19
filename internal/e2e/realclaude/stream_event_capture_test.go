@@ -702,16 +702,22 @@ func secapPrompt(nonce int64) string {
 		"flags or redirections, and do not comment on the task. run=%d", nonce, nonce)
 }
 
-// TestRealClaude_StreamEventCapture drives the turn and writes the record.
-//
-// Ordering below is load-bearing in one place: newDropcapScanner reads
-// CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY via os.Getenv AS DENY NEEDLES, and
-// WithWorktreeAuthenticated is what re-pins them into this process's environment.
-// Building the scanner first yields EMPTY needles, which dropcapScanner.scan reports
-// as notApplied — silently skipped, not fatal. The credential net would be off while
-// every message still read green, so the scanner is built after the auth helper and
-// the skipped classes ship in the record.
+// TestRealClaude_StreamEventCapture admits the required mobile evidence.
+// Missing mobile input fails even when isolated diagnostic evidence exists.
+// Forced isolated recapture stays available, and cannot complete mobile proof.
+// Mobile promotion runs through ordinary live admission so the deny-scanner
+// receives credential needles without the portable driver obtaining a login.
 func TestRealClaude_StreamEventCapture(t *testing.T) {
+	if os.Getenv("PYRY_TOOL_THEN_TEXT_MOBILE_DIR") != "" || os.Getenv(secapEnableEnv) != "1" {
+		tttMobileCapture(t)
+		return
+	}
+	tttCapture(t) // explicit isolated recapture never satisfies mobile admission
+}
+
+// TestRealClaude_StreamEventSerialCapture retains the text-then-tool-then-text
+// probe and its separate fixture family.
+func TestRealClaude_StreamEventSerialCapture(t *testing.T) {
 	// THE GATE IS THE FIXTURE'S ABSENCE, which is #2089's break from the env-gated
 	// siblings. Under the sibling shape `make e2e-realclaude` never sets the
 	// variable, so the probe skips on the ENV check before it ever reaches the

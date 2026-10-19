@@ -1,0 +1,76 @@
+{
+  "ticket": "2939",
+  "scope": "Isolated diagnosis only; mobile rejection not reproduced and no production parser repair inferred.",
+  "fixture": "internal/e2e/realclaude/testdata/tool_then_text_stream_event_v2.1.280.json",
+  "fixture_sha256": "f7c91e86ffe9b8269166035e21e4f20d5a7186b55c5aac7dd9031aab6a456ac9",
+  "daemon_revision": "98b937b6f45cf5fe6dff4f8280d1b2e713789edd",
+  "daemon_dirty_reason": "Prior untracked generated fixture; parser/runner source committed at the recorded revision.",
+  "claude_version": "2.1.280 (Claude Code)",
+  "mobile_revision": "not driven; historical failure at 5de4f4459",
+  "settings": {
+    "model": "claude-sonnet-5",
+    "permissionMode": "default",
+    "effort": "unknown: absent from init; no override supplied",
+    "admission": "--allowedTools Bash; historical mobile settings unknown"
+  },
+  "capture_attempts": [
+    {
+      "attempt": 1,
+      "executed": 1,
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "outcome": "fixture marshal instrument failure; no usable record"
+    },
+    {
+      "attempt": 2,
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "rows": 30,
+      "rejections": 0,
+      "outcome": "inconclusive isolated capture before final redactor correction"
+    },
+    {
+      "attempt": 3,
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "rows": 30,
+      "rejections": 0,
+      "outcome": "final forced capture retained and committed"
+    }
+  ],
+  "capture_loss": {
+    "lines_dropped_over_cap": 0,
+    "bytes_dropped_over_cap": 0,
+    "partials_dropped": 0,
+    "unterminated_tail_bytes": 0
+  },
+  "final_replay": {
+    "executed": 18,
+    "passed": 18,
+    "failed": 0,
+    "skipped": 0,
+    "named_isolated_capture_executed": 1,
+    "named_isolated_capture_passed": 1
+  },
+  "offline_capture_checks": {
+    "executed": 43,
+    "passed": 43,
+    "failed": 0,
+    "skipped": 0
+  },
+  "checks_passed": [
+    "go test -race ./internal/streamsup/...",
+    "go vet ./...",
+    "go vet -tags e2e_realclaude ./internal/e2e/realclaude/...",
+    "go build -o /tmp/builder-2939/pyry ./cmd/pyry"
+  ],
+  "focused_mobile_proof": "pending: no mobile checkout or admitted Android launcher in this runtime",
+  "subsequent_full_live_suite": "pending: dispatcher-owned",
+  "recovery_record_basename": "tool_then_text_record.json; retained outside disposable worktree",
+  "return_contract": "docs/specs/architecture/2939-tool-then-text-stream-event.md: Live-artifact return contract"
+}
