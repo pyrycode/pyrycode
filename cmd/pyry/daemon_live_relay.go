@@ -39,6 +39,38 @@ func daemonRelaySnapshot(o *daemonLiveState) func() func() (relay.LiveState, boo
 	}
 }
 
+// Catalogs are resolved once per captured target, independently of retained
+// session readings. The finite cursor never follows newly registered targets.
+func daemonRelayCatalogSnapshot(o *daemonLiveState, reg *conversations.Registry, resolve func(string, bool) (daemonLiveReading, bool)) func() func() (relay.LiveState, bool) {
+	retained := daemonRelaySnapshot(o)
+	return func() func() (relay.LiveState, bool) {
+		next := retained()
+		targets := reg.List()
+		index := 0
+		return func() (relay.LiveState, bool) {
+			for {
+				r, ok := next()
+				if !ok {
+					break
+				}
+				if r.Envelope.Type != protocol.TypeModelList {
+					return r, true
+				}
+			}
+			for index < len(targets) {
+				id := string(targets[index].ID)
+				index++
+				// Capture canonical inventory; relay projects for each recipient.
+				if r, ok := resolve(id, true); ok {
+					r.Envelope.InReplyTo = nil
+					return daemonRelayReading(r), true
+				}
+			}
+			return relay.LiveState{}, false
+		}
+	}
+}
+
 const daemonLivePublicationCap = 256
 
 type daemonLivePublisher struct {
@@ -175,6 +207,9 @@ func installDaemonLiveRelay(cfg *relay.V2SessionConfig, w relayWiring, usage *co
 		return
 	}
 	cfg.ThreadLiveState = daemonRelaySnapshot(w.streamSink.live)
+	if w.convReg != nil && w.modelListReading != nil {
+		cfg.ThreadLiveState = daemonRelayCatalogSnapshot(w.streamSink.live, w.convReg, w.modelListReading)
+	}
 	cfg.LiveStateCurrent = func(r relay.LiveState) bool { return daemonLiveCurrent(w.streamSink.live, r) }
 	if usage != nil {
 		cfg.ContextUsageReadingFor = func(ctx context.Context, conv string) (relay.LiveState, bool) {
@@ -225,6 +260,13 @@ func daemonLiveCurrent(o *daemonLiveState, r relay.LiveState) bool {
 		return c.revisions[liveRevisionKey{r.SessionGeneration, key}] == r.Revision
 	}
 	retained := c.readings[key]
+	if r.Envelope.Type == protocol.TypeModelList {
+		revision := c.catalogReplyRevision
+		if retained != nil {
+			revision = max(revision, retained.Revision)
+		}
+		return r.Revision == revision
+	}
 	return retained != nil && retained.Revision == r.Revision
 }
 

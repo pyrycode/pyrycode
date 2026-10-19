@@ -28,6 +28,7 @@ type switchWire struct {
 	t           *testing.T
 	frames, out chan protocol.RoutingEnvelope
 	phones      map[string]switchPhone
+	privateKeys map[string][]byte
 	pub         []byte
 	pending     []protocol.RoutingEnvelope
 }
@@ -74,19 +75,29 @@ func (w *switchWire) data(e protocol.RoutingEnvelope) []byte {
 }
 func (w *switchWire) open(id string, capable bool, extra ...string) {
 	w.t.Helper()
-	key, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		w.t.Fatal(err)
-	}
-	init, err := noise.NewInitiator(key.Bytes(), w.pub)
-	if err != nil {
-		w.t.Fatal(err)
-	}
 	caps := []string{protocol.CapabilityInteractive}
 	if capable {
 		caps = append(caps, protocol.CapabilityMultiAgent)
 	}
-	caps = append(caps, extra...)
+	w.openCapabilities(id, append(caps, extra...))
+}
+
+func (w *switchWire) openCapabilities(id string, caps []string) {
+	w.t.Helper()
+	if w.privateKeys == nil {
+		w.privateKeys = make(map[string][]byte)
+	}
+	if w.privateKeys[id] == nil {
+		key, err := ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		w.privateKeys[id] = key.Bytes()
+	}
+	init, err := noise.NewInitiator(w.privateKeys[id], w.pub)
+	if err != nil {
+		w.t.Fatal(err)
+	}
 	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: id + "-token", Capabilities: caps})
 	raw, _ := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: payload})
 	data, err := init.WriteInit(raw)

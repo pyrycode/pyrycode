@@ -115,8 +115,10 @@ summary projection and `ActiveConn.View`.
 ### Supplied live-state ordering
 
 `startRelayV2` installs the [daemon retained-reading delivery path](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery):
-`daemonRelaySnapshot` supplies a finite `ThreadLiveState` cursor spanning owner
-conversations, `startDaemonLivePublisher` supplies bounded `PushLiveState`
+`daemonRelayCatalogSnapshot` composes a finite `ThreadLiveState` cursor from
+`daemonRelaySnapshot`'s other retained families and lazy catalog resolution for
+captured registered targets, including those with no own reading or turn.
+`startDaemonLivePublisher` supplies bounded `PushLiveState`
 publication, and `installDaemonLiveRelay` wires all five source-bearing reply/
 settings providers. Accepted producers hand off publication before legacy
 enumeration or fan-in can refuse/delay delivery. Captured source/order fields survive adaptation;
@@ -163,7 +165,7 @@ thread recipients. Otherwise an unsourced legacy dismissal could arrive before
 its source-bound counterpart and bypass conversation checks. Legacy recipients
 keep their existing frames and bytes.
 
-`LiveStateCurrent` checks owner generation and accepted retained revision before
+`LiveStateCurrent` checks owner generation and accepted reading revision before
 unsolicited Run delivery, including captured cursors and queued pushes. Removing
 owner state alone cannot invalidate a detached cursor; without this check it can
 restore stale indicators after removal/recreation. An unfinished query reservation
@@ -172,6 +174,15 @@ clears use current generation. Correlated replies instead preserve captured
 evidence under relay ordering. `TestDaemonLiveRelayRetiredSnapshot` and
 `TestDaemonLiveRelayReservedQuerySnapshot` cover those distinctions;
 `TestLiveStateCapturedEligibility` pins detached eligibility.
+
+Catalog freshness also includes accepted reply-only resolutions without retaining
+their borrowed bytes. Another peer can supersede a reconnect catalog parked
+behind its clear without publishing replacement inventory. `refreshLiveCatalog`
+therefore resolves an overtaken unsolicited catalog once after access checks,
+requires the same target and captured generation, and removes correlation before
+ordinary validation, projection and freshness checks. A new generation or
+removal/recreation still withholds the old capture; other families keep their
+retained-reading checks. See [catalog reconciliation and the two-peer regression](v2-session-manager-state-machine-connect-time-model-list-reconcile-retain.md#supplied-thread-reconciliation).
 
 Canonical daemon model inventories carry `ModelListUnprojected`, so
 `mergedForConn` projects separately for each recipient on snapshots, pushes and

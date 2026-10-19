@@ -1,8 +1,70 @@
 # Connect-time model-list reconcile (#1863) — `RetainedModelLists` seam + `reconcileModelLists`
 
-`security-sensitive` — the third Mode B instance of the reconcile-on-connect mechanism (umbrella #829), a structural twin of [modal](#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals) and [queue](#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues) reconcile above. `ModelListPayload` otherwise reaches a live conn only on the interactive-turn lane (`interactiveTurnEmitterV2`), which has three independent loss points in front of it — an empty-conversation early return that is unconditional on the bootstrap child (the conversation cursor is only ever set by a successful route, while the `initialize` ask fires at child spawn), a droppable classification that can be shed under load, and `forwardEnvelope`'s `last_event_id` dedup, which is a *reconnect* mechanism with no fresh-connect backfill. **On a freshly-minted conversation's own child, that first loss point is a genuine race, not a deterministic drop** (found while building #1868's e2e diagnostic): `(*interactiveTurnEmitterV2).Handle`'s cursor read and the `initialize` ack's parse-and-forward both run on the child's own streamsup Run goroutine, but the cursor is stamped by `sessionRouter.Route`'s `active.set` on the separate routing goroutine servicing the mint's own `send_message` — no lock or channel orders the two, so whether the live lane also delivers the list to the very conn that minted the conversation is a coin flip, observed as 0 or 1 across otherwise-identical runs. This is additional reason the connect-time reconcile below exists as a snapshot rather than relying on lane timing — the live lane's delivery to *any* recently-active conn, not just a later-connecting one, is opportunistic. A client attaching later — and every client on the bootstrap session — therefore had no path to the list at all. `docs/protocol-mobile.md` § Reconnect / Backfill semantics binds the transport by **data class**, not by how long the client was away: control state is always a cheap current-state snapshot on connect (Mode B), and `ModelListPayload`'s own doc calls the frame exactly that — "a SNAPSHOT of what claude will accept, not a delta … receiving one neither opens nor closes a turn."
+Catalog recovery has two delivery paths: supplied thread reconciliation and
+legacy `RetainedModelLists` reconciliation. Both can restore menus before a turn
+using the same vocabulary precedence; their provenance and ordering contracts
+differ. See the [wire specification](../../protocol-mobile.md#model_list).
 
-**`RetainedModelLists func(multiAgent bool) []protocol.ModelListPayload`** is the third optional `V2SessionConfig` seam in the family (nil ⇒ no reconcile, byte-identical to pre-#1863). Production wires a non-nil closure as of #1867: `cmd/pyry/session_model_list.go`'s `retainedModelLists(convReg, pool)`, built at the composition root in `main.go` and assigned straight through the `relayWiring` struct (§ below). Same closure-not-concrete-import idiom as `OutstandingModals`/`OutstandingQueues`: `internal/relay` imports neither `internal/turnevent` nor `internal/sessions` directly (`internal/sessions` reaches it only transitively, via `internal/control` — a `go list -deps` reading that looks contradictory and isn't), while `internal/protocol` is already a direct import, so the payload crosses with no new import and no cycle. **Enumerate-all, not conversation-keyed** — `V2Session` carries no conversation id, so there is no "this conn's conversation" to join on at connect time; `OutstandingQueues`' one-per-conversation shape is the precedent, and `RunConfigFor` (conversation-keyed) is the wrong shape here. The enumerator (`retainedModelLists`) walks `conversations.Registry.List()` unfiltered — including archived rows, since `Registry.SetArchived` writes one field without unbinding `CurrentSessionID` — and appends only the payloads `resolveBoundModelList` (#1857) answers `true` for; the comma-ok is its only filter, and the resolver decides refusal on its own. **As of #2124, that refusal surface is one arm, not several**: an unbound conversation, a binding the pool cannot resolve, a runner without the `ModelList` method and an empty hold all used to refuse here and now fall back to a daemon-wide copy instead (below); only a registry miss on the conversation id still refuses. **The bound is the producer's**: this path applies no cap of its own to either the number of payloads or any entry's text — it relies entirely on the construction-time bounds upstream (`DroppedModels` on the aggregate, `TruncatedFields` per entry, frozen by #1704/#1705), and the seam's doc comment says so explicitly. #2124 widens who reaches those bounds (every registry row once any vocabulary is retained, not just rows with a live, reporting session) without changing the bounds themselves.
+## Supplied thread reconciliation
+
+`handleNoiseInit` selects `ThreadLiveState` for thread peers and returns before
+legacy `reconcileModelLists`. Reusing only the retained owner cursor therefore
+loses catalogs for targets whose vocabulary is borrowed: those bytes have no
+current-session retention authority. `installDaemonLiveRelay` instead composes
+`daemonRelayCatalogSnapshot`, retaining the other families and resolving catalogs
+lazily for a finite captured registry target set. It uses
+`daemonModelListReadingFor` / `modelListResultFor`, preserving bound-session →
+bootstrap → saved precedence. Recipient access and basic/`multi_agent` projection
+still apply. A registered target needs neither its own reading nor an assistant
+turn or request. No usable vocabulary skips inventory and completes the handshake
+without an empty catalog or legacy-provider retry.
+
+Each target generation's first catalog delivery clears with uncorrelated
+`model_list`, `session_state_cleared: true`, payload `{}`, then sends fresh
+uncorrelated inventory. Both omit ring/history IDs and route by top-level
+`conversation_id`. Producer `session_id` stays omitted, null or the captured
+producer string, even for bootstrap/predecessor inventory or colliding target/
+session identities. A delivered same-generation source replacement replaces the
+whole catalog without a second clear, session admission or settings changes.
+Borrowed bytes stay outside target retention and cannot mutate another
+conversation's state.
+
+**Rejecting stale inventory must leave a way to recover current inventory.**
+A second peer's successful borrowed request advances accepted catalog ordering
+without publishing replacement bytes. If a reconnect catalog is parked behind
+its clear, rejecting it and exhausting the finite cursor would leave only the
+clear on the phone. `drainLiveOnce` calls `refreshLiveCatalog` for an overtaken
+unsolicited catalog: resolve once through `ModelListReadingFor` after recipient
+capability/access gates, require the same target and captured generation, clear
+correlation, then use ordinary `forwardLiveState` validation, projection and
+freshness checks. Refusal or a different generation leaves the capture withheld.
+There is no retry loop or extension of the captured target set. Removal/recreation
+and reused-session transitions still invalidate old captures; an independent
+fresh resolution after a clear can acquire current target ordering.
+
+`TestDaemonLiveRelayCatalogConcurrentRequest` exercises that two-peer hold after
+the clear with unchanged/replaced bootstrap vocabulary and both projections.
+`TestDaemonLiveRelayCatalogSnapshotOvertaken` distinguishes a new resolution from
+an old capture across catalog updates, transitions and removal/recreation.
+`TestDaemonLiveRelayCatalogReconnect` inspects raw producer presence and full
+decoded payloads for persisted/bootstrap fallback on connect and reconnect.
+The authenticated `switchWire` fixture must preserve the phone's paired static
+key across reconnects while creating fresh connection ciphers: generating a new
+key under the same token correctly fails pairing before catalog recovery runs.
+`TestDaemonLiveRelayCatalogReconnectGates` proves no-vocabulary completion,
+capability/access withholding with an accessible positive control, and legacy
+reconciliation. See [accepted catalog ordering versus retention](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery).
+
+## Legacy reconciliation
+
+Legacy live delivery is opportunistic: fan-in can drop inventory, and a later
+connection cannot rely on a live frame emitted before it attached. Bootstrap and
+rotated-child events now route to their own bound conversations (#2739), so the
+old foreground-cursor loss no longer applies. Connect-time reconciliation reads
+current vocabulary independently of that live delivery and event-ring replay.
+It opens no turn and sends snapshots without `event_id`.
+
+**`RetainedModelLists func(multiAgent bool) []protocol.ModelListPayload`** is the third optional `V2SessionConfig` seam in the family (nil ⇒ no reconcile, byte-identical to pre-#1863). Production wires a non-nil closure as of #1867: `cmd/pyry/session_model_list.go`'s `retainedModelLists(convReg, pool)`, built at the composition root in `main.go` and assigned straight through the `relayWiring` struct (§ below). Same closure-not-concrete-import idiom as `OutstandingModals`/`OutstandingQueues`: `internal/relay` imports neither `internal/turnevent` nor `internal/sessions` directly (`internal/sessions` reaches it only transitively, via `internal/control` — a `go list -deps` reading that looks contradictory and isn't), while `internal/protocol` is already a direct import, so the payload crosses with no new import and no cycle. **Enumerate-all, not conversation-keyed** — `V2Session` carries no conversation id, so there is no "this conn's conversation" to join on at connect time; `OutstandingQueues`' one-per-conversation shape is the precedent, and `RunConfigFor` (conversation-keyed) is the wrong shape here. The enumerator (`retainedModelLists`) walks `conversations.Registry.List()` unfiltered — including archived rows, since `Registry.SetArchived` writes one field without unbinding `CurrentSessionID` — and appends only the payloads `resolveBoundModelList` (#1857) answers `true` for; the comma-ok is its only filter, and the resolver decides refusal on its own. **As of #2124, that refusal surface is one arm, not several**: an unbound conversation, a binding the pool cannot resolve, a runner without the `ModelList` method and an empty hold all used to refuse here and now fall back to a daemon-wide copy instead (below); with usable vocabulary available, only a registry miss on the conversation id still refuses. **The bound is the producer's**: this path applies no cap of its own to either the number of payloads or any entry's text — it relies entirely on the construction-time bounds upstream (`DroppedModels` on the aggregate, `TruncatedFields` per entry, frozen by #1704/#1705), and the seam's doc comment says so explicitly. #2124 widens who reaches those bounds (every registry row once any vocabulary is retained, not just rows with a live, reporting session) without changing the bounds themselves.
 
 **The daemon-wide fallback, now two sources deep (#2124, #2450).** The vocabulary is machine- and account-scoped, not conversation-scoped — the committed capture `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json`, taken under an `argv` carrying `--model claude-haiku-4-5`, still reports six models with `default → claude-sonnet-5` — so `resolveBoundModelList` answers a binding that yields nothing from a daemon-wide copy rather than refusing. Two new unexported helpers carry the first fallback: `sessionRetainedModelList(sess *sessions.Session)` does the type assertion off `Session.Runner()` plus the hold's comma-ok, with an explicit `sess == nil` guard in front; `retainedModelVocabulary(pool, saved, boundSessionID)` tries the bound session's hold first, `pool.Default()`'s hold second. **A live child's own report always wins** — a daemon-wide source is read only when the binding above it yields nothing, never used to override one. Neighbouring resolvers (`resolveBoundRunner`, `resolveBoundSession`, `resolveBoundRunSettings`, `resolveBoundSlashCommandList`, `resolveBoundBackgroundTaskRoster`, the `cmd/pyry/main.go` twins) keep refusing on every one of these arms — the fallback is vocabulary-only, and each twin's doc now says so explicitly rather than leaving the family's refusal inventories to read as if they had all moved together.
 
