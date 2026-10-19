@@ -187,3 +187,48 @@ func TestRetiredLivePendingDoesNotDrain(t *testing.T) {
 		t.Fatal("retired pending output escaped")
 	}
 }
+
+func TestHostedLiveAdmissionRetirement(t *testing.T) {
+	for _, kind := range []string{"pending", "snapshot"} {
+		t.Run(kind, func(t *testing.T) {
+			m, s, q := testHostedCapacityManager(t)
+			q.popHead()
+			m.pushOverflow = make(chan string, 1)
+			s.hosted.inbox.used = 0
+			s.hosted.active = &hostedOutput{} // Hold delivery so leaked admission remains observable.
+			s.thread, s.interactive = true, true
+			m.cfg.KnownConversation = func(string) bool { return true }
+			r := liveReading(protocol.TypeTurnState, "conversation", "", `"session"`, 1, 1)
+			if kind == "pending" {
+				s.livePending = &r
+			}
+			pending := s.livePending
+			reads := 0
+			s.liveSnapshot = func() (LiveState, bool) { reads++; return r, true }
+			finished := make(chan struct{})
+			ctx := t.Context()
+			// Admission must pass the initial retirement check before retirement
+			// latches; hostedMu keeps it from consuming dependent output yet.
+			m.hostedMu.Lock()
+			go func() {
+				m.drainLiveOnce(ctx, kind == "pending")
+				close(finished)
+			}()
+			t.Cleanup(func() { testHostedAwait(t, finished) })
+			func() {
+				defer m.hostedMu.Unlock()
+				testHostedAwaitAdmission(t)
+				if err := m.RetireLiveState(ctx, s.connID); err != nil {
+					t.Fatal(err)
+				}
+			}()
+			testHostedAwait(t, finished)
+			if !q.overflowed || !q.producerGap || s.livePending != pending || s.liveSnapshot == nil || reads != 0 {
+				t.Errorf("dependent output consumed: pending=%v snapshot_reads=%d retired=%v producer_gap=%v", s.livePending != pending, reads, q.overflowed, q.producerGap)
+			}
+			if s.hosted.pushReserved || s.hosted.inbox.used != 0 || len(s.hosted.queue) != 0 || len(q.items) != 0 || s.nextID != 2 {
+				t.Fatalf("retired admission retained capacity or output: reserved=%v used=%d queued=%d upstream=%d id=%d", s.hosted.pushReserved, s.hosted.inbox.used, len(s.hosted.queue), len(q.items), s.nextID)
+			}
+		})
+	}
+}
