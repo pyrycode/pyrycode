@@ -19,7 +19,7 @@ import (
 
 func prepareRecordedWorkspace(t *testing.T, name, home string) string {
 	switch name {
-	case "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
+	case "ordinary-queue-placement", "interrupt-running", "interrupt-thinking", "subagent-text", "hook-banner", "workspace-change", "skill-silence", "confirmed-permission-settings", "default-outside-read", "mcp-reconnect", "permission-context-absent", "permission-context-outside", "native-suggestions":
 		dir := filepath.Join(home, "work")
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)

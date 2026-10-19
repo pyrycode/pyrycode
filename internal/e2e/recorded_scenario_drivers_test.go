@@ -15,6 +15,7 @@ import (
 )
 
 type recordedScenarioContext struct {
+	Checkpoint                  func(claudetape.ClientCheckpoint)
 	Source                      func() []claudetape.Frame
 	Reconnect                   func()
 	Home, Workdir, Socket, Mode string
@@ -24,6 +25,11 @@ type recordedScenarioContext struct {
 }
 
 var recordedScenarioDrivers = map[string]func(*testing.T, recordedScenarioContext){
+	"ordinary-queue-placement": runTapeOrdinaryQueue,
+	"interrupt-running":        func(t *testing.T, c recordedScenarioContext) { runTapeInterrupt(t, c, false) },
+	"interrupt-thinking":       func(t *testing.T, c recordedScenarioContext) { runTapeInterrupt(t, c, true) },
+	"subagent-text":            runTapeSubagent,
+
 	"hook-banner":                     runTapeHookBanner,
 	"native-suggestions":              runTapeNativeSuggestions,
 	"permission-context-absent":       func(t *testing.T, c recordedScenarioContext) { runTapePermissionContext(t, c, false) },

@@ -474,6 +474,86 @@
         "Actual UserPromptSubmit hook execution, blocked-first/passed-later witnesses, current informational shape, and original create-conversation cold-spawn coverage remain live."
       ],
       "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "subagent-text",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamForwardsSubagentText"
+      ],
+      "retained_live": [
+        "Current provider generation, actual foreground agent execution and streaming timing remain live."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamForwardsSubagentText": "b6a8b4904e7774b5c670ffc2eb1d10375487def836a012cd38d0aae7f9bb1b12"
+      },
+      "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "ordinary-queue-placement",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestRealClaude_OrdinaryQueuedPlacement"
+      ],
+      "retained_live": [
+        "Actual foreground Bash execution and elapsed time remain live; the action checkpoint proves client queue admission and ordered eventual delivery."
+      ],
+      "live_contracts": {
+        "TestRealClaude_OrdinaryQueuedPlacement": "bccbff9a35553d91849f0b1260df36d9bf660c57c9ee30b68e9240ca6362421f"
+      },
+      "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "interrupt-running",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamInterruptStopsRunningTurn"
+      ],
+      "retained_live": [
+        "Real foreground process cancellation, provider interruption latency and current cancellation behavior remain live; replay proves exact interrupt input after responding, cancelled terminal and subsequent health turn."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamInterruptStopsRunningTurn": "04df7e1d1286e00f27d69dbac8e2f7cdba91349ca13160ef09cfc862e5514f3b"
+      },
+      "comparison_policy": "strict_ordered"
+    },
+    {
+      "name": "interrupt-thinking",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [
+        "--model",
+        "haiku",
+        "--dangerously-skip-permissions"
+      ],
+      "live_tests": [
+        "TestInteractiveStreamInterruptStopsInitialThinkingTurn"
+      ],
+      "retained_live": [
+        "Actual provider interruption during initial thinking and latency remain live; replay preserves initial-thinking guard, exact named interrupt and first cancelled terminal."
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamInterruptStopsInitialThinkingTurn": "d10eb02c3ea29245986aa6544df51fb5d6fe66ab559982682876e0f19500cd7c"
+      },
+      "comparison_policy": "strict_ordered"
     }
   ],
   "batches": {
@@ -516,14 +596,15 @@
       "permission-context-outside",
       "native-suggestions",
       "hook-banner"
+    ],
+    "client-checkpoints": [
+      "subagent-text",
+      "ordinary-queue-placement",
+      "interrupt-running",
+      "interrupt-thinking"
     ]
   },
   "reviews": {
-    "TestRealClaude_OrdinaryQueuedPlacement": {
-      "disposition": "needs_checkpoint",
-      "reason": "Busy queue admission writes no Claude input; require a client-action checkpoint before fast replay.",
-      "contract_sha256": "7d63f9488f4a3892ecee384653a4c8b0598631a6fb69eb587b99b77169909af7"
-    },
     "TestInteractiveStreamMultiTurnContinuity": {
       "disposition": "live_only",
       "reason": "Requires current Claude semantic memory across three turns; sequential replay does not establish recall.",
@@ -608,16 +689,6 @@
       "disposition": "needs_harness",
       "reason": "Daemon restart, dormant predecessor resume, fresh handoff-note production and successor prompt require daemon/process lifecycle and session-file inputs. Fresh provider recall/read/write witnesses must remain live.",
       "contract_sha256": "ca970a0cceb92a5cb4870bdfd9a687cc8e8e413ca0b0f91a47979784f1707362"
-    },
-    "TestInteractiveStreamInterruptStopsInitialThinkingTurn": {
-      "disposition": "needs_checkpoint",
-      "reason": "Interrupt during initial thinking has a real stdin interrupt request. Require a captured thinking-start -> exact interrupt input -> cancelled terminal boundary before promotion; keep actual interruption latency live.",
-      "contract_sha256": "6832e4e95f5b3499fe1b63173d35656bc953c85900b02b06238ce8e96281730e"
-    },
-    "TestInteractiveStreamInterruptStopsRunningTurn": {
-      "disposition": "needs_checkpoint",
-      "reason": "Running-turn cancellation plus follow-up liveness needs a captured busy/start -> interrupt stdin -> cancelled result boundary. Preserve no early completion and attributed cancellation; physical Bash stop remains live.",
-      "contract_sha256": "d18e3725ae4089134cc07855f855f2f97307f115861b699b8529383c5b2e9273"
     },
     "TestInteractiveStreamNewSessionRotatesAndSpawnsFresh": {
       "disposition": "needs_harness",
@@ -1008,11 +1079,6 @@
       "disposition": "control",
       "reason": "Re-execs with both credential variables empty and asserts fixture skips/help text. It never launches real Claude.",
       "contract_sha256": "17a2add44f329bc8f2cd68e5fd166bfbfb33c0e6a58937034cdb4ca0856356f2"
-    },
-    "TestInteractiveStreamForwardsSubagentText": {
-      "disposition": "needs_checkpoint",
-      "reason": "Burst replay coalesces main text into one delta; requires a first owned main client delta observation barrier before releasing the remaining native text. Original live assertions remain active.",
-      "contract_sha256": "bc665d530017cbbd9d2f0fefcfa30f12700a0eb7cf56982ccf10918055894c68"
     },
     "TestInteractiveStreamQuestionAnswer": {
       "disposition": "candidate",

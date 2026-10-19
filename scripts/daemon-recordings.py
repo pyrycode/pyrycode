@@ -39,7 +39,7 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
         for key in ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR'):
             env.pop(key, None)
     cmd = [sys.executable, str(ROOT / 'scripts/test-admission.py'), '--', 'go', 'test',
-           '-tags=e2e', '-count=1', '-timeout=' + ('30m' if 'native-suggestions' in scenarios else '10m'), '-json', '-run', '^' + name + '$', './internal/e2e']
+           '-tags=e2e', '-count=1', '-timeout=' + ('30m' if set(scenarios) & {'native-suggestions', 'ordinary-queue-placement', 'interrupt-running', 'interrupt-thinking', 'subagent-text'} else '10m'), '-json', '-run', '^' + name + '$', './internal/e2e']
     started = time.monotonic()
     # Preserve the admission descriptor when an operator reserves one slot for
     # the whole compatibility command. The nested launcher validates its inode.
