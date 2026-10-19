@@ -21,7 +21,8 @@ func TestStoreIdleReloadContinuity(t *testing.T) {
 			t.Fatal(err)
 		}
 		entries = append(entries, testStoreAppend(t, h, testStoreA,
-			testMain(0, "assistant_delta", `,"text":" suffix"`), testMessage(0))...)
+			testMain(0, "assistant_delta", `,"text":" suffix"`),
+			testMain(0, "send_accepted", `,"text":"queued"`))...)
 		if err := s.Load(context.Background(), testStoreA); err != nil {
 			t.Fatal(err)
 		}
@@ -55,6 +56,21 @@ func TestStoreIdleReloadContinuity(t *testing.T) {
 		for _, item := range p.Items {
 			if item.ID == 1 {
 				t.Fatal("unchanged inventory escaped")
+			}
+		}
+		roots := make(map[uint64]Item, len(next.Items))
+		for _, item := range base.Items {
+			roots[item.ID] = item
+		}
+		for _, item := range p.Items {
+			roots[item.ID] = item
+		}
+		if len(roots) != len(next.Items) {
+			t.Fatal("compact suffix lost or duplicated roots")
+		}
+		for _, item := range next.Items {
+			if !sameItems([]Item{roots[item.ID]}, []Item{item}) {
+				t.Fatalf("compact suffix did not reproduce root %d", item.ID)
 			}
 		}
 		base = next
@@ -164,7 +180,7 @@ func TestStoreIdleReloadNestedCompact(t *testing.T) {
 		t.Fatal(err)
 	}
 	entries = append(entries, testStoreAppend(t, h, testStoreA,
-		testMain(0, "tool_result", `,"parent_tool_use_id":"root","tool_use_id":"nested","output":"done"`))...)
+		testMain(0, "tool_result", `,"parent_tool_use_id":"root","tool_use_id":"nested","is_error":false,"result_detail":"done"`))...)
 	if err := s.Load(context.Background(), testStoreA); err != nil {
 		t.Fatal(err)
 	}
