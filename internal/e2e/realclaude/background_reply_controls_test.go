@@ -174,7 +174,7 @@ func TestBackgroundReplyWording(t *testing.T) {
 			case "failed main":
 				frames[2] = `{"type":"result","subtype":"success","is_error":true}`
 			case "main before launch":
-				frames[0], frames[2] = frames[2], frames[0]
+				frames[0], frames[1], frames[2] = frames[2], frames[0], frames[1]
 			case "missing main":
 				frames[2] = `{}`
 			case "failed tool":
