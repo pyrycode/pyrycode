@@ -38,8 +38,8 @@ This package shipped the registry **primitive only**, unwired and unit-tested in
   [conversation-session-binding.md](conversation-session-binding.md) for the
   same resolver's other caller (the #741 `session_transition` producer) — and
   stamps that conversation on `modal_shown`/`question_shown`, falling back to
-  the router's `activeConv()` cursor only when nothing resolves (no session —
-  the control-socket path — or a session bound to no conversation, e.g. the
+  the router's `activeConv()` cursor only when nothing resolves (an unbound
+  caller or a session bound to no conversation, e.g. the
   bootstrap). Before this fix both frame types were stamped with the cursor
   unconditionally: the conversation the session router last routed a
   *message* to, not the conversation whose session parked the *request*.
@@ -82,6 +82,7 @@ type Request struct {
     DefaultToNo        bool            `json:"default_to_no,omitempty"`
     RequiresUserInteraction bool            `json:"-"`
     AlwaysAllow        AlwaysAllow     `json:"-"`
+    SessionID          string          `json:"-"`
 }
 
 type PermissionRule struct {
@@ -118,6 +119,15 @@ func AllowAlways(updatedInput json.RawMessage, offer AlwaysAllow) Verdict
 ```
 
 `Input`/`UpdatedInput` are `json.RawMessage` so an arbitrary tool-input object round-trips byte-verbatim — the #1080 stream verdict arm (`streamApprovalBridge.ResolveStream`) always echoes the parked `Input` back as `UpdatedInput` unmodified on allow; the primitive only carries the bytes. The five optional ask-context fields are independent Claude-authored display values (#2346): the stdio adapter copies each only from its corresponding `can_use_tool` field, never from `Input`, while the approval MCP producer leaves all five at zero values. They do not participate in the verdict or timeout. `RequiresUserInteraction` is different: it is immutable daemon-internal eligibility copied from the typed stdio ask, excluded from JSON, never displayed or logged, and false for approval-MCP requests. `AlwaysAllow` is also daemon-internal: it retains only validated command-rule grants from a stdio permission-suggestion batch and stays zero for approval MCP. `omitempty` gives the two disjoint verdict wire shapes claude expects. `Allow`/`Deny` constructors make call sites correct-by-construction — no stringly-typed `"allow"`/`"deny"` at the resolver. `reasonTimeout` (unexported, a fixed string, never host-derived content) is the deny message the timer path uses.
+
+`SessionID` is producer attribution, not answer authority. The approval MCP
+process forwards inherited `PYRY_SESSION_ID` through the optional local
+`control.ApprovePayload.SessionID`; `handleApprove` preserves it before
+registration. Model tool arguments cannot select that identity, including for an
+unbound process. Supplying a tagged `Request` directly in a bridge test would
+miss an omission in this upstream producer; the [MCP reconnect
+regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery)
+exercises the subprocess and control socket before retention and wire delivery.
 
 **`ToolName`/`Description`/`DecisionReason` reach the modal exactly as the
 producer set them — the registry does not escape anything.** #2587's

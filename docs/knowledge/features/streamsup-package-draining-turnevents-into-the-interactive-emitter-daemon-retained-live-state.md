@@ -272,6 +272,39 @@ explicit inactive retry/compaction values; slash-command inventories use the sam
 retained snapshot/publication path. Correlated replies use the five installed
 providers above. Source evidence is never reconstructed from legacy pushes.
 
+An outstanding remotely answerable permission surfaced while a thread-capable
+phone is disconnected retains its original owning conversation, producing
+session, modal identity and captured generation/revision. Reconnect delivers the
+`modal_shown` family clear (`session_state_cleared: true`, payload `{}`) before
+the fresh `modal_shown`, with the original conversation/session on both envelopes
+and the original `modal_id`, payload and timestamp on the fresh reading.
+Repeated reconnects do not resolve the prompt or rebind it to the active
+conversation/session. Retired-generation prompts cannot return, even when the
+session ID is reused. See the [supplied delivery
+contract](../../protocol-mobile.md#session-scoped-live-state-v2-supplied-delivery-contract).
+
+Missing fresh-modal provenance can originate before retention: the MCP approval
+producer previously dropped the session identity already present in its spawned
+environment. `runMCPApprove` now supplies inherited `PYRY_SESSION_ID` to the
+immutable server; `approveServer.toolsCall` overwrites any model-supplied
+`session_id`, including with an empty process identity. `handleApprove` copies
+that source into `permbridge.Request.SessionID` before registration and surface,
+so `promptOwner` can capture it once. An unbound producer remains unresolved;
+legacy payloads, reply correlation, consumer bindings and older connections
+cannot supply missing thread provenance. Remote-answer eligibility, access and
+capability gates and non-thread delivery keep their existing contracts.
+
+[`TestDaemonLiveRelayMCPPromptReconnect`](../../../cmd/pyry/daemon_live_mcp_prompt_test.go)
+drives the actual MCP entry point through the control registry, retained snapshot
+and authenticated decrypted reconnect wire, observing both clear and fresh
+frames with a different active conversation. It checks repeated reconnects,
+unchanged captured ordering and pending approval, and stale-generation suppression.
+A test that directly supplies `permbridge.Request{SessionID: ...}` misses the
+MCP forwarding omission; both producer scenarios failed with missing fresh-modal
+provenance before repair. This regression proves Core delivery; FCM wake and
+exactly-one Mobile alert require the separate native acceptance evidence tracked
+in [#3636](https://github.com/pyrycode/pyrycode/issues/3636).
+
 Accepted stream/control admissions, clears and prompt dismissals hand immutable
 records to `startDaemonLivePublisher` independently of legacy enumeration, fan-in
 acceptance or delivery success. Its one cancellation-owned worker and 256-reading

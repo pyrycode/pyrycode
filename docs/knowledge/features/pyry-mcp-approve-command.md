@@ -41,7 +41,7 @@ Steps, each failure terminating in a deny result:
 
 1. Unmarshal `params` into `{name, arguments}`. Failure → `deny("malformed approval request")`. Deliberately a deny result, not a JSON-RPC error — an error on the permission path risks hanging or confusing claude's turn.
 2. `name != "approve"` → `deny("unknown tool")`.
-3. Unmarshal `arguments` into `control.ApprovePayload{tool_name, input, tool_use_id}`; `input` stays `json.RawMessage`. Failure → `deny("malformed approval request")`.
+3. Unmarshal `arguments` into `control.ApprovePayload`; `input` stays `json.RawMessage`. Failure → `deny("malformed approval request")`. Overwrite `SessionID` with the server's immutable process-owned identity, even when empty; model arguments cannot select the producer.
 4. `control.Approve(ctx, socketPath, payload)` — `ctx` is the `Serve` ctx, passed straight through with **no per-call deadline added**. The client carries no duration of its own (`approveServer` has no timeout field); the bound is liveness-shaped and lives entirely in `control.Approve`/`requestPatient` — see § `internal/control.Approve` client helper (#1929).
 5. Map the outcome:
    - error (socket unreachable, daemon `Response.Error`, conn ended with no verdict, ctx cancelled) → `deny("approval unavailable")`
@@ -52,7 +52,22 @@ Steps, each failure terminating in a deny result:
 
 **The daemon's own deny message wins at every window, and no margin buys that anymore (#1929).** Through #1929 this step used a fixed `mcpApproveClientMargin = 30s` added to `approvalTimeout()`, so the client's deadline expired just after the daemon's — the margin decided only which deny message reached claude, never the outcome. #1929 deleted the margin along with the client's deadline entirely: since the client itself no longer expires, the daemon's timeout-deny is now the *only* way this path resolves to a deny on a live conn, at every configured window, structurally rather than by margin sizing. The pre-#1929 daemon-message-wins guarantee is what #1929's `TestMCPApprove_DaemonMessageWinsAtEveryWindow` now pins directly against the production constructor.
 
-The whole `approveServer{...}` literal is built exactly once, at construction, by `newMCPApproveServer(socketPath, log)` — the sole production construction site (`grep -n 'approveServer{' cmd/pyry/mcp_approve.go` returns exactly one hit, inside that function). Since #1929 that literal is `{socketPath, log}` only: **no duration field, and `newMCPApproveServer` reads no duration source.** That absence is itself the enforcement — no cheap test can pin "the client never re-grows a large bound," so a reviewer verifies it structurally (no timeout field on `approveServer`, `mcpApproveClientMargin` gone, the constructor free of `approvalTimeout()`) rather than by reading an assertion. The pre-existing test helper `newApproveServer` (`mcp_approve_test.go`) now delegates straight to `newMCPApproveServer` — the reason it didn't (eleven `t.Parallel()` tests would have read the ambient `PYRY_APPROVAL_TIMEOUT` through a shared derived deadline) dies along with the env read this constructor used to do.
+`runMCPApprove` reads inherited `PYRY_SESSION_ID` once and passes it to
+`newMCPApproveServer(socketPath, sessionID, log)`. The constructor stores
+`socketPath`, immutable `sessionID` and `log`, with no duration field or duration
+source. The test helper `newApproveServer` delegates to this constructor. The
+client's lack of a timeout remains structural: no `mcpApproveClientMargin`, no
+`approvalTimeout()` read and no per-call deadline.
+
+The process-owned identity crosses the local socket as optional `session_id`;
+`handleApprove` copies it into `permbridge.Request.SessionID` before registration
+and surface. Empty identity stays unresolved. This attribution grants no answer
+permission and does not change stdio approval producers or legacy delivery.
+[`TestMCPApprove_ProducerSession`](../../../cmd/pyry/daemon_live_mcp_prompt_test.go)
+checks both bound and empty process identities against spoofed tool arguments.
+The [retained reconnect regression](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#relay-delivery)
+also drives the real MCP entry point: directly constructing a tagged registry
+request would leave missing subprocess attribution undetected.
 
 `--permission-prompt-tool` argv/config generation landed in [#1106](../codebase/1106.md); the live `streamsup` interactive-spawn wiring landed in [#1168](../codebase/1168.md) — `newStreamRunnerFactory`'s closure injects `permissionArgs(false, mcpServersPath)` (the parameter's name since #2169's rename) on every non-yolo spawn, so this server now has a live production caller beyond `pyry agent-run`.
 
