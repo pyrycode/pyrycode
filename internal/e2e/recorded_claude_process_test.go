@@ -262,7 +262,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 					return frames, errors.New("capture exceeded bound")
 				}
 				if e = claudetape.Safe(normalized); e != nil {
-					return frames, e
+					return frames, fmt.Errorf("stdin frame %d: %w", frames, e)
 				}
 				tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdin", Data: normalized})
 				frames++
@@ -283,7 +283,7 @@ func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
 				return frames, errors.New("capture exceeded bound")
 			}
 			if e = claudetape.Safe(normalized); e != nil {
-				return frames, e
+				return frames, fmt.Errorf("stdout frame %d: %w", frames, e)
 			}
 			tape.Frames = append(tape.Frames, claudetape.Frame{Direction: "stdout", Data: normalized})
 			frames++

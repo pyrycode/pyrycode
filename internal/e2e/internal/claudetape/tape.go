@@ -123,7 +123,7 @@ func Safe(raw []byte) error {
 	lower := strings.ToLower(string(raw))
 	for _, needle := range []string{"sk-ant-", "bearer ", "access_token", "refresh_token", "api_key", "oauth_token", "password", "/users/", "/home/"} {
 		if strings.Contains(lower, needle) {
-			return errors.New("candidate contains private data")
+			return fmt.Errorf("candidate contains private data (%s)", needle)
 		}
 	}
 	for _, key := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"} {
