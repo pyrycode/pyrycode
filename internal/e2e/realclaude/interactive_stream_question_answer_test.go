@@ -18,6 +18,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/history"
+	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -121,12 +122,40 @@ func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 	// child's model rather than merely persisting it and reporting success.
 	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change",
 		fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
-	announced, seen := drainForAnnouncedModel(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, targetModel), perTurnReplyBudget)
+}
+
+func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration) {
+	t.Helper()
+	var announced protocol.ModelAnnouncedPayload
+	seen := false
+	next := func(deadline time.Time) protocol.Envelope {
+		env, _ := receiveQuestionEnvelope(t, phone, cs, deadline)
+		switch env.Type {
+		case protocol.TypeModalShown:
+			t.Fatalf("unexpected modal_shown during post-question turn: %q", truncateString(string(env.Payload), questionTextLogCap))
+		case protocol.TypeRateLimited:
+			// The receiver has validated this warning; do not log provider fields.
+			return protocol.Envelope{}
+		case protocol.TypeModelAnnounced:
+			if !seen {
+				var p protocol.ModelAnnouncedPayload
+				if json.Unmarshal(env.Payload, &p) != nil {
+					t.Fatalf("invalid model announcement: %q", truncateString(string(env.Payload), questionTextLogCap))
+				}
+				if p.ConversationID == convID {
+					announced, seen = p, true
+				}
+			}
+		}
+		return env
+	}
+	scenario.CompletedTurn(t, next, convID, timeout, true)
 	if !seen {
 		t.Fatalf("the post-question turn emitted no model_announced frame")
 	}
-	if want := announcedTargetFor(t, targetModel); announced.Model != want {
-		t.Errorf("post-question model = %q, want %q after set_model %q", announced.Model, want, targetModel)
+	if announced.Model != expected {
+		t.Errorf("post-question model = %q, want %q", truncateString(announced.Model, questionTextLogCap), expected)
 	}
 }
 
@@ -268,7 +297,7 @@ func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID,
 	proof := questionAnswerTurn{convID: convID, batchID: batchID, witness: witness}
 	deadline := time.Now().Add(timeout)
 	for {
-		env, ok := receiveQuestionEnvelope(t, h, deadline)
+		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
 		if !ok {
 			t.Fatalf("answer proof incomplete: dismissal=%v idle=%v; continuation=%q", proof.dismissed, proof.idle, truncateString(proof.text.String(), questionTextLogCap))
 		}
@@ -287,10 +316,10 @@ func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID,
 
 // receiveQuestionEnvelope decrypts every Noise frame in order. Transport controls
 // do not advance the receive nonce and are skipped without decryption.
-func receiveQuestionEnvelope(t *testing.T, h *perConvHarness, deadline time.Time) (protocol.Envelope, bool) {
+func receiveQuestionEnvelope(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, deadline time.Time) (protocol.Envelope, bool) {
 	t.Helper()
 	for time.Until(deadline) > 0 {
-		raw, err := h.phone.ReceiveBytes(time.Until(deadline))
+		raw, err := phone.ReceiveBytes(time.Until(deadline))
 		if errors.Is(err, fakephone.ErrReceiveTimeout) {
 			return protocol.Envelope{}, false
 		}
@@ -308,7 +337,7 @@ func receiveQuestionEnvelope(t *testing.T, h *perConvHarness, deadline time.Time
 		if err != nil {
 			t.Fatal(err)
 		}
-		plain, err := h.initRecv.Decrypt(cipher)
+		plain, err := cs.Decrypt(cipher)
 		if err != nil {
 			t.Fatalf("question decrypt: %v", err)
 		}
@@ -358,7 +387,7 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		env, ok := receiveQuestionEnvelope(t, h, deadline)
+		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
 		if !ok {
 			t.Fatalf("no %s within %s", want, timeout)
 		}

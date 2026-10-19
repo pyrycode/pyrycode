@@ -100,8 +100,8 @@ func TestInteractiveStreamBypassQuestions(t *testing.T) {
 					t.Fatal("ordinary bypass tool did not write the witness")
 				}
 				settings := requestSessionSettings(t, h, convID, nextID)
-				if settings.PermissionMode != runningModeBypass || !settings.YOLO {
-					t.Fatal("live child lost bypass mode")
+				if settings.SessionID != streamModalBootstrapUUID || settings.PermissionMode != runningModeBypass || !settings.YOLO {
+					t.Fatal("live child lost bypass mode or settings session ownership")
 				}
 
 				var tape claudetape.Tape
