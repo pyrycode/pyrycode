@@ -98,16 +98,40 @@ conversation through `RetireLiveState`, then forgets and reacquires the boundary
 Tracking only successful live pushes misses clients initialized solely by queries.
 Retirement closes the connection before dependent output can escape; existing
 interactive/thread and agent eligibility gates still apply. Same-epoch reload
-cannot establish retained-range continuity; clients reconnect and explicitly
-catch up, or acquire a newest window after reset, rather than receive a full
-live inventory. An unchanged coordinator-owned idle checkpoint can survive
-unload as described below.
+preserves live continuity only with a validated clean checkpoint matching the
+saved successful retirement boundary and a contiguous, representable suffix.
+The Store reconstructs complete changes and compact root evidence from that
+boundary; equality of epochs alone proves no range. Genuine gaps still retire
+consumers, which reconnect and explicitly catch up or acquire a newest window
+after reset. Acquisition never sends a full live inventory.
 Status is only a hint, not continuity evidence or a transaction across reads.
 Wire metadata, changes and cursor advancement must all come from the same
 captured `Changes` result. Recheck captured usability and retire
 consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
+
+For journal diagnostics, each `daemonThreadPublisher.gap` invocation emits one
+Warn with message `relay: thread gap`, event `daemon.thread.gap` and a fixed
+`reason` identifying the rejecting branch:
+
+| Reason | Trigger |
+| --- | --- |
+| `state_not_usable` | `publish` finds unusable status while a publication cursor exists. |
+| `baseline_required` | The captured `Changes` result is unusable or requires a baseline. |
+| `compact_reset_required` | The captured `CompactChanges` result is unusable or requires a reset. |
+| `encode_failure` | `deliver` cannot encode an update or decode an encoded envelope. |
+
+The record contains only the fixed event/reason fields and normal log metadata
+(time, level and static message). It includes no history/content, payload bytes,
+credentials, filesystem paths, peer/conversation IDs or raw errors. This warning
+replaces `daemon.thread.encode_err`, so encoding failure emits one gap warning.
+An unusable status without an existing publication cursor stays silent.
+Logging preserves recipient selection, retirement and metadata-only cursor
+recovery: `Changes` rejection attempts replacement acquisition in the same
+pass; status, compact and encoding gaps leave acquisition to a later pass.
+Recovery never broadcasts a historical baseline; clients use authenticated
+catch-up and paging as described above.
 
 Recipient projection is per connection and conversation. `ActiveThreadConns`
 captures `ActiveConn.View` and `PendingView` together under `hostedMu`, with
@@ -140,6 +164,10 @@ acquisition nor retirement publishes a baseline. Compact recovery remains an
 explicit query, even when compact catch-up can survive a lost complete
 publication range. The publication gate and publisher wait group own both
 families; publisher stop cancels and joins in-flight publication and reads.
+Publication prunes disconnected tracked recipients before checking compact
+continuity. Compact-gap retirement therefore excludes those already-pruned
+peers while still including currently eligible query-only consumers; expecting
+every previously tracked peer to retire would change existing recipient behavior.
 
 `daemonThreadUpdates` maps exported fold field names through `ThreadItem`'s JSON
 tags. Copying `EndedOrder` or `NoChild` directly would produce unusable wire
@@ -193,9 +221,26 @@ changed publication here could make a query trigger its own live-race refusal.
 Never wait for this gate while holding shadow or quiescence mutexes; cancellation
 must release a query waiting behind held fanout without waiting for that fanout.
 A successful coordinator-owned idle unload retains the publication cursor while
-the cache is absent or rebuilding, so reading an unchanged checkpoint does not
-disconnect the peer. Changed publications must still prove continuity through
-`Changes`; an actual gap or failure retains the normal consumer retirement.
+the cache is absent or rebuilding. Reading an unchanged checkpoint and appending
+durable history can both preserve the original connections. Before output, the
+reloaded Store must prove the saved boundary's clean checkpoint/retirement match
+and suffix coverage through `Changes` and, for compact recipients,
+`CompactChanges`. Complete patches use applicable previous/resulting revisions;
+compact updates contain only affected roots or consumed progress. Missing or
+mismatched boundary evidence, invalid/dirty checkpoints, epoch change, lost
+ranges, history gaps, published-row suppression, compact root removal or failed
+recovery retain reset/retirement before dependent output. Deliberate unload
+still releases worker memory, and the existing publication gate serializes
+queries with cursor acquisition and delivery. Reconnect remains explicit
+catch-up even when an idle reload can continue live.
+
+`TestDaemonThreadDemandIdleReadKeepsConnection` retains the unchanged idle-read
+proof. `TestDaemonThreadIdleAppendKeepsConnections` completes authenticated
+complete and compact catch-up, observes actual idle unload, then appends durable
+history over two cycles. It checks one unsolicited update per projection on the
+original connection IDs and successful later queries from both peers; no new
+handshake or baseline inventory repairs the live state. It uses the real history
+Store, thread Store, shadow follower and session manager, without live Claude.
 
 `dropRingOnConversationDelete` retains the registry's single removal observer
 for explicit deletion and sweep, including with the relay disabled. It preserves
@@ -233,6 +278,16 @@ wire ordering or recipient projection errors. `TestDaemonThreadReadiness`,
 `TestDaemonThreadUnusable` and `TestDaemonThreadContinuity` cover usable zero,
 missing providers/views and lost ranges. `TestDaemonThreadQueriesReadiness`
 checks complete query installation, request cancellation and nonloading reads.
+
+`TestDaemonThreadGapReasons` enters through `publish`/`deliver`, checking all
+four gap reasons, unique recipient retirement and metadata-only recovery.
+Its exact JSON record allowlist also rejects unexpected fields; checking only
+for a known secret would miss other input leaking into logs. Private-looking
+content, identifiers and retirement errors must leave exactly one Warn.
+`TestDaemonThreadGapNoCursor` preserves silent unusable startup. The defensive
+envelope-decoding failure shares `encode_failure` by source review; the real
+encoder returns valid JSON, so this branch has no injected runtime proof.
+
 `TestDaemonThreadQueriesRecovery` checks authenticated clean-reopen catch-up,
 old-revision first appearances, escaped multiframe replies, page metadata and
 simultaneous legacy raw history. `TestDaemonThreadQueriesReset` checks explicit
@@ -350,9 +405,14 @@ provider: otherwise shutdown can wait for a peer query no manager will service.
 
 `TestDaemonThreadBoundedRecovery` compares 128 and 8333 settled rows: initial and
 replacement acquisitions emit zero historical item frames/bytes, while a new
-append emits one live item frame. It recovers idle reload, retained-range loss
-and epoch replacement through authenticated queries and reconstructs the full
-inventory through older pages. Silence alone cannot prove bounded output: wait
+append emits one live item frame. Each size/event case owns its Store, wire,
+publisher cursor and counters: a failed idle assertion must not leave unread
+frames or state that contaminates later gap cases. After full baseline paging,
+clean idle reload delivers exactly one applicable addition on the original
+connection; applying it must equal replay. Actual retained-range loss and epoch
+replacement still retire before historical output and recover through explicit
+authenticated catch-up. All cases retain bounded older pages and a subsequent
+live-append check. Silence alone cannot prove bounded output: wait
 for the successful query marker and completed publisher fanout, then drain the
 delivery lane with an observable FIFO barrier. `TestDaemonThreadRecoveryCommit`
 and `TestDaemonThreadQueryBoundary` hold replay/query capture around commits to

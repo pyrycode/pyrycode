@@ -531,9 +531,8 @@ func TestStreamTurnDrainV2_UnresolvedSessionDrops(t *testing.T) {
 	}
 }
 
-// The drain drives the emitter's ~250ms coalescing timer: a lone assistant text
-// line (no following event) still surfaces its assistant_delta once the timer
-// fires — proving the drain selects flushC() and calls flushDelta.
+// The drain flushes same-message fragments across timer windows while the turn
+// stays open, then publishes terminal closure after all ordered text.
 func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -550,7 +549,14 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
 	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
-	feedLines(sink, "sess-a", assistantTextLine("m1", "streamed"))
+	parser := streamsup.NewParser(sink.sinkFor("sess-a"), discardLogger())
+	writeLine := func(line string) {
+		t.Helper()
+		if _, err := parser.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeLine(assistantTextLine("m1", "streamed"))
 
 	// responding first, then the coalesced delta once the ~250ms window elapses.
 	got := collectEnvs(t, bcast.pushed, 2)
@@ -560,8 +566,48 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	if got[1].Type != protocol.TypeAssistantDelta {
 		t.Fatalf("second envelope = %s, want %s (timer-flushed)", got[1].Type, protocol.TypeAssistantDelta)
 	}
-	if d := decodeDelta(t, got[1]); d.Text != "streamed" {
-		t.Errorf("coalesced assistant_delta text = %q, want %q", d.Text, "streamed")
+	first := decodeDelta(t, got[1])
+	if first.Text != "streamed" || first.TurnID == "" || first.ConversationID != testConvID || first.Seq != 0 {
+		t.Fatalf("first timer-flushed delta = %+v", first)
+	}
+	var state protocol.TurnStatePayload
+	if err := json.Unmarshal(got[0].Payload, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "responding" || state.ConversationID != testConvID {
+		t.Fatalf("state before first delta = %+v", state)
+	}
+
+	// Release another fragment only after observing the first timer flush. No
+	// result is available to flush either fragment at a turn boundary.
+	writeLine(assistantTextLine("m1", " incrementally"))
+	next := collectEnvs(t, bcast.pushed, 1)
+	if next[0].Type != protocol.TypeAssistantDelta {
+		t.Fatalf("second window emitted %s, want assistant_delta before closure", next[0].Type)
+	}
+	second := decodeDelta(t, next[0])
+	if second.Text != " incrementally" || first.Text+second.Text != "streamed incrementally" ||
+		second.ConversationID != first.ConversationID || second.TurnID != first.TurnID || second.Seq != first.Seq+1 {
+		t.Fatalf("second timer-flushed delta = %+v, first = %+v", second, first)
+	}
+
+	writeLine(resultLine)
+	closed := collectEnvs(t, bcast.pushed, 2)
+	if !slices.Equal(envTypes(closed), []string{protocol.TypeTurnEnd, protocol.TypeTurnState}) {
+		t.Fatalf("closure order = %v", envTypes(closed))
+	}
+	var end protocol.TurnEndPayload
+	if err := json.Unmarshal(closed[0].Payload, &end); err != nil {
+		t.Fatal(err)
+	}
+	if end.ConversationID != first.ConversationID || end.TurnID != first.TurnID || end.StopReason != "end_turn" {
+		t.Fatalf("terminal end = %+v, first delta = %+v", end, first)
+	}
+	if err := json.Unmarshal(closed[1].Payload, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "idle" || state.ConversationID != first.ConversationID {
+		t.Fatalf("terminal idle = %+v", state)
 	}
 }
 

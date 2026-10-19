@@ -168,14 +168,15 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		w = &conversationWorker{parent: ctx, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{}), snapshot: Snapshot{State: StateRebuilding}}
+		previous := s.records[id]
 		s.workers[id] = w
 		s.records[id] = progressRecord{Err: ErrUnavailable}
-		go s.run(workerCtx, id, w)
+		go s.run(workerCtx, id, w, previous)
 		return nil
 	}
 }
 
-func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker) {
+func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker, previous progressRecord) {
 	result := ErrUnavailable
 	var progress Snapshot
 	var checksum, progressChecksum string
@@ -234,6 +235,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		return
 	}
 	checkpoint.parent = w.parent
+	resumePublication := dirty.Clean && dirty.Epoch != "" && previous.Err == nil &&
+		previous.Epoch == dirty.Epoch && previous.Version == dirty.Version &&
+		previous.Checksum == dirty.Checksum && previous.LastShownVersion == dirty.LastShownVersion
 	if dirty.Epoch == "" {
 		dirty.Epoch, err = randomToken()
 		if err != nil {
@@ -274,6 +278,16 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	fold.captureSet = make(map[int]struct{})
 	if !checkpoint.writer.fullRefold {
 		capture.restore(fold)
+	}
+	if resumePublication {
+		// Reconstruct the saved boundary before suffix replay so advancement can
+		// track root removals and dirty ancestors without retaining unloaded rows.
+		index := s.initialPublicationIndex(capture.slots, fold, nil)
+		s.mu.Lock()
+		if s.workers[id] == w && !w.retiring && !s.closed && ctx.Err() == nil {
+			w.query = index
+		}
+		s.mu.Unlock()
 	}
 	checksum = dirty.Checksum
 	resumeVersion := fold.Version()
@@ -348,26 +362,18 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	before := w.snapshot
 	index := w.query
 	s.mu.Unlock()
+	retain := (before.State == StateUsable || index != nil) && changes.Version > changes.FromVersion
+	if fold.unprovenThrough > changes.FromVersion {
+		changes.BaselineRequired, changes.Changes = true, nil
+	}
 	if index == nil {
-		index = newPublicationIndex(items, s.queryWork)
-		index.prepareCatchUp(fold)
-		for _, item := range items {
-			if item == nil {
-				continue
-			}
-			row, _ := index.lookup(item.ID, true)
-			if header, ok := capture.headers[item.ID]; ok {
-				row.header = header
-			}
-			index.refreshHeader(row, fold.version)
-		}
-		index.compactFrom = fold.version
+		index = s.initialPublicationIndex(items, fold, capture.headers)
 	} else {
 		index = index.advance(items, capture.affected, fold, s.queryWork, s.queryCopies, capture.headers)
 	}
 	index.worker = w
 	var batch changeBatch
-	if before.State == StateUsable {
+	if retain {
 		batch.observation = changes
 		encoded, _ := json.Marshal(batch.observation.Changes)
 		batch.bytes = len(encoded)
@@ -375,7 +381,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.workers[id] == w && !w.retiring && !s.closed && ctx.Err() == nil {
-		if before.State == StateUsable {
+		if retain {
 			w.retain(batch)
 		}
 		w.snapshot = changes.Snapshot

@@ -163,7 +163,7 @@ func TestQueuedSendHandleActions(t *testing.T) {
 			peer := "phone"
 			if changes.BaselineRequired {
 				closed := w.await()
-				if action != "send_now" || closed.ConnID != "phone" || closed.CloseCode != uint16(relay.StatusQueueOverflow) {
+				if action != "send_now" || closed.ConnID != "phone" || closed.CloseCode != uint16(relay.StatusProducerGap) {
 					t.Fatal("unexpected retirement", closed)
 				}
 				w.open("again", false, protocol.CapabilityThread)

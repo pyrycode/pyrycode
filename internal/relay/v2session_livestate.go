@@ -262,6 +262,24 @@ func (m *V2SessionManager) signalLiveDrain() {
 	}
 }
 
+// refreshLiveCatalog resolves an overtaken reconnect reading once. It cannot
+// carry a captured catalog into a different target generation or bypass delivery
+// validation, projection and freshness checks in forwardLiveState.
+func (m *V2SessionManager) refreshLiveCatalog(s *V2Session, r LiveState) LiveState {
+	if !s.thread || s.state != V2StateOpen || m.liveWithheld(s, r.ConversationID) ||
+		r.Envelope.Type != protocol.TypeModelList || r.Envelope.SessionStateCleared || r.Envelope.InReplyTo != nil ||
+		m.cfg.ModelListReadingFor == nil || m.cfg.LiveStateCurrent == nil || m.cfg.LiveStateCurrent(r) {
+		return r
+	}
+	fresh, ok := m.cfg.ModelListReadingFor(r.ConversationID, s.multiAgent)
+	if !ok || fresh.ConversationID != r.ConversationID || fresh.SessionGeneration != r.SessionGeneration ||
+		fresh.Envelope.Type != protocol.TypeModelList || fresh.Envelope.SessionStateCleared {
+		return r
+	}
+	fresh.Envelope.InReplyTo = nil
+	return fresh
+}
+
 // drainLiveOnce pulls only one detached snapshot reading, after queued live
 // updates have had a chance to overtake it. No batch enters the push/outbox queue.
 func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) {
@@ -273,6 +291,11 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 			continue
 		}
 		if (s.livePending == nil && (s.liveSnapshot == nil || pendingOnly)) || !m.reserveHostedPush(s) {
+			continue
+		}
+		// Hosted admission can wait while a producer retires the queue.
+		if m.pushRetired(s.connID) {
+			m.releaseHostedPush(s)
 			continue
 		}
 		var r LiveState
@@ -291,7 +314,7 @@ func (m *V2SessionManager) drainLiveOnce(ctx context.Context, pendingOnly bool) 
 		} else {
 			continue
 		}
-		if err := m.forwardLiveState(ctx, s, r); err != nil {
+		if err := m.forwardLiveState(ctx, s, m.refreshLiveCatalog(s, r)); err != nil {
 			m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", s.connID)
 		}
 		m.releaseHostedPush(s)
@@ -308,7 +331,8 @@ func (m *V2SessionManager) RetireLiveState(ctx context.Context, connID string) e
 	}
 	m.pushMu.Lock()
 	q, ok := m.queues[connID]
-	if ok {
+	if ok && !q.overflowed {
+		q.producerGap = true
 		q.overflowed = true
 	}
 	m.pushMu.Unlock()

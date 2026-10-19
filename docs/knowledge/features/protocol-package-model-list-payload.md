@@ -8,9 +8,11 @@ Legacy live delivery is best-effort: the frame is droppable at the turn-busy
 fan-in (`turnMarkFor` answers `turnMarkNone`). `V2SessionConfig.RetainedModelLists`
 and `cmd/pyry`'s `retainedModelLists` provide legacy connect-time reconciliation;
 on-demand requests use the same inventory precedence. Supplied thread delivery
-uses retained current readings and source-bearing request results instead. Its
-request-driven catalog admission is described below; reconnect fallback
-resolution remains [#3611](https://github.com/pyrycode/pyrycode/issues/3611).
+uses source-bearing resolution for requests and finite connect/reconnect
+snapshots, including targets with no retained owner inventory or turn. Both use
+bound/bootstrap/saved precedence and recipient projection. Without usable
+vocabulary the handshake completes without fabricated inventory. See
+[supplied catalog reconciliation](v2-session-manager-state-machine-connect-time-model-list-reconcile-retain.md#supplied-thread-reconciliation).
 
 ```go
 type ModelListPayload struct {
@@ -78,11 +80,18 @@ before fresh inventory; later resolution can repopulate it. Equal-revision
 correlated answers remain usable, while older revisions and overtaken generations
 are suppressed. These counters are internal ordering inputs, not wire fields.
 
-A new resolution of retained predecessor vocabulary owns the request's target
+A fresh resolution of retained predecessor vocabulary captures current target
 ordering; an old captured reply keeps its earlier ordering. Checking only the
 producer conversation would miss a predecessor in the same conversation, and
 matching session strings cannot distinguish a reused-ID transition. Borrowed
-inventory remains reply-only and cannot change target retention or cache evidence.
+inventory remains reply-only, including in unsolicited reconnect snapshots, and
+cannot change target retention or cache evidence. Another peer's successful
+borrowed resolution can supersede a pending reconnect catalog without publishing
+a replacement. The relay may resolve that catalog once afresh within its captured
+target generation; it never delivers the old capture across a transition or
+removal/recreation. A refused reservation does not count as accepted replacement
+inventory. Clear and fresh snapshot frames are both uncorrelated and carry no
+ring/history IDs; the catalog clear remains `{}` rather than an empty menu.
 See [daemon retention and regression proofs](streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings)
 and [emitted wire examples](../../protocol-mobile.md#asking-for-a-model-list-on-demand).
 

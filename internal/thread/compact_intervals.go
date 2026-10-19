@@ -69,7 +69,7 @@ func (s *Store) CompactChanges(ctx context.Context, id conversations.Conversatio
 // no value can widen the selection beyond MaxCatchUpGap or compact evidence.
 func (s *Store) compactInterval(ctx context.Context, id conversations.ConversationID, snap Snapshot, q *queryIndex, epoch string, after uint64, extras bool) (CompactQueryResult, error) {
 	p := CompactQueryResult{State: StateUsable, ConversationID: id, Projection: compactProjection, Epoch: snap.Epoch, Version: snap.Version}
-	if epoch != snap.Epoch || after > snap.Version || snap.Version-after > MaxCatchUpGap || q == nil || q.coveredThrough != snap.Version || after < q.compactFrom || q.compactLost > after {
+	if epoch != snap.Epoch || after > snap.Version || snap.Version-after > MaxCatchUpGap || q == nil || q.coveredThrough != snap.Version || after < q.compactFrom || q.compactLost > after || q.unprovenThrough > after {
 		p.ResetRequired = true
 		return p, nil
 	}

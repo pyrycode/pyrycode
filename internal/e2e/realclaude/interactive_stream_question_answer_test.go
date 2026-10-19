@@ -2,6 +2,9 @@
 
 package realclaude
 
+// The live question gate shares encrypted wire adapters and durable-history
+// readers with captured replay, and additionally checks current Claude semantics.
+
 import (
 	"crypto/rand"
 	"encoding/base64"
@@ -13,25 +16,14 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// The dismissal vocabulary this gate asserts, transcribed rather than imported:
-// outcomeQuestionAnswered and sourceQuestionRemote live in cmd/pyry, package main,
-// which a test package cannot import. A rename there does NOT reach these literals;
-// the symptom is this file's attribution assertion failing, which is the right place
-// for a reader to notice the vocabulary moved.
-const (
-	wantQuestionOutcome = "answered"
-	wantQuestionSource  = "remote"
-)
-
-// questionAnswerToken is the client-minted idempotency key on the answer frame. A
-// fixed constant is correct and not a shortcut: QuestionAnswerPayload's doc block
-// states the token is NOT the authorization (that is the device gate) and that the
-// daemon's dedup is the one-shot consume of the batch id.
-const questionAnswerToken = "e2e-1987-answer-token"
+// The refusal driver uses the same remote-attribution vocabulary as the answer driver.
+const wantQuestionSource = "remote"
+const wantQuestionOutcome = "answered"
 
 const questionModelUpdateBudget = 30 * time.Second
 
@@ -55,12 +47,18 @@ func questionAnswerTrigger(nonce int64) string {
 
 func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 	runParallel(t)
-	// The #1154 harness, unchanged except for the model: it pairs the phone WITH
-	// --allow-remote-permissions (questionResolverV2.admit gates on the same
-	// MayAnswerRemotePermission() bit the modal path does), writes the stream-json
-	// toggle, and spawns WITHOUT --dangerously-skip-permissions so claude's tool
-	// call genuinely parks on the approve path.
 	h, convID := startStreamModalResolutionHarness(t, askQuestionCaptureModel)
+	driveSharedQuestionAnswer(t, h, convID)
+}
+
+func TestInteractiveStreamStdioQuestionAnswer(t *testing.T) {
+	runParallel(t)
+	h, convID := startStdioModalResolutionHarness(t, askQuestionCaptureModel)
+	driveSharedQuestionAnswer(t, h, convID)
+}
+
+func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
+	t.Helper()
 	nonce := time.Now().UnixNano()
 
 	// AC 1: a real batch surfaced, and non-vacuous BEFORE anything is answered.
@@ -108,7 +106,7 @@ func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.QuestionAnswerPayload{
 			QuestionBatchID: batch.QuestionBatchID,
-			AnswerToken:     questionAnswerToken,
+			AnswerToken:     "e2e-1987-answer-token",
 			Answers:         entries,
 		}),
 	})
@@ -130,8 +128,6 @@ func TestInteractiveStreamQuestionAnswer(t *testing.T) {
 		t.Errorf("post-question model = %q, want %q after set_model %q", announced.Model, want, targetModel)
 	}
 }
-
-// --- surfacing --------------------------------------------------------------
 
 // raiseRealQuestionBatch asserts a nonempty batch before any answer is sent.
 func raiseRealQuestionBatch(t *testing.T, h *perConvHarness, reqID uint64, convID, triggerPrompt string, prior ...*strings.Builder) protocol.QuestionShownPayload {
@@ -346,4 +342,16 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 			return env
 		}
 	}
+}
+
+// modalScenarioWire leaves encryption and sequence ownership in the live harness.
+func modalScenarioWire(t *testing.T, h *perConvHarness, first uint64) scenario.Wire {
+	t.Helper()
+	sequence := first
+	return scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
+		id := sequence
+		sequence++
+		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: id, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return id
+	}}
 }

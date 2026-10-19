@@ -12,6 +12,23 @@ import (
 	"github.com/pyrycode/pyrycode/internal/history"
 )
 
+func (s *Store) initialPublicationIndex(items []*Item, fold *Fold, headers map[uint64]childHeader) *queryIndex {
+	index := newPublicationIndex(items, s.queryWork)
+	index.prepareCatchUp(fold)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		row, _ := index.lookup(item.ID, true)
+		if header, ok := headers[item.ID]; ok {
+			row.header = header
+		}
+		index.refreshHeader(row, fold.version)
+	}
+	index.compactFrom = fold.version
+	return index
+}
+
 // resumeCheckpoint validates history before permitting generation mutation.
 // Only checkpoint state authorizes epoch reuse or continuation restoration.
 func (s *Store) resumeCheckpoint(ctx context.Context, id conversations.ConversationID, bound uint64, source HistorySource) (*workerCheckpoint, cacheRecord, error) {
