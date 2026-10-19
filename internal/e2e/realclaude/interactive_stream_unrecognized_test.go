@@ -107,6 +107,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // Fixed identifiers for the seeded state, distinct from every sibling in this
@@ -179,15 +181,14 @@ func TestInteractiveStreamNoUnrecognizedOnToolTurn(t *testing.T) {
 	// tool_result blocks rather than text alone. The per-run nonce defeats accidental
 	// caching; the instruction is deliberately mechanical so the turn is short and
 	// the assertion never depends on what claude says.
-	nonce := time.Now().UnixNano()
-	sealSendMessage(t, phone, initSend, 2, unrecognizedConvID, "m-1",
-		fmt.Sprintf("Use the Write tool to create a file called probe.txt containing the single "+
-			"word banana, then use the Read tool to read it back. Reply with one short word. run=%d", nonce))
-
-	// The assertion is inside this drain: it fails on the FIRST unrecognized_message
-	// frame, naming the offending site, type, and raw payload. Reaching the terminal
-	// idle state without one is the pass.
-	drainForCompletedTurn(t, phone, initRecv, unrecognizedConvID, 180*time.Second)
+	sequence := uint64(1)
+	wire := scenariohelpers.Wire{Send: func(kind string, payload any) uint64 {
+		sequence++
+		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return sequence
+	}, Next: scenariohelpers.Receive(t, phone, initRecv)}
+	scenariohelpers.ToolTurn(t, wire, unrecognizedConvID, fmt.Sprintf("Use the Write tool to create a file called probe.txt containing the single "+
+		"word banana, then use the Read tool to read it back. Reply with one short word. run=%d", time.Now().UnixNano()), 180*time.Second)
 
 	t.Log("a full real-claude tool turn produced zero unrecognized_message frames — " +
 		"streamsup.ignoredLineTypes still matches claude's actual output")
