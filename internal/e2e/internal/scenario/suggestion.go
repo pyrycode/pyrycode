@@ -1,0 +1,103 @@
+package scenario
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/protocol"
+)
+
+const NativeSuggestionClearPrompt = "Sounds good, thank you. Reply with a single short sentence."
+
+type NativeSuggestionConfig struct {
+	ConversationID     string
+	Prompts            []string
+	TurnBudget, Window time.Duration
+	CheckNative        func()
+}
+
+func NativeSuggestions(t *testing.T, w Wire, c NativeSuggestionConfig) {
+	t.Helper()
+	sawDelta, idle := false, false
+	var setRev, clearRev uint64
+	observe := func(env protocol.Envelope) {
+		switch env.Type {
+		case protocol.TypeError:
+			t.Fatal("native suggestion turn was refused")
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid suggestion delta")
+			}
+			if p.ConversationID == c.ConversationID && strings.TrimSpace(p.Text) != "" {
+				sawDelta = true
+			}
+		case protocol.TypeTurnState:
+			var p protocol.TurnStatePayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid suggestion turn state")
+			}
+			if p.ConversationID == c.ConversationID && p.State == "idle" && sawDelta {
+				idle = true
+			}
+		case protocol.TypeReplySuggestion:
+			var p struct {
+				ConversationID string          `json:"conversation_id"`
+				Revision       uint64          `json:"revision"`
+				SuggestedReply json.RawMessage `json:"suggested_reply"`
+			}
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid suggestion payload")
+			}
+			if p.ConversationID != c.ConversationID {
+				return
+			}
+			if string(p.SuggestedReply) == "null" {
+				if setRev != 0 && p.Revision > setRev {
+					clearRev = p.Revision
+				}
+				return
+			}
+			var text string
+			if json.Unmarshal(p.SuggestedReply, &text) != nil {
+				t.Fatal("suggestion is neither explicit null nor a string")
+			}
+			if strings.TrimSpace(text) != "" && p.Revision > setRev {
+				setRev = p.Revision
+			}
+		}
+	}
+	pump := func(budget time.Duration, done func() bool) bool {
+		deadline := time.Now().Add(budget)
+		for !done() && time.Now().Before(deadline) {
+			env := w.Next(deadline)
+			if env.Type == "" {
+				break
+			}
+			observe(env)
+		}
+		return done()
+	}
+	for i, prompt := range c.Prompts {
+		if setRev != 0 {
+			break
+		}
+		sawDelta, idle = false, false
+		w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: fmt.Sprintf("native-suggestion-%d", i+1), Text: prompt})
+		if !pump(c.TurnBudget, func() bool { return idle }) {
+			t.Fatal("native suggestion exchange did not complete")
+		}
+		pump(c.Window, func() bool { return setRev != 0 })
+	}
+	if setRev == 0 {
+		t.Fatal("no native suggestion after completed exchanges")
+	}
+	c.CheckNative()
+	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "suggestion-clear", Text: NativeSuggestionClearPrompt})
+	if !pump(c.TurnBudget, func() bool { return clearRev != 0 }) {
+		t.Fatal("native suggestion did not explicitly clear at a higher revision")
+	}
+}

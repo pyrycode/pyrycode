@@ -50,7 +50,7 @@ def load(path=PATH):
         if not re.fullmatch(r'Test[A-Za-z0-9_]+', name):
             raise ValueError('Invalid reviewed test name')
         keys(review, 'disposition reason contract_sha256')
-        if review['disposition'] not in ('candidate', 'needs_checkpoint', 'live_only', 'control') or not isinstance(review['reason'], str) or not review['reason'].strip() or not isinstance(review['contract_sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', review['contract_sha256']):
+        if review['disposition'] not in ('candidate', 'needs_checkpoint', 'needs_harness', 'live_only', 'control') or not isinstance(review['reason'], str) or not review['reason'].strip() or not isinstance(review['contract_sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', review['contract_sha256']):
             raise ValueError('Invalid boundary review')
     return value
 

@@ -146,10 +146,8 @@ package realclaude
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,9 +155,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
-	"github.com/pyrycode/pyrycode/internal/protocol"
-	"github.com/pyrycode/pyrycode/internal/turnevent"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 )
 
 // postureObserverEnv switches on the observer's control_response arm. It is set by
@@ -380,6 +376,7 @@ func TestInteractiveStreamDefaultPostureOutsideWorkspaceRead(t *testing.T) {
 	// The token separates them. It exists only inside a file outside the workspace, so a
 	// reply carrying it is a file that was opened; a silent refusal and a lucky guess
 	// both land here instead. Checked last, so the capture above is already on disk.
+	scenario.RequireReadWitness(t, reply, token)
 	if !readWitnessed {
 		t.Fatalf("the reply does not carry the token that existed only inside %s, so nothing here "+
 			"shows claude opened it — this measures neither an ungated read nor a gated one. "+
@@ -484,12 +481,7 @@ func awaitDefaultPostureAck(t *testing.T, observations <-chan permissionObservat
 // either is one that should never have been held intact. BlockedPath is reduced to its
 // presence for the same reason: whether the field was populated is the finding, and the
 // path itself is claude-authored text this record has no use for.
-type postureProbeModal struct {
-	ToolLabel          string
-	ReasonType         string
-	BlockedPathPresent bool
-	DefaultToNo        bool
-}
+type postureProbeModal = scenario.OutsideReadModal
 
 // driveOutsideWorkspaceRead drains the turn to terminal idle, ANSWERING each permission
 // modal allow_once, and returns the accumulated assistant text, the distinct tool names
@@ -517,145 +509,7 @@ type postureProbeModal struct {
 // here — see outsideReadTurnBudget for why that matters to what its comment claims.
 func driveOutsideWorkspaceRead(t *testing.T, h *perConvHarness, convID string, deadline time.Time, answerEnvID uint64) (string, []string, *postureProbeModal, int) {
 	t.Helper()
-	var (
-		text     strings.Builder
-		tools    []string
-		seenTool = map[string]struct{}{}
-		sawDelta bool
-		first    *postureProbeModal
-		answered int
-	)
-	reqID := answerEnvID
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("no non-empty assistant_delta for %q within %s (modals answered: %d) — the "+
-					"message naming the note never produced a turn, so this run measured nothing",
-					convID, outsideReadTurnBudget, answered)
-			}
-			t.Fatalf("claude replied for %q but the turn never reached terminal turn_state{idle} "+
-				"within %s; %d byte(s) so far, %d modal(s) answered, tools %v",
-				convID, outsideReadTurnBudget, text.Len(), answered, tools)
-		}
-		raw, err := h.phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the Fatalf above
-			}
-			t.Fatalf("phone receive (outside-workspace read): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (outside-workspace read): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) carries no envelope and does
-			// not advance the receive nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (outside-workspace read): %v", err)
-		}
-		plain, err := h.initRecv.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (outside-workspace read): %v", err)
-		}
-
-		switch env.Type {
-		case protocol.TypeError:
-			var ep protocol.ErrorPayload
-			if err := json.Unmarshal(env.Payload, &ep); err != nil {
-				t.Fatalf("the message was refused and its error payload did not decode: %v", err)
-			}
-			t.Fatalf("the message naming the note was refused with code %q (retryable=%v) — the "+
-				"refusal is the daemon's, never claude's, so check the seeded conversation binding "+
-				"before reading anything into it", ep.Code, ep.Retryable)
-
-		case protocol.TypeModalShown:
-			var shown protocol.ModalShownPayload
-			if err := json.Unmarshal(env.Payload, &shown); err != nil {
-				t.Fatalf("decode modal_shown payload: %v", err)
-			}
-			if shown.Class != "permission" || shown.ModalID == "" {
-				t.Fatalf("modal_shown class = %q with modal_id present = %t, want a permission modal "+
-					"with a non-empty id", stdioPermissionSafeLabel(shown.Class), shown.ModalID != "")
-			}
-			if answered >= postureProbeModalCap {
-				t.Fatalf("claude raised more than %d permission modals for %q without reaching idle — "+
-					"it keeps reissuing the tool past the cap despite the prompt's no-retry clause; "+
-					"that is a finding to raise separately, not a cap to widen", postureProbeModalCap, convID)
-			}
-			if first == nil {
-				first = &postureProbeModal{
-					ToolLabel:          stdioPermissionSafeLabel(shown.Title),
-					ReasonType:         stdioPermissionSafeLabel(shown.ReasonType),
-					BlockedPathPresent: shown.BlockedPath != "",
-					DefaultToNo:        shown.DefaultToNo,
-				}
-				t.Logf("#2474: permission modal raised during the outside-workspace read "+
-					"(title=%q, reason_type=%q, default_to_no=%t) — answering allow_once so the read "+
-					"proceeds and the token can still witness it. READ THE TITLE: a modal for some "+
-					"other tool is not this read being gated",
-					first.ToolLabel, first.ReasonType, first.DefaultToNo)
-			}
-			answered++
-			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-				ID:   reqID,
-				Type: protocol.TypeModalAnswer,
-				TS:   time.Now().UTC(),
-				Payload: mustJSON(t, protocol.ModalAnswerPayload{
-					ModalID:  shown.ModalID,
-					OptionID: string(turnevent.PermissionOptionKindAllowOnce),
-					// A client-minted idempotency key, NOT authorization — authorization is
-					// ModalID validity plus the paired device's remote-permission grant.
-					AnswerToken: "e2e-2474-posture-probe",
-				}),
-			})
-			reqID++
-
-		case protocol.TypeToolUse:
-			var p protocol.ToolUsePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode tool_use payload: %v", err)
-			}
-			if p.ConversationID != convID || p.Name == "" {
-				continue
-			}
-			if _, dup := seenTool[p.Name]; dup || len(tools) >= attachReadToolLogCap {
-				continue
-			}
-			// Allowlisted, not merely truncated: these names are claude-authored and
-			// reach a committed capture as well as a failure message.
-			seenTool[p.Name] = struct{}{}
-			tools = append(tools, stdioPermissionSafeLabel(p.Name))
-
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				text.WriteString(p.Text)
-			}
-
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if st.State != "idle" || st.ConversationID != convID || !sawDelta {
-				continue
-			}
-			return text.String(), tools, first, answered
-		}
-	}
+	return scenario.OutsideRead(t, sharedHarnessWire(t, h, answerEnvID), convID, deadline)
 }
 
 // --- fixture ------------------------------------------------------------------
@@ -805,7 +659,10 @@ func (f defaultPostureReadFinding) modalDetail() string {
 // depend on.
 func writeDefaultPostureReadFinding(t *testing.T, h *perConvHarness, rec defaultPostureReadFinding) string {
 	t.Helper()
-	dir := filepath.Join(packageDir(t), "testdata")
+	dir := os.Getenv("PYRY_REALCLAUDE_EVIDENCE_DIR")
+	if dir == "" {
+		dir = filepath.Join(packageDir(t), "testdata")
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir testdata: %v — the finding is this probe's only deliverable and it has "+
 			"nowhere to land", err)

@@ -67,6 +67,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -157,76 +158,19 @@ func TestRealClaudeMCPStatusAndReconnect(t *testing.T) {
 	// boundServerName refuses a name that child does not currently report. One
 	// tool-free turn is enough, and under this harness's downgraded spawn arm a
 	// prompt that touches no tool raises no permission modal to answer.
-	sealSendMessage(t, h.phone, h.initSend, 2, convID, "m-2",
-		"Reply with the single word ready and nothing else. Do not use any tool.")
-	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	scenario.MCPReconnect(t, sharedHarnessWire(t, h, 2), scenario.MCPReconnectConfig{ConversationID: convID, TurnBudget: perTurnReplyBudget, SettleBudget: mcpStatusSettleBudget, StatusBudget: mcpStatusReplyBudget, ReconnectBudget: mcpReconnectReplyBudget, Poll: mcpStatusPoll, Repair: func() {
+		if _, err := os.Lstat(brokenCommand); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the broken command path %q already exists (stat: %v) — the server would not have "+
+				"been broken and this run measured two healthy twins", brokenCommand, err)
+		}
+		if err := os.Symlink(ensurePyryBuilt(t), brokenCommand); err != nil {
+			t.Fatalf("repair the broken server's command: %v", err)
+		}
 
-	reqID := uint64(2)
-	nextReqID := func() uint64 { reqID++; return reqID }
-
-	// AC 1. Poll to readiness first — asserting a single read would redden on
-	// pending, which is what both healthy servers report before they settle.
-	settled := pollMCPStatusUntilHealthy(t, h, convID, nextReqID)
-	broken := requireMCPServerRow(t, settled, mcpReconnectBrokenServer,
-		"the deliberately broken server is missing from the status report; the shim never "+
-			"rewrote the --mcp-config document, or claude dropped the entry instead of reporting it")
-	if broken.Status != mcpStatusFailed {
-		t.Fatalf("broken server %q reports status %q, want %q — the entry the shim planted was "+
-			"supposed to name a command that does not exist, so a status other than failed means "+
-			"the arrangement under test never existed",
-			mcpReconnectBrokenServer, broken.Status, mcpStatusFailed)
-	}
-	if strings.TrimSpace(broken.Error) == "" {
-		t.Fatalf("broken server %q reports %q with an EMPTY error — claude's own text is the half "+
-			"of this measurement the daemon cannot author, so a failed row without it proves nothing",
-			mcpReconnectBrokenServer, mcpStatusFailed)
-	}
-	t.Logf("broken server %q: status=%q scope=%q version=%q error=%q",
-		mcpReconnectBrokenServer, broken.Status, broken.Scope, broken.Version,
-		truncateString(broken.Error, mcpErrorLogCap))
-
-	// Repair: put the built pyry binary where the broken entry points. The entry is
-	// a clone of pyry_files' registration, so the reconnect brings this server up
-	// exactly the way its twin came up. A symlink rather than a copy — it costs no
-	// I/O and execs identically.
-	if _, err := os.Lstat(brokenCommand); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the broken command path %q already exists (stat: %v) — the server would not have "+
-			"been broken and this run measured two healthy twins", brokenCommand, err)
-	}
-	if err := os.Symlink(ensurePyryBuilt(t), brokenCommand); err != nil {
-		t.Fatalf("repair the broken server's command: %v", err)
-	}
-
-	// AC 2. The answer to an accepted actuation is mcpActuatorV2.actuate's SECOND
-	// read, taken after the child acknowledged — never the membership read that
-	// preceded it. That is what makes the changed row attributable to claude.
-	reconnectID := nextReqID()
-	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
-		ID:   reconnectID,
-		Type: protocol.TypeMCPReconnect,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.MCPReconnectPayload{
-			ConversationID: convID,
-			ServerName:     mcpReconnectBrokenServer,
-		}),
-	})
-	after := drainForMCPStatusReply(t, h, reconnectID, mcpReconnectReplyBudget)
-
-	repaired := requireMCPServerRow(t, after, mcpReconnectBrokenServer,
-		"the reconnect's post-acknowledgement report no longer lists the server it reconnected")
-	if repaired.Status == mcpStatusFailed {
-		t.Fatalf("after repairing its command and reconnecting it, server %q still reports %q "+
-			"(error %q) — the reconnect did not reach claude, or claude did not re-run the command",
-			mcpReconnectBrokenServer, repaired.Status, truncateString(repaired.Error, mcpErrorLogCap))
-	}
-	// A one-row or empty frame would satisfy the assertion above vacuously.
-	for _, name := range []string{mcpReconnectApproveServer, mcpReconnectFilesServer} {
-		requireMCPServerRow(t, after, name,
-			"the post-reconnect report dropped one of the daemon's own servers, so it is not the "+
-				"full snapshot the changed row was read from")
-	}
-	t.Logf("after reconnect, server %q: status=%q version=%q (was %q) — the reconnect reached claude",
-		mcpReconnectBrokenServer, repaired.Status, repaired.Version, mcpStatusFailed)
+		// AC 2. The answer to an accepted actuation is mcpActuatorV2.actuate's SECOND
+		// read, taken after the child acknowledged — never the membership read that
+		// preceded it. That is what makes the changed row attributable to claude.
+	}})
 }
 
 // --- harness ----------------------------------------------------------------
@@ -340,52 +284,7 @@ func mcpShimConfigPath(args []string) (string, bool) {
 // match would make every read and actuation refuse. Re-entering on a child respawn
 // is a no-op — the key is already there.
 func mcpShimInjectServer(path, command string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read mcp config: %w", err)
-	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("decode mcp config: %w", err)
-	}
-	var servers map[string]json.RawMessage
-	if err := json.Unmarshal(doc["mcpServers"], &servers); err != nil {
-		return fmt.Errorf("decode mcpServers: %w", err)
-	}
-	if _, done := servers[mcpReconnectBrokenServer]; done {
-		return nil
-	}
-	twin, ok := servers[mcpReconnectFilesServer]
-	if !ok {
-		return fmt.Errorf("mcp config has no %q entry to clone", mcpReconnectFilesServer)
-	}
-	var spec struct {
-		Command string   `json:"command"`
-		Args    []string `json:"args"`
-	}
-	if err := json.Unmarshal(twin, &spec); err != nil {
-		return fmt.Errorf("decode %q entry: %w", mcpReconnectFilesServer, err)
-	}
-	spec.Command = command
-	clone, err := json.Marshal(spec)
-	if err != nil {
-		return fmt.Errorf("encode cloned entry: %w", err)
-	}
-	servers[mcpReconnectBrokenServer] = clone
-	if doc["mcpServers"], err = json.Marshal(servers); err != nil {
-		return fmt.Errorf("encode mcpServers: %w", err)
-	}
-	out, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("encode mcp config: %w", err)
-	}
-	// The daemon created this file at 0600 via os.CreateTemp and it already exists,
-	// so the mode argument is a statement of what must remain true rather than the
-	// mechanism that makes it so.
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return fmt.Errorf("write mcp config: %w", err)
-	}
-	return nil
+	return scenario.InjectMCPReconnectServer(path, command)
 }
 
 // --- reading the status -----------------------------------------------------
