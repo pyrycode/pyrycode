@@ -104,19 +104,17 @@ package realclaude
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -208,90 +206,14 @@ func TestInteractiveStreamModelAnnouncedFrame(t *testing.T) {
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
 
-	// Drive ONE real turn. claude announces the model once per TURN, not once per
-	// session, so the frame is read from inside this turn — nothing is latched and
-	// compared across turns. (If claude also emits an init line at child spawn,
-	// that one lands before the phone has handshaken and before Handle has a
-	// conversation cursor, so it is dropped at the interactive_turn.no_cursor guard
-	// and cannot be what is drained here.) A short deterministic instruction with a
-	// per-run nonce defeats accidental caching; nothing is asserted about the
-	// reply's content.
-	nonce := time.Now().UnixNano()
-	sealSendMessage(t, phone, initSend, 2, announcedConvID, "m-1",
-		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	announced, seen := drainForAnnouncedModel(t, phone, initRecv, announcedConvID, perTurnReplyBudget)
+	sequence := uint64(1)
+	wire := scenariohelpers.Wire{Send: func(kind string, payload any) uint64 {
+		sequence++
+		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		return sequence
+	}, Next: scenariohelpers.Receive(t, phone, initRecv)}
+	scenariohelpers.ModelAnnouncement(t, wire, announcedConvID, fmt.Sprintf("Reply with a single short word. run=%d", time.Now().UnixNano()), announcedSpawnAlias, announcedTargetFor(t, announcedSpawnAlias), perTurnReplyBudget, d.stderr.String)
 
-	// AC-1: the daemon emitted its own frame and a connected client decoded it.
-	// This is the assertion both AC-3 mutants RED.
-	if !seen {
-		t.Fatalf("#1634: the turn completed but the daemon emitted no %s frame — a real claude's "+
-			"announced model never reached a connected client. Either turnbridge.MapEvent has no "+
-			"turnevent.ModelAnnounced case (the event maps to nothing; the daemon logs "+
-			"interactive_turn.unmapped), or interactiveTurnEmitterV2.Handle has no matching case "+
-			"(the event is dropped at the interactive_turn.unknown default). Both log at Debug and "+
-			"this daemon runs verbose, so the stderr above says which.\nstderr:\n%s", protocol.TypeModelAnnounced, d.stderr.String())
-	}
-	t.Logf("#1634: drained %s frame: model=%q truncated=%v conversation_id=%q",
-		protocol.TypeModelAnnounced, announced.Model, announced.Truncated, announced.ConversationID)
-
-	want := announcedTargetFor(t, announcedSpawnAlias)
-
-	// A1 (AC-2 equality) — the frame carries the identifier claude is MEASURED to
-	// resolve the spawn alias to. This is what catches a rewrite, a truncation, a
-	// lowercasing, or a value unrelated to the request.
-	//
-	// A1 and A2 are t.Errorf, never t.Fatalf, so one run reports BOTH colours —
-	// that is the whole point of the pair.
-	if announced.Model != want {
-		t.Errorf("A1: the daemon's %s frame reports model %q after spawning claude with --model %s, want %q.\n"+
-			"If A2 below is GREEN the daemon is fine and the measured inbandModelTargets row is stale for "+
-			"this claude version — the alias resolves elsewhere now. Update the row; do NOT weaken this to "+
-			"a substring match, which would stop testing what AC-2 names.",
-			protocol.TypeModelAnnounced, announced.Model, announcedSpawnAlias, want)
-	}
-
-	// A2 (AC-2 inequality) — the frame is not the bare alias the daemon was spawned
-	// with, so the daemon reports claude's RESOLVED answer rather than echoing its
-	// own request.
-	//
-	// A2 can never be the sole red under A1, and that is not a reason to drop it.
-	// It is the DISCRIMINATOR: when a future claude release changes what the alias
-	// resolves to, A1 goes red and A2's colour says which cause — A2 green means a
-	// stale measured row (update it), A2 red means claude regressed to announcing
-	// the bare alias, which is worth a human look rather than a daemon fix. This is
-	// the same A1/A2 relationship
-	// TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel documents
-	// and maintains; it is a deliberate local pattern, not redundancy.
-	if announced.Model == announcedSpawnAlias {
-		t.Errorf("A2: the daemon's %s frame reports the bare alias %q — the same string the daemon was "+
-			"spawned with, not a resolved identifier.\n"+
-			"The legitimate cause is that claude now announces the bare alias on its init line rather than "+
-			"the specific model it resolved to. That is not a daemon bug: it would mean the daemon can no "+
-			"longer report anything more specific than what it asked for, which is worth a human look "+
-			"before anything here is changed.",
-			protocol.TypeModelAnnounced, announced.Model)
-	}
-
-	// AC-4: the announced value reaches no daemon log at any level.
-	//
-	// Two things make this non-vacuous. First, the drained frame on THIS run is the
-	// control: it proves the value existed and the daemon held it in hand, so a
-	// miss means the log bar held rather than "nothing was observed". Second, the
-	// daemon is spawned with -pyry-verbose, so the haystack is one that would
-	// actually carry a Debug-level leak — the two plausible leak sites both log at
-	// Debug, and at LevelInfo their absence would prove nothing.
-	//
-	// Search for the FRAME'S OWN value, never announcedSpawnAlias: `spawning claude`
-	// logs the argv, which contains `--model haiku`, so searching the alias would
-	// fail on a healthy daemon.
-	daemonLog := d.stderr.String()
-	if idx := strings.Index(daemonLog, announced.Model); idx >= 0 {
-		t.Errorf("#1634: the announced model %q appears in the daemon's own debug-level stderr at offset %d — "+
-			"the #833 posture regressed (restated on handleRequestSessionSettings and across internal/relay's "+
-			"v2session_settings.go and internal/sessions' pool.go: the value reaches an event and a wire frame, "+
-			"and still reaches no daemon LOG at any level).\ncontext: %q",
-			announced.Model, idx, logContextAround(daemonLog, idx, len(announced.Model)))
-	}
 }
 
 // announcedTargetFor returns the identifier the package's MEASURED
@@ -421,90 +343,5 @@ func spawnBootstrapDaemonVerbose(t *testing.T, home, workdir, claudeBin, relayUR
 // that one is the turn boundary.
 func drainForAnnouncedModel(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) (protocol.ModelAnnouncedPayload, bool) {
 	t.Helper()
-	var (
-		announced protocol.ModelAnnouncedPayload
-		seen      bool
-		sawDelta  bool
-	)
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the turn never drained "+
-					"end-to-end (delivery never reached the child, or the parser / drain gate / emitter dropped it — "+
-					"most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)", convID, timeout)
-			}
-			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
-				"the turn opened but never closed", convID, timeout)
-		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the milestone-specific t.Fatalf above
-			}
-			t.Fatalf("phone receive (announced drain): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (announced drain): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) does not advance the
-			// receive nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (announced drain): %v", err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (announced drain): %v", err)
-		}
-		switch env.Type {
-		case protocol.TypeModelAnnounced:
-			if seen {
-				continue
-			}
-			var p protocol.ModelAnnouncedPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode model_announced payload: %v", err)
-			}
-			announced, seen = p, true
-			t.Logf("captured %s for conversation %q", protocol.TypeModelAnnounced, p.ConversationID)
-		case protocol.TypeAssistantDelta:
-			if sawDelta {
-				continue
-			}
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			// M1: liveness — a non-empty streamed delta for the driving conv. No
-			// content/echo assertion (real claude's words are non-deterministic).
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
-			}
-		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			// M2: after the delta, the terminal idle state closes the turn — return
-			// whatever announcement the turn carried, including none.
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("M2: terminal turn_state{idle} for %q — the turn closed (model_announced seen: %v)", convID, seen)
-				return announced, seen
-			}
-		}
-	}
+	return scenariohelpers.AnnouncedTurn(t, scenariohelpers.Receive(t, phone, cs), convID, timeout)
 }

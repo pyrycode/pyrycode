@@ -5,7 +5,7 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Seven scenarios run the same assertions in live capture and offline replay:
+Eleven scenarios run the same assertions in live capture and offline replay:
 
 - `two-turn`: two separately accepted user messages each produce nonempty text
   followed by terminal idle in the correct conversation. Wording is unrestricted.
@@ -51,6 +51,28 @@ Seven scenarios run the same assertions in live capture and offline replay:
   Exactly one durable cancel fact must retain the asking session. Live capture
   and the original live gate also require the denied file to be absent. Replay
   cannot establish actual filesystem effects or elapsed provider time.
+
+- `send-now-placement`: the original foreground Bash trigger starts a busy turn;
+  the client queues the marker text, takes its surfaced queued identity and sends
+  it now. The single arrival log must contain one turn end and one exact user
+  push after the matching Bash result and before final assistant text containing
+  the marker, no parser gaps, and an empty final queue. The three-second late-frame
+  window also rejects delayed duplicate messages or extra turn ends. Both live
+  and recorded callers use this same driver. Real Bash execution, current Claude
+  interpretation and elapsed provider time remain live proof.
+
+- `model-announced`: one text turn must expose the exact resolved Haiku model,
+  distinct from the spawn alias, in an owned announcement; the observed value
+  must be absent from the verbose daemon log. Nonempty reply and terminal idle
+  are both required. Current provider resolution remains live proof.
+- `model-rejection`: read a complete current menu with no dropped rows or truncated
+  values, derive an absent model, and reject the correlated settings update as
+  non-retryable `protocol.malformed`, including its co-submitted effort/posture.
+  A fresh turn must still announce the original model and reach terminal idle.
+- `tool-turn-clean`: the original Write/Read trigger and completed-turn drain keep
+  parser-gap and unknown-rate-status alarms. Owned matching Write and Read
+  use/result pairs make the sample non-vacuous in live capture and replay.
+  Real filesystem effects and newly introduced provider shapes remain live.
 
 `make e2e` includes these cases in the ordinary offline integration selection.
 `make e2e-recorded-claude` runs just the recorded suite. Missing fixtures fail; nothing
@@ -113,7 +135,8 @@ replay and strict outgoing request comparison. Comparison binds observed control
 IDs by producer direction and ordinal; it retains complete ordered requests.
 Different provider wording and accounting do not themselves fail this comparison.
 Changed user choices, commands, recovery steps and request payloads do. Every
-stage must execute all seven named leaves with no failures or skips. A failing stage
+stage must execute every selected named leaf with no failures or skips; default
+selection includes the full manifest. A failing stage
 cannot produce a successful compatibility summary, even if the others passed.
 Verification never replaces the reviewed baseline.
 
@@ -134,6 +157,10 @@ preship remains unchanged, and dispatcher routing is unchanged.
 | Three-turn memory continuity | None in this batch | Actual Claude context retention |
 | Question refusal | `question-refuse`, same refusal drain and history checks | Unpredictable question labels, blocked Write absence and actual provider refusal behavior |
 | Permission cancellation | `permission-cancel`, same cancellation/history checks | Denied-file absence, real parked-completer timing and current stdio behavior |
+| Model announcement | `model-announced`, same first-announcement/reply/idle and verbose-log assertions | Current alias resolution and provider behavior |
+| Absent-model rejection | `model-rejection`, same complete-menu/rejection/retained-model driver | Current advertised menu and provider interpretation |
+| Tool-turn parser sample | `tool-turn-clean`, same completed-turn alarms plus owned Write/Read round trips | Actual filesystem effects and current provider line vocabulary |
+| Send-now queued placement | `send-now-placement`, same queue/action/order driver | Actual foreground Bash execution, current Claude interpretation and elapsed/settle time |
 | Permission allow/deny | `permission-allow` and `permission-deny`, same resolution/history drivers | Actual file creation/absence, current approval transport and settings-respawn behavior |
 
 The recorded question trigger supplies a complete fixed AskUserQuestion input so
@@ -144,7 +171,7 @@ The compatibility comparator does not scrub provider prose or loosen request
 comparison for these cases. Dismissal and terminal idle may arrive in either order;
 both are required after the matching continuation.
 
-Next candidates are queue actions, further model-control messages and thread
+Next candidates are ordinary queued placement, further model-control messages and thread
 folding. Each must preserve its
 original assertions and account for all external inputs before promotion.
 Crash/restart, session files, real tool effects, signal handling, transport
@@ -162,3 +189,144 @@ and idle in either order, but cannot pass with an unresolved sent decision. Allo
 still needs text before idle; deny and refusal retain their original ability to
 finish silently. Retry caps remain four permission retries, two re-asked questions
 and four post-refusal permission allows.
+
+## Batch migration tooling
+
+`internal/e2e/testdata/claude-scenarios.json` is the shared source of scenario
+names, stdio configuration, explicit bootstrap Claude arguments, original live
+owners, retained live obligations and
+named batches. Both the Go tests and Python runner read it. A driver without a
+manifest entry, an entry without an implemented driver, an empty/unknown/duplicate
+selection, or missing/extra/duplicate/skipped execution evidence fails. Default
+selection remains every scenario; normal `make e2e` and `make check` retain all
+recorded coverage. A selected batch never narrows the full regression gate.
+
+```sh
+python3 scripts/daemon-recordings.py inventory
+python3 scripts/daemon-recordings.py plan --batch queue
+python3 scripts/daemon-recordings.py replay --batch permissions --output /outside/new/replay-reports
+python3 scripts/daemon-recordings.py capture --scenario permission-cancel --output /outside/new/capture
+python3 scripts/daemon-recordings.py batch --batch all --agents-repo /path/to/pyrycode-agents --output /outside/new/batch
+```
+
+`batch` audits the manifest, performs fresh capture, committed replay, fresh
+replay and strict request comparison, then runs `make check-common` **once for
+the entire selected group**, its mapped live test roots once, the complete
+201-cut restoration proof once, and citation/documentation guards once. Live
+roots and restoration cuts are counted from Go JSON events: exit zero, skipped
+cases or an empty run cannot substitute for evidence. Failed stages stop later
+gates and retain their reports and private logs. The summary records source
+revision, manifest identity, individual stages, selected cases and retained live
+obligations. Every fresh producer must match the pinned clean source revision;
+changing HEAD or leaving source changes during gates fails completion. The
+existing shared host admission launcher serializes expensive stages and its
+inherited descriptor is preserved. Set `AGENTS_REPO_PATH` or use `--agents-repo`
+for a checkout where the sibling agents repository is elsewhere. Provider
+credentials and `CLAUDE_CONFIG_DIR` are removed for replay/offline gates.
+
+### Inventory counts and review boundaries
+
+The standard-library Go AST reader enumerates declarations and package-function
+references, including callbacks passed as function values; Go build expressions
+are evaluated rather than inferred from filenames or a line-prefix regex. The
+Python analysis reports possible paths to configured provider prerequisites or
+literal Claude executable calls, process-helper entries, and entries with no
+known provider path. **No known path is not an offline-safety proof.** Methods,
+dynamic dispatch and external packages are not type-resolved; findings are
+conservative source evidence, not executed acceptance or automatic eligibility.
+Diagnostic probe environment gates are names only, never values.
+
+Reviewed manifest dispositions distinguish shared replay assertions, candidates,
+checkpoint work and live-only proof. Everything else remains explicitly
+unreviewed. Counts of recorded scenarios, shared live entrypoints, static test
+declarations and remaining eligibility reviews are separate; the total eligible
+migration count stays unknown until reviewed. No live requirement is retired.
+
+Review fingerprints include reachable package function bodies plus conservative
+package declaration/method context and the imported shared assertion source.
+Changing a timeout constant, model table, harness global or shared assertion
+invalidates the review as well as changing a function. Inventory reports stale
+reviews, and plan/scaffold/batch refuse to proceed. A maintainer reviews the new
+boundary and records the new digest from inventory; the tooling never silently
+refreshes its own approval metadata. Context is deliberately conservative and
+can require re-review after an unrelated declaration change.
+
+### Generate a reviewable proposal
+
+```sh
+python3 scripts/daemon-recordings.py scaffold \
+  --name send-now-placement \
+  --live-test TestRealClaude_SendQueuedNowPlacement \
+  --retained-live 'Actual Bash execution and elapsed/settle time remain live' \
+  --output /outside/new/proposal
+```
+
+This creates a Go registry adapter, manifest fragment with current source
+fingerprints, and a review checklist in a new directory outside the checkout.
+The adapter calls `t.Fatal` until the shared driver is implemented. It is a
+proposal, never counted as a migrated scenario. It refuses unsafe names, missing
+live owners/obligations, already-owned or live-only entries, and existing output
+directories. Use `--stdio-permission` when the reviewed scenario requires that
+configuration. Review the actual spawn/bypass settings and all external-input
+checkpoints rather than inferring them from the generated stub.
+
+After implementing the shared driver and merging its manifest entry, commit clean
+source, capture the named candidates into a new directory, inspect their privacy,
+provenance and complete inputs, then commit the inspected fixtures and run the
+batch workflow. Capture never overwrites a baseline and neither scaffolding nor
+batching removes or retags a live test. Semantic assertion mapping, physical/time
+witnesses and candidate promotion remain explicit code-review work.
+
+### Send-now input checkpoint
+
+The send-now tape is accepted for capture or replay only if its exact queued
+text appears once on daemon stdin after the first Bash tool-use start and before
+that tool's matching result on stdout. Partial tool-use starts and complete
+assistant blocks are correlated by tool-use ID. This is the causal boundary that
+holds fast replay while the client queues and accelerates the message; a delay
+or recorded timestamp cannot substitute for it. Controls reject early, late,
+missing, duplicated, foreign and output-only substitutes for that input.
+
+The manifest preserves the original live harness's explicit `--model haiku
+--dangerously-skip-permissions` bootstrap arguments. This operator bypass is
+needed for the foreground Bash call to run without a permission modal. All
+previous scenarios retain empty extra arguments. Every supplied settings,
+system-prompt and MCP configuration file is captured and compared; the bypass
+spawn has settings and system prompt but no approval MCP file. Missing a file
+from an existing tape's input inventory still fails replay and fresh comparison.
+The recorded receive adapter returns an empty envelope only on the deadline,
+preserving the shared driver's late-frame window and transport failures.
+
+The live send-now test still supplies a fresh run nonce. Recorded requests use a
+fixed run suffix so their complete stdin contracts remain comparable; the shell
+command, marker and all queue/order assertions are unchanged. The ordinary-queue
+live test uses the extracted classifier with its original assertions intact.
+Ordinary queue admission does not itself write Claude stdin, so its separate
+client-action checkpoint requirement remains unresolved and it is not migrated.
+
+### Three-scenario protocol batch
+
+`--batch basic-protocol` groups `model-announced`, `model-rejection` and
+`tool-turn-clean`. Implement and check each shared driver with focused controls,
+then capture and review the three candidates together. After committing only the
+new inspected fixtures, run the batch once: fresh capture and per-case contract
+comparisons, one full offline regression, one mapped live selection containing
+all three original roots, one 201-cut restoration and one guard invocation.
+The full offline gate still exercises every manifest scenario. All eight earlier
+fixtures remain unchanged; no live tests are removed or retagged.
+
+These cases need no queue checkpoint or process-lifecycle support. Announcement
+and tool-turn spawns retain the live explicit Haiku/operator-bypass arguments;
+model rejection keeps Haiku with normal approval configuration. Live prompts keep
+fresh nonces, while recorded prompts use fixed run suffixes. Model-menu retry
+counts are not provider requests: complete ordered daemon stdin still faces the
+existing exact comparison. A changed provider menu that changes a submitted model
+or another request must fail compatibility and be reviewed.
+
+Extracting the announcement drain also affects existing family-alias consumers.
+The helper retains its first-announcement, owned nonempty text and terminal-idle
+milestones. Each new announcement consumer additionally requires the announcement
+itself to belong to the driving conversation. Controls reject missing or wrong
+models, alias echoes, foreign attribution, log leaks, incomplete menus, wrong
+request correlation, retryable/wrong rejection codes, changed post-rejection
+models, missing/foreign tool results and parser/rate-limit alarms.
