@@ -297,7 +297,12 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	digest, tapes, err := claudetape.AuditLifecycleArtifacts(home, name, revision, sourceSHA, config.DaemonSHA256, true)
 	if err != nil || digest != receipt.ArtifactSHA256 {
-		t.Fatal("lifecycle role evidence changed during original cleanup")
+		for _, role := range profile.Roles {
+			var terminal claudetape.LifecycleReceipt
+			readErr := claudetape.ReadLifecycleControl(filepath.Join(children, role+".receipt"), 16384, &terminal)
+			t.Logf("lifecycle terminal role=%s readable=%t success=%t frames=%d", role, readErr == nil, terminal.Success, terminal.Frames)
+		}
+		t.Fatalf("lifecycle role evidence changed during original cleanup: audit=%v digest_matches=%t", err, digest == receipt.ArtifactSHA256)
 	}
 	if mode == "capture" {
 		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes}

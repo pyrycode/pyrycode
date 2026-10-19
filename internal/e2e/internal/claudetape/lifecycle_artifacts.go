@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -103,7 +104,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			}
 			v, e := read(prefix+suffix, limit, suffix != ".receipt")
 			if e != nil {
-				return "", nil, e
+				return "", nil, fmt.Errorf("lifecycle role %s artifact %s unreadable: %w", role, suffix, e)
 			}
 			values[suffix] = v
 		}
@@ -146,7 +147,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		for _, suffix := range receipts {
 			var receipt LifecycleReceipt
 			if !decode(values[suffix], &receipt) || !receipt.Success || receipt.Error != "" || receipt.Frames != len(tape.Tape.Frames) || receipt.OwnerPID != c.OwnerPID || receipt.BrokerPID != brokerPID {
-				return "", nil, fail
+				return "", nil, fmt.Errorf("lifecycle role %s artifact %s invalid terminal receipt", role, suffix)
 			}
 		}
 		if end != "seal" {
@@ -164,7 +165,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 	}
 	children, e := os.ReadDir(filepath.Join(home, "recording-children"))
 	if e != nil || len(children) != len(expectedFiles) {
-		return "", nil, fail
+		return "", nil, errors.New("lifecycle child artifact inventory changed")
 	}
 	for _, entry := range children {
 		if !expectedFiles[entry.Name()] {
