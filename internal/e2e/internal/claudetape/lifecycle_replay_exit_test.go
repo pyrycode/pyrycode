@@ -17,6 +17,13 @@ func TestLifecycleReplayAfterProviderExit(t *testing.T) {
 	for _, variant := range []string{"held-eofs", "early-eofs", "live-exhausted", "changed-input", "partial-input", "missing-input", "foreign-action", "missing-action", "terminal-rejected"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
+			t.Cleanup(func() {
+				var d LifecycleDiagnostic
+				if ReadLifecycleControl(filepath.Join(root, "diagnostic.json"), 16384, &d) == nil {
+					raw, _ := json.Marshal(d)
+					t.Logf("terminal diagnostic=%s", raw)
+				}
+			})
 			c := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "replay", Scenario: "session-rotation-bootstrap", Path: filepath.Join(root, "tape.json"), Claim: filepath.Join(root, "claim"), Finish: filepath.Join(root, "finish")}, BrokerParentPID: os.Getpid(), End: "rotate-session", Kill: filepath.Join(root, "action"), Deadline: time.Now().Add(15 * time.Second)}
 			query := `{"type":"control_request","request_id":"final","request":{"subtype":"get_context_usage"}}`
 			responses := []string{`{"type":"control_response","response":{"request_id":"final","subtype":"success"}}`, `{"type":"system","subtype":"status","status":"idle"}`}
