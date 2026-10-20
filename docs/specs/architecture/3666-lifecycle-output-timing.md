@@ -104,3 +104,41 @@ Full module and complete acceptance gates belong to the verifier/dispatcher.
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-20
+
+## Revisions
+
+### 2026-10-20 — measured completion work consumes captured output gaps
+
+Diagnostic-only source `ad4c8b1fe0671a6f33d07d9e36807c2e14ff5a78`
+reproduced both originals. Bare output 21 was 107056170 ns late; prompted output
+20 was 106920991 ns late. Active-switch outputs 21 and 18 were 109860659 and
+121002554 ns late. All failed before waiting, with user anchor 1. The immediately
+preceding output completion validation took 29–43 ms, repeatedly exceeding the
+roughly 20 ms captured output gaps. Input observation was at most 25.6 ms and
+input-witness work was zero for these profiles. Startup work was before readiness.
+Raw logs and original root events are under `/tmp/builder-3666/`.
+
+`NewConversationCompletionObserver` calls `completedConversationExchange` after
+every frame. That repeatedly invokes `FallbackExchanges`, full tape validation,
+safety scans and production parsing on the growing prefix. Only a native result
+can establish successful completion. Keep collecting every actual forwarded frame,
+but derive the exchange only after a stdout result. Keep the complete derivation,
+publication and final independent audit; malformed or failed results still cannot
+complete. No epoch, schedule or tolerance changes.
+
+Add a private constructor with an injected derivation function for the controlled
+clock regression `TestConversationCompletionPreservesOutputSchedule`: charge 35 ms
+for a real full-prefix derivation while replaying a 20 ms output cadence. The old
+observer must miss its deadline; result-boundary derivation must keep every due
+time and publish the same independently validated completion. Existing missing,
+failed, foreign and repeated-publication controls remain required in both modes.
+This adds `conversation_settlement.go` and `conversation_settlement_test.go` to
+Files read and the touched surface. #3665 concerns session-clear EOF/action
+completion, not this conversation observer; no branch dependency was found.
+
+Revised size: approximately 400 written lines, one exported diagnostic type,
+two receipt consumers, four acceptance criteria, no new state-machine rejects.
+Security pass remains PASS: result header inspection is only a cheap admission
+guard; full source validation still decides whether publication is authorized.
+No frame data is added to diagnostics. Resolve the open timing question above
+with this measured cause and verify the unchanged originals after repair.
