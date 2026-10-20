@@ -70,3 +70,8 @@ One repair and its regression: approximately 300 written lines including this pl
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+- 2026-10-20: Shared admission held the first regression invocation for over fifteen minutes with zero test events; that queued process was explicitly terminated (exit 143, not a test result). Preserve the exact `bf0e9346b6c25ee9395a022c6b8bc17efe40079e` test files in a Go overlay for the expected-red check, without bypassing admission. This separates source preservation from subsequent edits. The implementation still follows observation of the expected failure.
+- 2026-10-20: The exact overlay failed 1/0/1/0, returning an empty witness after one read. The repair adds a readiness predicate to the common polling helper, so the regression supplies its existing complete-PID assertion as the predicate; generic execution-marker waits retain their old contract. The foreground predicate also calls `RequireForegroundWitness`. Added empty, partial and foreign PID rejection controls. This confirms the ordering defect without identifying the historical rejection branch.

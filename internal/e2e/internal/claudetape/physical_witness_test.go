@@ -60,7 +60,7 @@ func TestPhysicalForegroundWitnessWaitsForPublication(t *testing.T) {
 			}
 		}
 		return raw, err
-	})
+	}, func(raw []byte) bool { return string(raw) == fmt.Sprintf("%d\n", cmd.Process.Pid) })
 	if string(raw) != fmt.Sprintf("%d\n", cmd.Process.Pid) || reads < 2 {
 		t.Fatalf("foreground readiness returned incomplete witness %q after %d reads", raw, reads)
 	}
