@@ -316,6 +316,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		})
 	}
+	var launchAudit *claudetape.FallbackLaunchAudit
+	if name == "session-resume" {
+		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary)
+		defer launchAudit.Stop()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "tool", "test2json", "-t", "-p", "daemon-recording", binary, "-test.v", "-test.run=^"+regexp.QuoteMeta(profile.Root)+"$", "-test.timeout=20m")
@@ -341,6 +346,13 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
 		t.Fatal(err)
+	}
+	if launchAudit != nil {
+		defer func() {
+			if err := launchAudit.Save(filepath.Join(evidenceDir, name+"-launch-audit.json")); err != nil {
+				t.Errorf("cannot retain launch audit: %v", err)
+			}
+		}()
 	}
 	evidence, err := os.OpenFile(filepath.Join(evidenceDir, name+"-"+mode+".jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -497,7 +509,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			t.Fatal(err)
 		}
 	}
-	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes)
+	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes, launchAudit)
 	if err != nil {
 		destination := filepath.Join(evidenceDir, name+"-invalid-worker-diagnostic.json")
 		if diagnosticErr := claudetape.SaveLifecycleWorkerDiagnostic(home, name, destination, tapes); diagnosticErr == nil {

@@ -664,7 +664,7 @@ func ValidateLifecycleWorkers(scenario string, roles map[string]*LifecycleTape, 
 // ReadLifecycleWorkers closes the complete private attempt inventory after the
 // original daemon cleanup. Every attempt must have an actual broker receipt and
 // matching production Wait/status observation; unknown or partial attempts fail.
-func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, parent int, roles map[string]*LifecycleTape) (workers []LifecycleWorker, resultErr error) {
+func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, parent int, roles map[string]*LifecycleTape, audits ...*FallbackLaunchAudit) (workers []LifecycleWorker, resultErr error) {
 	stage := "private-root"
 	defer func() {
 		if resultErr != nil {
