@@ -1,16 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/attachments"
 	"github.com/pyrycode/pyrycode/internal/canonicalpath"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
@@ -98,6 +102,7 @@ func fileAttacher(
 	convReg *conversations.Registry,
 	live func(sessions.SessionID) error,
 	instanceDir string,
+	record func(conversationID, sessionID, attachmentID, filename string) error,
 	announce func(conversationID, attachmentID, filename string),
 	log *slog.Logger,
 ) func(sessionID, path string) (string, error) {
@@ -164,6 +169,13 @@ func fileAttacher(
 		stored, err := attachments.Store(dir, filepath.Base(resolved), data)
 		if err != nil {
 			return "", errAttachStoreFailed
+		}
+
+		// Publish durably before announcing success. A raw live offer is not authoritative thread content.
+		if record != nil {
+			if err := record(string(conv.ID), sessionID, string(id), filepath.Base(stored)); err != nil {
+				return "", errAttachStoreFailed
+			}
 		}
 
 		// The only log line on any path, and the only two values in this whole
@@ -347,4 +359,26 @@ func readChecked(resolved string, checked os.FileInfo, maxBytes int64) ([]byte, 
 		return nil, errAttachTooLarge
 	}
 	return data, nil
+}
+
+// attachmentOfferRecorder uses the daemon's existing history store even when no relay is configured.
+func attachmentOfferRecorder(store *history.Store, harnessFor func(sessions.SessionID) (string, error)) func(string, string, string, string) error {
+	return func(conversationID, sessionID, attachmentID, filename string) error {
+		kind, err := harnessFor(sessions.SessionID(sessionID))
+		if err != nil || (kind != "claude" && kind != "codex") {
+			return errAttachNoSession
+		}
+		raw, err := json.Marshal(protocol.AttachmentOfferedPayload{ConversationID: conversationID, AttachmentID: attachmentID, Filename: filename})
+		if err != nil {
+			return errAttachStoreFailed
+		}
+		shown := true
+		_, err = store.AppendWithMetadata(conversations.ConversationID(conversationID), protocol.TypeAttachmentOffered, raw, time.Now().UTC(), history.Metadata{
+			Session: &history.SessionProvenance{Kind: kind, SessionID: sessionID}, Shown: &shown,
+		})
+		if err != nil {
+			return errAttachStoreFailed
+		}
+		return nil
+	}
 }

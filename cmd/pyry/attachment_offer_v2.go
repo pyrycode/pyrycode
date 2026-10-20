@@ -29,14 +29,10 @@ import (
 // capability gate, a monotonic envelope id, and a push loop that tolerates a
 // torn-down conn.
 //
-// LIVE-ONLY, and this is the one place it differs from modal_shown. There is no
-// outstanding-offer registry and no connect-time replay: a client that was
-// disconnected when a file landed is never told about it. modal_shown has
-// modalbridge.Snapshot because an unanswered approval BLOCKS claude and must be
-// re-raised; an offer blocks nothing, so the registry would buy a growing
-// daemon-side store of claude-authored strings and nothing else. Recorded in
-// docs/protocol-mobile.md § Attachments so a client author does not wait for a
-// replay that never comes.
+// The raw announcement is live-only. fileAttacher persists the same offer in the
+// existing conversation history before calling this emitter. Thread-capable clients
+// recover its authoritative notice through ordinary thread queries; this emitter
+// keeps the legacy raw-frame contract and owns no second offer store.
 //
 // SECURITY: no log line here carries the filename, on any branch. It is
 // claude-authored, and docs/protocol-mobile.md § Attachments bans logging a
@@ -126,8 +122,7 @@ func (e *attachmentOfferEmitterV2) announce(conversationID, attachmentID, filena
 			}
 			// A conn that closed between the snapshot above and this push, which
 			// Push answers with the ErrConnNotFound sentinel. Logged and skipped,
-			// never fatal — and there is no re-sync path to mention, unlike
-			// modal_shown's: the offer is live-only by design.
+			// never fatal. The saved thread offer remains recoverable independently.
 			e.logger.Debug("relay: attachment-offer push dropped",
 				"event", "attachment_offer.push_err",
 				"conversation_id", conversationID,
