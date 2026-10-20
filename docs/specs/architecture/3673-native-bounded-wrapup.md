@@ -82,3 +82,11 @@ Pending documentation stage: update `docs/testing/daemon-recordings.md`, “Sess
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+2026-10-20, capture retention: publish the reviewed-candidate paths `internal/e2e/realclaude/testdata/clear-wrapup-skipped-native.json`, `internal/e2e/realclaude/testdata/clear-wrapup-skipped-native-root.json` and `internal/e2e/realclaude/testdata/clear-wrapup-skipped-native-suite.json` only after successful native root, outer audit and complete validated observations. Durable originals remain under `/tmp/pyry-3673-native-*` with `driver-counts.json` and `clear-wrapup-skipped-capture.jsonl`. The missing broker fixture arms capture; a present but incomplete or mismatched trio fails. The builder must recover and review all three with their source hashes before replay changes, rather than rely on files surviving a gate checkout.
+
+Historical recovery verified all 160 witnesses pinned by the original index with zero missing/mismatched hashes; 161 files including the index are copied under `/tmp/builder-3673/historical`. This adds availability evidence only. Native timing and the repair contract remain open pending the dispatcher capture.
+
+The managed launcher rejects the ticket's double-anchored subtest expression. The supported `^TestRecordedClaude/clear-wrapup-skipped$` selects the same recorded scenario (and the sibling startup control); retain actual counts and both selector outcomes. No timing, input matching or settlement behavior changes in this pass.

@@ -422,7 +422,16 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
 	}
+	if c.Process.Mode == "capture" && c.Process.Scenario == "clear-wrapup-skipped" && job.Role == "bound" {
+		job.Config.Observation = claudetape.NewWrapUpObservation(poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256)
+	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
+	if observation := job.Config.Observation; observation != nil {
+		observation.Add("complete", nil, e)
+		if err := observation.Save(wrapUpEvidencePath(t, "clear-wrapup-skipped-bound-native.json")); err != nil && e == nil {
+			e = err
+		}
+	}
 	if physical != nil {
 		if err := physical.Close(); err != nil && e == nil {
 			e = err

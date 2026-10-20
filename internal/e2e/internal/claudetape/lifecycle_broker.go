@@ -100,6 +100,7 @@ type LifecycleBrokerConfig struct {
 	BeforeOutput     func([]byte) error        `json:"-"`
 	BeforeSeal       func(*Tape) error         `json:"-"`
 	OnFailure        func(*LifecycleTape, int) `json:"-"`
+	Observation      *WrapUpObservation        `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -213,6 +214,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return 0, fail
 	}
 	_ = originals[6].Close()
+	c.Observation.Add("ready", nil, nil)
 	frames, total := 0, 0
 	sealed := false
 	actionAccepted := false
@@ -300,6 +302,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
 	accept := func(direction string, raw []byte) error {
+		if direction == "stdin" {
+			c.Observation.Add("received", raw, nil)
+		}
 		if direction == "stdout" && observeAction != nil {
 			if err := observeAction(); err != nil {
 				return err
@@ -364,7 +369,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 		}
 		if err := write(target, append(raw, '\n')); err != nil {
+			if direction == "stdin" {
+				c.Observation.Add("forwarded", raw, err)
+			}
 			return err
+		}
+		if direction == "stdin" {
+			c.Observation.Add("forwarded", raw, nil)
+		} else {
+			c.Observation.Add("output", raw, nil)
 		}
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
@@ -450,6 +463,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			if n == 0 {
 				*eof = true
+				switch direction {
+				case "stdin":
+					c.Observation.Add("stdin_eof", nil, nil)
+				case "stdout":
+					c.Observation.Add("stdout_eof", nil, nil)
+				case "stderr":
+					c.Observation.Add("stderr_eof", nil, nil)
+				}
 				if direction == "stdin" {
 					_ = originals[3].Close()
 				}
@@ -512,6 +533,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
+		c.Observation.Add("action", nil, nil)
 		return nil
 	}
 	finish := func() (int, error) {
