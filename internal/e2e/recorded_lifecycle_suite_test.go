@@ -51,6 +51,18 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	sourceSum := sha256.Sum256(sourceBytes)
 	sourceSHA := hex.EncodeToString(sourceSum[:])
 	home := shortHome(t)
+	retained := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE")
+	if retained == "" {
+		retained, err = os.MkdirTemp("", "pyry-lifecycle-evidence-")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	retained = filepath.Join(retained, name+"-broker")
+	if err := os.MkdirAll(retained, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("lifecycle broker evidence=%s revision=%s source_binary_sha256=%s", retained, revision, sourceSHA)
 	process := claudetape.PoolProcessConfig{Mode: mode, Scenario: name, Home: home, WorkDir: filepath.Join(home, "work"), Path: filepath.Join(dir, name+".json"), Claim: filepath.Join(home, "claim"), Finish: filepath.Join(home, "finish")}
 	switch mode {
 	case "capture":
@@ -112,6 +124,18 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	daemonSum := sha256.Sum256(daemonBytes)
+	fixtureBytes, err := os.ReadFile(process.Path)
+	if err != nil && mode == "replay" {
+		t.Fatal("cannot identify reviewed fixture")
+	}
+	fixtureSHA := ""
+	if err == nil {
+		fixtureSum := sha256.Sum256(fixtureBytes)
+		fixtureSHA = hex.EncodeToString(fixtureSum[:])
+	}
+	t.Cleanup(func() {
+		retainLifecycleWitnesses(t, home, retained, name, revision, sourceSHA, hex.EncodeToString(daemonSum[:]), fixtureSHA)
+	})
 	t.Logf("lifecycle source=%s helper_sha256=%s daemon_sha256=%x scenario=%s mode=%s", revision, sourceSHA, daemonSum, name, mode)
 	if mode == "capture" {
 		info, err := buildinfo.ReadFile(daemon)
@@ -236,6 +260,12 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			return nil, os.ErrInvalid
 		}
 		cmd := exec.Command(binary, "-test.run=^TestLifecycleTapeBrokerProcess$", "--", jobPath)
+		diagnostic, err := os.OpenFile(filepath.Join(retained, job.Role+".diagnostic.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { _ = diagnostic.Close() })
+		cmd.Stdout = diagnostic
 		cmd.Env = os.Environ()
 		if mode == "replay" {
 			cmd.Env = recordedPoolOfflineEnv()
@@ -353,7 +383,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	evidenceDir := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE")
 	if evidenceDir == "" {
-		evidenceDir = home
+		evidenceDir = filepath.Dir(retained)
 	}
 	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
 		t.Fatal(err)

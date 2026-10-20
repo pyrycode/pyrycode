@@ -465,6 +465,11 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 	if c.Process.Mode == "capture" && c.Process.Scenario == "clear-wrapup-skipped" && job.Role == "bound" {
 		job.Config.Observation = claudetape.NewWrapUpObservation(poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256)
 	}
+	job.Config.OnDiagnostic = func(d claudetape.LifecycleDiagnostic) {
+		if json.NewEncoder(os.Stdout).Encode(d) != nil {
+			os.Exit(2)
+		}
+	}
 	var mcp *claudetape.MCPRecordingSession
 	if claudetape.MCPScenario(c.Process.Scenario) {
 		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
