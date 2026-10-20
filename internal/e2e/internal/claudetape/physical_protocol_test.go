@@ -1,8 +1,10 @@
 package claudetape
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,7 +149,11 @@ func TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease(t 
 	physicalProtocolJSON(t, p, physicalProtocolStart("background-tool", "background-task"))
 	physicalProtocolJSON(t, p, map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "The controlled background task started."})
 	beforeContext := len(p.facts)
-	if p.BeforeInput([]byte(`{"type":"control_request","request_id":"native-context-after-setup","request":{"subtype":"get_context_usage"}}`)) != nil || len(p.facts) != beforeContext || len(p.controlIDs) != 0 || !p.operations[0].owned.Running() || !p.setupCompleted {
+	var contextRequest bytes.Buffer
+	if err := streamsup.WriteContextUsage(&contextRequest, "native-context-after-setup", "summary"); err != nil {
+		t.Fatal(err)
+	}
+	if p.BeforeInput(contextRequest.Bytes()) != nil || len(p.facts) != beforeContext || len(p.controlIDs) != 0 || !p.operations[0].owned.Running() || !p.setupCompleted {
 		t.Fatal("automatic context request changed physical proof")
 	}
 	physicalProtocolArm(t, p, "composer-foreground")
@@ -177,7 +183,7 @@ func TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease(t 
 	}
 }
 func TestPhysicalProtocolRejectsUnownedOrPrematureEvidence(t *testing.T) {
-	for _, kind := range []string{"foreign-task", "terminal-before-stop", "omission-before-stop", "duplicate-tool", "child-tool", "malformed-parent", "duplicate-task", "changed-tool-join", "extra-control-selector", "context-usage-selector", "abort", "post-close"} {
+	for _, kind := range []string{"foreign-task", "terminal-before-stop", "omission-before-stop", "duplicate-tool", "child-tool", "malformed-parent", "duplicate-task", "changed-tool-join", "extra-control-selector", "context-usage-selector", "context-usage-detail", "abort", "post-close"} {
 		t.Run(kind, func(t *testing.T) {
 			p, _, release := physicalProtocolStopRig(t)
 			defer release()
@@ -215,7 +221,13 @@ func TestPhysicalProtocolRejectsUnownedOrPrematureEvidence(t *testing.T) {
 			case "extra-control-selector":
 				err = p.BeforeInput([]byte(`{"type":"control_request","request_id":"stop","request":{"subtype":"stop_task","task_id":"held-task","pid":1}}`))
 			case "context-usage-selector":
-				err = p.BeforeInput([]byte(`{"type":"control_request","request_id":"context","request":{"subtype":"get_context_usage","task_id":"held-task"}}`))
+				err = p.BeforeInput([]byte(`{"type":"control_request","request_id":"context","request":{"subtype":"get_context_usage","detail":"summary","task_id":"held-task"}}`))
+			case "context-usage-detail":
+				var request bytes.Buffer
+				if err := streamsup.WriteContextUsage(&request, "context-full", "full"); err != nil {
+					t.Fatal(err)
+				}
+				err = p.BeforeInput(request.Bytes())
 			case "abort":
 				ctx, cancel := context.WithCancel(context.Background())
 				p.ctx = ctx
