@@ -183,7 +183,7 @@ func ReadWrapUpObservationJSON(path string, limit int, value any) error {
 }
 
 func openWrapUpObservation(path string, expected os.FileInfo, limit int) (*os.File, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, errors.New("invalid native observation file")
 	}
