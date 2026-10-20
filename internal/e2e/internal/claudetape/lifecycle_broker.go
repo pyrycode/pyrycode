@@ -117,6 +117,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		diagnostic.Frames = count
 		diagnostic.ErrorClass = lifecycleErrorClass(resultErr)
 		diagnostic.Completed = resultErr == nil
+		if diagnostic.Completed {
+			diagnostic.Stage = "complete"
+		}
 		if c.OnDiagnostic != nil {
 			c.OnDiagnostic(diagnostic)
 		}
@@ -353,12 +356,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			diagnostic.InputsMatched++
 			frames++
-			// Consume through the stand-in's pipe as well: closure and the owned PID
-			// have real process semantics even though provider responses are replayed.
-			if e = write(originals[3], append(raw, '\n')); e != nil {
-				diagnostic.Stage = "forward-provider-input"
-				return e
-			}
+			// Matched tape responses are independent of the stand-in's stdin.
+			// Its owned lifetime and both output EOFs still gate completion.
 			recordTimelineInput(normalized)
 			if e := observeCompletion("stdin", normalized); e != nil {
 				return e
@@ -399,6 +398,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		if direction == "stdin" {
 			diagnostic.ProviderInputsForwarded++
+		} else {
+			diagnostic.OutputsDelivered++
 		}
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
@@ -645,6 +646,12 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			diagnostic.Stage = "authorize-end"
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
+			}
+			// The daemon can write its final recorded query after provider exit.
+			// An open input stream is not evidence of incomplete replay yet.
+			if player != nil && player.next < len(player.tape.Frames) && !inputEOF {
+				time.Sleep(5 * time.Millisecond)
+				continue
 			}
 			return finish()
 		}
