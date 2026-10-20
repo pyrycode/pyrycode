@@ -95,10 +95,11 @@ type LifecycleBrokerConfig struct {
 	BrokerParentPID  int
 	Deadline         time.Time
 	End, Kill, Abort string
-	OnSeal           func(int) error    `json:"-"`
-	OnInput          func([]byte) error `json:"-"`
-	BeforeOutput     func([]byte) error `json:"-"`
-	BeforeSeal       func(*Tape) error  `json:"-"`
+	OnSeal           func(int) error           `json:"-"`
+	OnInput          func([]byte) error        `json:"-"`
+	BeforeOutput     func([]byte) error        `json:"-"`
+	BeforeSeal       func(*Tape) error         `json:"-"`
+	OnFailure        func(*LifecycleTape, int) `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -147,6 +148,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return 0, fail
 	}
 	var tape *LifecycleTape
+	defer func() {
+		if resultErr != nil && tape != nil && c.OnFailure != nil {
+			c.OnFailure(tape, count)
+		}
+	}()
 	var player *Player
 	if c.Mode == "capture" {
 		version := 1

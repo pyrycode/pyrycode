@@ -405,3 +405,25 @@ func validateLifecycleWorkerSource(scenario, role string, sequence int, tape *Ta
 	}
 	return ValidatePhysicalFallbackSource(contract.Declarations[sequence-1].Spec, input, source)
 }
+
+// PhysicalFailedCapture is private, failed observation evidence only. It is not
+// a LifecycleSuite and is never accepted by DecodeLifecycleSuite or promotion.
+// The broker's completed normalized frames include the rejecting continuation.
+// No arbitrary paths, native stderr or operator environment enter this record.
+type PhysicalFailedCapture struct {
+	Kind, Scenario, Revision, SourceBinarySHA256 string
+	Frames                                       int
+	Tape                                         *Tape
+}
+
+func RetainPhysicalFailedCapture(path string, c LifecycleBrokerConfig, source string, tape *LifecycleTape, frames int) error {
+	if c.Mode != "capture" || !lifecycleFrameTimeline(c.Scenario) || path != strings.TrimSuffix(c.Path, ".json")+".failed-native" || tape == nil || tape.Tape == nil {
+		return errors.New("unowned failed physical capture")
+	}
+	value := PhysicalFailedCapture{Kind: "failed-unpromotable-native-observation-v1", Scenario: c.Scenario, Revision: c.Producer.Revision, SourceBinarySHA256: source, Frames: frames, Tape: tape.Tape}
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw) > MaxBytes || safeCLIJSON(raw) != nil {
+		return errors.New("unsafe failed physical observation")
+	}
+	return PublishLifecycleControl(path, value)
+}

@@ -416,6 +416,9 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			}
 			return physical.Input(actual)
 		}
+		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) {
+			_ = claudetape.RetainPhysicalFailedCapture(prefix+".failed-native", job.Config, c.SourceBinarySHA256, tape, frames)
+		}
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
 	}

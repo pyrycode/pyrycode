@@ -359,3 +359,21 @@ func TestPhysicalOperationContextAbortPreservesOwnershipUntilClose(t *testing.T)
 		t.Fatal("aborted wait claimed a physical completion")
 	}
 }
+
+func TestPhysicalProgressCannotSupplyTerminalOrOutliveActualStop(t *testing.T) {
+	p, _, release := physicalProtocolStopRig(t)
+	defer release()
+	physicalProtocolJSON(t, p, physicalProtocolStart("hold-tool", "held-task"))
+	physicalProtocolJSON(t, p, physicalProtocolRoster("held-task"))
+	physicalProtocolJSON(t, p, map[string]any{"type": "system", "subtype": "task_updated", "task_id": "held-task", "patch": map[string]string{"status": "running"}})
+	if !p.operations[0].owned.Running() || p.operations[0].terminalSeen {
+		t.Fatal("running progress changed actual operation or supplied terminal proof")
+	}
+	if p.BeforeInput([]byte(`{"type":"control_request","request_id":"stop","request":{"subtype":"stop_task","task_id":"held-task"}}`)) != nil {
+		t.Fatal("current stop")
+	}
+	raw, _ := json.Marshal(map[string]any{"type": "system", "subtype": "task_updated", "task_id": "held-task", "patch": map[string]string{"status": "running"}})
+	if p.BeforeOutput(raw) == nil {
+		t.Fatal("native progress claimed a running operation after actual Wait9")
+	}
+}

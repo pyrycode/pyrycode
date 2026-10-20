@@ -390,6 +390,16 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				t.Logf("daemon helper role=%s success=%t frames=%d error=%q", role, r.Success, r.Frames, r.Error)
 			}
 		}
+		if mode == "capture" && claudetape.PhysicalFamily(name) != "" {
+			var failed claudetape.PhysicalFailedCapture
+			path := filepath.Join(children, "bootstrap.failed-native")
+			if claudetape.ReadLifecycleControl(path, claudetape.MaxBytes, &failed) == nil && failed.Kind == "failed-unpromotable-native-observation-v1" && failed.Scenario == name+"-bootstrap" && failed.Revision == revision && failed.SourceBinarySHA256 == sourceSHA {
+				destination := filepath.Join(evidenceDir, name+"-failed-unpromotable-native.json")
+				if claudetape.PublishLifecycleControl(destination, failed) == nil {
+					t.Log("failed native observation retained privately; supplies no fixture coverage")
+				}
+			}
+		}
 		t.Fatalf("original daemon assertions failed: mode=%s root=%s runs=%d passed=%d; private evidence=%s", mode, profile.Root, runs, passed, evidence.Name())
 	}
 	var receipt struct {

@@ -215,6 +215,13 @@ func (p *PhysicalReplayProtocol) BeforeOutput(raw []byte) error {
 				}
 				status = patch.Status
 			}
+			if status == "running" {
+				if !operation.running() || operation.stopped || operation.completed || operation.terminalSeen {
+					return p.reject()
+				}
+				// This is progress only. It cannot satisfy a terminal assertion.
+				continue
+			}
 			if status != "" {
 				if p.requireTerminal(operation, status) != nil {
 					return p.reject()

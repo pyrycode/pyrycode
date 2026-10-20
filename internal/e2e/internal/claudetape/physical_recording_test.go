@@ -1,7 +1,9 @@
 package claudetape
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,5 +139,41 @@ func TestPhysicalReplayProjectionRequiresActualWaitLabelsAndStatus(t *testing.T)
 	got, err := physicalNativeFacts([]PhysicalProtocolFact{{Kind: "actual-stop_task", Status: &FallbackWorkerStatus{ExitCode: -1, Signal: 9}}}, "replay")
 	if err != nil || len(got) != 1 || got[0].Kind != "native-stop_task-request-observed" || got[0].Status != nil {
 		t.Fatal("closed actual-to-native projection", err)
+	}
+}
+
+func TestPhysicalFailedCaptureIsPrivateExclusiveAndUnpromotable(t *testing.T) {
+	home := physicalControlHome(t)
+	if os.Mkdir(filepath.Join(home, "recording-children"), 0700) != nil {
+		t.Fatal("private children")
+	}
+	path := filepath.Join(home, "recording-children", "bootstrap.json")
+	config := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "capture", Scenario: "stop-background-task-bootstrap", Path: path, Producer: Producer{Revision: strings.Repeat("a", 40)}}}
+	_, tape := physicalRecordingControl(t)
+	failed := &LifecycleTape{Tape: tape}
+	diagnostic := strings.TrimSuffix(path, ".json") + ".failed-native"
+	if RetainPhysicalFailedCapture(diagnostic, config, strings.Repeat("b", 64), failed, 6) != nil {
+		t.Fatal("failed observation retention")
+	}
+	info, err := os.Lstat(diagnostic)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("failed observation is not private")
+	}
+	if RetainPhysicalFailedCapture(diagnostic, config, strings.Repeat("b", 64), failed, 6) == nil {
+		t.Fatal("failed observation overwritten")
+	}
+	if RetainPhysicalFailedCapture(path, config, strings.Repeat("b", 64), failed, 6) == nil {
+		t.Fatal("failed observation published as native fixture")
+	}
+	raw, err := os.ReadFile(diagnostic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeLifecycleSuite(bytes.NewReader(raw), []string{"bootstrap"}); err == nil {
+		t.Fatal("failed native diagnostic promoted as coverage")
+	}
+	var stored PhysicalFailedCapture
+	if ReadLifecycleControl(diagnostic, MaxBytes, &stored) != nil || stored.Kind != "failed-unpromotable-native-observation-v1" || stored.Frames != 6 || len(stored.Tape.Frames) != len(tape.Frames) {
+		t.Fatal("failed evidence lost the actual rejecting observation")
 	}
 }
