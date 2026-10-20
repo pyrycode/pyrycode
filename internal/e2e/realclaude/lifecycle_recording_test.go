@@ -212,9 +212,19 @@ func waitLifecycleReceipt(t *testing.T, path string) claudetape.LifecycleReceipt
 }
 func finishLifecycleRecording(t *testing.T) {
 	t.Helper()
+	started := time.Now()
+	// Observe entry without repeating the expensive executable validation.
+	var observed lifecycleRecordingConfig
+	if claudetape.ReadLifecycleControl(os.Getenv("PYRY_LIFECYCLE_RECORDING_CONFIG"), 16384, &observed) == nil && observed.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, observed, "finish-entry", started)
+	}
 	c, ok := lifecycleRecordingCurrent(t)
 	if !ok || t.Failed() {
 		return
+	}
+	if c.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, c, "config-validated", started)
+		defer observeResumeSeal(t, c, "finish-return", started)
 	}
 	settleLifecycleRecording(t, c)
 	profile := claudetape.LifecycleProfiles()[c.Process.Scenario]
@@ -241,12 +251,18 @@ func finishLifecycleRecording(t *testing.T) {
 	if daemonRecordingWrite(c.Process.Finish, struct{}{}) != nil {
 		t.Fatal("lifecycle prefix seal repeated")
 	}
+	if c.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, c, "finish-published", started)
+	}
 	for _, role := range profile.Roles {
 		if claudetape.LifecycleSeals(claudetape.LifecycleEnd(c.Process.Scenario, role)) {
 			_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", role+".prefix"))
 		}
 	}
 	digest, _, e := claudetape.AuditLifecycleArtifacts(c.Process.Home, c.Process.Scenario, poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256, c.BrokerParentPID, false)
+	if c.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, c, "prefix-audited", started)
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -426,6 +442,17 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		}
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
+	}
+	job.Config.OnTerminalState = func(input, output, diagnostic, sealed bool) {
+		if c.Process.Scenario == "session-resume" && os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE") != "" {
+			path := filepath.Join(os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE"), "session-resume-"+job.Role+"-terminal.json")
+			if daemonRecordingWrite(path, struct {
+				OwnerPID, BrokerPID                    int
+				InputEOF, OutputEOF, StderrEOF, Sealed bool
+			}{job.Config.OwnerPID, os.Getpid(), input, output, diagnostic, sealed}) != nil {
+				os.Exit(2)
+			}
+		}
 	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
 	if physical != nil {
