@@ -420,6 +420,7 @@ type LifecycleJob struct {
 	Daemon, Socket, SourceBinarySHA256       string
 }
 type LifecycleReceipt struct {
+	Timing                      *LifecycleTimingError `json:",omitempty"`
 	Success                     bool
 	Frames, OwnerPID, BrokerPID int
 	Error                       string `json:",omitempty"`
