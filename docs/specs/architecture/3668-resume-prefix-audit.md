@@ -219,3 +219,32 @@ verification and final dispatcher build remain pending.
   per-process source digest/error and continued per-call expected identity check.
 - Pending documentation stage: distinguish live sealing, inventory sampling and
   later audit return; preserve historical failures and observation limits.
+
+### 2026-10-20 — demonstrated reset boundary and merged repair reuse
+
+Diagnostic source `2a92758960ef2838909fddf5180a6163422753dc` reproduced the
+original reset failure in `/tmp/builder-3668/clear-observed/`. Its terminal record
+identifies `input-forward` / `broken-pipe`, frames 82, player cursor 83, accepted
+rotation and absent owner 273894 (broker 273941). This is the strict fixture's
+final context request, before its released response was forwarded. All EOF flags
+were false and remain unobserved at this return. The original root observed the
+reset transition at 10:29:30.205526682 UTC, then failed successor recall. The
+initial merged-source replay passed; neither it nor historical hashing timing
+establishes a causal scheduling guarantee. Host load was approximately 7–10.
+
+While investigating, #3672 landed in main as `147b5a59`. Read its committed plan,
+`RunLifecycleBroker` repair, exact regression and evidence: it fixes this same
+demonstrated replay-only forwarding defect. Integrate main rather than duplicate
+that independently reviewed repair. Strict replay matching releases responses
+without writing to the non-provider stand-in; real owned termination, both output
+EOFs, exact inputs/actions, terminal checks and inventory remain mandatory.
+Capture still rejects real forwarding errors. Keep the resume cache intact.
+
+Use `TestLifecycleReplayAfterProviderExit` and its rejection arms from main,
+including held independent EOFs and killed/reaped owner before the final query.
+Reintroduce only the former replay pipe write in a scratch overlay to demonstrate
+the held-EOF regression failing at that boundary, then test the unmodified merged
+source and both original replays. Reuse main's richer terminal diagnostic and
+retention rather than retain redundant progress plumbing. No new repair behavior
+or regression implementation is needed; final written work remains below 800.
+Security review stays PASS under the existing private evidence and EOF authority.
