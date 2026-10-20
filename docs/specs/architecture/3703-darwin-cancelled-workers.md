@@ -143,3 +143,10 @@ exchange distinctions, historical attribution limits, and offline versus live pr
   contract: `proc_listchildpids` takes buffer bytes but returns a PID count,
   unlike the former raw syscall's byte count. `sample` now bounds and slices
   using that count; full buffers remain unknown. The failed check is retained.
+- 2026-10-20: Cleanup implementation detail: the daemon uses a pollable duplicate
+  of its control pipe with the existing 15-second deadline, rather than a worker
+  context callback. This serializes cancellation with the sole worker Wait and
+  bounds readiness and post-Wait control reads. The parent retains its existing
+  20-second command context and five-second evidence deadline. The root waits for
+  its daemon without a competing cancellation callback that could kill the owner
+  before it retires its worker. No new goroutine or expanded timer is introduced.
