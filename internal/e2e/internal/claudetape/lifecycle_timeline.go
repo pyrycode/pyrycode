@@ -17,7 +17,7 @@ type LifecycleTimeline struct {
 const lifecycleTimelineKind = "provider-ready-stdout-v1"
 
 func lifecycleTimelineEnabled(scenario string) bool {
-	return scenario == "session-resume-bootstrap" || scenario == "conversation-system-prompt-bare" || scenario == "conversation-system-prompt-bootstrap" || scenario == "conversation-system-prompt-prompted"
+	return scenario == "conversation-active-switch-bootstrap" || scenario == "conversation-active-switch-created-1" || scenario == "conversation-active-switch-created-2" || scenario == "session-resume-bootstrap" || scenario == "conversation-system-prompt-bare" || scenario == "conversation-system-prompt-bootstrap" || scenario == "conversation-system-prompt-prompted"
 }
 func validateLifecycleTimeline(tape *LifecycleTape) error {
 	fail := errors.New("invalid native output timeline")

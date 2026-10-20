@@ -559,7 +559,7 @@ func ConnectFallbackWorker(socket, job string, env []string) (FallbackWorkerStat
 }
 
 func LifecycleWorkerLimit(scenario string) int {
-	if scenario == "session-resume" || scenario == "conversation-system-prompt" {
+	if scenario == "session-resume" || scenario == "conversation-system-prompt" || scenario == "conversation-active-switch" {
 		return 2
 	}
 	return 0

@@ -46,7 +46,7 @@ func lifecycleRecordingPromptSeeds(t *testing.T, home string) {
 		}
 	}
 }
-func lifecycleRecordingPromptRole(c lifecycleRecordingConfig, session string) (claudetape.LifecycleRoleBinding, error) {
+func lifecycleRecordingMappedRole(c lifecycleRecordingConfig, session string) (claudetape.LifecycleRoleBinding, error) {
 	for _, role := range claudetape.LifecycleProfiles()[c.Process.Scenario].Roles {
 		b, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, role)
 		if err != nil {

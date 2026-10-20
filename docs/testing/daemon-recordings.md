@@ -889,3 +889,15 @@ own source exchange, actual owned process group, complete native output/EOF and
 original production Wait status. Zero observed workers is a literal count, not an
 optional worker policy. Current Claude instruction following and physical prompt
 composition remain retained live obligations.
+
+
+`conversation-active-switch` uses the same closed three-role transport for the
+original active-switch liveness root. Both created roles come from the original
+phone create acknowledgements and persisted registry, not invented sessions.
+The audit rejects a duplicate session or conversation across those roles and the
+bootstrap. The original send to A, observed A streaming reply, send to B and
+observed B streaming reply remain unchanged. Captured output schedules preserve
+the native overlap, and every actual finite suggestion worker still requires its
+own completed source turn and actual production Wait. Current provider startup
+and streaming remain retained live checks. The `conversation-isolation` batch
+groups this root with per-conversation system-prompt isolation for one full gate.

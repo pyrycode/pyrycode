@@ -90,6 +90,13 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if !decode(raw, &b) || !validLifecycleRoleBinding(home, scenario, role, b) {
 			return "", nil, fail
 		}
+		if scenario == "conversation-active-switch" {
+			for _, prior := range bindings {
+				if b.SessionID == prior.SessionID || b.ConversationID == prior.ConversationID {
+					return "", nil, fail
+				}
+			}
+		}
 		bindings[role] = b
 	}
 	expectedFiles := map[string]bool{}

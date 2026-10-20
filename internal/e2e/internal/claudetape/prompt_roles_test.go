@@ -68,7 +68,8 @@ func TestPromptRolesRejectSwappedPersistedIdentity(t *testing.T) {
 	}
 }
 
-func TestPromptArtifactAuditJoinsAllThreeRoles(t *testing.T) {
+func testThreeRoleArtifactAudit(t *testing.T, suite *LifecycleSuite, active bool) {
+	t.Helper()
 	home := t.TempDir()
 	for _, dir := range []string{"recording-children", "recording-roles", "work"} {
 		if os.Mkdir(filepath.Join(home, dir), 0700) != nil {
@@ -82,13 +83,18 @@ func TestPromptArtifactAuditJoinsAllThreeRoles(t *testing.T) {
 			t.Fatal("write")
 		}
 	}
-	suite := promptSuiteControl()
 	daemon, socket := filepath.Join(home, "pyry"), filepath.Join(home, "socket")
 	write(filepath.Join(home, "finish"), struct{}{})
 	write(filepath.Join(home, "recording-endpoint.json"), map[string]string{"Daemon": daemon, "Socket": socket})
 	bindings := map[string]LifecycleRoleBinding{
 		"bare":     {Role: "bare", SessionID: "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", ConversationID: "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb", WorkDir: filepath.Join(home, "work")},
 		"prompted": {Role: "prompted", SessionID: "aaaaaaaa-2222-4222-8222-aaaaaaaaaaaa", ConversationID: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", WorkDir: filepath.Join(home, "work")},
+	}
+	if active {
+		bindings = map[string]LifecycleRoleBinding{
+			"created-1": {Role: "created-1", SessionID: "11111111-1111-4111-8111-111111111111", ConversationID: "22222222-2222-4222-8222-222222222222", WorkDir: filepath.Join(home, "work")},
+			"created-2": {Role: "created-2", SessionID: "33333333-3333-4333-8333-333333333333", ConversationID: "44444444-4444-4444-8444-444444444444", WorkDir: filepath.Join(home, "work")},
+		}
 	}
 	for role, b := range bindings {
 		write(filepath.Join(home, "recording-roles", role+".json"), b)
@@ -120,10 +126,30 @@ func TestPromptArtifactAuditJoinsAllThreeRoles(t *testing.T) {
 	if err != nil || before != after {
 		t.Fatal("three-role cleanup rejected", err)
 	}
-	foreign := bindings["bare"]
-	foreign.SessionID = bindings["prompted"].SessionID
-	write(filepath.Join(home, "recording-roles", "bare.json"), foreign)
+	first, second := LifecycleProfiles()[suite.Scenario].Roles[1], LifecycleProfiles()[suite.Scenario].Roles[2]
+	foreign := bindings[first]
+	foreign.SessionID = bindings[second].SessionID
+	write(filepath.Join(home, "recording-roles", first+".json"), foreign)
 	if _, _, err := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, 0, true); err == nil {
 		t.Fatal("foreign persisted role accepted")
 	}
+}
+
+func TestPromptArtifactAuditJoinsAllThreeRoles(t *testing.T) {
+	testThreeRoleArtifactAudit(t, promptSuiteControl(), false)
+}
+func TestLifecycleActiveSwitchJoinsIndependentCreatedRoles(t *testing.T) {
+	s := promptSuiteControl()
+	s.Scenario = "conversation-active-switch"
+	s.Roles["created-1"] = s.Roles["bare"]
+	s.Roles["created-2"] = s.Roles["prompted"]
+	delete(s.Roles, "bare")
+	delete(s.Roles, "prompted")
+	for role, tape := range s.Roles {
+		tape.Tape.Scenario = s.Scenario + "-" + role
+	}
+	if s.Validate(LifecycleProfiles()[s.Scenario].Roles) != nil {
+		t.Fatal("valid active-switch suite")
+	}
+	testThreeRoleArtifactAudit(t, s, true)
 }

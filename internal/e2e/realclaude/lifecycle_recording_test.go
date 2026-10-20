@@ -116,6 +116,20 @@ func lifecycleRecordingRegisterConversation(t *testing.T, conv string) {
 		t.Fatal("cannot validate lifecycle conversation ownership")
 	}
 	role := daemonRecordingRole{Role: "created-1", ConversationID: conv}
+	if c.Process.Scenario == "conversation-active-switch" {
+		var prior claudetape.LifecycleRoleBinding
+		path := filepath.Join(c.Process.Home, "recording-roles", "created-1.json")
+		if _, err := os.Lstat(path); err == nil {
+			var e error
+			prior, e = claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, "created-1")
+			if e != nil || prior.ConversationID == conv {
+				t.Fatal("active switch repeated or foreign first conversation")
+			}
+			role.Role = "created-2"
+		} else if !os.IsNotExist(err) {
+			t.Fatal("active switch role inventory unreadable")
+		}
+	}
 	for _, row := range registry.Conversations {
 		if row.ID == conv {
 			if role.SessionID != "" {
@@ -127,7 +141,7 @@ func lifecycleRecordingRegisterConversation(t *testing.T, conv string) {
 	if role.SessionID == "" || role.SessionID == claudetape.LifecycleBootstrapSession || role.WorkDir != filepath.Join(c.Process.Home, "work") {
 		t.Fatal("lifecycle conversation lacks its independent session")
 	}
-	if daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-roles", "created-1.json"), role) != nil {
+	if daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-roles", role.Role+".json"), role) != nil {
 		t.Fatal("additional lifecycle conversation")
 	}
 }
@@ -272,8 +286,8 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 		}
 	}
 	var role claudetape.LifecycleRoleBinding
-	if c.Process.Scenario == "conversation-system-prompt" {
-		role, e = lifecycleRecordingPromptRole(c, session)
+	if c.Process.Scenario == "conversation-system-prompt" || c.Process.Scenario == "conversation-active-switch" {
+		role, e = lifecycleRecordingMappedRole(c, session)
 		if e != nil {
 			fail()
 		}

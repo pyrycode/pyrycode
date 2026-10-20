@@ -14,6 +14,7 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
+		"conversation-active-switch": {"TestInteractivePerConversationLiveness_ActiveSwitch", []string{"bootstrap", "created-1", "created-2"}},
 		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bootstrap", "bare", "prompted"}},
 		"conversation-lifecycle":     {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
 		"session-rotation":           {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
@@ -46,7 +47,7 @@ func LifecycleBootstrapFor(scenario string) string {
 		return bootstrap
 	}
 	switch scenario {
-	case "conversation-lifecycle", "conversation-system-prompt":
+	case "conversation-lifecycle", "conversation-system-prompt", "conversation-active-switch":
 		return LifecycleBootstrapSession
 	case "session-rotation":
 		return LifecycleRotationSession
@@ -57,6 +58,10 @@ func LifecycleBootstrapFor(scenario string) string {
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "conversation-active-switch":
+		if role == "bootstrap" || role == "created-1" || role == "created-2" {
+			return "seal"
+		}
 	case "conversation-system-prompt":
 		if role == "bare" || role == "bootstrap" || role == "prompted" {
 			return "seal"
@@ -216,7 +221,7 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 			return err
 		}
 	}
-	if s.Scenario == "conversation-system-prompt" {
+	if s.Scenario == "conversation-system-prompt" || s.Scenario == "conversation-active-switch" {
 		for _, role := range profile.Roles {
 			if s.Roles[role].Timeline == nil {
 				return fail

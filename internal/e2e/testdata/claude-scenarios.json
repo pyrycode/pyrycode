@@ -1203,6 +1203,23 @@
       "retained_live": [
         "Current Claude instruction following and physical per-session prompt-file composition remain live. Replay runs the original positive and negative marker reply assertions and original per-session prompt-file assertions against three separately owned native process roles; complete literal prompt files, launch arguments and ordered user inputs remain strict. Actual finite fallback attempts and status remain mandatory and source-derived."
       ]
+    },
+    {
+      "name": "conversation-active-switch",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractivePerConversationLiveness_ActiveSwitch"
+      ],
+      "live_contracts": {
+        "TestInteractivePerConversationLiveness_ActiveSwitch": "a5cc4b0514028f17fd724becbbb3591a664f49bb154c177f55584bdf519a2954"
+      },
+      "retained_live": [
+        "Current Claude startup and live streaming remain retained. Replay runs the original two wire-created conversations and both per-conversation streaming liveness assertions against independent native process roles. Actual persisted session/conversation identities, complete prompt/settings files, ordered inputs, provider output schedules and every observed finite fallback attempt/status remain strict."
+      ]
     }
   ],
   "batches": {
@@ -1363,6 +1380,13 @@
     ],
     "conversation-system-prompt": [
       "conversation-system-prompt"
+    ],
+    "conversation-active-switch": [
+      "conversation-active-switch"
+    ],
+    "conversation-isolation": [
+      "conversation-system-prompt",
+      "conversation-active-switch"
     ]
   },
   "reviews": {
@@ -1685,11 +1709,6 @@
       "disposition": "control",
       "reason": "Re-execs with both credential variables empty and asserts fixture skips/help text. It never launches real Claude.",
       "contract_sha256": "0c23e9178beead430ab6177a1e4a0f13b1228243824ee7d09f7ccd8a9bab8af8"
-    },
-    "TestInteractivePerConversationLiveness_ActiveSwitch": {
-      "disposition": "needs_harness",
-      "reason": "Dynamic active switching also launches an independent fallback-suggestion print process. Requires complete print argv, EOF, causal input binding and cancellation recording; current prototype rejects that unowned invocation. Original live root remains unchanged.",
-      "contract_sha256": "a5cc4b0514028f17fd724becbbb3591a664f49bb154c177f55584bdf519a2954"
     }
   }
 }
