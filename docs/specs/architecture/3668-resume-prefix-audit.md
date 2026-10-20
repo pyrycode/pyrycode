@@ -123,6 +123,19 @@ test2json line fragmentation. Revised estimate remains below 650 written lines,
 zero exported types, at most four consumers and no additional state-machine
 reject branches.
 
+The exact-inventory diagnostic on still-unrepaired source
+`48693437f019eab136d5a8eccaee81b3fc772e3f` reproduced the second symptom
+(`/tmp/builder-3668/observed-exact/`). At finish entry, idle-eviction count was
+one and resumed owner 197256/broker 197292 were present. Configuration validation
+consumed 0.884 seconds. At finish publication (0.888 seconds), the successful
+prefix existed with no terminal receipt and exact names. At prefix-audit return
+(1.830 seconds), eviction count was two, the owner was absent, and the only extra
+name was `resumed.receipt`, successful with matching owner/broker identities.
+Independent broker terminal state confirmed real stdout/stderr EOF after sealing.
+Thus the liveness and extra-inventory failures are two stages of the same
+activation-timer race, not independently repairable publication causes. The
+synchronized regression failed 2/2, zero skips, on the uncached implementation.
+
 ## Security review
 
 **Verdict:** PASS
