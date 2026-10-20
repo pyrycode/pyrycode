@@ -39,6 +39,16 @@ func TestWrapUpObservationKinds(t *testing.T) {
 	if o.Save(path) == nil {
 		t.Fatal("observation overwrote existing evidence")
 	}
+	if os.Chmod(path, 0644) != nil || ReadWrapUpObservationJSON(path, 16384, &restored) != nil || restored.Validate(false) != nil {
+		t.Fatal("reviewed fixture mode rejected")
+	}
+	link := path + ".link"
+	if os.Symlink(path, link) != nil {
+		t.Fatal("cannot create rejection control")
+	}
+	if ReadWrapUpObservationJSON(link, 16384, &restored) == nil {
+		t.Fatal("symlink fixture accepted")
+	}
 }
 
 func TestWrapUpObservationValidation(t *testing.T) {

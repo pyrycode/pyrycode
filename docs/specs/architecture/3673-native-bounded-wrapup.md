@@ -92,3 +92,5 @@ Historical recovery verified all 160 witnesses pinned by the original index with
 The managed launcher rejects the ticket's double-anchored subtest expression. The supported `^TestRecordedClaude/clear-wrapup-skipped$` selects the same recorded scenario (and the sibling startup control); retain actual counts and both selector outcomes. No timing, input matching or settlement behavior changes in this pass.
 
 Capture provenance also logs only source revision and helper/daemon SHA-256 values from `runRecordedLifecycleSuite`, so a failed replay retains binary identity after its private home and helper executable are removed.
+
+Focused publication control exposed that `PublishLifecycleControl` requires a 0700 parent, while repository `testdata` and `testing.TempDir` need not have that mode. Reviewed Git files also become 0644 on checkout. Use a separate observation-only atomic exclusive publisher and bounded no-symlink JSON reader for sanitized diagnostic fixtures. Keep private authorization-control readers and directory requirements unchanged. Add publication/round-trip, overwrite and symlink controls; diagnostic files still cannot authorize any lifecycle event.

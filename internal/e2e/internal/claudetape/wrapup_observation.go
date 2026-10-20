@@ -1,10 +1,13 @@
 package claudetape
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"syscall"
@@ -129,5 +132,53 @@ func (o *WrapUpObservation) Save(path string) error {
 	if err != nil || Safe(raw) != nil {
 		return errors.New("unsafe native observation")
 	}
-	return PublishLifecycleControl(path, o)
+	return PublishWrapUpObservation(path, o)
+}
+
+// PublishWrapUpObservation publishes sanitized diagnostics atomically and
+// exclusively. Unlike authorization controls, reviewed diagnostics may live in
+// a repository directory; their files are still private when first captured.
+func PublishWrapUpObservation(path string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil || len(raw) > 16384 || Safe(raw) != nil {
+		return errors.New("invalid native observation publication")
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".wrapup-pending-")
+	if err != nil {
+		return errors.New("native observation publication failed")
+	}
+	defer os.Remove(f.Name())
+	_, writeErr := f.Write(raw)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if writeErr != nil || syncErr != nil || closeErr != nil || os.Link(f.Name(), path) != nil {
+		return errors.New("native observation publication failed")
+	}
+	return nil
+}
+
+// ReadWrapUpObservationJSON accepts reviewed repository file modes as well as
+// private native candidates. It never reads authorization or receipt state.
+func ReadWrapUpObservationJSON(path string, limit int, value any) error {
+	fail := errors.New("invalid native observation file")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(limit) || limit > MaxBytes || limit <= 0 {
+		return fail
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fail
+	}
+	opened, statErr := f.Stat()
+	raw, readErr := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	closeErr := f.Close()
+	if statErr != nil || !os.SameFile(info, opened) || readErr != nil || closeErr != nil || len(raw) > limit {
+		return fail
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if !uniqueSuiteKeys(raw) || d.Decode(value) != nil || d.Decode(new(any)) != io.EOF {
+		return fail
+	}
+	return nil
 }

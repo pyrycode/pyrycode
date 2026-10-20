@@ -64,11 +64,11 @@ func captureSkippedWrapUp(t *testing.T) bool {
 	}
 	var observation claudetape.WrapUpObservation
 	if _, err := os.Lstat(wrapUpNativeFixture); err == nil {
-		if claudetape.ReadLifecycleControl(wrapUpNativeFixture, 16384, &observation) != nil || observation.Validate(true) != nil {
+		if claudetape.ReadWrapUpObservationJSON(wrapUpNativeFixture, 16384, &observation) != nil || observation.Validate(true) != nil {
 			t.Fatal("invalid reviewed native wrap-up observation")
 		}
 		var root wrapUpRootObservation
-		if claudetape.ReadLifecycleControl(wrapUpNativeRootFixture, 16384, &root) != nil || root.validate(&observation) != nil {
+		if claudetape.ReadWrapUpObservationJSON(wrapUpNativeRootFixture, 16384, &root) != nil || root.validate(&observation) != nil {
 			t.Fatal("missing or invalid reviewed native root observation")
 		}
 		_ = readWrapUpNativeSuite(t, wrapUpNativeSuiteFixture, &observation)
@@ -149,7 +149,7 @@ func captureSkippedWrapUp(t *testing.T) bool {
 		t.Fatal("native capture lacks root observations")
 	}
 	suite := readWrapUpNativeSuite(t, filepath.Join(dir, "clear-wrapup-skipped.json"), &observation)
-	if suite.Save(wrapUpNativeSuiteFixture, claudetape.LifecycleProfiles()["clear-wrapup-skipped"].Roles) != nil || claudetape.PublishLifecycleControl(wrapUpNativeRootFixture, root) != nil {
+	if suite.Save(wrapUpNativeSuiteFixture, claudetape.LifecycleProfiles()["clear-wrapup-skipped"].Roles) != nil || claudetape.PublishWrapUpObservation(wrapUpNativeRootFixture, root) != nil {
 		t.Fatal("cannot publish native capture candidates")
 	}
 	if err := observation.Save(wrapUpNativeFixture); err != nil {
@@ -162,7 +162,7 @@ func captureSkippedWrapUp(t *testing.T) bool {
 func readWrapUpNativeSuite(t *testing.T, path string, observation *claudetape.WrapUpObservation) *claudetape.LifecycleSuite {
 	t.Helper()
 	var suite claudetape.LifecycleSuite
-	if claudetape.ReadLifecycleControl(path, claudetape.MaxBytes, &suite) != nil || suite.Validate(claudetape.LifecycleProfiles()["clear-wrapup-skipped"].Roles) != nil || suite.Scenario != "clear-wrapup-skipped" || suite.Producer.Revision != observation.Revision || suite.Producer.BinarySHA256 != observation.SourceSHA256 || suite.DaemonSHA256 != observation.DaemonSHA256 {
+	if claudetape.ReadWrapUpObservationJSON(path, claudetape.MaxBytes, &suite) != nil || suite.Validate(claudetape.LifecycleProfiles()["clear-wrapup-skipped"].Roles) != nil || suite.Scenario != "clear-wrapup-skipped" || suite.Producer.Revision != observation.Revision || suite.Producer.BinarySHA256 != observation.SourceSHA256 || suite.DaemonSHA256 != observation.DaemonSHA256 {
 		t.Fatal("missing or mismatched complete native suite")
 	}
 	return &suite
@@ -186,6 +186,12 @@ func TestWrapUpNativeRootObservation(t *testing.T) {
 		{"arbitrary-outcome", func(r *wrapUpRootObservation) { r.Outcome = "private error" }},
 		{"combined-outcomes", func(r *wrapUpRootObservation) { r.Outcome = "unknown|deadline" }},
 		{"missing-record", func(r *wrapUpRootObservation) { r.Observation = nil }},
+		{"failed-phase", func(r *wrapUpRootObservation) {
+			copy := *r.Observation
+			copy.Events = append([]claudetape.WrapUpObservationEvent(nil), copy.Events...)
+			copy.Events[0].Error = "rejected"
+			r.Observation = &copy
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := valid
