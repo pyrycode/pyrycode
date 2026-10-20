@@ -166,3 +166,77 @@ func TestMCPSendFileRequiresRealCurrentCopyAndPreservesUnrelatedJSONBytes(t *tes
 		})
 	}
 }
+
+// Controlled source shapes exercise the observed split-input approval barrier;
+// these frames are not provider recordings or native migration coverage.
+func mcpStreamInputControl() (*MCPExchange, *Tape) {
+	x, tape := mcpSendFileControl()
+	frames := []Frame{
+		{"stdout", json.RawMessage(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"role":"assistant","id":"controlled-message"}}}`)},
+		{"stdout", json.RawMessage(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_CONTROLLED1","name":"mcp__pyry_files__send_file","input":{}}}}`)},
+		{"stdout", json.RawMessage(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"handover-"}}}`)},
+		{"stdout", json.RawMessage(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"2718281828.txt\"}"}}}`)},
+	}
+	tape.Frames[2].Data = bytes.Replace(tape.Frames[2].Data, []byte(`"message":{"role"`), []byte(`"message":{"id":"controlled-message","role"`), 1)
+	tape.Frames = append(append(append([]Frame{}, tape.Frames[:2]...), frames...), tape.Frames[2:]...)
+	for i := 6; i < len(x.Events); i++ {
+		x.Events[i].NativeStdoutCount = 5
+	}
+	for _, i := range []int{6, 8} {
+		x.Events[i].Raw = strings.Replace(x.Events[i].Raw, `"params":{`, `"params":{"_meta":{"claudecode/toolUseId":"toolu_CONTROLLED1","progressToken":2},`, 1)
+	}
+	return x, tape
+}
+func TestMCPSendFileStreamedInputMustBeCompleteAndSourceJoinedBeforeApproval(t *testing.T) {
+	for _, mutation := range []string{"valid", "early-barrier", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
+		t.Run(mutation, func(t *testing.T) {
+			x, tape := mcpStreamInputControl()
+			switch mutation {
+			case "early-barrier":
+				for i := 6; i < len(x.Events); i++ {
+					x.Events[i].NativeStdoutCount = 4
+				}
+			case "foreign-input":
+				tape.Frames[5].Data = bytes.ReplaceAll(tape.Frames[5].Data, []byte("2718281828"), []byte("foreign"))
+			case "duplicate-input-key":
+				tape.Frames[4].Data = bytes.Replace(tape.Frames[4].Data, []byte(`{\"path\":\"handover-`), []byte(`{\"path\":\"foreign\",\"path\":\"handover-`), 1)
+			case "foreign-id":
+				tape.Frames[3].Data = bytes.ReplaceAll(tape.Frames[3].Data, []byte("toolu_CONTROLLED1"), []byte("toolu_FOREIGN"))
+			case "child-stream":
+				tape.Frames[3].Data = bytes.Replace(tape.Frames[3].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign"`), 1)
+			case "foreign-message":
+				tape.Frames[2].Data = bytes.ReplaceAll(tape.Frames[2].Data, []byte("controlled-message"), []byte("foreign-message"))
+			case "reused-index":
+				tape.Frames[4].Data = append(json.RawMessage(nil), tape.Frames[3].Data...)
+			case "foreign-delta-index":
+				tape.Frames[5].Data = bytes.Replace(tape.Frames[5].Data, []byte(`"index":1`), []byte(`"index":2`), 1)
+			case "foreign-meta":
+				x.Events[8].Raw = strings.Replace(x.Events[8].Raw, `"claudecode/toolUseId":"toolu_CONTROLLED1"`, `"claudecode/toolUseId":"toolu_FOREIGN"`, 1)
+			}
+			_, err := ValidateMCPSendFile(x, tape)
+			if (err == nil) != (mutation == "valid") {
+				t.Fatal("streamed input boundary mismatch", err)
+			}
+		})
+	}
+}
+func TestMCPSendFileFreshMetadataBindingPreservesEveryOtherRequestByte(t *testing.T) {
+	a, at := mcpStreamInputControl()
+	b, bt := mcpStreamInputControl()
+	for i := range b.Events {
+		b.Events[i].Raw = strings.ReplaceAll(b.Events[i].Raw, "toolu_CONTROLLED1", "toolu_CONTROLLED2")
+	}
+	for name, body := range b.Stderr {
+		b.Stderr[name] = strings.ReplaceAll(body, "toolu_CONTROLLED1", "toolu_CONTROLLED2")
+	}
+	for i := range bt.Frames {
+		bt.Frames[i].Data = bytes.ReplaceAll(bt.Frames[i].Data, []byte("toolu_CONTROLLED1"), []byte("toolu_CONTROLLED2"))
+	}
+	if SameMCPSendFileRequests(a, b, at, bt) != nil {
+		t.Fatal("joined fresh tool id not bound in exact declared metadata leaf")
+	}
+	b.Events[8].Raw = strings.Replace(b.Events[8].Raw, `"progressToken":2`, `"progressToken":3`, 1)
+	if SameMCPSendFileRequests(a, b, at, bt) == nil {
+		t.Fatal("unknown metadata difference erased")
+	}
+}

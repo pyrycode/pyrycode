@@ -173,8 +173,14 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 	if message, present := verdict["message"]; present && mcpString(message) != "" {
 		return facts, mcpError()
 	}
+	for _, params := range []map[string]json.RawMessage{file, approval} {
+		if _, err := mcpCallToolMetadata(params, facts.ToolID); err != nil {
+			return facts, err
+		}
+	}
 	facts.FileResponseSequence = fileResponse.Sequence
 	facts.ApprovalResponseSequence = approveResponse.Sequence
+	toolMessageID := ""
 	toolCount, resultCount, users, outputs, initialized := 0, 0, 0, 0, 0
 	for index, frame := range tape.Frames {
 		if frame.Direction == "stdin" {
@@ -214,12 +220,13 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 			}
 			blockKind := mcpString(block["type"])
 			if blockKind == "tool_use" && mcpString(block["name"]) == mcpSendFileTool {
-				if initialized != 1 || kind != "assistant" || mcpString(message["role"]) != "assistant" || mcpString(block["id"]) != facts.ToolID || !bytes.Equal(physicalCanonicalJSON(block["input"]), fileInput) || approveRequest.event.NativeStdoutCount < outputs || approveRequest.event.UserOrdinal != 1 {
+				if initialized != 1 || kind != "assistant" || mcpString(message["role"]) != "assistant" || mcpString(block["id"]) != facts.ToolID || !bytes.Equal(physicalCanonicalJSON(block["input"]), fileInput) || approveRequest.event.UserOrdinal != 1 {
 					return facts, mcpError()
 				}
 				if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
 					return facts, mcpError()
 				}
+				toolMessageID = mcpString(message["id"])
 				toolCount++
 			}
 			if blockKind == "tool_result" && mcpString(block["tool_use_id"]) == facts.ToolID {
@@ -253,6 +260,9 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 		}
 	}
 	if toolCount != 1 || resultCount != 1 || users != 1 || initialized != 1 {
+		return facts, mcpError()
+	}
+	if validateMCPToolInputPrefix(tape, facts.ToolID, toolMessageID, fileInput, approveRequest.event.NativeStdoutCount) != nil {
 		return facts, mcpError()
 	}
 	start, e := time.Parse(time.RFC3339Nano, tape.Producer.CapturedAt)
@@ -438,6 +448,22 @@ func SameMCPSendFileRequests(a, b *MCPExchange, at, bt *Tape) error {
 					return nil, e
 				}
 			}
+			if parsed.Method == "tools/call" {
+				params, err := mcpRawObject(parsed.Params)
+				if err != nil {
+					return nil, err
+				}
+				present, err := mcpCallToolMetadata(params, sourceID)
+				if err != nil {
+					return nil, err
+				}
+				if present {
+					raw, err = e2emcp.BindJSONString(raw, []string{"params", "_meta", "claudecode/toolUseId"}, sourceID, af.ToolID)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
 			out[event.Connection] = append(out[event.Connection], string(raw))
 		}
 		return out, nil
@@ -454,4 +480,166 @@ func SameMCPSendFileRequests(a, b *MCPExchange, at, bt *Tape) error {
 		return mcpError()
 	}
 	return nil
+}
+
+// SDKs can ask approval after the last input_json_delta but before publishing
+// the assembled assistant tool_use. Join that complete current native prefix to
+// the same full tool id/input checked independently by ValidateMCPSendFile.
+func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []byte, barrier int) error {
+	outputs, starts, index := 0, 0, -1
+	initial := []byte(nil)
+	partial := ""
+	assembled, stopped := false, false
+	messageID, role := "", ""
+	initialized := 0
+	for _, frame := range tape.Frames {
+		if frame.Direction != "stdout" {
+			continue
+		}
+		outputs++
+		if outputs > barrier {
+			break
+		}
+		envelope, err := mcpRawObject(frame.Data)
+		if err != nil {
+			return err
+		}
+		kind := mcpString(envelope["type"])
+		if kind == "system" && mcpString(envelope["subtype"]) == "init" {
+			if mcpString(envelope["permissionMode"]) != "default" {
+				return mcpError()
+			}
+			initialized++
+		}
+		if kind == "assistant" {
+			message, err := mcpRawObject(envelope["message"])
+			if err != nil {
+				return err
+			}
+			var blocks []json.RawMessage
+			if json.Unmarshal(message["content"], &blocks) == nil {
+				for _, raw := range blocks {
+					block, err := mcpRawObject(raw)
+					if err != nil {
+						return err
+					}
+					if mcpString(block["type"]) == "tool_use" && mcpString(block["id"]) == tool && mcpString(block["name"]) == mcpSendFileTool && bytes.Equal(physicalCanonicalJSON(block["input"]), input) {
+						assembled = true
+					}
+				}
+			}
+		}
+		if kind != "stream_event" {
+			continue
+		}
+		event, err := mcpRawObject(envelope["event"])
+		if err != nil {
+			return err
+		}
+		eventKind := mcpString(event["type"])
+		if eventKind == "message_start" {
+			if starts > 0 {
+				return mcpError()
+			}
+			message, err := mcpRawObject(event["message"])
+			if err != nil {
+				return err
+			}
+			messageID, role = mcpString(message["id"]), mcpString(message["role"])
+		}
+		if eventKind == "message_stop" {
+			messageID, role = "", ""
+		}
+		var current int
+		if eventKind != "content_block_start" && eventKind != "content_block_delta" && eventKind != "content_block_stop" {
+			continue
+		}
+		if json.Unmarshal(event["index"], &current) != nil || current < 0 || current > 1024 {
+			return mcpError()
+		}
+		if starts == 1 && current == index && eventKind == "content_block_stop" {
+			stopped = true
+			continue
+		}
+		if eventKind == "content_block_start" {
+			if starts == 1 && current == index {
+				return mcpError()
+			}
+			block, err := mcpRawObject(event["content_block"])
+			if err != nil {
+				return err
+			}
+			if mcpString(block["type"]) != "tool_use" || (mcpString(block["id"]) != tool && mcpString(block["name"]) != mcpSendFileTool) {
+				continue
+			}
+			if mcpString(block["id"]) != tool || mcpString(block["name"]) != mcpSendFileTool || starts != 0 || initialized != 1 || messageID == "" || messageID != fullMessage || role != "assistant" {
+				return mcpError()
+			}
+			if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
+				return mcpError()
+			}
+			initial = physicalCanonicalJSON(block["input"])
+			if !bytes.Equal(initial, []byte(`{}`)) && !bytes.Equal(initial, input) {
+				return mcpError()
+			}
+			starts++
+			index = current
+		} else if starts == 1 && current == index && eventKind == "content_block_delta" {
+			if stopped || messageID == "" {
+				return mcpError()
+			}
+			delta, err := mcpRawObject(event["delta"])
+			if err != nil || mcpString(delta["type"]) != "input_json_delta" {
+				return mcpError()
+			}
+			var text string
+			if json.Unmarshal(delta["partial_json"], &text) != nil || len(text) > MaxBytes-len(partial) {
+				return mcpError()
+			}
+			if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
+				return mcpError()
+			}
+			partial += text
+		}
+	}
+	if assembled {
+		return nil
+	}
+	if starts != 1 {
+		return mcpError()
+	}
+	if partial == "" {
+		if bytes.Equal(initial, input) {
+			return nil
+		}
+		return mcpError()
+	}
+	if !bytes.Equal(initial, []byte(`{}`)) {
+		return mcpError()
+	}
+	if _, err := mcpRawObject([]byte(partial)); err != nil || !bytes.Equal(physicalCanonicalJSON([]byte(partial)), input) {
+		return mcpError()
+	}
+	return nil
+}
+
+// Only this source-joined scalar can vary between fresh tool calls. Other _meta
+// keys (including progress tokens), all envelope fields and raw formatting stay.
+func mcpCallToolMetadata(params map[string]json.RawMessage, tool string) (bool, error) {
+	raw, present := params["_meta"]
+	if !present {
+		return false, nil
+	}
+	meta, err := mcpRawObject(raw)
+	if err != nil {
+		return false, err
+	}
+	id, present := meta["claudecode/toolUseId"]
+	if !present {
+		return false, nil
+	}
+	if mcpString(id) != tool {
+		return false, mcpError()
+	}
+	return true, nil
 }
