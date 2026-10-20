@@ -169,8 +169,8 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	if e != nil || parseErr != nil || flags&(syscall.MSG_TRUNC|syscall.MSG_CTRUNC) != 0 || n != 1 || one[0] != 1 || len(messages) != 1 || len(owned) != 3 {
 		return proxyLaunch{}, files, protocolError()
 	}
-	stage = "launch-fd-kind"
 	for i, f := range owned {
+		stage = "launch-fd-kind"
 		info, x := f.Stat()
 		if x != nil || info.Mode()&os.ModeNamedPipe == 0 {
 			return proxyLaunch{}, files, protocolError()
