@@ -375,8 +375,8 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			t.Fatal(err)
 		}
 		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots}
-		if suite.Save(process.Path, profile.Roles) != nil {
-			t.Fatal("cannot publish complete original lifecycle capture")
+		if err := suite.Save(process.Path, profile.Roles); err != nil {
+			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}
 	}
 
