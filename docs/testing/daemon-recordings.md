@@ -974,7 +974,7 @@ timer starts at activation. No old accepted fixture is rewritten.
 
 ## Physical background-task boundary
 
-The `physical-background` candidate batch retains the original
+The `physical-background` batch retains the original
 `TestRealClaudeComposerStopPreservesBackgroundTask` and
 `TestRealClaudeStopBackgroundTaskCompletion` bodies and their real phone actions.
 A candidate profile is not accepted coverage until its native fixture, exact replay,
