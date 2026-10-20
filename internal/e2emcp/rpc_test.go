@@ -164,3 +164,53 @@ func TestRPCSessionDoesNotAliasOriginalSourceOrReturnedFields(t *testing.T) {
 		t.Fatal("source params alias mutable caller")
 	}
 }
+
+func TestRPCSessionFinishPreservesEveryLiteralByte(t *testing.T) {
+	s := initializedRPC(t)
+	request := `  { "params" : { "z": [ {"escaped":"\u003c&>", "literal":"<>&", "unicode":"\u00e4"} ], "a": true }, "method":"tools/call", "id":"call-\u0041", "jsonrpc":"2.0" }  `
+	response := ` { "result": { "nested": [ {"second":2, "first":"<>&\u003e"} ] }, "id":"call-A", "jsonrpc":"2.0" } `
+	errorRequest := ` {"jsonrpc":"2.0", "id":2, "method":"ping"} `
+	errorResponse := ` {"error": {"data": {"z":"<>&", "a":"\u0041"}, "message":"<>&", "code":-32000}, "id":2, "jsonrpc":"2.0"} `
+	expectedRequest := observeRPC(t, s, ClientToServer, request)
+	expectedResponse := observeRPC(t, s, ServerToClient, response)
+	expectedErrorRequest := observeRPC(t, s, ClientToServer, errorRequest)
+	expectedErrorResponse := observeRPC(t, s, ServerToClient, errorResponse)
+	got, err := s.Finish()
+	if err != nil || len(got) != 3 {
+		t.Fatal("finish", err)
+	}
+	for i, pair := range [][2]RPCFrame{{expectedRequest, got[1].Request}, {expectedResponse, got[1].Response}, {expectedErrorRequest, got[2].Request}, {expectedErrorResponse, got[2].Response}} {
+		a, b := pair[0], pair[1]
+		for field, raw := range map[string][2]json.RawMessage{"raw": {a.Raw, b.Raw}, "id": {a.ID, b.ID}, "params": {a.Params, b.Params}, "result": {a.Result, b.Result}, "error": {a.Error, b.Error}} {
+			if !bytes.Equal(raw[0], raw[1]) {
+				t.Fatalf("exchange %d %s bytes changed", i, field)
+			}
+			if len(raw[1]) > 0 {
+				raw[1][0] = 'x'
+				if bytes.Equal(raw[0], raw[1]) {
+					t.Fatalf("exchange %d %s aliases returned evidence", i, field)
+				}
+			}
+		}
+	}
+	if string(s.exchanges[1].Request.Raw) != request || string(s.exchanges[1].Response.Raw) != response || string(s.exchanges[2].Response.Raw) != errorResponse {
+		t.Fatal("closed copy aliases retained evidence")
+	}
+}
+
+func TestRPCSessionRejectsNonObjectSuccessfulMCPResults(t *testing.T) {
+	for _, method := range []string{"tools/list", "tools/call", "ping"} {
+		for _, result := range []string{"null", "true", "1", `"text"`, "[]"} {
+			t.Run(method+"/"+result, func(t *testing.T) {
+				s := initializedRPC(t)
+				observeRPC(t, s, ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"`+method+`"}`)
+				if _, err := s.Observe(ServerToClient, []byte(`{"jsonrpc":"2.0","id":1,"result":`+result+`}`)); err == nil {
+					t.Fatal("non-object MCP result accepted")
+				}
+				if _, err := s.Finish(); err == nil {
+					t.Fatal("rejected MCP result closed successfully")
+				}
+			})
+		}
+	}
+}

@@ -192,6 +192,9 @@ func ParseRPC(raw []byte) (RPCFrame, error) {
 	out.Kind = Response
 	out.Result = append(json.RawMessage(nil), fields["result"]...)
 	out.Error = append(json.RawMessage(nil), fields["error"]...)
+	if hasResult && !objectJSON(out.Result) {
+		return RPCFrame{}, fail
+	}
 	if hasError {
 		var value map[string]json.RawMessage
 		if !objectJSON(out.Error) || json.Unmarshal(out.Error, &value) != nil {
@@ -315,13 +318,9 @@ func (s *RPCSession) Finish() ([]Exchange, error) {
 	s.closed = true
 	// A deep copy keeps callers from changing retained source evidence through a
 	// RawMessage backing slice after closure.
-	raw, err := json.Marshal(s.exchanges)
-	if err != nil {
-		return nil, s.reject()
-	}
-	var exchanges []Exchange
-	if json.Unmarshal(raw, &exchanges) != nil {
-		return nil, s.reject()
+	exchanges := make([]Exchange, len(s.exchanges))
+	for i, exchange := range s.exchanges {
+		exchanges[i] = Exchange{Ordinal: exchange.Ordinal, Request: cloneRPCFrame(exchange.Request), Response: cloneRPCFrame(exchange.Response)}
 	}
 	return exchanges, nil
 }
