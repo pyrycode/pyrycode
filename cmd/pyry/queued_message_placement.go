@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"io"
 	"log/slog"
 	"sync"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink, store *history.Store, isClaude func(string) bool, logger *slog.Logger) {
@@ -25,6 +28,8 @@ func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink,
 	}
 	p.dispatch = func(commit func()) { sink.dispatchPlacement(ctx, commit) }
 	p.isClaude = isClaude
+	p.position = func() uint64 { sink.offerMu.Lock(); defer sink.offerMu.Unlock(); return sink.queued }
+	sink.placement = p
 	idle := p.idle
 	sink.placementIdle.Store(&idle)
 }
@@ -93,14 +98,21 @@ func (p *sendNowPlacement) lockWrite(convID string) func() {
 // boundary. The result signal precedes caller cleanup: an echo may be waiting
 // for it while the drain holds the post-publication gate.
 func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []byte, write func() error, source ...*history.SessionProvenance) error {
+	return p.writeTarget(ctx, convID, payload, func(context.Context) error { return write() }, source...)
+}
+
+func (p *sendNowPlacement) writeTarget(ctx context.Context, convID string, payload []byte, write func(context.Context) error, source ...*history.SessionProvenance) error {
 	msg, ok := msgqueue.DeliveryMessage(ctx)
 	if !ok || p.record == nil {
-		return write()
+		return write(ctx)
 	}
 	unlock := p.lockWrite(convID)
 	defer unlock()
 	e := &placedMessage{id: msg.ID, digest: sha256.Sum256(payload), queued: true,
 		sentNow: msg.SentNow, outcome: make(chan struct{})}
+	if p.position != nil {
+		e.after = p.position()
+	}
 	e.commit = func() { p.record(convID, msg, e.source) }
 	p.mu.Lock()
 	if p.managed == nil {
@@ -112,9 +124,15 @@ func (p *sendNowPlacement) write(ctx context.Context, convID string, payload []b
 	p.managed[convID][msg.ID] = e
 	p.pending[convID] = append(p.pending[convID], e)
 	p.mu.Unlock()
-	e.writeErr = write()
+	e.writeErr = write(streamsup.WithTurnTarget(ctx, func(child io.Writer) {
+		p.mu.Lock()
+		e.child = child
+		p.mu.Unlock()
+	}))
 	if e.writeErr == nil && len(source) != 0 && source[0] != nil {
+		p.mu.Lock()
 		e.source = *source[0]
+		p.mu.Unlock()
 	}
 	close(e.outcome)
 	if e.writeErr != nil {
@@ -148,16 +166,16 @@ func writeOperatorTurn(ctx context.Context, convID string, payload []byte, w han
 		claude = p.isClaude(convID)
 	}
 	var source history.SessionProvenance
-	write := func() error {
+	write := func(writeCtx context.Context) error {
 		if known {
 			source = provider.operatorProvenance()
 		}
-		return w.WriteUserTurn(ctx, convID, payload)
+		return w.WriteUserTurn(writeCtx, convID, payload)
 	}
 	if p != nil && claude {
-		return p.write(ctx, convID, payload, write, &source)
+		return p.writeTarget(ctx, convID, payload, write, &source)
 	}
-	if err := write(); err != nil {
+	if err := write(ctx); err != nil {
 		return err
 	}
 	if msg, ok := msgqueue.DeliveryMessage(ctx); ok && p != nil && source.Kind != "" {
@@ -202,7 +220,10 @@ func (p *sendNowPlacement) takeQueued(convID string, e *placedMessage) {
 	case <-p.ctx.Done():
 		return
 	case <-e.outcome:
-		if e.writeErr == nil {
+		p.mu.Lock()
+		confirmed := e.completed
+		p.mu.Unlock()
+		if e.writeErr == nil && confirmed && p.ctx.Err() == nil {
 			p.take(convID, e)
 		}
 	}
@@ -212,6 +233,10 @@ func (p *sendNowPlacement) takeQueued(convID string, e *placedMessage) {
 // busy mark. No-echo entries are therefore committed by the answering turn's
 // idle boundary even when OnDelivered is withheld. Send-now keeps its grace.
 func (p *sendNowPlacement) idle(sessionID string) {
+	p.idleOwned(sessionID, nil, 0)
+}
+
+func (p *sendNowPlacement) idleOwned(sessionID string, child io.Writer, position uint64) {
 	convID, ok := p.resolve(sessionID)
 	if !ok {
 		return
@@ -220,8 +245,77 @@ func (p *sendNowPlacement) idle(sessionID string) {
 	entries := append([]*placedMessage(nil), p.pending[convID]...)
 	p.mu.Unlock()
 	for _, e := range entries {
-		if e.queued && !e.sentNow {
+		if !e.queued {
+			continue
+		}
+		p.mu.Lock()
+		matches := e.child == child && (position == 0 || position > e.after)
+		p.mu.Unlock()
+		if !matches {
+			continue
+		}
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-e.outcome:
+		}
+		p.mu.Lock()
+		e.completed = true
+		p.mu.Unlock()
+		if !e.sentNow {
 			p.takeQueued(convID, e)
 		}
+	}
+}
+
+// observe runs only on the ordered drain. Readiness clears do not call it.
+func (p *sendNowPlacement) observe(env streamTurnEnvelope) {
+	if env.exit {
+		p.retire("", env.sessionID, env.child)
+		return
+	}
+	if echo, ok := env.ev.(turnevent.UserEcho); ok {
+		p.echoOwned(env.sessionID, echo, env.child, env.queued)
+		return
+	}
+	if turnMarkFor(env.ev) == turnMarkClose {
+		p.idleOwned(env.sessionID, env.child, env.queued)
+		return
+	}
+}
+
+// retire removes confirmation candidates but preserves callback bookkeeping.
+// History keeps its unresolved acceptance; possibly consumed input is not replayed.
+func (p *sendNowPlacement) retire(convID, sessionID string, child io.Writer) {
+	if convID == "" {
+		var ok bool
+		convID, ok = p.resolve(sessionID)
+		if !ok {
+			return
+		}
+	}
+	p.mu.Lock()
+	entries := append([]*placedMessage(nil), p.pending[convID]...)
+	p.mu.Unlock()
+	for _, e := range entries {
+		if !e.queued {
+			continue
+		}
+		p.mu.Lock()
+		if child != nil && e.child != child {
+			p.mu.Unlock()
+			continue
+		}
+		if child == nil && sessionID != "" && e.source.SessionID != "" && e.source.SessionID != sessionID {
+			p.mu.Unlock()
+			continue
+		}
+		if p.removeLocked(convID, e) {
+			e.placed = true
+			if e.notified {
+				p.forgetLocked(convID, e.id)
+			}
+		}
+		p.mu.Unlock()
 	}
 }

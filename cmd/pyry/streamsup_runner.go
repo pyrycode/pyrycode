@@ -868,6 +868,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
+		tag.child = r.ChildTarget
 		// #2136's runner half, closed here rather than above because the runner does not
 		// exist up there: the follower's Sink is what the parser writes into, and that
 		// parser is this runner's Stdout. This line is still inside the factory's own

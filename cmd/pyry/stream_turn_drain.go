@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,7 @@ type streamTurnEnvelope struct {
 	// routing ID reactivation reuses. It never crosses history or wire seams.
 	incarnation uint64
 	sourceEpoch uint64
+	child       io.Writer
 	occurredAt  time.Time
 	sessionID   string
 	// source is captured from the runner's kind and this event's routing tag.
@@ -197,6 +199,7 @@ type streamTurnSink struct {
 	// fallback covers.
 	echo              atomic.Pointer[func(sessionID string, ev turnevent.UserEcho)]
 	placementIdle     atomic.Pointer[func(string)]
+	placement         *sendNowPlacement // bound before workers start
 	operatorPublisher atomic.Pointer[func(operatorMessage)]
 	placementCommands chan func()
 }
@@ -319,6 +322,9 @@ func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
 func (s *streamTurnSink) runnerStopped(sessionID string) {
 	s.offerMu.Lock()
 	env := streamTurnEnvelope{sessionID: sessionID, incarnation: s.runtimeProducers[sessionID], exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
+	if tag := s.runtimeProducerTags[sessionID]; tag != nil && tag.child != nil {
+		env.child = tag.child()
+	}
 	if s.live != nil {
 		src := s.live.capture(sessionID, env.incarnation, history.SessionProvenance{SessionID: sessionID}, false)
 		env.live = s.live.closeProducer(src)
@@ -379,6 +385,7 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // registered incarnation even before the new routing ID produces output. Empty
 // IDs are refused because they cannot resolve to a conversation.
 type streamSessionTag struct {
+	child          func() io.Writer // construction-bound before Run
 	runtimeSink    atomic.Pointer[streamTurnSink]
 	incarnation    atomic.Uint64
 	id             atomic.Pointer[string]
@@ -491,12 +498,20 @@ func (s *streamTurnSink) sinkForTag(tag func() string, kind ...string) func(turn
 }
 
 func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string, incarnation func() uint64) func(turnevent.Event) {
+	return s.sinkForChild(tag, producerKind, incarnation, nil)
+}
+
+func (s *streamTurnSink) sinkForChild(tag func() string, producerKind string, incarnation func() uint64, child func() io.Writer) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
+		var target io.Writer
+		if child != nil {
+			target = child()
+		}
 		if s.live != nil {
 			s.offerMu.Lock()
 		}
 		sessionID := tag()
-		env := streamTurnEnvelope{sessionID: sessionID, ev: ev}
+		env := streamTurnEnvelope{sessionID: sessionID, ev: ev, child: target}
 		if incarnation != nil {
 			env.incarnation = incarnation()
 		}
@@ -648,6 +663,9 @@ func startStreamTurnDrainV2(
 				return
 			}
 			for _, conversationID := range sink.takeLifecycleCloses() {
+				if sink.placement != nil {
+					sink.placement.retire(conversationID, "", nil)
+				}
 				unlock := busy.lockPostBoundary()
 				emitter.closeForConversation(ctx, conversationID)
 				busy.publishPostBoundary(conversationID, false)
@@ -667,6 +685,9 @@ func startStreamTurnDrainV2(
 			unlock := busy.lockPostBoundary()
 			defer unlock()
 			if env.exit {
+				if sink.placement != nil {
+					sink.placement.observe(env)
+				}
 				if emitter.runtimeFacts {
 					if sink.noteRuntimeStop(env) {
 						return
@@ -686,7 +707,6 @@ func startStreamTurnDrainV2(
 							if _, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); !cleared && busy != nil {
 								return
 							}
-							sink.observePlacementIdle(env.sessionID)
 							busy.publishPostBoundary(id, false)
 							if busy != nil && busy.posts != nil {
 								busy.posts.teardown.Delete(id)
@@ -707,7 +727,6 @@ func startStreamTurnDrainV2(
 				// Retain exit-epoch protection; flush and close publication before
 				// releasing posts, only when the producing exit was accepted.
 				if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
-					sink.observePlacementIdle(env.sessionID)
 					emitter.closeForConversation(ctx, conversationID)
 					busy.publishPostBoundary(conversationID, false)
 					if teardownEpoch != nil {
@@ -721,7 +740,11 @@ func startStreamTurnDrainV2(
 			if emitter.runtimeFacts {
 				if id, ok := resolve(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID, env.incarnation)] {
 					if echo, ok := env.ev.(turnevent.UserEcho); ok {
-						sink.observeEcho(env.sessionID, echo)
+						if sink.placement != nil {
+							sink.placement.observe(env)
+						} else {
+							sink.observeEcho(env.sessionID, echo)
+						}
 					} else {
 						emitter.handleForSource(ctx, id, env.ev, env.source, env.incarnation)
 					}
@@ -732,7 +755,9 @@ func startStreamTurnDrainV2(
 			// BEFORE the resolution below, and the ordering IS the contract: an
 			// event that resolves to no conversation is dropped there, and the
 			// tracker keeps its own resolution and its own unbound-session record.
-			if turnMarkFor(env.ev) == turnMarkClose {
+			if sink.placement != nil {
+				sink.placement.observe(env)
+			} else if turnMarkFor(env.ev) == turnMarkClose {
 				sink.observePlacementIdle(env.sessionID)
 			}
 			busy.observe(env.sessionID, env.ev)
@@ -744,7 +769,9 @@ func startStreamTurnDrainV2(
 			// so the operator-message push it may commit lands after it, and a
 			// background conversation's echo is placed too.
 			if echo, ok := env.ev.(turnevent.UserEcho); ok {
-				sink.observeEcho(env.sessionID, echo)
+				if sink.placement == nil {
+					sink.observeEcho(env.sessionID, echo)
+				}
 				return
 			}
 
