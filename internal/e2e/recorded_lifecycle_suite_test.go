@@ -107,6 +107,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	daemonSum := sha256.Sum256(daemonBytes)
+	t.Logf("lifecycle provenance mode=%s scenario=%s revision=%s helper_sha256=%s daemon_sha256=%s", mode, name, revision, sourceSHA, hex.EncodeToString(daemonSum[:]))
 	if mode == "capture" {
 		info, err := buildinfo.ReadFile(daemon)
 		if err != nil {

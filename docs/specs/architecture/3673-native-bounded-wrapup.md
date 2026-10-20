@@ -90,3 +90,5 @@ Pending documentation stage: update `docs/testing/daemon-recordings.md`, “Sess
 Historical recovery verified all 160 witnesses pinned by the original index with zero missing/mismatched hashes; 161 files including the index are copied under `/tmp/builder-3673/historical`. This adds availability evidence only. Native timing and the repair contract remain open pending the dispatcher capture.
 
 The managed launcher rejects the ticket's double-anchored subtest expression. The supported `^TestRecordedClaude/clear-wrapup-skipped$` selects the same recorded scenario (and the sibling startup control); retain actual counts and both selector outcomes. No timing, input matching or settlement behavior changes in this pass.
+
+Capture provenance also logs only source revision and helper/daemon SHA-256 values from `runRecordedLifecycleSuite`, so a failed replay retains binary identity after its private home and helper executable are removed.
