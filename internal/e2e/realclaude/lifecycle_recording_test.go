@@ -494,6 +494,18 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		}
 		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) { _ = mcp.RetainFailure(tape, frames) }
 	}
+	if c.Process.Scenario == "clear-reset" && os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE") != "" {
+		job.Config.OnProgress = func(progress claudetape.LifecycleProgress) {
+			path := filepath.Join(os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE"), "clear-reset-"+job.Role+"-terminal.json")
+			if daemonRecordingWrite(path, struct {
+				OwnerPID, BrokerPID int
+				OwnerPresent        bool
+				Progress            claudetape.LifecycleProgress
+			}{job.Config.OwnerPID, os.Getpid(), syscall.Kill(job.Config.OwnerPID, 0) == nil, progress}) != nil {
+				os.Exit(2)
+			}
+		}
+	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
 	if mcp != nil {
 		if err := mcp.Close(e == nil); err != nil && e == nil {

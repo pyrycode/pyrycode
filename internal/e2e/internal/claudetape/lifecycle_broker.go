@@ -107,6 +107,16 @@ type LifecycleBrokerConfig struct {
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
 	OnTerminalState  func(bool, bool, bool, bool)     `json:"-"`
+	OnProgress       func(LifecycleProgress)          `json:"-"`
+}
+
+// LifecycleProgress contains terminal observations, never protocol content or
+// ownership authority. Cursor counts consumed fixture frames, including outputs
+// that may not yet have been forwarded.
+type LifecycleProgress struct {
+	Stage, ErrorClass                                      string
+	Frames, Cursor, PendingInput                           int
+	ActionAccepted, InputEOF, OutputEOF, StderrEOF, Sealed bool
 }
 type LifecycleKill struct {
 	PID    int
@@ -253,6 +263,25 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	frames, total := 0, 0
 	sealed := false
 	actionAccepted := false
+	var pendingInput, pendingOutput []byte
+	inputEOF, outputEOF, stderrEOF := false, false, false
+	stage := "ready"
+	defer func() {
+		if c.OnProgress != nil {
+			class := "none"
+			if resultErr != nil {
+				class = "boundary"
+				if errors.Is(resultErr, syscall.EPIPE) {
+					class = "broken-pipe"
+				}
+			}
+			cursor := 0
+			if player != nil {
+				cursor = player.next
+			}
+			c.OnProgress(LifecycleProgress{stage, class, count, cursor, len(pendingInput), actionAccepted, inputEOF, outputEOF, stderrEOF, sealed})
+		}
+	}()
 	var observeAction func() error
 	sealDeadline := time.Time{}
 	deadline := time.Now().Add(20 * time.Minute)
@@ -287,6 +316,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
+		stage = "output-forward"
 		emit := func(extra time.Time) error {
 			restored, err := binding.Frame(raw, true)
 			if err != nil {
@@ -353,14 +383,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 		}
 	}
-	var pendingInput, pendingOutput []byte
-	inputEOF, outputEOF, stderrEOF := false, false, false
 	defer func() {
 		if c.OnTerminalState != nil {
 			c.OnTerminalState(inputEOF, outputEOF, stderrEOF, sealed)
 		}
 	}()
 	accept := func(direction string, raw []byte) error {
+		stage = "accept-" + direction
 		if direction == "stdout" && observeAction != nil {
 			if err := observeAction(); err != nil {
 				return err
@@ -391,9 +420,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			// Consume through the stand-in's pipe as well: closure and the owned PID
 			// have real process semantics even though provider responses are replayed.
 			inputForward := func() error { return write(originals[3], append(raw, '\n')) }
+			stage = "input-forward"
 			e = forwardLifecycleFrame(raw, c.ForwardInput, func([]byte) error { return inputForward() })
 			if e != nil {
-				return fail
+				return e
 			}
 			recordTimelineInput(normalized)
 			work := time.Now()
@@ -581,12 +611,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		frames++
 		actionAccepted = true
+		stage = "action-ack"
 		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
 		return nil
 	}
 	finish := func() (int, error) {
+		stage = "finish"
 		if c.Context != nil && c.Context.Err() != nil {
 			return frames, errors.New("cancelled lifecycle cannot seal")
 		}
