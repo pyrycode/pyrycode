@@ -121,14 +121,8 @@ const resumeAfterEvictionWARNTimeout = 20 * time.Second
 func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	runParallel(t)
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
+	var err error
 
 	// Isolated workdir under the authenticated HOME. Load-bearing twice: it
 	// guarantees the fresh-daemon state (empty claude sessions dir) AND sidesteps
@@ -184,11 +178,12 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	t.Cleanup(func() { finishDaemonRecording(t) })
 
 	// Per-run-unique, unbroken, upper-case-friendly recall token. Per-run
 	// uniqueness defeats accidental caching / coincidental matches; an unbroken
 	// token survives strings.Contains even if claude wraps it in punctuation.
-	token := fmt.Sprintf("PYRYRESUME%X", time.Now().UnixNano())
+	token := fmt.Sprintf("PYRYRESUME%X", daemonRecordingNonce(t, time.Now().UnixNano()))
 
 	// Plant turn (AC1, AC4-setup): instruct claude to remember the exact token and
 	// reply with just "ok" — the token is never asserted here; it only has to reach
@@ -203,6 +198,7 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 		fmt.Sprintf("Remember this exact token for later, but do NOT repeat it now: %s. "+
 			"Reply with just the word: ok", token))
 	drainForCompletedTurn(t, phone, initRecv, evictResumeConvID, perTurnReplyBudget)
+	lifecycleRecordingBeforeIdle(t, home)
 
 	// Force + observe eviction (AC1, AC2): after the plant drain returns, poll the
 	// daemon stderr for the session.idle_eviction WARN. This is the deterministic
@@ -210,6 +206,7 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// without it the continuity assertion is vacuous (a never-killed child trivially
 	// retains context).
 	waitForIdleEvictionWARN(t, d, evictResumeBootstrapUUID, evictionsBeforePlant, resumeAfterEvictionWARNTimeout)
+	lifecycleRecordingResumeSnapshot(t, home)
 
 	// Resume turn (AC3, AC4): ask claude for the exact token it was told to
 	// remember. drainForResumedTurnText returns the concatenated assistant_delta
@@ -252,6 +249,7 @@ func spawnBootstrapDaemonWithIdle(t *testing.T, home, workdir, claudeBin, relayU
 	t.Helper()
 	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
 	socket := shortSocketPath(t)
+	daemonRecordingRegisterSocket(t, home, bin, socket)
 	stderr := &lockedBuffer{}
 
 	args := []string{
@@ -275,6 +273,7 @@ func spawnBootstrapDaemonWithIdle(t *testing.T, home, workdir, claudeBin, relayU
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("realclaude: pyry start: %v", err)
 	}
+	lifecycleRecordingWorkerDaemon(t, home, cmd.Process.Pid, stderr)
 	doneCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()

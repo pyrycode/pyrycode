@@ -14,8 +14,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -140,7 +142,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 	}
-	if name == "session-rotation" {
+	if len(claudetape.LifecycleSnapshotRoles(name)) > 0 {
 		for _, dir := range []string{"recording-snapshots", "recording-snapshot-inputs"} {
 			if os.Mkdir(filepath.Join(home, dir), 0700) != nil {
 				t.Fatal("cannot prepare native transcript inventory")
@@ -156,9 +158,32 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, role := range profile.Roles {
+			for _, role := range claudetape.LifecycleSnapshotRoles(name) {
 				if suite.Snapshots[role].Save(filepath.Join(home, "recording-snapshot-inputs", role+".json"), home) != nil {
 					t.Fatal("cannot stage reviewed native transcript")
+				}
+			}
+		}
+	}
+	workerLimit := claudetape.LifecycleWorkerLimit(name)
+	if workerLimit > 0 {
+		if os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
+			t.Fatal("cannot prepare private finite workers")
+		}
+		if mode == "replay" {
+			file, err := os.Open(process.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			suite, err := claudetape.DecodeLifecycleSuite(file, profile.Roles)
+			file.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, worker := range suite.Workers {
+				path := strings.TrimSuffix(claudetape.FallbackWorkerJobPath(home, i+1), ".job") + ".json"
+				if worker.Tape.Save(path) != nil {
+					t.Fatal("cannot stage reviewed finite worker")
 				}
 			}
 		}
@@ -231,6 +256,55 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 	})
+	var workerServer *claudetape.LifecycleBrokerServer
+	workerLaunchHashes := map[string][32]byte{}
+	workerProofs := map[string]*recordedWorkerCompletion{}
+	var workerLaunchMu sync.Mutex
+	if workerLimit > 0 {
+		jobs := []string{}
+		for i := 1; i <= workerLimit; i++ {
+			jobs = append(jobs, claudetape.FallbackWorkerJobPath(home, i))
+		}
+		workerServer, err = claudetape.NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), jobs, func(path string, peer int) (*exec.Cmd, error) {
+			var job claudetape.FallbackWorkerJob
+			if claudetape.ReadLifecycleControl(path, 16384, &job) != nil || claudetape.ValidateFallbackWorkerLaunch(job, path, peer, os.Getpid(), process, sourceSHA) != nil {
+				return nil, os.ErrInvalid
+			}
+			launchRaw, err := os.ReadFile(path)
+			var sameJob claudetape.FallbackWorkerJob
+			if err != nil || len(launchRaw) > 16384 || json.Unmarshal(launchRaw, &sameJob) != nil || !reflect.DeepEqual(job, sameJob) {
+				return nil, os.ErrInvalid
+			}
+			workerLaunchMu.Lock()
+			workerLaunchHashes[path] = sha256.Sum256(launchRaw)
+			workerLaunchMu.Unlock()
+			cmd := exec.Command(binary, "-test.run=^TestFallbackWorkerBrokerProcess$", "--", path)
+			cmd.Env = os.Environ()
+			if mode == "replay" {
+				cmd.Env = recordedPoolOfflineEnv()
+			}
+			cmd.Env = append(cmd.Env, "PYRY_LIFECYCLE_RECORDING_CONFIG="+configPath)
+			proof := &recordedWorkerCompletion{cmd: cmd}
+			cmd.Stdout = proof
+			workerLaunchMu.Lock()
+			workerProofs[path] = proof
+			workerLaunchMu.Unlock()
+			return cmd, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = workerServer.Join(2 * time.Second) })
+		t.Cleanup(func() {
+			for i := 1; i <= workerLimit; i++ {
+				path := strings.TrimSuffix(claudetape.FallbackWorkerJobPath(home, i), ".job") + ".abort"
+				file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+				if err == nil {
+					file.Close()
+				}
+			}
+		})
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "tool", "test2json", "-t", "-p", "daemon-recording", binary, "-test.v", "-test.run=^"+regexp.QuoteMeta(profile.Root)+"$", "-test.timeout=20m")
@@ -369,16 +443,82 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		}
 		t.Fatalf("lifecycle role evidence changed during original cleanup: audit=%v digest_matches=%t", err, digest == receipt.ArtifactSHA256)
 	}
+	if workerServer != nil {
+		if err := workerServer.Join(15 * time.Second); err != nil {
+			for _, proof := range workerProofs {
+				decoder := json.NewDecoder(bytes.NewReader(proof.raw))
+				for {
+					var record json.RawMessage
+					if decoder.Decode(&record) != nil {
+						break
+					}
+					var diagnostic struct{ WorkerError string }
+					if len(record) < 1024 && json.Unmarshal(record, &diagnostic) == nil && diagnostic.WorkerError != "" && len(diagnostic.WorkerError) < 256 && claudetape.Safe([]byte(diagnostic.WorkerError)) == nil {
+						t.Log(diagnostic.WorkerError)
+					}
+				}
+			}
+			t.Fatal(err)
+		}
+	}
+	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workerLaunchHashes) != len(workers) {
+		t.Fatal("finite worker attempts do not match kernel-owned launches")
+	}
+	for path, proof := range workerProofs {
+		if proof.overflow || proof.cmd.Process == nil || claudetape.ValidateFallbackWorkerCompletion(proof.raw, proof.cmd.Process.Pid, path) != nil {
+			t.Fatal("finite worker completion differs from actual owned broker")
+		}
+	}
+	for path, want := range workerLaunchHashes {
+		raw, err := os.ReadFile(path)
+		if err != nil || sha256.Sum256(raw) != want {
+			t.Fatal("finite worker launch changed during original cleanup")
+		}
+	}
+	if mode == "replay" {
+		file, err := os.Open(process.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved, err := claudetape.DecodeLifecycleSuite(file, profile.Roles)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !(len(saved.Workers) == 0 && len(workers) == 0) && !reflect.DeepEqual(saved.Workers, workers) {
+			t.Fatal("replay finite worker inventory changed")
+		}
+	}
 	if mode == "capture" {
 		snapshots, _, err := claudetape.ReadLifecycleSnapshots(home, name, revision, sourceSHA)
 		if err != nil {
 			t.Fatal(err)
 		}
-		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots}
+		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers}
 		if err := suite.Save(process.Path, profile.Roles); err != nil {
 			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}
 	}
 
 	t.Logf("mode=%s scenario=%s original_daemon_roots=1 child_roles=%d", mode, name, len(profile.Roles))
+}
+
+type recordedWorkerCompletion struct {
+	cmd      *exec.Cmd
+	raw      []byte
+	overflow bool
+}
+
+func (p *recordedWorkerCompletion) Write(raw []byte) (int, error) {
+	n := len(raw)
+	if n > 16384-len(p.raw) {
+		p.overflow = true
+	} else {
+		p.raw = append(p.raw, raw...)
+	}
+	return n, nil
 }

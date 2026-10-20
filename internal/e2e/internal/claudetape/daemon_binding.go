@@ -18,11 +18,42 @@ type DaemonBinding struct {
 	session, home, workdir, daemon, socket string
 	filePaths                              map[string]string
 	args                                   []string
+	resume                                 bool
+	resumeSource                           *SessionSnapshot
 }
 
 const daemonSession = "${CHILD_SESSION}"
 
 func NewDaemonBinding(args []string, home, workdir, daemon, socket string) (*DaemonBinding, error) {
+	return newDaemonBinding(args, home, workdir, daemon, socket, false)
+}
+
+// NewLifecycleDaemonBinding permits resume only for the closed successor role.
+// Its complete native file input is checked again immediately before readiness.
+func NewLifecycleDaemonBinding(args []string, home, workdir, daemon, socket, scenario, role string) (*DaemonBinding, error) {
+	if LifecycleEnd(scenario, role) == "" {
+		return nil, errors.New("unknown lifecycle binding role")
+	}
+	resume := scenario == "session-resume" && role == "resumed"
+	p, err := newDaemonBinding(args, home, workdir, daemon, socket, resume)
+	if err != nil {
+		return nil, err
+	}
+	if resume {
+		raw, err := runnerPrivateRead(filepath.Join(home, "recording-snapshots", "bootstrap.json"), MaxBytes)
+		if err != nil {
+			return nil, errors.New("missing owned predecessor transcript input")
+		}
+		snapshot, err := DecodeSessionSnapshot(bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		p.resumeSource = &snapshot
+	}
+	return p, nil
+}
+
+func newDaemonBinding(args []string, home, workdir, daemon, socket string, resume bool) (*DaemonBinding, error) {
 	fail := errors.New("invalid fresh daemon child binding")
 	if !filepath.IsAbs(home) || !filepath.IsAbs(workdir) || !filepath.IsAbs(daemon) || !filepath.IsAbs(socket) {
 		return nil, fail
@@ -31,12 +62,15 @@ func NewDaemonBinding(args []string, home, workdir, daemon, socket string) (*Dae
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, fail
 	}
-	p := &DaemonBinding{home: home, workdir: workdir, daemon: daemon, socket: socket, filePaths: map[string]string{}, args: append([]string(nil), args...)}
+	p := &DaemonBinding{home: home, workdir: workdir, daemon: daemon, socket: socket, filePaths: map[string]string{}, args: append([]string(nil), args...), resume: resume}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--resume", "--continue":
+		case "--continue":
 			return nil, fail
-		case "--session-id":
+		case "--session-id", "--resume":
+			if (args[i] == "--resume") != resume {
+				return nil, fail
+			}
 			if p.session != "" || i+1 == len(args) || !poolUUID.MatchString(args[i+1]) {
 				return nil, fail
 			}
@@ -159,6 +193,20 @@ func (p *DaemonBinding) Files() (map[string]json.RawMessage, error) {
 			return nil, err
 		}
 		files[flag] = encoded
+	}
+
+	if p.resume {
+		if p.resumeSource == nil {
+			return nil, errors.New("unproved resume file input")
+		}
+		current, err := ReadSessionSnapshot(LifecycleNativePath(p.home, p.session), p.session, p.home)
+		if err != nil || current != *p.resumeSource {
+			return nil, errors.New("resume file differs from complete owned predecessor output")
+		}
+		files["$resume-input"], err = json.Marshal(current)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return files, nil
 }

@@ -781,3 +781,91 @@ and replay continues checking complete literal prompt files. Different model
 notes can therefore compare only when each is the precise predecessor output
 that actually reached its own successor. A foreign note, omitted note, duplicate
 fence, changed prompt header or changed mode still fails.
+
+## Idle eviction and literal native resume inputs
+
+`session-resume` captures the original five-second idle-eviction root. It keeps
+the original counted daemon WARN gate, unchanged idle timer and planted-token
+recall assertions. The bootstrap and resumed role share the original session
+UUID but have distinct kernel-owned process claims. Their argv forms stay
+explicitly different: `--session-id` first, `--resume` second. Unknown launches,
+repeated claims, a fresh successor or a foreign persisted binding fail closed.
+
+After the plant turn completes, a typed idle checkpoint authorizes only the
+current original provider's impending eviction. After the original WARN gate,
+the recording hook joins actual owned output EOF and requires the predecessor
+PID to be gone. Capture then takes the complete stable private native JSONL.
+Replay exclusively installs those reviewed raw bytes after the same strict user
+input and actual eviction, before the unchanged resume send. The production
+by-ID existence probe still runs and must select resume. Native parent folders
+are created through anchored no-follow descriptors; no ancestor symlink is
+traversed. No original deadline is extended and no file is restored before its
+causal barrier.
+
+The resumed broker checks the entire physical JSONL and its mode against that
+owned predecessor snapshot immediately before readiness. Its complete literal
+file input remains in the fixture and is checked again on replay. Suite decoding
+requires this input to equal its own predecessor snapshot. Fresh comparison may
+bind only that one complete source file to the closed predecessor reference;
+all other file bytes, modes, argv and ordered requests stay strict. Snapshot
+stage identity, current producer/source, user delivery, original terminal receipt
+and exact private inventories are pinned across unchanged daemon cleanup. Later
+native appends may extend the saved prefix but cannot rewrite it. Current Claude
+writing, actual reload and semantic recall remain obligations of the retained
+original live root.
+
+The idle-resume profile also permits up to two finite suggestion workers, one
+per completed original turn. The first native resume attempt exposed an unowned
+invocation during its unchanged five-second idle window. That attempt failed the
+strict cleanup inventory and produced no accepted fixture; its stream receipts
+alone do not count as coverage. The generic failure marker does not prove the
+invocation's argv or count. The production two-second suggestion timeout is the
+source-supported path that the new finite-worker boundary must observe directly.
+
+Finite workers use a separate kernel-authenticated pipe broker owned by the
+outer test parent. That broker starts and waits the actual native child in the
+current production worker's process group. Group cancellation reaches the helper
+and native child while leaving their recorder alive. It retains exact closed
+print argv/inline settings, the actual empty temporary cwd, complete stdin and
+EOF, both complete output streams and EOF, and native Wait status. Credentials
+travel only in the helper's in-memory environment pipe and are never serialized.
+The private post-cleanup inventory additionally joins every exclusive launch to
+its current kernel peer, unchanged source/job bytes and the original daemon's
+actual worker Wait observation. A signalled replay waits for actual production
+cancellation; a fixture cannot manufacture a successful cancellation.
+
+Each literal worker exchange must match exactly one completed turn in its own
+provider tape, derived through the production parser. Only the last main-agent
+message contributes assistant prose; nested-agent text, thinking, incomplete and
+failed turns cannot supply it. The derivation follows production's UTF-8 byte
+limits and opening/closing-text retention. Replay checks the entire literal input.
+Fresh comparison validates both complete source edges first and permits only the
+assistant output to differ; source role, user sequence, user text, argv and status
+remain strict. Workers in other lifecycle profiles remain unsupported until their
+own original invocation, timing and ownership paths have been reviewed.
+
+The finite broker bounds stdout and stderr reads with an absolute deadline before
+joining readers; a child that retains and trickles into an inherited pipe cannot
+postpone EOF forever. Invalid UTF-8 argv fail before serialization. Its complete
+tape digest travels in a separate outer-owned broker stdout capability as well
+as the private receipt. Final acceptance checks that capability against the
+actual broker `exec.Cmd` PID, the on-disk receipt and exact tape bytes. Rewriting
+safe prose after receipt, even with a forged disk digest, cannot replace output
+observed from the native process. Inherited transport descriptors are marked
+close-on-exec before the broker starts native Claude.
+
+Idle-resume additionally retains successful bootstrap stdout forwarding offsets
+from broker readiness. Fast output changes the phase between the activation-based
+five-second idle timer and the two-second fallback window; a native capture with
+no worker cannot supply an invented replay worker. This closed timeline restores
+absolute output due times, keeps strict input/action order, and rejects more than
+100 ms scheduling or successful-forwarding drift instead of compressing gaps. Readiness follows activation
+and is only an approximate epoch; the original timer/WARN/owned EOF still decide
+eviction. No fixture can trigger that eviction. All stdout offsets must be present,
+monotonic and bounded; other profiles reject this timeline. Fresh worker counts
+remain strict even when different native API latencies cause different attempts.
+
+A native attempt with no worker that cannot replay its timing remains unpromoted.
+Another attempt passed the original root but failed its outer broker join; it also
+remains unpromoted. Worker failures now expose only fixed stage diagnostics over
+the separate broker capability, never argv, environment or native output text.

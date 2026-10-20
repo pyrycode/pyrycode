@@ -259,9 +259,12 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	if daemonRecordingRead(filepath.Join(c.Process.Home, "recording-endpoint.json"), &endpoint) != nil || endpoint.Daemon != c.Daemon {
 		fail()
 	}
+	if lifecycleRecordingFiniteWorker(c, args) {
+		return
+	}
 	session := ""
 	for i, a := range args {
-		if a == "--session-id" && i+1 < len(args) {
+		if (a == "--session-id" || a == "--resume") && i+1 < len(args) {
 			if session != "" {
 				fail()
 			}
@@ -269,7 +272,12 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 		}
 	}
 	var role claudetape.LifecycleRoleBinding
-	if _, _, _, reset := claudetape.LifecycleResetSeeds(c.Process.Scenario); reset {
+	if c.Process.Scenario == "session-resume" {
+		role, e = lifecycleRecordingResumeRole(c, session, args)
+		if e != nil {
+			fail()
+		}
+	} else if _, _, _, reset := claudetape.LifecycleResetSeeds(c.Process.Scenario); reset {
 		role, e = lifecycleRecordingResetRole(c, session)
 		if e != nil {
 			fail()
@@ -336,7 +344,7 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 	if daemonRecordingWrite(prefix+".broker-pid", os.Getpid()) != nil {
 		os.Exit(2)
 	}
-	b, e := claudetape.NewDaemonBinding(job.Args, c.Process.Home, job.WorkDir, job.Daemon, job.Socket)
+	b, e := claudetape.NewLifecycleDaemonBinding(job.Args, c.Process.Home, job.WorkDir, job.Daemon, job.Socket, c.Process.Scenario, job.Role)
 	if e != nil {
 		os.Exit(2)
 	}

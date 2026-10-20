@@ -185,7 +185,7 @@ func lifecycleRecordingRotationSnapshots(t *testing.T, home, before, after strin
 }
 
 func lifecycleRecordingInputWitness(job claudetape.LifecycleJob, home, scenario string) func([]byte) error {
-	if scenario != "session-rotation" {
+	if len(claudetape.LifecycleSnapshotRoles(scenario)) == 0 {
 		return nil
 	}
 	count := 0

@@ -16,15 +16,19 @@ import (
 // literal, opaque data and is never used as a process or signal target. Kill
 // authorization uses the current owned launch, checked by the outer test parent.
 type LifecycleTape struct {
-	Version int    `json:"version"`
-	Tape    *Tape  `json:"tape"`
-	End     string `json:"end"`
-	Stderr  string `json:"stderr"`
+	Timeline *LifecycleTimeline `json:"timeline,omitempty"`
+	Version  int                `json:"version"`
+	Tape     *Tape              `json:"tape"`
+	End      string             `json:"end"`
+	Stderr   string             `json:"stderr"`
 }
 
 func (t *LifecycleTape) Validate() error {
-	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation" && t.End != "rotate-session") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
+	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation" && t.End != "rotate-session" && t.End != "idle-evict") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
 		return errors.New("invalid lifecycle tape")
+	}
+	if validateLifecycleTimeline(t) != nil {
+		return errors.New("invalid native output timeline")
 	}
 	raw, err := json.Marshal(t.Tape)
 	if err != nil {
@@ -109,7 +113,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if c.BrokerParentPID != 0 {
 		parent = c.BrokerParentPID
 	}
-	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session") {
+	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session" && c.End != "idle-evict") {
 		return 0, fail
 	}
 	defer func() {
@@ -166,6 +170,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return 0, e
 		}
 	}
+	if lifecycleTimelineEnabled(c.Scenario) {
+		if c.Mode == "capture" {
+			tape.Timeline = &LifecycleTimeline{Kind: lifecycleTimelineKind, OutputAfterNS: []int64{}}
+		} else if tape.Timeline == nil {
+			return 0, errors.New("missing required native output timeline")
+		}
+	}
 	// Cache FDs before setting nonblocking; File.Fd can itself restore blocking.
 	inputFD, outFD, errFD := int(originals[0].Fd()), int(originals[4].Fd()), int(originals[5].Fd())
 	for _, fd := range []int{inputFD, outFD, errFD} {
@@ -173,6 +184,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return 0, fail
 		}
 	}
+	timelineOrigin := time.Now()
+	timelineOutput := 0
 	if _, err = originals[6].Write([]byte{1}); err != nil {
 		return 0, fail
 	}
@@ -187,7 +200,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		deadline = c.Deadline
 	}
 	expired := func() bool { return !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline)) }
-	write := func(f *os.File, raw []byte) error {
+	writeBounded := func(f *os.File, raw []byte, extraDeadline time.Time) error {
 		if len(raw) == 0 {
 			return nil
 		}
@@ -201,22 +214,38 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if sealed && sealDeadline.Before(writeDeadline) {
 			writeDeadline = sealDeadline
 		}
+		if !extraDeadline.IsZero() && extraDeadline.Before(writeDeadline) {
+			writeDeadline = extraDeadline
+		}
 		if f.SetWriteDeadline(writeDeadline) != nil {
 			return fail
 		}
 		_, err := f.Write(raw)
 		return err
 	}
+	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
-		restored, e := binding.Frame(raw, true)
-		if e != nil {
-			return e
+		emit := func(extra time.Time) error {
+			restored, err := binding.Frame(raw, true)
+			if err != nil {
+				return err
+			}
+			return writeBounded(originals[1], append(restored, '\n'), extra)
 		}
-		e = write(originals[1], append(restored, '\n'))
-		if e == nil {
-			frames++
+		if tape.Timeline != nil {
+			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
+				return fail
+			}
+			offset := tape.Timeline.OutputAfterNS[timelineOutput]
+			if err := forwardLifecycleOutput(timelineOrigin, offset, time.Now, time.Sleep, func() error { return emit(timelineOrigin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
+				return err
+			}
+			timelineOutput++
+		} else if err := emit(time.Time{}); err != nil {
+			return err
 		}
-		return e
+		frames++
+		return nil
 	}
 	if player != nil {
 		for _, raw := range player.Prefix() {
@@ -284,6 +313,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		if err := write(target, append(raw, '\n')); err != nil {
 			return err
+		}
+		if direction == "stdout" && tape.Timeline != nil {
+			tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, time.Since(timelineOrigin).Nanoseconds())
 		}
 		if direction == "stdin" && c.OnInput != nil {
 			return c.OnInput(normalized)
@@ -422,6 +454,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return frames, fail
 		}
 		if player != nil {
+			if tape.Timeline != nil && timelineOutput != len(tape.Timeline.OutputAfterNS) {
+				return frames, fail
+			}
 			if player.Complete() != nil {
 				return frames, fail
 			}
@@ -472,7 +507,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if c.End == "eof" && inputEOF && outputEOF && stderrEOF {
 			return finish()
 		}
-		if (c.End == "kill" || c.End == "rotate-session") && outputEOF && stderrEOF {
+		if (c.End == "kill" || c.End == "rotate-session" || c.End == "idle-evict") && outputEOF && stderrEOF {
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
 			}
