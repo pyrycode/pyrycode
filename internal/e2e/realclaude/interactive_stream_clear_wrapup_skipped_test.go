@@ -162,6 +162,9 @@ const skipWindowQuiet = 8 * time.Second
 
 func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	runParallel(t)
+	if captureSkippedWrapUp(t) {
+		return
+	}
 	// Parallel only through runParallel; see liveHome.
 	claudeBin, home := daemonProviderEnvironment(t)
 	var err error
@@ -208,6 +211,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 
 	d := spawnBootstrapDaemonWithWrapUpBound(t, home, workdir, claudeBin, relayURL, wrapUpSkipBound)
 	t.Cleanup(func() { d.stop(t) })
+	nativeObservation := beginWrapUpRootObservation(t, home, d)
 
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
@@ -246,10 +250,12 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// registry key with its live binding.
 	w := newResetWindow()
 	lifecycleRecordingBeforeReset(t, home)
+	nativeObservation.Add("reset_send", nil, nil)
 	sealSendMessage(t, phone, initSend, clearReqID, skipConvID, "m-clear", "/clear")
 
 	// --- AC 2: the four frames, with `skipped` on the phase change -------------
 	w.awaitReset(t, phone, initRecv, clearReqID, skippedResetWindowBudget)
+	nativeObservation.Add("reset_observed", nil, nil)
 
 	assertResetEdge(t, "the first rising edge", w.edges[0], protocol.ResettingPayload{
 		ConversationID: skipConvID,

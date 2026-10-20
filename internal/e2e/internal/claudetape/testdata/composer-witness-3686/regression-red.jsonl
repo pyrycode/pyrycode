@@ -1,0 +1,9 @@
+{"Time":"2026-10-20T13:41:40.173539704Z","Action":"start","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"}
+{"Time":"2026-10-20T13:41:40.192810182Z","Action":"run","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalForegroundWitnessWaitsForPublication"}
+{"Time":"2026-10-20T13:41:40.192896707Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalForegroundWitnessWaitsForPublication","Output":"=== RUN   TestPhysicalForegroundWitnessWaitsForPublication\n"}
+{"Time":"2026-10-20T13:41:40.195104214Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalForegroundWitnessWaitsForPublication","Output":"    physical_witness_test.go:65: foreground readiness returned incomplete witness \"\" after 1 reads\n"}
+{"Time":"2026-10-20T13:41:40.196132002Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalForegroundWitnessWaitsForPublication","Output":"--- FAIL: TestPhysicalForegroundWitnessWaitsForPublication (0.00s)\n"}
+{"Time":"2026-10-20T13:41:40.19615901Z","Action":"fail","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalForegroundWitnessWaitsForPublication","Elapsed":0}
+{"Time":"2026-10-20T13:41:40.196181814Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Output":"FAIL\n"}
+{"Time":"2026-10-20T13:41:40.196462977Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Output":"FAIL\tgithub.com/pyrycode/pyrycode/internal/e2e/internal/claudetape\t0.023s\n"}
+{"Time":"2026-10-20T13:41:40.196498152Z","Action":"fail","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Elapsed":0.023}

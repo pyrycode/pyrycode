@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "kind": "session-resume-prefix-investigation",
+  "host": "pyrybox",
+  "os": "Linux 7.0.0-28-generic x86_64",
+  "toolchain": "go1.26.9 linux/amd64",
+  "scope": "focused builder proof; full-module verification remains dispatcher-owned; macOS outside scope",
+  "fixture_sha256": "1a1e6faee135a83b4deba4b2a84630bc846526e69c5db8c793e72b7eb80cb002",
+  "daemon_sha256": "0928376df3d28ce0405717b5f505041a41f3f8969fe1557dac8178d7db5f2f0f",
+  "selection": "go test -timeout=30m -tags=e2e -race -count=1 -json -run ^TestRecordedClaude/session-resume$ ./internal/e2e, through scripts/test-admission.py",
+  "environment": {"PYRY_CLAUDE_TAPE_MODE": "replay", "PYRY_CLAUDE_TAPE_SCENARIOS": "[\"session-resume\"]", "PYRY_CLAUDE_TAPE_EVIDENCE": "private external per-run directory"},
+  "repaired_selection_addition": "-skip ^TestRecordedClaudeFirstTurnWaitsForStartup$ excludes an unrelated top-level sibling matched by Go's slash selector; no original root is skipped",
+  "historical_originals": "/tmp/builder-3667/{baseline,baseline-repeat,observed-red,inventory-red}/",
+  "recovered_copies": "/tmp/builder-3668/historical/",
+  "original_root_counts_order": ["executed", "passed", "failed", "skipped"],
+  "unchanged_failure": {
+    "source": "998460bc38fb322aa03d4db0717fe2ca3c3e7f08",
+    "helper_sha256": "048eb9caf14ece11a350e9f41e58ec077fe4ef8da6d8739885b6bb109a97dc0b",
+    "directory": "/tmp/builder-3668/baseline/",
+    "test_jsonl_sha256": "8dcbf8e1e28fd349a1660b2b9da49341d80d7b8e5210b0c6470dbd71a7690124",
+    "original_root_counts": [1, 0, 1, 0],
+    "predicate": "lifecycle child artifact inventory changed; exact names unobserved in this run"
+  },
+  "observed_liveness_failure": {
+    "source": "ee66a5762572295ce54569fb6353aec1e042a785",
+    "helper_sha256": "33b9ee281c99e17cd17e9158789e9811875a92d33f1910d9e83485ee0005a3bc",
+    "directory": "/tmp/builder-3668/observed/",
+    "test_jsonl_sha256": "378aab5d83ca0e0ba6bfafe958eeeba39df3fb47fb319c3bc347bfb3dd40f6f5",
+    "original_root_counts": [1, 0, 1, 0],
+    "bootstrap_owner_broker": [196035, 196084],
+    "resumed_owner_broker": [196163, 196169],
+    "finish_entry": "resumed owner/broker present; no prefix or terminal receipt",
+    "after_config_elapsed_ns": 1459494367,
+    "after_config": "resumed owner/broker absent; failed terminal receipt; no prefix",
+    "broker_terminal": {"input_eof": false, "output_eof": true, "stderr_eof": true, "sealed": false},
+    "idle_eviction_count": "unknown; not retained by this diagnostic revision"
+  },
+  "observed_inventory_failure": {
+    "source": "48693437f019eab136d5a8eccaee81b3fc772e3f",
+    "helper_sha256": "e39861bb388224c752df3124114065f934526148cc02c8ac5879eaeee1c3b3d1",
+    "directory": "/tmp/builder-3668/observed-exact/",
+    "test_jsonl_sha256": "c670854d7328d5ac5dd2c1b90173cbc1b4219400cd847bc69d004ea88f9b37a6",
+    "original_root_counts": [1, 0, 1, 0],
+    "bootstrap_owner_broker": [197177, 197234],
+    "resumed_owner_broker": [197256, 197292],
+    "finish_entry_elapsed_ns": 3717149,
+    "after_config_elapsed_ns": 883558586,
+    "finish_published_elapsed_ns": 888274203,
+    "prefix_audited_elapsed_ns": 1830299449,
+    "idle_evictions_entry_and_audit_return": [1, 2],
+    "finish_publication": "resumed owner/broker present; successful prefix; exact inventory; no terminal receipt",
+    "audit_return": "resumed owner absent; successful terminal receipt; only extra name resumed.receipt",
+    "broker_terminal": {"input_eof": false, "output_eof": true, "stderr_eof": true, "sealed": true}
+  },
+  "causal_conclusion": "Repeated executable hashing in readLifecycleRecordingConfig consumes the small remaining activation-based idle window between recall and prefix sealing/inventory sampling. The same second actual idle eviction explains both absent-provider and extra-receipt failures. No independent publication cause was demonstrated.",
+  "prospective_causal_records": ["e2f6de19", "443a9d00"],
+  "repair": "Memoize only the executable digest/error per process with sync.OnceValues; re-read and validate every config and compare its expected source digest on every call. No timer, fixture, action, ownership check, audit inventory or receipt rule changes.",
+  "passing_replays": {
+    "source": "d2340d1c39909bb44e25859927654ad7c6ca3e89",
+    "helper_sha256": "4661f41c0e33db80e79e1dc82eb65429bf4502b8954d8d8c4e56f0864d02757e",
+    "runs": [
+      {"directory": "/tmp/builder-3668/repaired/", "original_root_counts": [1, 1, 0, 0], "wrapper_test_events": [2, 2, 0, 0], "test_jsonl_sha256": "970583226875632bed69165b2f1f19d39218852549f679dd5f060fb2c6659c3d", "root_jsonl_sha256": "3289dcf4f9d3096a3b4641d7fad89e30ac53e2ea845dc78a83c3f41272b4d692", "entry_ns": 6267355, "config_validated_ns": 9374183, "finish_published_ns": 15293046, "prefix_and_cleanup_sha256": "4a3b1ec1434e074522319aef569833ebd634cd47ff9cdf3791b1198b19fa86d5"},
+      {"directory": "/tmp/builder-3668/repaired-boundary/", "original_root_counts": [1, 1, 0, 0], "wrapper_test_events": [2, 2, 0, 0], "test_jsonl_sha256": "0a268b12f7d498de730c66eb7b23c22b823f5e2faebbade88f02debf61922959", "root_jsonl_sha256": "89b3625db2cbf165ef04fe5152b641c06f8a6878b6e99668a435419a58c6c713", "entry_ns": 4282533, "config_validated_ns": 10037209, "finish_published_ns": 16976418, "prefix_and_cleanup_sha256": "a7e93aac9d15b7911a6d400a4f49ee6d1a2940922aa239599d78a7543cad536b"}
+    ],
+    "observation_limit": "Both providers sealed live. The second idle eviction occurred during later audit processing, after its exact inventory sample; post-audit snapshots already see the receipt. No claim of liveness through audit return, atomic observations, or cross-run digest equality is made. Both unchanged complete audits passed with the original per-run pinned digest."
+  },
+  "regression": {
+    "names": ["TestLifecycleSourceValidationDoesNotRepeatAtSeal", "TestLifecycleSourceValidationRetainsInitialFailure"],
+    "red": {"path": "/tmp/builder-3668/regression-red.jsonl", "counts": [2, 0, 2, 0], "sha256": "6b05335630b8b27a31ec662ebbb4e4511e96bf16a937a03e262807219b66d93b", "source": "prospective uncached extraction later committed in 48693437; worktree was uncommitted during this proof; executable hash not retained"},
+    "green": {"path": "/tmp/builder-3668/regression-green.jsonl", "source": "d2340d1c39909bb44e25859927654ad7c6ca3e89", "counts": [2, 2, 0, 0], "sha256": "af4db729f91134938b8040ff72fdbc84f46f5330c799f128c69a8fee4cda56a6"}
+  },
+  "affected_controls": {"path": "/tmp/builder-3668/claudetape.jsonl", "source": "d2340d1c39909bb44e25859927654ad7c6ca3e89", "sha256": "ff9876e3be3a048c810ecade7f1fe0016ae068b79414c8bba734131ff4174f40", "leaf_counts": [744, 744, 0, 0], "all_test_events": [816, 816, 0, 0], "pin_prefix_family_events": [16, 16, 0, 0], "kernel_launch_family_events": [19, 19, 0, 0], "owned_process_family_events": [25, 25, 0, 0]},
+  "static_checks": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3668/pyry ./cmd/pyry"],
+  "static_check_result": "all passed",
+  "content_policy": "Bounded identities, known artifact names/states and hashes only. No environment dump, credentials or native transcript bytes. Recovered historical failures remain failed."
+}
