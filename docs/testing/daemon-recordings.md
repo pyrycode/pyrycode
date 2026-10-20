@@ -1015,7 +1015,8 @@ The `mcp-sidechannels` batch runs the original `TestInteractiveStreamSendFile`
 through a real isolated daemon. Its exact permission modal, `allow_once` answer,
 completed turn and single stored attachment with the original bytes remain the
 assertions. A successful native candidate still requires source/fixture review,
-offline replay, fresh request comparison and the full batch gate before promotion.
+offline replay, fresh request comparison and the full batch gate before final
+acceptance and merge.
 
 Only this profile uses a separately built `e2e_mcp_recording` daemon. Its command
 entry transfers the SDK's actual stdio descriptors through a private authenticated
@@ -1033,8 +1034,9 @@ allow verdict, tool result and attachment ID. Claude can request approval after
 the final streamed input fragment but before its assembled assistant message;
 that prefix must reconstruct the complete input and match the main message,
 tool and input identities. Native initialization must confirm `default` mode.
-Unknown fields stay literal. Only the joined tool-ID metadata leaf varies in
-fresh request comparison; progress tokens and other request bytes stay exact.
+Unknown fields stay literal. Fresh request comparison binds only the joined
+approval argument tool ID and the observed `claudecode/toolUseId` metadata leaves.
+Progress tokens and other request bytes stay exact.
 
 Replay executes real MCP handlers against the current daemon. The real file
 handoff mints a new attachment ID; only declared response/result text scalars can
