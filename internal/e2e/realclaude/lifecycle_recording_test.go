@@ -272,7 +272,12 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 		}
 	}
 	var role claudetape.LifecycleRoleBinding
-	if c.Process.Scenario == "session-resume" {
+	if c.Process.Scenario == "conversation-system-prompt" {
+		role, e = lifecycleRecordingPromptRole(c, session)
+		if e != nil {
+			fail()
+		}
+	} else if c.Process.Scenario == "session-resume" {
 		role, e = lifecycleRecordingResumeRole(c, session, args)
 		if e != nil {
 			fail()

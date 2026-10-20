@@ -75,6 +75,7 @@ func seedPromptedConversations(t *testing.T, home, cwd, prompt string) {
 	if err := os.WriteFile(convPath, convJSON, 0o600); err != nil {
 		t.Fatalf("seed conversations.json: %v", err)
 	}
+	lifecycleRecordingPromptSeeds(t, home)
 }
 
 // TestInteractiveConversationSystemPrompt_ReachesTheReply (AC #5) drives two
@@ -87,7 +88,7 @@ func seedPromptedConversations(t *testing.T, home, cwd, prompt string) {
 // absence assertion is not a coincidence.
 func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
 	runParallel(t)
-	marker := fmt.Sprintf("PYRYMARK%d", time.Now().UnixNano()%1000000)
+	marker := fmt.Sprintf("PYRYMARK%d", daemonRecordingNonce(t, time.Now().UnixNano())%1000000)
 	prompt := "You are in a test harness. Append the token " + marker +
 		" on its own line at the end of every reply you write, verbatim and unaltered."
 

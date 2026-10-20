@@ -14,11 +14,12 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
-		"conversation-lifecycle": {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
-		"session-rotation":       {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
-		"session-resume":         {"TestInteractiveStreamResumeAfterEviction", []string{"bootstrap", "resumed"}},
-		"clear-wrapup-skipped":   {"TestInteractiveStreamClearWrapUpSkipped", []string{"bootstrap", "bound", "rotated"}},
-		"clear-reset":            {"TestInteractiveStreamClearRunsDaemonReset", []string{"bootstrap", "bound", "rotated"}},
+		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bare", "bootstrap", "prompted"}},
+		"conversation-lifecycle":     {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
+		"session-rotation":           {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
+		"session-resume":             {"TestInteractiveStreamResumeAfterEviction", []string{"bootstrap", "resumed"}},
+		"clear-wrapup-skipped":       {"TestInteractiveStreamClearWrapUpSkipped", []string{"bootstrap", "bound", "rotated"}},
+		"clear-reset":                {"TestInteractiveStreamClearRunsDaemonReset", []string{"bootstrap", "bound", "rotated"}},
 	}
 }
 
@@ -45,7 +46,7 @@ func LifecycleBootstrapFor(scenario string) string {
 		return bootstrap
 	}
 	switch scenario {
-	case "conversation-lifecycle":
+	case "conversation-lifecycle", "conversation-system-prompt":
 		return LifecycleBootstrapSession
 	case "session-rotation":
 		return LifecycleRotationSession
@@ -56,6 +57,10 @@ func LifecycleBootstrapFor(scenario string) string {
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "conversation-system-prompt":
+		if role == "bare" || role == "bootstrap" || role == "prompted" {
+			return "seal"
+		}
 	case "session-resume":
 		switch role {
 		case "bootstrap":
@@ -127,6 +132,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 }
 
 func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBinding) bool {
+	if scenario == "conversation-system-prompt" && !validPromptRole(b) {
+		return false
+	}
 	if scenario == "session-resume" && (role != "resumed" || b.SessionID != LifecycleResumeSession || b.ConversationID != LifecycleResumeConversation) {
 		return false
 	}
@@ -206,6 +214,13 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 	if s.Scenario == "clear-reset" {
 		if _, err := lifecycleHandoffContract(s.Roles["rotated"].Tape, s.Roles["bound"].Tape); err != nil {
 			return err
+		}
+	}
+	if s.Scenario == "conversation-system-prompt" {
+		for _, role := range profile.Roles {
+			if s.Roles[role].Timeline == nil {
+				return fail
+			}
 		}
 	}
 	if s.Scenario == "session-resume" {

@@ -1186,6 +1186,23 @@
       "retained_live": [
         "Current Claude transcript writing, physical reload, recall and native process termination remain live. Replay preserves the original five-second idle timer, counted daemon WARN gate and token recall assertions. It restores the complete native predecessor JSONL only after matching original input and actual owned eviction EOF, before the unchanged resume send and real production existence probe. The exact native file is checked before provider readiness; fresh comparison binds only that complete file input to its own captured predecessor output."
       ]
+    },
+    {
+      "name": "conversation-system-prompt",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveConversationSystemPrompt_ReachesTheReply"
+      ],
+      "live_contracts": {
+        "TestInteractiveConversationSystemPrompt_ReachesTheReply": "f7a4343a37b1c2907782f6c097f1cd92002786a41d44c7601c79081f58fb8abd"
+      },
+      "retained_live": [
+        "Current Claude instruction following and physical per-session prompt-file composition remain live. Replay runs the original positive and negative marker reply assertions and original per-session prompt-file assertions against three separately owned native process roles; complete literal prompt files, launch arguments and ordered user inputs remain strict. Actual finite fallback attempts and status remain mandatory and source-derived."
+      ]
     }
   ],
   "batches": {
@@ -1343,6 +1360,9 @@
     ],
     "session-resume": [
       "session-resume"
+    ],
+    "conversation-system-prompt": [
+      "conversation-system-prompt"
     ]
   },
   "reviews": {
@@ -1375,11 +1395,6 @@
       "disposition": "needs_harness",
       "reason": "Codex request_user_input and adaptive model fallback need a separate Codex protocol recorder. Preserve surfaced question/answer assertions and current-provider fallback behavior.",
       "contract_sha256": "7a722090d97ba8ec91d4b19a6e661bb3bf7a62fcb1b62579cd5c31d5ff8eae69"
-    },
-    "TestInteractiveConversationSystemPrompt_ReachesTheReply": {
-      "disposition": "needs_harness",
-      "reason": "Two conversations require separate appended system-prompt files and marker isolation. Add session/process-role identity support and complete per-child prompt-file comparison; semantic instruction following stays live.",
-      "contract_sha256": "f7a4343a37b1c2907782f6c097f1cd92002786a41d44c7601c79081f58fb8abd"
     },
     "TestInteractiveStreamBackgroundIdleProbe": {
       "disposition": "live_only",

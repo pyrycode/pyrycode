@@ -869,3 +869,23 @@ A native attempt with no worker that cannot replay its timing remains unpromoted
 Another attempt passed the original root but failed its outer broker join; it also
 remains unpromoted. Worker failures now expose only fixed stage diagnostics over
 the separate broker capability, never argv, environment or native output text.
+
+## Per-conversation system prompt isolation
+
+`conversation-system-prompt` proposes the unchanged original two-conversation
+reply test. Its bootstrap, prompted and bare providers have separate exclusive
+kernel-owned claims. The two nonbootstrap roles are published from the original
+persisted seed and checked against its fixed session/conversation identities.
+The recording nonce is stable only inside the selected original root; ordinary
+live runs keep their fresh marker. Both original reply assertions and both
+per-session prompt-file assertions remain in the original test body. Every
+complete literal appended prompt file, mode, argv and ordered input stays strict.
+
+Each role retains its successful stdout forwarding schedule so replay does not
+compress the native two-conversation exchange and silently remove a suggestion
+worker from its original window. This profile permits at most one finite worker
+per completed source turn, up to two total. Every actual attempt must join its
+own source exchange, actual owned process group, complete native output/EOF and
+original production Wait status. Zero observed workers is a literal count, not an
+optional worker policy. Current Claude instruction following and physical prompt
+composition remain retained live obligations.

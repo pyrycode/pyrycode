@@ -351,6 +351,7 @@ func spawnBootstrapDaemonBinary(t *testing.T, bin, home, workdir, claudeBin, rel
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("realclaude: pyry start: %v", err)
 	}
+	lifecycleRecordingWorkerDaemon(t, home, cmd.Process.Pid, stderr)
 	doneCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
