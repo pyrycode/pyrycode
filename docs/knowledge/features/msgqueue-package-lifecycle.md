@@ -8,11 +8,39 @@ An optional seam beside `OnChange`/`OnGiveUp`/`Pending`, added so the
 operator's own typed message could get a producer into the durable
 per-conversation log ([history-package.md § Producers](history-package-producers.md#producers-2114-2115))
 without touching `DeliverFunc`. `DeliveredFunc(convID string, msg QueuedMessage)`
-fires after `q.mu` is released, once per **confirmed**
-delivery — unconditional on `advanced`, unlike the neighbouring `q.notify`:
-that guard is about the backlog, and once the write is confirmed the text has
-reached claude's stdin and will be answered, so a `Remove` racing the commit
-cancels nothing that already happened.
+fires after `q.mu` is released, once per successful write reported by
+`DeliverFunc` — unconditional on `advanced`, unlike the neighbouring `q.notify`.
+That guard is about the backlog: a `Remove` racing a successful write cannot
+undo it. This queue-level notification establishes neither that the child read
+the pipe nor that it will answer (#3683).
+
+For queued Claude messages, `sendNowPlacement` separately confirms delivery at
+a matching echo or supported normal answering-turn completion. Ordinary
+no-echo writes commit on that close; Send now's no-echo fallback also waits for
+carried-close grace readiness. `WaitIdle` alone supplies no completion evidence.
+Child exit, teardown and daemon cancellation cannot substitute for it, and exit
+during grace retires the still-unconfirmed Send now placement. Parsed evidence
+preceding exit is processed in stream order.
+
+**Bind evidence to the selected child and output boundary.** Placement captures
+the exact stdin pipe through `streamsup.WithTurnTarget` and refreshes its
+accepted-output floor there. A session ID or `Runner.Run` incarnation can
+survive respawn; conversation/digest equality alone admits a successor's echo,
+and a registration-time floor admits old output queued while selecting stdin.
+Echoes must match conversation, pipe and digest after that floor; normal closes
+must belong to the same child after the floor. Saturated exit retention also
+keys by pipe, so two exits from one producer cannot overwrite each other's
+retirement evidence. Retirement drops confirmation candidates but keeps callback
+bookkeeping until `OnDelivered` acknowledges the managed write; a delayed
+callback must not fall through to a fresh commit or steal an identical payload's
+confirmation. Retirement does not wait for an unrelated successor's write.
+
+Unconfirmed successful writes retain their original accepted identity and
+content as `queued` history for ordinary delivery or `written` for Send now,
+without a delivered fact, delivered operator-message publication or automatic
+replay. A historical `queued` state does not put possibly consumed bytes back in
+the FIFO. Failed writes retain the queue's retry behavior. See
+[accepted sends and restart loss](history-package-producers.md#accepted-sends-and-linked-outcomes-2972).
 
 With `OnAccepted` configured (#2970), its callback must finish before either
 `OnDelivered` or `OnTerminal` begins for that message, including immediate
@@ -24,11 +52,11 @@ acceptance. Successful `SendNow` also preserves `SentNow: true`. See the
 [exported API](msgqueue-package-api.md#exported-surface) for the full projection
 and the empty device identity supplied by legacy callers.
 
-`OnTerminal` reports exactly one outcome for each resolved acceptance:
+`OnTerminal` reports exactly one queue-level outcome for each resolved acceptance:
 
 | Outcome | Resolution |
 | --- | --- |
-| `TerminalDelivered` (`"delivered"`) | Confirmed ordinary or successful send-now delivery. |
+| `TerminalDelivered` (`"delivered"`) | Successful ordinary or Send now write reported by the delivery seam; Claude placement confirmation is separate. |
 | `TerminalRemoved` (`"removed"`) | Explicit removal without confirmed delivery. |
 | `TerminalGiveUp` (`"give_up"`) | A persistently failing head actually abandoned after its retry window. |
 
@@ -71,9 +99,10 @@ don't.
 cloning attachment ids and omitting delivery bytes. Decorators preserve the
 context instead of widening `DeliverFunc`. The sole placement consumer can
 register final composed bytes privately while preparing client/history content
-from this projection. `OnDelivered` is still a confirmation notification, not
-a stream-order barrier: placed Claude entries acknowledge it without committing
-again. Codex/no-stream recording retains confirmation-at-write timing. See
+from this projection. `OnDelivered` is a successful-write notification, not
+a stream-order barrier: managed Claude entries acknowledge it without a fresh
+commit, including retired entries. Codex/no-stream recording retains
+confirmation-at-write timing. See
 [history producers](history-package-producers.md#producers-2114-2115).
 
 **A negative-only test proves nothing until its fire site exists.** Built RED
@@ -84,6 +113,15 @@ distinguished "correctly silent" from "cannot possibly fire yet" except a
 paired positive test's timeout. A suite of purely negative assertions gives no
 RED signal; pair every "does not fire" case with a "does fire" case exercising
 the same path.
+
+For placement, a successful small pipe write must be tested against a child
+provably blocked elsewhere and never reading stdin. `TestQueuedPlacementUnreadPipe`
+uses the production queue, factory and drain, then checks durable identity,
+projected status and publication after a drain barrier and a same-ID respawn.
+Without that barrier, silence can mean only that the false commit has not run
+yet. Pair it with `TestQueuedPlacementOwnership`'s echo, completion and grace
+controls and `TestQueuedPlacementSelectionFloor`'s old-output interleavings;
+readiness-only fakes cannot prove receiving-child confirmation.
 
 `QueuedMessage.TS` on the delivered value is the **enqueue** timestamp, not the
 confirmation time — a durable-record consumer wanting ordering must mint its

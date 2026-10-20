@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"slices"
 	"sync"
 	"time"
@@ -96,6 +97,7 @@ type sendNowPlacement struct {
 	// the conversation is never read from the line.
 	resolve  func(sessionID string) (conversationID string, ok bool)
 	waitIdle func(ctx context.Context, conversationID string) error
+	position func() uint64
 
 	record   func(string, msgqueue.QueuedMessage, ...history.SessionProvenance)
 	dispatch func(func())
@@ -108,17 +110,20 @@ type sendNowPlacement struct {
 }
 
 type placedMessage struct {
-	id       uint64
-	digest   [sha256.Size]byte
-	echoed   bool
-	commit   func()
-	queued   bool
-	sentNow  bool
-	outcome  chan struct{}
-	writeErr error
-	notified bool
-	placed   bool
-	source   history.SessionProvenance
+	id        uint64
+	digest    [sha256.Size]byte
+	echoed    bool
+	commit    func()
+	queued    bool
+	sentNow   bool
+	outcome   chan struct{}
+	writeErr  error
+	notified  bool
+	placed    bool
+	source    history.SessionProvenance
+	child     io.Writer // guarded by placement.mu until outcome; immutable afterwards
+	after     uint64
+	completed bool // guarded by placement.mu
 }
 
 func newSendNowPlacement(ctx context.Context, resolve func(string) (string, bool), waitIdle func(context.Context, string) error) *sendNowPlacement {
@@ -191,6 +196,10 @@ func (p *sendNowPlacement) attach(convID string, id uint64, commit func()) {
 // echo applies one claude echo produced by sessionID. Runs on the stream drain
 // goroutine, after the drain has handled every event claude emitted before it.
 func (p *sendNowPlacement) echo(sessionID string, ev turnevent.UserEcho) {
+	p.echoOwned(sessionID, ev, nil, 0)
+}
+
+func (p *sendNowPlacement) echoOwned(sessionID string, ev turnevent.UserEcho, child io.Writer, position uint64) {
 	if p == nil {
 		return
 	}
@@ -199,11 +208,27 @@ func (p *sendNowPlacement) echo(sessionID string, ev turnevent.UserEcho) {
 		return
 	}
 	p.mu.Lock()
-	for _, e := range p.pending[convID] {
+	entries := append([]*placedMessage(nil), p.pending[convID]...)
+	p.mu.Unlock()
+	for _, e := range entries {
+		p.mu.Lock()
 		if e.echoed || e.digest != ev.TextSHA256 {
+			p.mu.Unlock()
 			continue
 		}
 		if e.queued {
+			if e.child != child || (position != 0 && position <= e.after) {
+				p.mu.Unlock()
+				continue
+			}
+			p.mu.Unlock()
+			select {
+			case <-p.ctx.Done():
+				return
+			case <-e.outcome:
+			}
+			p.mu.Lock()
+			e.completed = true
 			p.mu.Unlock()
 			p.takeQueued(convID, e)
 			return
@@ -217,7 +242,6 @@ func (p *sendNowPlacement) echo(sessionID string, ev turnevent.UserEcho) {
 		p.take(convID, e)
 		return
 	}
-	p.mu.Unlock()
 }
 
 // take commits e if it is still pending; a second taker finds it gone.

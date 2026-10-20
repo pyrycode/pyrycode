@@ -392,14 +392,17 @@ the existing parent-id guard, unchanged — and emits **only**
 block type at Debug and never the text or even the digest (a digest of a
 short message is itself a fingerprint of it). No downstream code holds echo
 text: `turnMarkFor` classes `UserEcho` as an unrecognised variant (the
-none/droppable default arm), so it is never an opener or a closer, and
-`startStreamTurnDrainV2` hands it to a late-bound observer
-(`streamTurnSink.setEchoObserver`, the `crashLoop` atomic-hook pattern) after
-`busy.observe` and before the active-session gate — never to
-`emitter.Handle`, so it reaches no client frame. `sendNowPlacement` is the
-only installed observer, and it matches an echo to a pending send-now write
-by digest equality alone; an ordinary message's opener echo matches no
-pending entry and is silently dropped.
+none/droppable default arm), so it is never an opener or a closer.
+`startStreamTurnDrainV2` handles it for placement rather than `emitter.Handle`,
+so it reaches no client frame. Production queued placement uses
+`sendNowPlacement.observe` on the ordered envelope, matching ordinary and
+Send now writes by conversation, receiving stdin pipe and digest, after the
+selected-write output floor. Session ID and digest alone cannot distinguish
+respawned children or identical payloads. Child exit retires pending placement
+after its accepted tail; readiness caused by exit supplies no completion
+evidence. The late-bound `streamTurnSink.setEchoObserver` observer remains
+available for compatibility callers.
+See [queue placement confirmation](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 ## Command lifecycle bookkeeping is consumed by state (#2877)
 

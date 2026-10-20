@@ -106,8 +106,12 @@ type LifecycleBrokerConfig struct {
 	BeforeOutput     func([]byte) error               `json:"-"`
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
+	OnTerminalState  func(bool, bool, bool, bool)     `json:"-"`
 	Observation      *WrapUpObservation               `json:"-"`
 	OnDiagnostic     func(LifecycleDiagnostic)        `json:"-"`
+
+	// ReplayTurnReady runs once after startup playback reaches its first user input.
+	ReplayTurnReady func() error `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -265,6 +269,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	_ = originals[6].Close()
 	c.Observation.Add("ready", nil, nil)
 	frames, total := 0, 0
+	turnReady := false
+	signalTurnReady := func() error {
+		if turnReady || player == nil || c.ReplayTurnReady == nil || !player.AwaitsTurn() {
+			return nil
+		}
+		turnReady = true
+		return c.ReplayTurnReady()
+	}
 	sealed := false
 	actionAccepted := false
 	var observeAction func() error
@@ -368,10 +380,16 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, err
 			}
 		}
+		if err := signalTurnReady(); err != nil {
+			return frames, err
+		}
 	}
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
 	defer func() {
+		if c.OnTerminalState != nil {
+			c.OnTerminalState(inputEOF, outputEOF, stderrEOF, sealed)
+		}
 		diagnostic.PendingInput, diagnostic.PendingOutput = len(pendingInput), len(pendingOutput)
 		diagnostic.InputEOF, diagnostic.OutputEOF, diagnostic.StderrEOF = inputEOF, outputEOF, stderrEOF
 		diagnostic.Sealed, diagnostic.ActionAccepted = sealed, actionAccepted
@@ -441,7 +459,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return e
 				}
 			}
-			return nil
+			return signalTurnReady()
 		}
 		total += len(normalized)
 		if total > MaxBytes || len(tape.Tape.Frames) >= MaxFrames || Safe(normalized) != nil {

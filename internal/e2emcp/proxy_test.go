@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -60,26 +61,39 @@ func TestMCPProxyRejectsInvalidUnixBytesBeforeJSONEncoding(t *testing.T) {
 	}
 }
 func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
-	for _, mutation := range []string{"complete-duplex", "complete-sockets", "quiet-input", "quiet-sockets", "backpressure", "backpressure-sockets", "wrong-cwd", "wrong-session", "wrong-token", "wrong-tool", "wrong-parent", "bad-rights"} {
+	t.Logf("go=%s os=%s arch=%s GOMAXPROCS=%d CPUs=%d GORACE=%q GOFLAGS=%q", runtime.Version(), runtime.GOOS, runtime.GOARCH, runtime.GOMAXPROCS(0), runtime.NumCPU(), os.Getenv("GORACE"), os.Getenv("GOFLAGS"))
+	for _, mutation := range []string{"complete-duplex", "complete-sockets", "quiet-input", "quiet-sockets", "backpressure", "backpressure-sockets", "backpressure-validation-delay", "backpressure-validation-delay-sockets", "wrong-cwd", "wrong-session", "wrong-token", "wrong-tool", "wrong-parent", "bad-rights"} {
 		t.Run(mutation, func(t *testing.T) {
 			b := actualUnitBinding(t)
 			if mutation == "wrong-parent" {
 				b.NativeOwnerPID = os.Getppid()
 			}
 			observed := make(chan struct{})
+			var observedAt time.Time
 			var once sync.Once
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
 			c, err := NewCoordinator(func(d Direction, raw []byte) error {
 				_, err := ParseRPC(raw)
 				if err == nil && d == ServerToClient && len(raw) > 1<<20 {
-					once.Do(func() { close(observed) })
+					once.Do(func() { observedAt = time.Now(); close(observed) })
+					if strings.Contains(mutation, "validation-delay") {
+						// Model descheduling after validation observation but before
+						// forwarding. Cancellation cannot interrupt owner validation.
+						timer := time.NewTimer(1200 * time.Millisecond)
+						defer timer.Stop()
+						select {
+						case <-timer.C:
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
 				}
 				return err
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
 			s, err := NewProxyServer(ctx, b, c, func(raw []byte) error {
 				if string(raw) != "controlled helper stderr\n" {
 					return protocolError()
@@ -89,9 +103,18 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			ownedCancelled := make(chan struct{})
+			var cancelledAt time.Time
+			go func() {
+				<-s.ctx.Done()
+				cancelledAt = time.Now()
+				close(ownedCancelled)
+			}()
+			defer func() { cancel(); <-ownedCancelled }()
 			joined := false
 			defer func() {
 				if !joined {
+					cancel()
 					s.Join(time.Second)
 				}
 			}()
@@ -173,6 +196,24 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 					cmd.Wait()
 				}
 			}()
+			// Bound broken cancellation independently of the live parent deadline.
+			// Closing our endpoints also releases a cancellation-disabled control.
+			watchdogDone := make(chan struct{})
+			watchdog := time.AfterFunc(15*time.Second, func() {
+				defer close(watchdogDone)
+				cancel()
+				input.Close()
+				output.Close()
+				stderr.Close()
+				cmd.Process.Kill()
+			})
+			defer func() {
+				if !watchdog.Stop() {
+					<-watchdogDone
+					t.Error("owned-I/O lifecycle watchdog fired")
+				}
+			}()
+			var partialReader *bufio.Reader
 			invalid := strings.HasPrefix(mutation, "wrong-") || mutation == "bad-rights"
 			if !invalid {
 				line, err := bufio.NewReader(stderr).ReadString('\n')
@@ -214,14 +255,23 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 						}
 						return
 					}
-					// Validator runs under the forwarding mutex. Leave the actual large
-					// response unread so its pipe write cannot release it.
 					select {
 					case <-observed:
 					case <-ctx.Done():
 						t.Fatal("actual backpressure response missing")
 					}
-
+					// A byte proves forwarding began after all validation. Leave
+					// the rest unread, keeping the actual large write incomplete.
+					first, err := r.ReadByte()
+					if err != nil || first != '{' {
+						t.Fatal("large response never reached actual stdio", err)
+					}
+					if c.mu.TryLock() {
+						c.mu.Unlock()
+						t.Fatal("large forwarding write already completed")
+					}
+					partialReader = r
+					t.Logf("validation-observed-to-first-byte=%s", time.Since(observedAt))
 				}
 			} else {
 				// Rejected before server startup, without relying on an invented receipt.
@@ -230,20 +280,49 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 				}
 				waited = true
 			}
-			started := time.Now()
-			_, err = s.Join(25 * time.Millisecond)
-			joined = true
-			if err == nil {
-				t.Fatal("failed or incomplete actual run accepted")
+			if !invalid && s.ctx.Err() != nil {
+				t.Fatal("owned run cancelled before Join budget", s.ctx.Err())
 			}
-			if time.Since(started) > time.Second {
-				t.Fatal("Join waited for parent timeout instead of cancelling owned I/O")
+			const joinBudget = 25 * time.Millisecond
+			started := time.Now()
+			_, err = s.Join(joinBudget)
+			joined = true
+			joinElapsed := time.Since(started)
+			if err == nil || ctx.Err() != nil || s.ctx.Err() == nil {
+				t.Fatalf("Join did not cancel independently: error=%v owned=%v parent=%v", err, s.ctx.Err(), ctx.Err())
+			}
+			<-ownedCancelled
+			if !invalid && cancelledAt.Before(started.Add(joinBudget)) {
+				t.Fatal("owned cancellation preceded Join budget expiry")
+			}
+			// handle removes its connection only after runOwnedServer has received
+			// every pump result and the actual server's exec.Cmd.Wait result.
+			s.mu.Lock()
+			active := len(s.conns)
+			s.mu.Unlock()
+			if active != 0 {
+				t.Fatal("Join returned with active owned handlers")
+			}
+			t.Logf("owned-cancel-observed=%s Join=%s parent-live=%v active-handlers=%d", cancelledAt.Sub(started), joinElapsed, ctx.Err() == nil, active)
+			if partialReader != nil {
+				// EOF comes from real descriptor/child shutdown, after cancellation.
+				// A complete response would invalidate the backpressure premise.
+				n, err := io.Copy(io.Discard, partialReader)
+				if err != nil || n+1 >= 2<<20 {
+					t.Fatal("cancelled response was not partial EOF", n+1, err)
+				}
+				t.Logf("partial-response-bytes=%d output-EOF-after-Join=%s", n+1, time.Since(started)-joinElapsed)
 			}
 			if !waited {
+				waitStarted := time.Now()
 				if err := cmd.Wait(); err == nil {
 					t.Fatal("cancelled proxy reported success")
 				}
 				waited = true
+				t.Logf("native-proxy-Wait=%s exited=%v", time.Since(waitStarted), cmd.ProcessState.Exited())
+			}
+			if ctx.Err() != nil {
+				t.Fatal("parent expired during child/EOF joins", ctx.Err())
 			}
 			if _, err := c.Finish(); err == nil {
 				t.Fatal("cancelled or foreign evidence sealed")

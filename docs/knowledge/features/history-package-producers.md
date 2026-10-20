@@ -135,9 +135,10 @@ provenance. See [session binding](conversation-session-binding.md) and
 [ADR 042's session provenance](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks).
 
 Successful Claude writes retain the snapshot on the managed placement entry
-before signaling the write outcome. Ordinary echo/idle placement and send-now
-echo/idle fallback pass it to the safe producer when they commit. Successful
-Codex/no-stream writes retain it by conversation and queue ID until
+before signaling the write outcome. Placement passes it to the safe producer
+when committing on an echo or normal completion, with Send now's carried-close
+grace for no-echo completion. Successful Codex/no-stream writes retain it by
+conversation and queue ID until
 `sendNowPlacement.takeSource` consumes it at confirmation. Failed writes retain
 no source and create no delivered entry; a retry captures its own receiving
 session. Existing placement order and exactly-once recording, including late
@@ -181,10 +182,28 @@ or drop. Outcomes carry `conversation_id`, `occurred_at` and `reason`.
 | Fact | Link and meaning | Raw visibility and source |
 | --- | --- | --- |
 | `send_accepted` | Durable identity for a successful enqueue, with the fields above. | Shown; bound session captured at acceptance observation. |
-| `send_written` | `accepted_entry_id`; reason `written` after successful Send now stdin delivery. No final placement link. | Shown; bound session observed at the successful write callback. |
+| `send_written` | `accepted_entry_id`; reason `written` after a successful Send now stdin pipe write. No final placement link. | Shown; bound session observed at the successful write callback. |
 | `send_delivered` | `accepted_entry_id` plus `delivery_entry_id` naming the existing operator `message`; reason `delivered` for ordinary and send-now delivery. | Shown; captured receiving session, shared with the operator message. |
-| `send_dropped` | `accepted_entry_id`; reason `removed` or `give_up` only after actual removal or abandonment. | Hidden; bound session captured at terminal observation. |
+| `send_dropped` | `accepted_entry_id`; reason `removed` or `give_up` only after actual removal or retry give-up. | Hidden; bound session captured at terminal observation. |
 | `send_lost` | `accepted_entry_id`; reason `daemon_restart` for a surviving acceptance without a durable outcome. | Shown; original acceptance's source. |
+
+For queued Claude writes, successful stdin pipe delivery establishes neither
+consumption nor completion (#3683). Placement requires a matching echo or
+supported normal answering-turn completion from the receiving child. Ordinary
+no-echo completion commits on that close; Send now's no-echo fallback also waits
+for its carried-close grace. `WaitIdle` reports readiness, so child exit,
+teardown, daemon cancellation, an unrelated close or successor activity cannot
+confirm a write, including exit during Send now's grace. Legitimate confirmation
+already parsed before exit retains its stream order. See
+[placement ownership and notification](msgqueue-package-lifecycle.md#delivered-notification-2115).
+
+Abandoning an unconfirmed successful write preserves the original acceptance
+entry ID, device/message/queue identities, text and attachment IDs. Ordinary
+history remains `queued`; Send now remains `written`. These are unresolved
+history states, not runnable FIFO entries: possibly consumed input is never
+automatically re-enqueued or replayed. Abandonment appends no `send_delivered`,
+publishes no delivered operator message and invents no child-exit loss reason.
+Later callbacks or predecessor/successor events cannot revive the placement.
 
 An actually empty binding is explicit `kind: none` with no session ID. Unknown
 or unavailable source facts remain absent. Delivery retains the
@@ -204,8 +223,8 @@ watermarks and ID allocation remain unchanged. See
 [legacy validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 **Gate placement itself on acceptance completion.** Queue callback ordering
-cannot protect the earlier echo/idle commit: placement can reach the producer
-before acceptance observation and before a delayed `OnDelivered`.
+cannot protect the earlier commit on echo or normal completion: placement can
+reach the producer before acceptance observation and before a delayed `OnDelivered`.
 `queuedSendHistory.beforeDelivery` waits for the synchronous acceptance append
 to finish, including failure, before `operatorMessageHistory` appends the
 existing operator message and its linked delivery fact. Waiting holds no
@@ -225,7 +244,8 @@ one ordered batch. Receipt notification never acquires that mutex or performs
 peer I/O; fan-out holds the mailbox mutex only while taking pending items. A full
 mailbox logs a content-free discriminant and leaves durable paging as recovery. Both
 ordinary and send-now delivery retain user-before-outcome chronology across
-delayed echo/idle confirmation, without duplicate content or receipts.
+delayed confirmation by echo or normal completion, without duplicate content or
+receipts.
 
 **Use the arbitrated terminal outcome, not a removal return value.** An
 in-flight `Remove` returning true can express a deferred request. Confirmed
@@ -252,8 +272,8 @@ delivery/removal and eligible legacy push. Nil/failed appends mint no receipt
 identity. Failed acceptance writes release the placement gate without inventing
 an ID or any linked outcome. Delivery linkage additionally requires a successful
 operator-message append. A failed outcome append can leave a durable acceptance
-unresolved. Startup loss records
-that missing durable resolution; the existing
+unresolved. Startup loss with reason `daemon_restart` records missing durable
+confirmation or resolution, not proven non-consumption; the existing
 [shutdown/confirmed-write gap](msgqueue-package-lifecycle.md#concurrency-model)
 means it cannot prove the agent never received the bytes. This is no durable
 backlog or gap-free crash guarantee. Failure logs use fixed event/reason
@@ -262,11 +282,12 @@ discriminants without raw errors, message content, sender keys or host paths.
 `send_written` is an additional intermediate fact (#3508). Only successful Send
 now queue delivery emits it; failed writes retain the backlog. Its native item
 is visible and active with status `written`, at its unchanged acceptance order.
-Echo/idle placement alone supplies final delivery chronology. A per-acceptance
-leaf lock deduplicates write callbacks and orders them before a racing final
-outcome without holding the global reference-map lock across history I/O.
+Placement on echo or normal completion alone supplies final delivery chronology.
+A per-acceptance leaf lock deduplicates write callbacks and orders them before
+a racing final outcome without holding the global reference-map lock across
+history I/O.
 This fact has no legacy runtime receipt. It does not resolve a surviving
-acceptance at startup: restart marks unconsumed written input lost and never
+acceptance at startup: restart marks unconfirmed written input lost and never
 replays it. A late/duplicate write cannot regress delivered or lost state.
 
 ### Resolved remote prompt answers (#2973)
