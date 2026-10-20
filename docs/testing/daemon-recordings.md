@@ -784,7 +784,7 @@ fence, changed prompt header or changed mode still fails.
 
 ## Idle eviction and literal native resume inputs
 
-`session-resume` proposes the original five-second idle-eviction root. It keeps
+`session-resume` captures the original five-second idle-eviction root. It keeps
 the original counted daemon WARN gate, unchanged idle timer and planted-token
 recall assertions. The bootstrap and resumed role share the original session
 UUID but have distinct kernel-owned process claims. Their argv forms stay
@@ -859,7 +859,7 @@ from broker readiness. Fast output changes the phase between the activation-base
 five-second idle timer and the two-second fallback window; a native capture with
 no worker cannot supply an invented replay worker. This closed timeline restores
 absolute output due times, keeps strict input/action order, and rejects more than
-100 ms scheduling drift instead of compressing gaps. Readiness follows activation
+100 ms scheduling or successful-forwarding drift instead of compressing gaps. Readiness follows activation
 and is only an approximate epoch; the original timer/WARN/owned EOF still decide
 eviction. No fixture can trigger that eviction. All stdout offsets must be present,
 monotonic and bounded; other profiles reject this timeline. Fresh worker counts
