@@ -66,3 +66,23 @@ Retain failing and passing original Linux scenario logs with exact revisions, bi
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-20
+
+## Revisions
+
+### 2026-10-20 — retained evidence requires two behavior slices
+
+No forwarding, deadline, fixture or completion behavior was changed. Diagnosis resolved the open questions with two distinct failing invariants, rather than one shared completion defect:
+
+- On `29b7757da5a39fc7e349a9af57451a5809d8b5f1` and `7d8e087f18f7cceb8b789aeae01ea887e7fac932`, `clear-wrapup-skipped` rejects an extra `user` stdin frame after all 25 recorded frames. The latter diagnostic reports `match-input`, player 25/25, 1172 pending input bytes, accepted action and no EOF. The original root still proves skipped wrap-up and unchanged prior note. Its fixture has no output timeline; source inspection shows the interrupt acknowledgement precedes an attempted wrap-up write under the original 1ms deadline. A timing-sensitive replay contract is implicated; native timing must be measured rather than fabricated or replaced with a sleep.
+- `clear-reset` passes four focused runs, each with all 83 bound frames, then reproduces on the third additional repeat at `7d8e087f18f7cceb8b789aeae01ea887e7fac932`: `forward-provider-input`, `broken-pipe`, 82 forwarded frames, player advanced to 83/83, 105 pending input bytes, accepted action and no sampled EOF. The final `get_context_usage` stdin write hits EPIPE before its released response can be forwarded. The original root subsequently cannot recall from the successor. This is an actual replay provider-pipe lifetime defect, independent of the first scenario's extra user frame.
+
+Evidence is outside disposable homes under `/tmp/builder-3665/`: `baseline/`, `baseline-kind/`, `reset-repeat-1/`, `reset-repeat-2/`, and `reset-repeat-3/`. Each scenario directory has original test2json output plus per-role diagnostics, source/daemon binary hashes and allowlisted job, role, action, acknowledgement and completion witnesses. Original earlier failures on `03eda6c1b9586c4389b11b0cf86d97a954d97ec0` remain preserved in the #3660 evidence path from the issue. No claim about session-rotation inheritance was made.
+
+The affected package race run executes 721 leaf tests: 720 pass, one fails, zero skip. Its sole failure is the existing stalled-transfer control race, filed separately as #3670. The new retention test passes 1/1 without skips. Both tagged harness packages and the ordinary module vet/build pass on Linux. Full acceptance remains unexecuted and belongs to the dispatcher/verifier.
+
+Scope reassessment under `behaviour-slices-v1`: the issue has no parent or grandparent, so split-depth does not prevent a split. Proposed independently useful children, each retaining security review, diagnostics, actual original scenario proof and all relevant hostile/physical controls:
+
+1. Repair replay provider-pipe completion after original rotation, proved by `clear-reset`, with a controlled death-before-final-query regression. Keep shared diagnostics/retention with this consumer; expected 600–750 written lines, at most one exported diagnostic type and no production change assumed.
+2. Repair the bounded wrap-up replay contract, proved by `clear-wrapup-skipped`, preserving the 1ms deadline and strict native input evidence. Establish and retain native phase/timing evidence before choosing capture/timeline changes; never accept an unrecorded user frame or invent a delay. Forecast 400–600 lines including native timing schema/fixture deltas, subject to refinement against actual capture needs.
+
+These can land and be verified independently while the application remains functional. Returning the original combined ticket for refinement preserves both failures and their verification floors. Withdraw the diagnostic-only branch diff with an ordinary revert before handback; its committed history and retained patch remain available to the children. No PR represents a completed repair.
