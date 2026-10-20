@@ -410,18 +410,21 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	approvals := permbridge.New()
 	approvalWindow := approvalTimeout()
 	approvalSurfaces := &approvalSurfaceReport{}
+	// Installed by relay wiring before pool.Run starts any watchdog readers.
+	approvalParked := &approvalParkedReport{}
 	codex := codexHarness{bin: *codexBin, home: codexHomePath(resolveInstanceDirPath(*name))}
 	// One usage reading per daemon: every Claude session's parser writes it and
 	// the relay answers request_claude_usage from it.
 	claudeUsage := &claudeUsageStore{}
 	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpServersPath, modelVocabulary, streamApprovalConfig{
-		stdio:    cfg.StdioPermissionPrompt,
-		registry: approvals,
-		timeout:  approvalWindow,
-		surface:  approvalSurfaces,
-		account:  account.provider(),
-		settings: claudeSettingsFile.composer(),
-		usage:    claudeUsage,
+		stdio:             cfg.StdioPermissionPrompt,
+		registry:          approvals,
+		timeout:           approvalWindow,
+		surface:           approvalSurfaces,
+		account:           account.provider(),
+		settings:          claudeSettingsFile.composer(),
+		usage:             claudeUsage,
+		pendingPermission: streamPendingPermission(convReg, approvalParked),
 	}, codex)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
@@ -587,16 +590,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	streamSink.setCrashLoopNotify(childCrashingNotify(giveUps, func(sid string) (string, bool) {
 		return conversationForSession(convReg, sid)
 	}, logger, liveBindings))
-	// approvalParked is the third value in this block built BEFORE msgqueue.New for
-	// the same chicken-and-egg reason as queueChanges and giveUps: it carries #1919's
-	// ApprovalParked report to the Pending gate below, and the bridge that answers
-	// the report is constructed inside startRelayV2, well after this queue. Unlike
-	// the two channels it cannot be a channel — the gate needs an answer, not a
-	// notification — so it is the one late-bound field here, threaded to its single
-	// setter through relayWiring.approvalParked. Left unset (before the relay leg
-	// wires it, or when it never does) it reports negative for every conversation,
-	// which is the pre-#1911 behaviour exactly.
-	approvalParked := &approvalParkedReport{}
 	// The daemon's ONE durable conversation log (#2112, first written by #2114).
 	// Exactly one Store may exist per instance directory: it caches each
 	// conversation's next id after recovering it from disk once, so two stores
