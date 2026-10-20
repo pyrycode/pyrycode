@@ -179,6 +179,8 @@ func mcpStreamInputControl() (*MCPExchange, *Tape) {
 	}
 	tape.Frames[2].Data = bytes.Replace(tape.Frames[2].Data, []byte(`"message":{"role"`), []byte(`"message":{"id":"controlled-message","role"`), 1)
 	tape.Frames = append(append(append([]Frame{}, tape.Frames[:2]...), frames...), tape.Frames[2:]...)
+	stop := Frame{"stdout", json.RawMessage(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":1}}`)}
+	tape.Frames = append(append(append([]Frame{}, tape.Frames[:7]...), stop), tape.Frames[7:]...)
 	for i := 6; i < len(x.Events); i++ {
 		x.Events[i].NativeStdoutCount = 5
 	}
@@ -188,7 +190,7 @@ func mcpStreamInputControl() (*MCPExchange, *Tape) {
 	return x, tape
 }
 func TestMCPSendFileStreamedInputJoinsExactBarrierAndCompleteContinuation(t *testing.T) {
-	for _, mutation := range []string{"valid", "split-forward-barrier", "before-tool-start", "before-input-prefix", "missing-continuation", "late-foreign-input", "late-duplicate-input-key", "late-foreign-delta-index", "late-child-delta", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "child-message", "typed-parent", "typed-full-parent", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
+	for _, mutation := range []string{"valid", "split-forward-barrier", "before-tool-start", "before-input-prefix", "missing-continuation", "late-foreign-input", "late-duplicate-input-key", "late-foreign-delta-index", "late-child-delta", "late-missing-stop", "late-foreign-stop", "late-child-stop", "late-premature-message-stop", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "child-message", "typed-parent", "typed-full-parent", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
 		t.Run(mutation, func(t *testing.T) {
 			x, tape := mcpStreamInputControl()
 			if strings.HasPrefix(mutation, "late-") {
@@ -215,6 +217,17 @@ func TestMCPSendFileStreamedInputJoinsExactBarrierAndCompleteContinuation(t *tes
 				}
 				tape.Frames[5].Data = json.RawMessage(`{"type":"system","subtype":"unrelated"}`)
 
+			case "missing-stop":
+				tape.Frames[7].Data = json.RawMessage(`{"type":"system","subtype":"unrelated"}`)
+			case "foreign-stop":
+				tape.Frames[7].Data = bytes.Replace(tape.Frames[7].Data, []byte(`"index":1`), []byte(`"index":2`), 1)
+			case "child-stop":
+				tape.Frames[7].Data = bytes.Replace(tape.Frames[7].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign"`), 1)
+			case "premature-message-stop":
+				tape.Frames[6].Data = json.RawMessage(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`)
+				// Keep the independently required full tool; only its stream namespace
+				// ends before the selected block's stop.
+				tape.Frames = append(tape.Frames, Frame{"stdout", json.RawMessage(`{"type":"assistant","parent_tool_use_id":null,"message":{"id":"controlled-message","role":"assistant","content":[{"type":"tool_use","id":"toolu_CONTROLLED1","name":"mcp__pyry_files__send_file","input":{"path":"handover-2718281828.txt"}}]}}`)})
 			case "foreign-input":
 				tape.Frames[5].Data = bytes.ReplaceAll(tape.Frames[5].Data, []byte("2718281828"), []byte("foreign"))
 			case "duplicate-input-key":

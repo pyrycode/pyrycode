@@ -561,6 +561,9 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			messageMain = mcpMainParent(envelope)
 		}
 		if eventKind == "message_stop" {
+			if starts == 1 && !stopped {
+				return mcpError()
+			}
 			messageID, role = "", ""
 		}
 		var current int
@@ -571,7 +574,7 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			return mcpError()
 		}
 		if starts == 1 && current == index && eventKind == "content_block_stop" {
-			if stopped || !messageMain || !mcpMainParent(envelope) {
+			if stopped || messageID != fullMessage || role != "assistant" || !messageMain || !mcpMainParent(envelope) {
 				return mcpError()
 			}
 			stopped = true
@@ -620,6 +623,9 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			}
 			partial += text
 		}
+	}
+	if pastBarrier && !stopped {
+		return mcpError()
 	}
 	if assembled {
 		return nil
