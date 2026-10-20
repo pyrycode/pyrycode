@@ -173,45 +173,52 @@ func TestControlLivePromptProducers(t *testing.T) {
 }
 
 func TestControlLiveDelayedProducers(t *testing.T) {
-	b := testControlBindings(t, "conv", "a")
-	ch := make(chan giveUpNotice, 1)
-	notify := sessionErrorNotify(ch, discardLogger(), b)
-	notify("conv", "first")
-	notify("conv", "second") // retention survives a full delivery channel
-	r := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeSessionError, ""}]
-	if len(r.Envelope.SessionID) != 0 || !bytes.Contains(r.Envelope.Payload, []byte("second")) {
-		t.Fatal("conversation-only notice invented a source or dropped retention")
-	}
-	e := newResettingEmitterV2(context.Background(), discardLogger())
-	e.live = b
-	operation := e.bound("conv", "a")
-	operation.wrappingUp("conv")
-	reset := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeResetting, ""}]
-	if string(reset.Envelope.SessionID) != `"a"` {
-		t.Fatal("reset not retained without broadcaster")
-	}
-	suggestions := newReplySuggestions(discardLogger())
-	suggestions.live = b
-	src := b.capture("conv", "a", false)
-	suggestions.mu.Lock()
-	c := suggestions.entry("conv", true)
-	c.live = src
-	suggestions.setLocked("conv", c, "text", "a")
-	suggestions.mu.Unlock()
-	suggestion := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeReplySuggestion, ""}]
-	if !bytes.Contains(suggestion.Envelope.Payload, []byte("text")) {
-		t.Fatal("retention waited for publisher")
-	}
-	b.sink.live.transition(sessions.SessionTransition{ConversationID: "conv", PreviousID: "a", NewID: "a", NextAgent: "claude"})
-	operation.done("conv")
-	newSessionErrorEmitterV2(ch, discardLogger()).broadcast(context.Background(), historyOnlyBroadcaster{}, <-ch)
-	suggestions.mu.Lock()
-	suggestions.setLocked("conv", c, "late fallback", "a")
-	suggestions.mu.Unlock()
-	for _, family := range []string{protocol.TypeResetting, protocol.TypeSessionError, protocol.TypeReplySuggestion} {
-		if !testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{family, ""}].Envelope.SessionStateCleared {
-			t.Fatalf("old %s restored state", family)
-		}
+	for _, next := range []string{"a", "b"} {
+		t.Run(next, func(t *testing.T) {
+			b := testControlBindings(t, "conv", "a")
+			ch := make(chan giveUpNotice, 1)
+			notify := sessionErrorNotify(ch, discardLogger(), b)
+			notify("conv", "first")
+			notify("conv", "second") // retention survives a full delivery channel
+			r := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeSessionError, ""}]
+			if string(r.Envelope.SessionID) != `"a"` || !bytes.Contains(r.Envelope.Payload, []byte("second")) {
+				t.Fatal("bound notice lost its captured session or dropped retention")
+			}
+			e := newResettingEmitterV2(context.Background(), discardLogger())
+			e.live = b
+			operation := e.bound("conv", "a")
+			operation.wrappingUp("conv")
+			reset := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeResetting, ""}]
+			if string(reset.Envelope.SessionID) != `"a"` {
+				t.Fatal("reset not retained without broadcaster")
+			}
+			suggestions := newReplySuggestions(discardLogger())
+			suggestions.live = b
+			src := b.capture("conv", "a", false)
+			suggestions.mu.Lock()
+			c := suggestions.entry("conv", true)
+			c.live = src
+			suggestions.setLocked("conv", c, "text", "a")
+			suggestions.mu.Unlock()
+			suggestion := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeReplySuggestion, ""}]
+			if !bytes.Contains(suggestion.Envelope.Payload, []byte("text")) {
+				t.Fatal("retention waited for publisher")
+			}
+			b.sink.offerMu.Lock()
+			b.reg.RebindSession("a", next)
+			b.sink.live.transition(sessions.SessionTransition{ConversationID: "conv", PreviousID: "a", NewID: sessions.SessionID(next), NextAgent: "claude"})
+			b.sink.offerMu.Unlock()
+			operation.done("conv")
+			newSessionErrorEmitterV2(ch, discardLogger()).broadcast(context.Background(), historyOnlyBroadcaster{}, <-ch)
+			suggestions.mu.Lock()
+			suggestions.setLocked("conv", c, "late fallback", "a")
+			suggestions.mu.Unlock()
+			for _, family := range []string{protocol.TypeResetting, protocol.TypeSessionError, protocol.TypeReplySuggestion} {
+				if !testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{family, ""}].Envelope.SessionStateCleared {
+					t.Fatalf("old %s restored state", family)
+				}
+			}
+		})
 	}
 }
 

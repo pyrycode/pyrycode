@@ -124,11 +124,11 @@ func TestDaemonLiveRelayPublication(t *testing.T) {
 	if string(got.SessionID) != `"a"` {
 		t.Fatal("stream source lost")
 	}
-	// Actual control producer refuses its legacy queue, yet reaches the wire with unresolved source.
+	// Actual control producer refuses its legacy queue, yet reaches the wire with its captured source.
 	notify := sessionErrorNotify(make(chan giveUpNotice), discardLogger(), b)
 	notify("other", "blocked")
 	got = testDaemonWireReading(t, w, protocol.TypeSessionError, 0)
-	if len(got.SessionID) != 0 || !bytes.Contains(got.Payload, []byte(`"other"`)) {
+	if string(got.SessionID) != `"b"` || !bytes.Contains(got.Payload, []byte(`"other"`)) {
 		t.Fatal("control source/owner changed")
 	}
 	if err := mgr.FlushPushes(t.Context()); err != nil {
@@ -499,5 +499,48 @@ func TestDaemonLiveRelayReservedQuerySnapshot(t *testing.T) {
 	e := testDaemonWireReading(t, w, protocol.TypeContextUsage, 0)
 	if !bytes.Contains(e.Payload, []byte("remembered")) {
 		t.Fatal("failed query reservation blanked retained state")
+	}
+}
+
+func TestSessionBlockedCurrentBindingOnWire(t *testing.T) {
+	for _, tc := range []struct{ name, sid, tag string }{
+		{"bound", "a", `"a"`},
+		{"no_session", "", `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testControlBindings(t, "conv", tc.sid)
+			w, _ := testDaemonRelayWire(t, b, relayWiring{}, nil, nil)
+			w.open("phone", false, protocol.CapabilityThread)
+			ch := make(chan giveUpNotice, 1)
+			sessionErrorNotify(ch, discardLogger(), b)("conv", "blocked")
+			cleared, received := false, false
+			for !cleared || !received {
+				id, env := w.read()
+				if id != "phone" || env.Type != protocol.TypeSessionError {
+					continue
+				}
+				if string(env.SessionID) != tc.tag {
+					t.Fatalf("session tag=%s want %s", env.SessionID, tc.tag)
+				}
+				if env.SessionStateCleared {
+					if received {
+						t.Fatal("clear followed the reading")
+					}
+					cleared = true
+					continue
+				}
+				if !cleared {
+					t.Fatal("reading preceded clear")
+				}
+				var payload protocol.SessionErrorPayload
+				if err := json.Unmarshal(env.Payload, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.ConversationID != "conv" || payload.Code != protocol.CodeSessionBlocked || payload.Message != "blocked" {
+					t.Fatal("blocked payload changed")
+				}
+				received = true
+			}
+		})
 	}
 }
