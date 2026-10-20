@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -341,7 +342,13 @@ func (o *OwnedPhysicalOperation) Close() error {
 		return nil
 	}
 	if err := syscall.Kill(-o.guard.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		return err
+		// Darwin reports EPERM for a pinned group containing only zombies. As in
+		// test admission, accept this only after an actual readable group census
+		// proves that no live member remains; a live/unknown group stays a failure.
+		live, censusErr := physicalGroupAlive(o.guard.Process.Pid)
+		if runtime.GOOS != "darwin" || err != syscall.EPERM || censusErr != nil || live {
+			return err
+		}
 	}
 	if _, err := o.Wait(3 * time.Second); err != nil {
 		return err
