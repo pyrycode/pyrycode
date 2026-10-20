@@ -61,9 +61,13 @@ func physicalControlInput(command string, background bool) json.RawMessage {
 }
 func physicalControlWaitFile(t *testing.T, path string) []byte {
 	t.Helper()
+	return physicalControlReadWitness(t, path, os.ReadFile)
+}
+func physicalControlReadWitness(t *testing.T, path string, readFile func(string) ([]byte, error)) []byte {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if raw, err := os.ReadFile(path); err == nil {
+		if raw, err := readFile(path); err == nil {
 			return raw
 		}
 		time.Sleep(time.Millisecond)
