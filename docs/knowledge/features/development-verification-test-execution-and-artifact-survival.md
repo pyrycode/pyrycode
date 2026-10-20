@@ -16,6 +16,44 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+### Diagnosing recorded lifecycle output timing
+
+Measure work between forwarded frames before changing a replay deadline. In the
+Linux conversation replay diagnosis, repeated full-prefix validation and parsing
+took 29–43 ms immediately before missed outputs, against roughly 20 ms captured
+gaps. Both original roots delivered replies but failed final settlement. All four
+role failures were `before-wait`, anchored to user 1, with 107–121 ms lateness;
+input observation was at most 25.6 ms, input-witness work was zero and startup
+preceded readiness. This established accumulated observer work as the demonstrated
+defect, rather than a reason to enlarge the 100 ms allowance. The
+[result-boundary observer](e2e-harness.md#recorded-lifecycle-timing-and-settlement)
+retains full validation and the final independent audit.
+
+The [committed timing evidence](../../../internal/e2e/internal/claudetape/testdata/lifecycle_timing_3666.json)
+retains failed/passing source revisions, executed helper/daemon SHA256 identities,
+exact commands, numeric diagnostics, unchanged fixture hashes, report hashes and
+external log paths. On Linux/amd64 with `-race -count=1`:
+
+| Evidence | Source | Executed / passed / failed / skipped |
+| --- | --- | --- |
+| Original conversation roots, diagnostic-only code | `ad4c8b1f` | 2 / 0 / 2 / 0 |
+| Controlled 35 ms derivation / 20 ms cadence, capture and replay | preserved `b668be39` | 2 / 0 / 2 / 0 leaf tests; both failed at output 7 |
+| Affected claudetape package after repair | `08f448c5` | 794 / 794 / 0 / 0 events; 724 leaf tests |
+| Unchanged original roots with final settlement after repair | `08f448c5` | 2 / 2 / 0 / 0; outer replay events 3 / 3 / 0 / 0 |
+
+The roots are `conversation-system-prompt` and `conversation-active-switch`.
+Baseline runs used separate fresh processes and homes; an accidentally
+prefix-selected startup control ran afterward and passed. The passing run used
+that listed scenario order. Build caches were warm; OS page-cache state was
+unknown. Admission waits were recorded, but host load during execution was not
+measured. Historical cold state, preceding suite sequence and contention remain
+unknown, and historical failures remain failed. These focused results establish
+the repair on unchanged recordings; complete-suite acceptance is separate. The
+[accepted verifier review](https://github.com/pyrycode/pyrycode/pull/3669#issuecomment-6285112952)
+records both conversation passes and the separately tracked inherited
+`clear-wrapup-skipped` failure. Other operating systems are outside this Linux
+ticket's verification scope.
+
 ### Diagnosing dormant relay restart readiness
 
 Process collection, relay deregistration, replacement registration and phone

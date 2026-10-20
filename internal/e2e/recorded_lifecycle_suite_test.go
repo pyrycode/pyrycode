@@ -131,6 +131,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	t.Cleanup(func() {
 		retainLifecycleWitnesses(t, home, retained, name, revision, sourceSHA, hex.EncodeToString(daemonSum[:]), fixtureSHA)
 	})
+	t.Logf("lifecycle source=%s helper_sha256=%s daemon_sha256=%x scenario=%s mode=%s", revision, sourceSHA, daemonSum, name, mode)
 	if mode == "capture" {
 		info, err := buildinfo.ReadFile(daemon)
 		if err != nil {
@@ -414,10 +415,15 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				Success bool   `json:"success"`
 				Frames  int    `json:"frames"`
 				Error   string `json:"error"`
+				Timing  *claudetape.LifecycleTimingError
 			}
 			raw, readErr := os.ReadFile(filepath.Join(children, role+".receipt"))
 			if readErr == nil && len(raw) < 16384 && json.Unmarshal(raw, &r) == nil && len(r.Error) < 512 && claudetape.Safe([]byte(r.Error)) == nil {
 				t.Logf("daemon helper role=%s success=%t frames=%d error=%q", role, r.Success, r.Frames, r.Error)
+				if r.Timing != nil {
+					numeric, _ := json.Marshal(r.Timing)
+					t.Logf("lifecycle timing scenario=%s role=%s diagnostic=%s", name, role, numeric)
+				}
 			}
 		}
 		if mode == "capture" && claudetape.PhysicalFamily(name) != "" {

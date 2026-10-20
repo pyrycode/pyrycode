@@ -2,9 +2,37 @@ package claudetape
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
+
+func TestLifecycleTimingDiagnostic(t *testing.T) {
+	for _, stage := range []string{"before-wait", "after-wait", "forwarding"} {
+		t.Run(stage, func(t *testing.T) {
+			origin := time.Unix(0, 0)
+			current := origin
+			if stage == "before-wait" {
+				current = current.Add(2 * time.Second)
+			}
+			now := func() time.Time { return current }
+			sleep := func(d time.Duration) {
+				current = current.Add(d)
+				if stage == "after-wait" {
+					current = current.Add(time.Second)
+				}
+			}
+			err := forwardLifecycleOutput(origin, int64(time.Second), now, sleep, func() error {
+				current = current.Add(time.Second)
+				return nil
+			})
+			var diagnostic *LifecycleTimingError
+			if !errors.As(err, &diagnostic) || diagnostic.Stage != stage || diagnostic.DueNS != int64(time.Second) || diagnostic.CurrentNS != int64(2*time.Second) || diagnostic.LatenessNS != int64(time.Second) {
+				t.Fatalf("missing numeric timing evidence for %s: %v", stage, err)
+			}
+		})
+	}
+}
 
 func TestLifecycleTimelineRejectsForeignOrIncompleteSchedule(t *testing.T) {
 	source := resumeSuiteControl("complete original native transcript")
