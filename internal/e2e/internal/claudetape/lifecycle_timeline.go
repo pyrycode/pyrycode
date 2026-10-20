@@ -123,6 +123,15 @@ func waitLifecycleOutput(origin time.Time, offset int64, now func() time.Time, s
 	return nil
 }
 
+func forwardPreparedLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), prepare, forward func() error) error {
+	return forwardLifecycleOutput(origin, offset, now, sleep, func() error {
+		if err := prepare(); err != nil {
+			return err
+		}
+		return forward()
+	})
+}
+
 func forwardLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), forward func() error) error {
 	if err := waitLifecycleOutput(origin, offset, now, sleep); err != nil {
 		return err

@@ -324,13 +324,17 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				}
 			}
 		}()
-		emit := func(extra time.Time) error {
+		var restored []byte
+		prepare := func() error {
 			work := time.Now()
-			restored, err := binding.Frame(raw, true)
+			var err error
+			restored, err = binding.Frame(raw, true)
 			outputWork[0] = time.Since(work).Nanoseconds()
-			if err != nil {
-				return err
-			}
+			return err
+		}
+		emit := func(extra time.Time) error {
+			var err error
+			work := time.Now()
 			if c.BeforeOutput != nil {
 				work = time.Now()
 				err := c.BeforeOutput(restored)
@@ -373,7 +377,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				origin = timelineOrigins[anchor]
 			}
 			offset := tape.Timeline.OutputAfterNS[timelineOutput]
-			if err := forwardLifecycleOutput(origin, offset, time.Now, time.Sleep, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
+			if err := forwardPreparedLifecycleOutput(origin, offset, time.Now, time.Sleep, prepare, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
 				var timing *LifecycleTimingError
 				if errors.As(err, &timing) {
 					timing.Output, timing.Anchor = timelineOutput, anchor
@@ -385,6 +389,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return err
 			}
 			timelineOutput++
+		} else if err := prepare(); err != nil {
+			return err
 		} else if err := emit(time.Time{}); err != nil {
 			return err
 		}

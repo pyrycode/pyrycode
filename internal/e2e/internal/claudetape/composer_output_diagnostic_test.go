@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-func TestComposerControlResponseDiagnostic(t *testing.T) {
+func testComposerControlResponse(t *testing.T) ([]byte, int64) {
+	t.Helper()
 	raw, err := os.ReadFile("../../testdata/claude-tapes/composer-stop.json")
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +35,11 @@ func TestComposerControlResponseDiagnostic(t *testing.T) {
 	if len(response) == 0 || json.Unmarshal(response, &header) != nil || header.Type != "control_response" {
 		t.Fatal("recovered forwarding boundary changed")
 	}
+	return response, suite.Roles["bootstrap"].Timeline.OutputAfterNS[68]
+}
+
+func TestComposerControlResponseDiagnostic(t *testing.T) {
+	response, _ := testComposerControlResponse(t)
 	home := "/tmp/composer-output-diagnostic"
 	binding := LifecycleRoleBinding{Role: "bootstrap", SessionID: "33333333-3333-4333-8333-333333333333", ConversationID: "44444444-4444-4444-8444-444444444444", WorkDir: home + "/work"}
 	p, err := NewPhysicalNativeObserver(context.Background(), home, "composer", binding)
