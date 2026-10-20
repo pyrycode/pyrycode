@@ -69,3 +69,6 @@ None.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+- 2026-10-20: The wire fixture establishes a named compact subscription with an initial catch-up before checking live publication. Reopened terminal content uses complete catch-up, matching `TestQueuedSendHandleQueries`; compact interval certificates are not retained through store reopening. The attachment recording contract is unchanged. Tests rename the stored leaf after acceptance to distinguish durable facts from a later metadata lookup, and use descending fixed IDs to make order assertions deterministic.

@@ -642,6 +642,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
 	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
 	sends := newQueuedSendHistory(conversationHistory, logger, channelPostSession(convReg, pool.HarnessFor))
+	sends.attachmentName = storedQueuedAttachmentName(resolveInstanceDirPath(*name), convReg)
 	sends.publish = ome.notifyReceipt
 	// Queued Claude history entries and pushes wait for their echoes, which the stream drain hands over through the sink. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
