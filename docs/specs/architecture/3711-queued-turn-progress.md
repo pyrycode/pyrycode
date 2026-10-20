@@ -77,3 +77,26 @@ None. Mobile's clearing contract, both fixture arms and original 20-second deadl
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-20
+
+## Verification evidence
+
+Linux, 2026-10-20. The plan was committed in `7223a036` before the regression commit `a1601307c457c18eb82beb6e8559179eb808428a` and production repair `dc3018b7f761041b074641ac1be7f3521de4442e`.
+
+The failing baseline used `a1601307` with unchanged production from `4f4c7fa1b5b23435d173a9bd345d7176cb124e38`. The relevant production files (`daemon_live_relay.go`, `daemon_live_source.go`, `daemon_live_state.go`, `v2session_livestate.go`) are identical between that base and the originally demonstrated `f90990dd142f206422bfd4a24a8feedcc94f8274`.
+
+Baseline command: `python3 scripts/test-admission.py -- go test -timeout=5m -race -json -run '^(TestDaemonLiveQueuedTurnProgress|TestDaemonLiveTurnProgressWatermark|TestDaemonLiveTurnProgressFreshness)$' ./cmd/pyry`.
+
+| Proof | Leaf executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged production, named regression | 22 | 16 | 6 | 0 |
+| Final repair `dc3018b7`, same regression within affected-package run | 22 | 22 | 0 | 0 |
+
+Both publisher-held and relay-held baseline cases delivered only `[idle]`, missing `[responding idle]` or `[thinking idle]`; the two recognized-progress freshness cases also failed. Immediate, retirement/recreation and consumer-watermark controls passed before and after repair. No retries, sleeps or deadline extensions established the controlled result.
+
+Final command: `python3 scripts/test-admission.py -- go test -timeout=30m -race -json ./cmd/pyry/...`. It exited successfully with 15,702 leaf cases passed, zero failed and four skipped. Skips were existing opt-ins in `TestRunAgentRun_RealClaude`, `TestDaemonThreadMetadataReadiness` and `TestPushWakeFeedbackExpiryIntegration`, plus `TestMemoryPathsCaseInsensitive` on the case-sensitive filesystem. `go vet ./...` passed on the final code tree; `go build -o /tmp/builder-3711/pyry ./cmd/pyry` passed on the identical production source. Full-module, documentation and downstream Mobile gates remain pending with their owning stages.
+
+Private raw evidence is retained under `/work/Projects/pyrycode-agents/logs/evidence/3711/builder-20261020-dc3018b7/`; only enum/static outcomes and hashes are published here:
+
+- `before-regression.json`: SHA-256 `115e6a3bb3227861e524701b63a34c54e64f01189f579584dde521b248a36bbe`.
+- `package-race.json`: SHA-256 `efd243552178f7fbbf57444966dedb8fc34f4e23589f9f9d3038a42a36974f00`.
+- `SHA256SUMS` (including the earlier fixture compile failure and intermediate focused pass): SHA-256 `f7c4c04e5d3a2fdd660ff5aca6e1f9fd8743f39910d0023f2b3f66c40f466c9a`.
