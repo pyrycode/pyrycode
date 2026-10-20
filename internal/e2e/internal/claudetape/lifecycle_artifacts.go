@@ -68,18 +68,29 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 	if !decode(endpointRaw, &endpoint) || !filepath.IsAbs(endpoint.Daemon) || !filepath.IsAbs(endpoint.Socket) {
 		return "", nil, fail
 	}
-	type roleBinding struct{ Role, ConversationID, SessionID, WorkDir string }
 	entries, e := os.ReadDir(filepath.Join(home, "recording-roles"))
-	if e != nil || len(entries) != 1 || entries[0].Name() != "created-1.json" {
+	if e != nil || len(entries) != len(profile.Roles)-1 {
 		return "", nil, fail
 	}
-	raw, e := read(filepath.Join(home, "recording-roles", "created-1.json"), 16384, true)
+	bindings := map[string]LifecycleRoleBinding{}
+	bootstrap, e := ReadLifecycleRole(home, scenario, "bootstrap")
 	if e != nil {
-		return "", nil, e
-	}
-	var created roleBinding
-	if !decode(raw, &created) || created.Role != "created-1" || !poolUUID.MatchString(created.SessionID) || created.SessionID == LifecycleBootstrapSession || !poolUUID.MatchString(created.ConversationID) || created.WorkDir != filepath.Join(home, "work") {
 		return "", nil, fail
+	}
+	bindings["bootstrap"] = bootstrap
+	for index, role := range profile.Roles[1:] {
+		if entries[index].Name() != role+".json" {
+			return "", nil, fail
+		}
+		raw, e := read(filepath.Join(home, "recording-roles", role+".json"), 16384, true)
+		if e != nil {
+			return "", nil, e
+		}
+		var b LifecycleRoleBinding
+		if !decode(raw, &b) || !validLifecycleRoleBinding(home, scenario, role, b) {
+			return "", nil, fail
+		}
+		bindings[role] = b
 	}
 	expectedFiles := map[string]bool{}
 	tapes := map[string]*LifecycleTape{}
@@ -88,12 +99,30 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		prefix := filepath.Join(home, "recording-children", role)
 		end := LifecycleEnd(scenario, role)
 		suffixes := []string{".claim", ".json", ".job", ".broker-pid"}
-		suffixes = append(suffixes, ".prefix")
-		if complete {
-			suffixes = append(suffixes, ".receipt")
+		if LifecycleSeals(end) {
+			suffixes = append(suffixes, ".prefix")
+			if complete {
+				suffixes = append(suffixes, ".receipt")
+			}
+		} else {
+			suffixes = append(suffixes, ".receipt", ".stopped")
 		}
-		if end == "delete-conversation" {
+		if LifecycleAction(end) != "" {
 			suffixes = append(suffixes, ".action", ".action.ready")
+		}
+		if scenario == "session-rotation" {
+			f, e := os.Open(prefix + ".json")
+			if e != nil {
+				return "", nil, fail
+			}
+			preview, e := DecodeLifecycle(f)
+			f.Close()
+			if e != nil {
+				return "", nil, fail
+			}
+			for i := 1; i <= lifecycleUserInputs(preview.Tape); i++ {
+				suffixes = append(suffixes, fmt.Sprintf(".user-%06d", i))
+			}
 		}
 		values := map[string][]byte{}
 		for _, suffix := range suffixes {
@@ -102,7 +131,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			if suffix == ".json" || suffix == ".job" {
 				limit = MaxBytes
 			}
-			v, e := read(prefix+suffix, limit, suffix != ".receipt")
+			v, e := read(prefix+suffix, limit, !(LifecycleSeals(end) && suffix == ".receipt"))
 			if e != nil {
 				return "", nil, fmt.Errorf("lifecycle role %s artifact %s unreadable: %w", role, suffix, e)
 			}
@@ -121,10 +150,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			return "", nil, fail
 		}
 		pids[brokerPID], pids[job.Config.OwnerPID] = true, true
-		session, conversation := LifecycleBootstrapSession, ""
-		if role == "created-1" {
-			session, conversation = created.SessionID, created.ConversationID
-		}
+		session, conversation := bindings[role].SessionID, bindings[role].ConversationID
 		c := job.Config
 		if job.Role != role || job.SessionID != session || job.ConversationID != conversation || job.WorkDir != filepath.Join(home, "work") || job.SourceBinarySHA256 != sourceSHA || job.Daemon != endpoint.Daemon || job.Socket != endpoint.Socket || c.Scenario != scenario+"-"+role || c.Home != home || c.WorkDir != job.WorkDir || c.Path != prefix+".json" || c.Claim != prefix+".claim" || c.Finish != filepath.Join(home, "finish") || c.Kill != prefix+".action" || c.Abort != prefix+".abort" || c.End != end || !c.Deadline.IsZero() || c.Producer.Revision != revision || c.BrokerParentPID != brokerParentPID || (c.Mode != "capture" && c.Mode != "replay") {
 			return "", nil, fail
@@ -140,9 +166,12 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if json.Unmarshal(tape.Tape.Files["$cwd"], &cwd) != nil || cwd != "work" {
 			return "", nil, fail
 		}
-		receipts := []string{".prefix"}
-		if complete {
-			receipts = append(receipts, ".receipt")
+		receipts := []string{".receipt"}
+		if LifecycleSeals(end) {
+			receipts = []string{".prefix"}
+			if complete {
+				receipts = append(receipts, ".receipt")
+			}
 		}
 		for _, suffix := range receipts {
 			var receipt LifecycleReceipt
@@ -150,7 +179,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 				return "", nil, fmt.Errorf("lifecycle role %s artifact %s invalid terminal receipt", role, suffix)
 			}
 		}
-		if end != "seal" {
+		if LifecycleAction(end) != "" {
 			var action LifecycleKill
 			if !decode(values[".action"], &action) || action.PID != c.OwnerPID || action.Signal != end {
 				return "", nil, fail
@@ -160,6 +189,20 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 				return "", nil, fail
 			}
 
+		}
+		if !LifecycleSeals(end) {
+			var stopped LifecycleStopObservation
+			if !decode(values[".stopped"], &stopped) || stopped.PID != c.OwnerPID || stopped.Kind != "not-running" {
+				return "", nil, fail
+			}
+		}
+		if scenario == "session-rotation" {
+			for i := 1; i <= lifecycleUserInputs(tape.Tape); i++ {
+				var delivery LifecycleDelivery
+				if !decode(values[fmt.Sprintf(".user-%06d", i)], &delivery) || delivery.Version != 1 || delivery.Kind != "user-input-forwarded" || delivery.OwnerPID != c.OwnerPID || delivery.BrokerPID != brokerPID || delivery.Sequence != i {
+					return "", nil, fail
+				}
+			}
 		}
 		tapes[role] = tape
 	}
@@ -175,7 +218,14 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 	// The source-bound daemon checksum is a parent-owned constant. Bind it to
 	// this digest even though no executable bytes are embedded in the fixture.
 	hashes["$daemon-sha256"] = daemonSHA
-	raw, e = json.Marshal(hashes)
+	_, snapshotHashes, se := ReadLifecycleSnapshots(home, scenario, revision, sourceSHA)
+	if se != nil {
+		return "", nil, se
+	}
+	for path, hash := range snapshotHashes {
+		hashes[path] = hash
+	}
+	raw, e := json.Marshal(hashes)
 	if e != nil {
 		return "", nil, fail
 	}
@@ -220,14 +270,11 @@ func ValidateLifecycleLaunch(j LifecycleJob, jobPath string, peer, parent int, b
 	if ReadLifecycleControl(filepath.Join(base.Home, "recording-endpoint.json"), 16384, &endpoint) != nil || endpoint.Daemon != daemon || endpoint.Socket != j.Socket || !filepath.IsAbs(j.Socket) {
 		return fail
 	}
-	session, conv := LifecycleBootstrapSession, ""
-	if j.Role == "created-1" {
-		var binding struct{ Role, ConversationID, SessionID, WorkDir string }
-		if ReadLifecycleControl(filepath.Join(base.Home, "recording-roles", "created-1.json"), 16384, &binding) != nil || binding.Role != j.Role || binding.WorkDir != base.WorkDir || !poolUUID.MatchString(binding.SessionID) || binding.SessionID == LifecycleBootstrapSession || !poolUUID.MatchString(binding.ConversationID) {
-			return fail
-		}
-		session, conv = binding.SessionID, binding.ConversationID
+	role, e := ReadLifecycleRole(base.Home, base.Scenario, j.Role)
+	if e != nil {
+		return fail
 	}
+	session, conv := role.SessionID, role.ConversationID
 	b, err := NewDaemonBinding(j.Args, base.Home, base.WorkDir, j.Daemon, j.Socket)
 	if err != nil || b.session != session || j.SessionID != session || j.ConversationID != conv {
 		return fail

@@ -76,13 +76,15 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 		return LifecycleRoleBinding{Role: role, SessionID: bootstrap, ConversationID: conv, WorkDir: filepath.Join(home, "work")}, nil
 	}
 	var b LifecycleRoleBinding
-	if ReadLifecycleControl(filepath.Join(home, "recording-roles", role+".json"), 16384, &b) != nil || b.Role != role || !poolUUID.MatchString(b.SessionID) || b.SessionID == bootstrap || !poolUUID.MatchString(b.ConversationID) || b.WorkDir != filepath.Join(home, "work") {
+	if ReadLifecycleControl(filepath.Join(home, "recording-roles", role+".json"), 16384, &b) != nil || !validLifecycleRoleBinding(home, scenario, role, b) {
 		return b, fail
 	}
-	if scenario == "session-rotation" && b.ConversationID != LifecycleRotationConversation {
-		return b, fail
-	}
+
 	return b, nil
+}
+
+func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBinding) bool {
+	return LifecycleEnd(scenario, role) != "" && role != "bootstrap" && b.Role == role && poolUUID.MatchString(b.SessionID) && b.SessionID != LifecycleBootstrapFor(scenario) && poolUUID.MatchString(b.ConversationID) && b.WorkDir == filepath.Join(home, "work") && (scenario != "session-rotation" || b.ConversationID == LifecycleRotationConversation)
 }
 
 type LifecycleSuite struct {

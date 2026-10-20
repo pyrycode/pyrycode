@@ -1111,13 +1111,30 @@
         "TestInteractiveConversationLifecycle"
       ],
       "retained_live": [
-        "Real Claude startup, native process termination and current-provider interpretation remain live. Replay preserves original create/rename/archive/unarchive/routing/delete assertions and observes its owned stand-in EOF after the unchanged delete action."
+        "Current Claude startup, response and process termination remain live. Replay preserves the original create, rename, archive, unarchive, routing and delete assertions; both owned providers remain alive until the original daemon cleanup, whose output EOF the external brokers observe."
       ],
       "live_contracts": {
         "TestInteractiveConversationLifecycle": "ec45068c7defe5f9431289c247ead6d08281fbda0185808e60af98ea54b6e9a8"
       },
       "comparison_policy": "strict_ordered",
       "boundary": "lifecycle_suite"
+    },
+    {
+      "name": "session-rotation",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStreamNewSessionRotatesAndSpawnsFresh"
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamNewSessionRotatesAndSpawnsFresh": "9fc7a28f840a288a7736b1d2e8be9b3df21a1ba56eb4acb93a92fe0e0e3ab05d"
+      },
+      "retained_live": [
+        "Current Claude rotation, response, native transcript production and real process termination remain live. Replay runs the original rotation controls, persistence, transition attribution, second-send ACK and coexisting physical JSONL assertions; native transcript bytes are restored only after the matching request reaches its owned provider boundary."
+      ]
     }
   ],
   "batches": {
@@ -1258,6 +1275,9 @@
     ],
     "conversation-lifecycle": [
       "conversation-lifecycle"
+    ],
+    "session-rotation": [
+      "session-rotation"
     ]
   },
   "reviews": {
@@ -1315,11 +1335,6 @@
       "disposition": "needs_harness",
       "reason": "Daemon restart, dormant predecessor resume, fresh handoff-note production and successor prompt require daemon/process lifecycle and session-file inputs. Fresh provider recall/read/write witnesses must remain live.",
       "contract_sha256": "0438d612fc7fcc9882e257d272afaadce13b8242184eba26ba06c4a271f1025c"
-    },
-    "TestInteractiveStreamNewSessionRotatesAndSpawnsFresh": {
-      "disposition": "needs_harness",
-      "reason": "New-session rotation includes repeated control sends, fresh UUID persistence, transition attribution and actual successor transcript appearance. Requires typed rotation, multiple processes and explicit transcript/file effects; provider transcript production stays live.",
-      "contract_sha256": "9fc7a28f840a288a7736b1d2e8be9b3df21a1ba56eb4acb93a92fe0e0e3ab05d"
     },
     "TestInteractiveStreamPermissionDenyAfterSettingsRespawn": {
       "disposition": "needs_harness",

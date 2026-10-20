@@ -90,7 +90,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,14 +118,8 @@ const (
 func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	runParallel(t)
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
+	var err error
 
 	// Isolated workdir under the authenticated HOME. Load-bearing twice: it
 	// guarantees the fresh-daemon state (empty claude sessions dir) AND sidesteps
@@ -180,12 +173,13 @@ func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	t.Cleanup(func() { finishDaemonRecording(t) })
 
 	// A per-run nonce so reruns differ — enough to defeat any accidental caching,
 	// without asserting on content. reqID is a single monotonic counter: only the
 	// turn-2 send_message id is load-bearing (drainForReply correlates the ack on
 	// InReplyTo); the turn-1 id and the fire-and-forget new_session ids are cosmetic.
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 	var reqID uint64 = 2
 
 	// --- Turn 1: pre-rotation liveness (M1) ------------------------------------
@@ -210,6 +204,7 @@ func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	// idBefore. new_session drops silently on a not-yet-attached session, hence the
 	// re-send; after Turn 1 the session is attached, so the first frame normally
 	// actuates. Fresh envelope ids per send keep the send nonce advancing.
+	lifecycleRecordingBeforeRotation(t, home)
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	rotated := false
 	rotateDeadline := time.Now().Add(rotateBudget)
@@ -299,6 +294,7 @@ func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	// fresh child (`--session-id idAfter`), NOT a `--resume idBefore` (which would
 	// append to the old file and never mint <idAfter>.jsonl). Fakeclaude cannot
 	// regress this — it uses a stdin-log tee, not real claude transcripts.
+	lifecycleRecordingRotationSnapshots(t, home, idBefore, idAfter)
 	dir := streamNewSessionTranscriptDir(t, home, idBefore, rotateBudget)
 	requireTranscriptAppears(t, dir, idAfter, rotateBudget)
 }

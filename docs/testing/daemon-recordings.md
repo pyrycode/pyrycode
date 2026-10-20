@@ -712,3 +712,36 @@ run the production descendant reaper against an actual detached owned witness,
 then signal the provider while holding its stdin open, proving that the external
 broker survives both native capture and offline replay teardown. Stderr bytes belong to the saved prefix; their separate diagnostic
 stream order is not an asserted deletion property.
+
+## Session rotation and native transcript snapshots
+
+`session-rotation` runs the original new-session root, including its repeated
+control sends, persisted fresh identity, settled registry, transition attribution,
+second user-send acknowledgement and coexistence of the two physical JSONL files.
+A typed `lifecycle_rotate` checkpoint orders the unchanged first rotation send.
+The bootstrap journal stays strict through subsequent wrap-up and control traffic
+until its actual output EOF. The successor may register only against the current
+persisted conversation, after the actual predecessor PID is gone and its owned
+broker has published a successful terminal receipt. The successor uses the
+original fresh-session argv; resume or extra unknown launches fail the closed
+role audit. Its prefix seals alive before unchanged daemon cleanup.
+
+The transcript assertions use complete point-in-time native JSONL snapshots.
+Capture reads a stable private file through descriptor-anchored, no-symlink HOME
+traversal. It retains raw JSONL bytes, record order, whitespace, Unicode escaping,
+numeric formatting and mode. Only top-level session identity tokens and declared
+HOME path tokens bind. Nested IDs, message prose and unrelated bytes stay literal.
+Duplicate keys, secrets, ambiguous reserved markers, incomplete records, foreign
+identities, public files and expansion beyond eight MiB fail closed.
+
+Replay stages the reviewed snapshot carrier privately. It installs each native
+file exclusively only after the strict matching original user request has reached
+that role's provider boundary. The original physical-file assertions then run.
+A private stage binds the exact snapshot digest to the current owner, broker,
+source binary, revision and user sequence. Both sides of daemon cleanup validate
+the full private snapshot inventory and require the native file still to contain
+the complete saved prefix. Later native appends are allowed; rewriting the saved
+prefix is not. Fixtures contain captured native outputs, so fresh captures compare
+all outgoing requests while independently validating their own transcript witness.
+Current provider transcript creation, rotation interpretation and signal behavior
+remain covered by the retained original live root.
