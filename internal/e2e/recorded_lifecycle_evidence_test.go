@@ -27,12 +27,12 @@ func retainLifecycleWitnesses(t *testing.T, home, destination, scenario, revisio
 		Present, Missing             []string
 	}{Revision: revision, SourceBinarySHA256: sourceSHA}
 	for _, path := range paths {
-		var raw json.RawMessage
-		err := claudetape.ReadLifecycleControl(filepath.Join(home, path), claudetape.MaxBytes, &raw)
-		if os.IsNotExist(err) {
+		if _, err := os.Lstat(filepath.Join(home, path)); os.IsNotExist(err) {
 			manifest.Missing = append(manifest.Missing, path)
 			continue
 		}
+		var raw json.RawMessage
+		err := claudetape.ReadLifecycleControl(filepath.Join(home, path), claudetape.MaxBytes, &raw)
 		if err != nil {
 			t.Errorf("cannot retain lifecycle witness %s: %v", path, err)
 			continue
