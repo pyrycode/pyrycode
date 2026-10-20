@@ -15,6 +15,8 @@ type FallbackLaunchAudit struct {
 	home, scenario, binary string
 	revision, sourceSHA    string
 	parent                 int
+	outer, root            workerProcess
+	chain                  []workerProcess
 	image                  os.FileInfo
 	stop, done             chan struct{}
 	once                   sync.Once
@@ -23,16 +25,23 @@ type FallbackLaunchAudit struct {
 }
 
 type workerLaunch struct {
-	PID, DaemonPID int
-	Start          string
-	Registration   string
+	PID, DaemonPID     int
+	Start, DaemonStart string
+	Registration       string
+}
+
+type workerProcess struct {
+	PID, Parent, Group int
+	Start              string
 }
 
 // StartFallbackLaunchAudit observes current helper launches without delaying or
 // signalling production. Unobserved launches remain unknown, never absent.
-func StartFallbackLaunchAudit(home, scenario, binary, revision, sourceSHA string, parent int) *FallbackLaunchAudit {
+// root is the actual command just started by parent, which must be this process.
+func StartFallbackLaunchAudit(home, scenario, binary, revision, sourceSHA string, parent, root int) *FallbackLaunchAudit {
 	a := &FallbackLaunchAudit{home: home, scenario: scenario, binary: binary, revision: revision, sourceSHA: sourceSHA, parent: parent, stop: make(chan struct{}), done: make(chan struct{}), launches: map[int]workerLaunch{}}
 	a.image, _ = os.Stat(binary)
+	a.bindRoot(root)
 	go func() {
 		defer close(a.done)
 		tick := time.NewTicker(time.Millisecond)
@@ -62,7 +71,7 @@ func (a *FallbackLaunchAudit) cancelled(home, scenario, revision, sourceSHA stri
 	}
 	joined := map[int]bool{}
 	for pid, launch := range a.launches {
-		if launch.PID != pid || launch.DaemonPID != daemon || launch.Start == "" {
+		if len(a.chain) < 3 || a.chain[0].PID != daemon || a.chain[len(a.chain)-1] != a.outer || a.chain[len(a.chain)-2] != a.root || a.outer.PID != parent || a.root.Parent != parent || launch.PID != pid || launch.DaemonPID != daemon || launch.DaemonStart != a.chain[0].Start || launch.Start == "" {
 			return nil, os.ErrInvalid
 		}
 		registered := false
@@ -110,10 +119,11 @@ func (a *FallbackLaunchAudit) Save(destination string) error {
 	raw, e := json.Marshal(struct {
 		Revision, SourceBinarySHA256 string
 		Launches                     map[int]workerLaunch
+		OwnershipChain               []workerProcess
 		Invalid                      bool
 		WaitsKnown                   bool
 		Waits                        []FallbackWorkerObservation
-	}{a.revision, a.sourceSHA, a.launches, a.invalid, err == nil, observations})
+	}{a.revision, a.sourceSHA, a.launches, a.chain, a.invalid, err == nil, observations})
 	if e != nil || len(raw) > 16384 {
 		return os.ErrInvalid
 	}

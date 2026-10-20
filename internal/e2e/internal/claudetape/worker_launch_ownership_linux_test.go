@@ -99,17 +99,31 @@ func testLaunchOwner(t *testing.T) (int, launchOwnerEvidence, func() FallbackWor
 		t.Fatal("root start")
 	}
 	var evidence launchOwnerEvidence
+	waited := false
+	decoder := json.NewDecoder(output)
 	t.Cleanup(func() {
-		_ = input.Close()
-		if evidence.Worker > 1 {
-			_ = syscall.Kill(-evidence.Worker, syscall.SIGKILL)
+		defer cancel()
+		defer func() {
+			if cmd.ProcessState == nil {
+				if evidence.Worker > 1 {
+					_ = syscall.Kill(-evidence.Worker, syscall.SIGKILL)
+				}
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = cmd.Wait()
+			}
+		}()
+		if evidence.Worker > 1 && !waited {
+			if _, err := input.Write([]byte{1}); err != nil || decoder.Decode(&evidence) != nil {
+				t.Error("cleanup cancellation/Wait")
+				return
+			}
 		}
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_ = cmd.Wait()
-		cancel()
+		_ = input.Close()
+		if cmd.Wait() != nil {
+			t.Error("cleanup root Wait")
+		}
 	})
 	_ = output.(*os.File).SetReadDeadline(time.Now().Add(5 * time.Second))
-	decoder := json.NewDecoder(output)
 	if decoder.Decode(&evidence) != nil || evidence.Daemon <= 1 || evidence.Worker <= 1 {
 		t.Fatal("current daemon/helper identities")
 	}
@@ -117,23 +131,20 @@ func testLaunchOwner(t *testing.T) (int, launchOwnerEvidence, func() FallbackWor
 		if _, err := input.Write([]byte{1}); err != nil || decoder.Decode(&evidence) != nil {
 			t.Fatal("completed cancellation Wait")
 		}
+		waited = true
 		return evidence.Wait
 	}
 }
 
 func TestFallbackCancelledLaunchOwnership(t *testing.T) {
-	for _, foreign := range []bool{false, true} {
-		name := "owned"
-		if foreign {
-			name = "unrelated-daemon"
-		}
+	for _, name := range []string{"owned", "unrelated-daemon", "unknown-chain", "changed-root", "changed-daemon", "changed-outer"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			if os.Chmod(home, 0700) != nil || os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
 				t.Fatal("private home")
 			}
 			root, evidence, cancelWorker := testLaunchOwner(t)
-			if foreign {
+			if name == "unrelated-daemon" {
 				_, evidence, cancelWorker = testLaunchOwner(t)
 			}
 			if PublishLifecycleControl(filepath.Join(home, "recording-worker-daemon.json"), struct{ PID int }{evidence.Daemon}) != nil {
@@ -141,16 +152,29 @@ func TestFallbackCancelledLaunchOwnership(t *testing.T) {
 			}
 			exe, _ := os.Executable()
 			producer := lifecycleSuiteControl().Producer
-			audit := StartFallbackLaunchAudit(home, "session-resume", exe, producer.Revision, producer.BinarySHA256, os.Getpid())
+			audit := StartFallbackLaunchAudit(home, "session-resume", exe, producer.Revision, producer.BinarySHA256, os.Getpid(), root)
 			audit.Stop()
+			switch name {
+			case "unknown-chain":
+				audit.chain = nil
+			case "changed-root":
+				audit.root.Start = "stale"
+				audit.sample()
+			case "changed-daemon":
+				audit.chain[0].Start = "stale"
+				audit.sample()
+			case "changed-outer":
+				audit.outer.Start = "stale"
+				audit.sample()
+			}
 			wait := cancelWorker()
-			t.Logf("root=%d daemon=%d worker=%d Wait=%+v launches=%+v", root, evidence.Daemon, evidence.Worker, wait, audit.launches)
+			t.Logf("root=%d daemon=%d worker=%d Wait=%+v chain=%+v launches=%+v", root, evidence.Daemon, evidence.Worker, wait, audit.chain, audit.launches)
 			if PublishLifecycleControl(filepath.Join(home, "recording-worker-observations.json"), []FallbackWorkerObservation{wait}) != nil {
 				t.Fatal("Wait control")
 			}
 			workers, err := ReadLifecycleWorkers(home, "session-resume", "replay", producer.Revision, producer.BinarySHA256, os.Getpid(), nil, audit)
-			if len(workers) != 0 || foreign && err == nil || !foreign && err != nil {
-				t.Fatalf("ownership foreign=%t workers=%d inventory=%v", foreign, len(workers), err)
+			if len(workers) != 0 || (name == "owned") != (err == nil) {
+				t.Fatalf("ownership %s workers=%d inventory=%v", name, len(workers), err)
 			}
 		})
 	}

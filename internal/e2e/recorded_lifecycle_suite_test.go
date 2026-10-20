@@ -317,10 +317,6 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		})
 	}
 	var launchAudit *claudetape.FallbackLaunchAudit
-	if name == "session-resume" {
-		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary, revision, sourceSHA, os.Getpid())
-		defer launchAudit.Stop()
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "tool", "test2json", "-t", "-p", "daemon-recording", binary, "-test.v", "-test.run=^"+regexp.QuoteMeta(profile.Root)+"$", "-test.timeout=20m")
@@ -339,6 +335,10 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
 		t.Fatal("cannot run original daemon assertions")
+	}
+	if name == "session-resume" {
+		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary, revision, sourceSHA, os.Getpid(), cmd.Process.Pid)
+		defer launchAudit.Stop()
 	}
 	evidenceDir := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE")
 	if evidenceDir == "" {
