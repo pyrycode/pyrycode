@@ -1,0 +1,129 @@
+{
+  "kind": "composer-worker-accounting-investigation-v1",
+  "platform": "linux/amd64",
+  "toolchain": "go1.26.9",
+  "state": "Fresh processes and private homes; build caches retained after vet/build, exact cache-hit set and OS page-cache state unmeasured. GOMAXPROCS unset and GOFLAGS empty; no worker override or synthetic load. Historical cache state, preceding sequence and contention unknown. Admission waits retained in each report.",
+  "fixture": {
+    "path": "internal/e2e/testdata/claude-tapes/composer-stop.json",
+    "sha256": "c50f5c8f38b8134ec94eed0beda7d14fb1dbefa805787c91dedee31d73217a25",
+    "native_workers": 0,
+    "changed": false
+  },
+  "historical": {
+    "revision": "c98f455bcf14be5b7c2b171e7de3771373bc5b63",
+    "stage": "total-wait-cardinality",
+    "counts": "unknown: original private HOME deleted",
+    "source": "#3677 refinement comment and retained refiner bundle 93b13551b222a52693e5895dbd7b3a7076161161decb1517719cf664d152d6dd",
+    "full_gate_sha256": "73421f8e99112f6215433a2b53187b78e55a24942a0194306254180a8ef711e2",
+    "attribution": "Not established by later passing focused replays. Reset remains separately owned by #3672."
+  },
+  "commands": {
+    "control_before": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run TestFallbackCancelledLaunchBoundary ./internal/e2e/internal/claudetape",
+    "controls_after": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape",
+    "replay_environment": "PYRY_CLAUDE_TAPE_MODE=replay PYRY_CLAUDE_TAPE_SCENARIOS='[\"composer-stop\"]' PYRY_CLAUDE_TAPE_EVIDENCE=<each report directory>",
+    "first_replay": "python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run TestRecordedClaude ./internal/e2e",
+    "later_replays": "python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e",
+    "vet": "go vet ./...",
+    "build": "go build -o /tmp/builder-3677/pyry-final ./cmd/pyry"
+  },
+  "control_before": {
+    "revision": "f9aefcc3db9ef155edb7717977f7e61ad8818bd1",
+    "working_tree_note": "Diagnostic-test parser correction was uncommitted; cancellation control and accounting code matched this revision.",
+    "test_events_executed_passed_failed_skipped": [15, 13, 2, 0],
+    "composer_stop_leaf_executed_passed_failed_skipped": [1, 0, 1, 0],
+    "failure": "Proved owned cancellation rejected at current-launch-audit; the same control also asserts Wait alone rejects at total-wait-cardinality.",
+    "report": "/tmp/builder-3677/control-before.jsonl",
+    "sha256": "f25ce30ce3eedf10475d16927af318107699ee244d7cf1a70fbfdafdf26a46dd"
+  },
+  "replays": [
+    {
+      "revision": "f9aefcc3db9ef155edb7717977f7e61ad8818bd1",
+      "helper_sha256": "ad077855cb622eb1bfd2c3151629a4bc1531af55d6a036ad09bfa232b1812d53",
+      "daemon_sha256": "1408ae967944efe70f1b60a6c1d67013b10adb4e5e83fffb66d22c320d8115fc",
+      "test_events_executed_passed_failed_skipped": [3, 3, 0, 0],
+      "order": ["TestRecordedClaude/composer-stop", "TestRecordedClaudeFirstTurnWaitsForStartup"],
+      "original_root_executed_passed_failed_skipped": [1, 1, 0, 0],
+      "launches_registered_waits": [0, 0, 0],
+      "waits_known": true,
+      "registrations_known": true,
+      "report": "/tmp/builder-3677/diagnostic-replay/go-test.jsonl",
+      "report_sha256": "ab3688a58d48856ead1c7ad1cdebb80cd8b6a51b332cfcc6e1e13ae0bca16ebd",
+      "original_root_report_sha256": "dc560efee91a31fd4579cff571841613f095a01c771833a1cdf4536893e388d8",
+      "launch_audit_sha256": "7b96ce07f3d93b85cbd9a92c83f59b12c0db88bf639ec66572d8c0b3fd234356"
+    },
+    {
+      "revision": "9af02f2400ed6c57444ed31022398e74c10712d0",
+      "helper_sha256": "3f9ba7ebaaf8f38f032be3fbcd4ca2b03f7822cf171d92c9a2791fb098ec348f",
+      "daemon_sha256": "1408ae967944efe70f1b60a6c1d67013b10adb4e5e83fffb66d22c320d8115fc",
+      "test_events_executed_passed_failed_skipped": [2, 2, 0, 0],
+      "order": ["TestRecordedClaude/composer-stop"],
+      "original_root_executed_passed_failed_skipped": [1, 1, 0, 0],
+      "launches_registered_waits": [0, 0, 0],
+      "waits_known": true,
+      "registrations_known": true,
+      "report": "/tmp/builder-3677/diagnostic-replay-2/go-test.jsonl",
+      "report_sha256": "0d0c9d1ac4b122ffa04355ee83651783d50f101525ba9104348afb6fef0d8a1b",
+      "original_root_report_sha256": "d4df506ee8352ca73e965b2b5428f48e03131414b740ad9c1ffa50d3e6da379d",
+      "launch_audit_sha256": "57da1926e183d18c601f7f4e5ebcacfb8f6babf63e3df28b5fe0afbc12d7dd74"
+    },
+    {
+      "revision": "3ed0f9190ed71c2e4a969732598f1e5ed3fbfd17",
+      "helper_sha256": "ef201be923eef2b58acefc0176f1c5558ce944ef11c8ffe2b5a7b7cf736ed1f3",
+      "daemon_sha256": "1408ae967944efe70f1b60a6c1d67013b10adb4e5e83fffb66d22c320d8115fc",
+      "test_events_executed_passed_failed_skipped": [2, 2, 0, 0],
+      "order": ["TestRecordedClaude/composer-stop"],
+      "original_root_executed_passed_failed_skipped": [1, 1, 0, 0],
+      "launches_registered_waits": [0, 0, 0],
+      "waits_known": true,
+      "registrations_known": true,
+      "report": "/tmp/builder-3677/repaired-replay/go-test.jsonl",
+      "report_sha256": "99919a2adeb8a51823aa9d02c673b8d04ea10faf54eb09e6c039a46d72303df1",
+      "original_root_report_sha256": "021055208fe89f23c2cd8bbbdf1a7b8ae602f21390c5aa1024ec58b257a40f22",
+      "launch_audit_sha256": "a26ddc433fe6d60582d635612f1548457a341dc47fc0d5d294084067ece6edf0"
+    }
+  ],
+  "controls_after_initial": {
+    "revision": "3ed0f9190ed71c2e4a969732598f1e5ed3fbfd17",
+    "test_events_executed_passed_failed_skipped": [843, 838, 5, 0],
+    "failure": "Only TestFallbackLaunchDiagnosticRegistration and its four leaf cases failed: test-created directories lacked explicit 0700. Corrected at 1cf527fd; security permission checks unchanged.",
+    "report": "/tmp/builder-3677/controls-after.jsonl",
+    "sha256": "5df237125dc81fbb6405366d8f93e4c22e44964dbe22062507e8a448035b122d",
+    "composer_stop_boundary": {
+      "launch": {"PID": 714959, "DaemonPID": 714952, "Start": "48786078", "DaemonStart": "48786075", "Registration": "absent"},
+      "registered": 0,
+      "Wait": {"OwnerPID": 714959, "GroupCancel": true, "WaitCompleted": true, "ExitObserved": true, "Status": {"ExitCode": -1, "Signal": 9}},
+      "without_audit": "total-wait-cardinality",
+      "with_audit": "PASS: zero native exchanges"
+    }
+  },
+  "controls_final": {
+    "revision": "1cf527fd6bfe2022ae828c6f4abd77f7504978b9",
+    "test_events_executed_passed_failed_skipped": [843, 843, 0, 0],
+    "leaf_tests_executed_passed_failed_skipped": [766, 766, 0, 0],
+    "composer_stop_boundary_events": [13, 13, 0, 0],
+    "composer_stop_ownership_events": [7, 7, 0, 0],
+    "diagnostic_registration_events": [5, 5, 0, 0],
+    "report": "/tmp/builder-3677/controls-final.jsonl",
+    "sha256": "9f3483fe98e8c3328b346bd04988cd6ce3aa5b464a765f065457b9dffee02d04",
+    "composer_stop_boundary": {
+      "launch": {"PID": 725612, "DaemonPID": 725604, "Start": "48822133", "DaemonStart": "48822132", "Registration": "absent"},
+      "registered": 0,
+      "Wait": {"OwnerPID": 725612, "GroupCancel": true, "WaitCompleted": true, "ExitObserved": true, "Status": {"ExitCode": -1, "Signal": 9}},
+      "without_audit": "total-wait-cardinality",
+      "with_audit": "PASS: zero native exchanges"
+    },
+    "source_equivalence": "Only worker_launch_diagnostic_test.go changed after the passing 3ed0f919 original-root replay: explicit test-fixture directory permissions. Linked helper, daemon and replay/accounting code are unchanged.",
+    "vet": {"result": "PASS", "report": "/tmp/builder-3677/vet-fixed.log"},
+    "build": {"result": "PASS", "report": "/tmp/builder-3677/build-fixed.log"}
+  },
+  "investigation": {
+    "status": "assessment-queued",
+    "id": "ca41a6b00adfe418b300d03b365fcd8fc0f5a1c3e4044dc8ca98a8c5908f6848",
+    "revision": "1cf527fd6bfe2022ae828c6f4abd77f7504978b9",
+    "supersedes": "795c651ab86eff066665caa76daa834324919c14f81eecd259ef8b51b980da9c: earlier candidate had only a diagnostic-test directory permission defect, now corrected",
+    "scope": {"kind": "package", "selectors": ["./internal/e2e/..."]},
+    "executed": 0,
+    "reason": "Focused replays record no launches. Recovery must assess the original preceding sequence and contention before historical attribution; assessment executes no diagnostic and waives no acceptance."
+  },
+  "acceptance": "Full-suite acceptance and historical attribution remain pending. Offline evidence establishes no new live-provider behavior. macOS is outside this Linux ticket's verification scope."
+}

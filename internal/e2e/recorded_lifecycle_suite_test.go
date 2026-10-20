@@ -377,7 +377,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal("cannot run original daemon assertions")
 	}
-	if name == "session-resume" {
+	if name == "session-resume" || name == "composer-stop" {
 		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary, revision, sourceSHA, os.Getpid(), cmd.Process.Pid)
 		defer launchAudit.Stop()
 	}
