@@ -204,7 +204,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	observeCompletion := NewConversationCompletionObserver(c, tape.Tape)
 	timelineOrigin := time.Now()
 	startupNS := timelineOrigin.Sub(startup).Nanoseconds()
-	var completionNS, witnessNS int64
+	var completionNS, witnessNS, outputCompletionNS int64
 	timelineOrigins := []time.Time{timelineOrigin}
 	recordTimelineInput := func(raw []byte) {
 		if lifecycleFrameTimeline(c.Scenario) || lifecycleTimelineUser(raw) {
@@ -290,6 +290,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					timing.Output, timing.Anchor = timelineOutput, anchor
 					timing.StartupNS, timing.ReadyNS = startupNS, time.Since(timelineOrigin).Nanoseconds()
 					timing.CompletionNS, timing.WitnessNS = completionNS, witnessNS
+					timing.PriorOutputCompletionNS = outputCompletionNS
 				}
 				return err
 			}
@@ -298,7 +299,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		frames++
-		return observeCompletion("stdout", raw)
+		work := time.Now()
+		err := observeCompletion("stdout", raw)
+		outputCompletionNS = time.Since(work).Nanoseconds()
+		return err
 	}
 	if player != nil {
 		for _, raw := range player.Prefix() {

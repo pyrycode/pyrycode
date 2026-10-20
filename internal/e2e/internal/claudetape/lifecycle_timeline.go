@@ -147,6 +147,7 @@ type LifecycleTimingError struct {
 	DueNS, CurrentNS, LatenessNS int64
 	StartupNS, ReadyNS           int64
 	CompletionNS, WitnessNS      int64
+	PriorOutputCompletionNS      int64
 }
 
 func (e *LifecycleTimingError) Error() string {
