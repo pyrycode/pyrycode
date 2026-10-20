@@ -249,9 +249,7 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	if _, e = b.serverEnvironment(launch.Env); e != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
-	for i, f := range owned {
-		files[i] = f
-	}
+	copy(files[:], owned)
 	launch.peerPID = pid
 	accepted = true
 	return launch, files, nil
