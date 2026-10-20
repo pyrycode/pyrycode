@@ -148,7 +148,7 @@ type LifecycleTimingError struct {
 	StartupNS, ReadyNS           int64
 	CompletionNS, WitnessNS      int64
 	PriorOutputCompletionNS      int64
-	// OutputWorkNS measures restoration, physical observation, replay projection
+	// OutputWorkNS measures restoration, BeforeOutput observation, replay projection
 	// and actual forwarding, in that order. It grants no completion authority.
 	OutputWorkNS [4]int64
 }

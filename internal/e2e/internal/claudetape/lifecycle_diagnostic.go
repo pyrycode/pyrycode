@@ -17,7 +17,7 @@ type LifecycleDiagnostic struct {
 	InputSampled, OutputSampled, StderrSampled                    bool
 	InputsMatched, OutputsDelivered, ProviderInputsForwarded      int
 	// Maxima retain the output ordinal for each timing substage independently.
-	// Order: restoration, physical observation, replay projection, forwarding.
+	// Order: restoration, BeforeOutput observation, replay projection, forwarding.
 	OutputWorkMaxNS      [4]int64
 	OutputWorkMaxOrdinal [4]int
 }

@@ -50,6 +50,8 @@ state-machine reject branches; reassess once the cause is measured.
 
 Overlap: #3673 adds local observation hooks to `RunLifecycleBroker`; #3686 changes
 the direct foreground-witness fixture. Neither supplies a required dependency.
+The #3668 branch also adds an independent terminal-observation hook to the broker; this
+diagnostic instrumentation does not call or extend it.
 
 ## Concurrency model
 
@@ -158,3 +160,23 @@ fallback-suggestion; a fresh one-scenario process lacks that preceding state.
 Historical cache/load contributions remain unknown. The request executes zero
 tests and is pending, as are the causal repair and complete-suite acceptance.
 Documentation must preserve this explicit attribution limit.
+
+### 2026-10-20 — diagnostic handoff, repair remains incomplete
+
+Pushed diagnostic candidate `9813f95df7541fc939905d009e94da1924b3c5a5` passed
+1009/1009 package test events (910/910 leaves), zero failures/skips. Composer
+cancellation and ownership families passed 13/13 and 7/7 events. Its focused
+replay passed 2/2 outer events and 1/1 original root, including final audits;
+the audit again records one current launch and one completed cancellation Wait,
+zero registrations. Module vet, tagged vet for both harness consumers and the
+binary build passed on Linux Go 1.26.9. The final recording commit changes only
+evidence, this plan and diagnostic comments, not executable behavior or tests.
+
+Recovery assessment `3ad252474069132d5cba62de808ce884e92c15b8752361ee9ab8689e1f87d6f2`
+targets that pushed diagnostic candidate. It is queued with zero tests executed,
+requesting the adjacent fallback-suggestion → composer-stop sequence first.
+The manifest `internal/e2e/internal/claudetape/testdata/composer_recurrence_3677.json`
+records commands, source/fixture/binary identities, counts and hashed report paths.
+The original 232879911 ns miss is still failed and unattributed. Causal repair,
+synchronized regression and full acceptance remain pending; this diagnostic PR
+must not be treated as a completed reliability repair.

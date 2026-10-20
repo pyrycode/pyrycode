@@ -2,6 +2,8 @@
   "kind": "diagnosis-only-not-a-reliability-repair",
   "ticket": 3677,
   "os": "linux",
+  "toolchain": "go1.26.9 linux/amd64; CGO_ENABLED=1",
+  "build_cache_path": "/home/agent/.cache/go-build",
   "historical_conditions": {"cold_state": "unknown", "cache": "unknown", "contention": "unknown"},
   "current_conditions": {
     "home_and_process": "fresh per replay; existing external retention in private directories",
@@ -37,6 +39,7 @@
     "failure_stage": "bootstrap deliver-output / forwarding; before original root success and inventory",
     "timing": {"output": 68, "anchor": 3, "due_ns": 34330542, "current_ns": 267210453, "lateness_ns": 232879911, "completion_ns": 576, "witness_ns": 574247, "prior_output_completion_ns": 538},
     "substage_or_scheduler_cause": "unknown",
+    "additional_observation": "unowned lifecycle invocation stage=job-publish; causal order versus forwarding failure unknown",
     "fixture_sha256": "c50f5c8f38b8134ec94eed0beda7d14fb1dbefa805787c91dedee31d73217a25",
     "helper_sha256": "b6b3e073ec247fe4661400d79292a792ce63c698d41a76de8a6aa3ddfa5d323f",
     "daemon_sha256": "8afa15d09e65859778b2feee2d3400be98fd91dd97beda76c59e4d8153bff9ad",
@@ -122,6 +125,48 @@
     "reviewed_frame_bytes": 39808,
     "elapsed_ns": {"unique": 6087354, "privacy": 14306958, "envelope": 3679511, "compact": 1899985, "parser": 6348624, "observer": 41876014},
     "establishes_historical_cause_or_reliability_repair": false
+  },
+  "pushed_diagnostic_candidate": {
+    "revision": "9813f95df7541fc939905d009e94da1924b3c5a5",
+    "report": "/tmp/builder-3677-final.jsonl",
+    "sha256": "ce44dacddb7f39aeab5648ca861140d10a3029db6f302bee9e88e66f2c313848",
+    "retention_root": "/tmp/builder-3677-final",
+    "helper_sha256": "845269e3871ff14b8525b55215923630fec2e1a7dca743d354bb1cd72423c7ca",
+    "daemon_sha256": "d56410f5f135f098d8bdeb757ed43f9289ef1928846546276584d2f296651660",
+    "outer_counts_executed_passed_failed_skipped": [2, 2, 0, 0],
+    "original_root_counts_executed_passed_failed_skipped": [1, 1, 0, 0],
+    "launches_registrations_completed_waits": [1, 0, 1],
+    "worker_owner": 533399,
+    "launch_audit_sha256": "0f9bf6bd1b45e7e020d4557aea0fa16631978d3fdb1aba204d1052acb35a681c",
+    "bootstrap_diagnostic_sha256": "aa38c50f4a154759a03071c1877b891dd1149484ff853f738f521aaf3da5cf3c",
+    "output_work_max_ns": [11886009, 60264842, 0, 4216134],
+    "output_work_max_ordinals": [0, 68, 0, 51],
+    "final_worker_and_artifact_audits": "passed",
+    "establishes_historical_cause_or_reliability_repair": false
+  },
+  "investigation": {
+    "id": "3ad252474069132d5cba62de808ce884e92c15b8752361ee9ab8689e1f87d6f2",
+    "status": "assessment-queued",
+    "executed": 0,
+    "revision": "9813f95df7541fc939905d009e94da1924b3c5a5",
+    "request_path": "/tmp/builder-3677-investigation.json",
+    "scope": {"kind": "sequence", "selectors": ["TestRecordedClaude/fallback-suggestion", "TestRecordedClaude/composer-stop"]},
+    "evidence": {"runId": "9c05560c923d283b5ca35c1dd608860672a5d6f7b15767b2367cbe4c90f0deb0", "digest": "a82d6a46dd55806578249d540ee1256d378d14b00d22ab7f209c1238d8072cd1", "path": "logs/2026-10-20T15-27-36-721Z_refiner__3677.log"}
+  },
+  "static_checks": {
+    "passed": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3677-pyry ./cmd/pyry"],
+    "report_paths": ["/tmp/builder-3677-vet.log", "/tmp/builder-3677-tagged-vet.log", "/tmp/builder-3677-realclaude-vet.log", "/tmp/builder-3677-build.log"],
+    "all_reports_empty_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "final_affected_package": {
+    "revision": "9813f95df7541fc939905d009e94da1924b3c5a5",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape",
+    "report": "/tmp/builder-3677-final-controls.jsonl",
+    "sha256": "d8520c1daf5bb52cd0306a4ef500bbce4701fe821979e7027495d6e148f0301c",
+    "test_event_counts_executed_passed_failed_skipped": [1009, 1009, 0, 0],
+    "leaf_counts_executed_passed_failed_skipped": [910, 910, 0, 0],
+    "composer_cancellation_control_events": [13, 13, 0, 0],
+    "composer_ownership_control_events": [7, 7, 0, 0]
   },
   "pending": ["managed wider diagnostic assessment", "demonstrated causal repair", "synchronized failing-before/passing-after regression", "dispatcher complete-suite acceptance", "documentation-stage handoff"]
 }
