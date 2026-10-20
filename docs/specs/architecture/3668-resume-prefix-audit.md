@@ -136,6 +136,36 @@ Thus the liveness and extra-inventory failures are two stages of the same
 activation-timer race, not independently repairable publication causes. The
 synchronized regression failed 2/2, zero skips, on the uncached implementation.
 
+### 2026-10-20 — focused repair proof and observation limits
+
+Implementation `d2340d1c39909bb44e25859927654ad7c6ca3e89` passed two
+independent original uncached race replays (each original root 1/1, zero
+failures/skips). Source validation at finish now takes approximately 3–6 ms
+instead of 0.88–1.45 seconds; finish publication occurs 15–17 ms after entry.
+Both providers sealed live, and each unchanged complete audit matched its
+original prefix digest. The synchronized source controls passed 2/2. The affected
+claudetape package passed 744 leaf tests (816 test events), zero failures/skips,
+including every existing prefix, launch, extra/missing artifact and receipt
+rejection control. Go vet, both tagged vets and daemon build passed on Linux.
+
+The independent replay addressed the remaining timing concern after the first
+passing replay: a post-audit observation already sees the second idle eviction
+and successful final receipt. Inventory sampling occurs before audit processing
+returns, so that observation cannot establish provider liveness at the earlier
+seal or exact inventory at the earlier sample. The actual live seal checks,
+broker state and both unchanged audits establish those respective predicates;
+no audit rule or lifecycle deadline was changed. Do not describe the provider as
+alive through audit return. Complete normal verification remains dispatcher-owned.
+
+The content-free evidence index is
+`internal/e2e/testdata/3668-prefix-evidence.json`; its private raw evidence paths
+and SHA-256 values preserve all new failures and both passes. The failing source
+unit proof ran on the prospective uncommitted extraction, as the index states;
+its executable hash was not retained and remains unknown. Original replay source
+and helper/daemon/fixture identities are recorded exactly. Final size is under
+650 written lines, zero exported types, four consumer hooks, three criteria and
+no new lifecycle reject branches. No documentation-only acceptance was assigned.
+
 ## Security review
 
 **Verdict:** PASS
