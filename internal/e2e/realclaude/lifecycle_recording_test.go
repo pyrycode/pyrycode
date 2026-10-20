@@ -433,6 +433,45 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 	}
 	job.Config.OnSeal = func(n int) error { return daemonRecordingWrite(prefix+".prefix", receipt(n, nil)) }
 	job.Config.OnInput = lifecycleRecordingInputWitness(job, c.Process.Home, c.Process.Scenario)
+	if c.Process.Mode == "replay" && c.Process.Scenario == "mcp-send-file" {
+		job.Config.ReplayTurnReady = func() error {
+			return daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-turn-ready"), true)
+		}
+	}
+	if c.Process.Mode == "replay" && c.Process.Scenario == "mcp-send-file" && os.Getenv("PYRY_CLAUDE_TAPE_HOLD_INITIALIZE") == "1" {
+		initializeID := ""
+		job.Config.OnInput = func(raw []byte) error {
+			var env struct {
+				RequestID string `json:"request_id"`
+				Request   struct{ Subtype string }
+			}
+			if err := json.Unmarshal(raw, &env); err != nil {
+				return err
+			}
+			if env.Request.Subtype == "initialize" {
+				initializeID = env.RequestID
+			}
+			return nil
+		}
+		job.Config.BeforeOutput = func(raw []byte) error {
+			var env struct {
+				Response struct {
+					RequestID string `json:"request_id"`
+				}
+			}
+			if err := json.Unmarshal(raw, &env); err != nil {
+				return err
+			}
+			if initializeID != "" && env.Response.RequestID == initializeID {
+				if err := daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-initialize-held"), true); err != nil {
+					return err
+				}
+				time.Sleep(2 * time.Second)
+				initializeID = ""
+			}
+			return nil
+		}
+	}
 	var physical *claudetape.PhysicalRecordingSession
 	if claudetape.PhysicalFamily(c.Process.Scenario) != "" {
 		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)

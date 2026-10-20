@@ -64,6 +64,12 @@ func TestRecordedClaude(t *testing.T) {
 	}
 }
 
+func TestRecordedMCPSendFileWaitsForStartup(t *testing.T) {
+	t.Setenv("PYRY_CLAUDE_TAPE_MODE", "replay")
+	t.Setenv("PYRY_CLAUDE_TAPE_HOLD_INITIALIZE", "1")
+	runRecordedLifecycleSuite(t, "mcp-send-file")
+}
+
 // The daemon may write a turn once claude confirms the permission posture, which
 // can precede the initialize reply that triggers its MCP status ask. A message
 // that reaches the daemon inside that window therefore reorders its stdin

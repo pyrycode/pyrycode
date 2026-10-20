@@ -107,6 +107,9 @@ type LifecycleBrokerConfig struct {
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
 	OnDiagnostic     func(LifecycleDiagnostic)        `json:"-"`
+
+	// ReplayTurnReady runs once after startup playback reaches its first user input.
+	ReplayTurnReady func() error `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -263,6 +266,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	_ = originals[6].Close()
 	frames, total := 0, 0
+	turnReady := false
+	signalTurnReady := func() error {
+		if turnReady || player == nil || c.ReplayTurnReady == nil || !player.AwaitsTurn() {
+			return nil
+		}
+		turnReady = true
+		return c.ReplayTurnReady()
+	}
 	sealed := false
 	actionAccepted := false
 	var observeAction func() error
@@ -366,6 +377,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, err
 			}
 		}
+		if err := signalTurnReady(); err != nil {
+			return frames, err
+		}
 	}
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
@@ -436,7 +450,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return e
 				}
 			}
-			return nil
+			return signalTurnReady()
 		}
 		total += len(normalized)
 		if total > MaxBytes || len(tape.Tape.Frames) >= MaxFrames || Safe(normalized) != nil {
