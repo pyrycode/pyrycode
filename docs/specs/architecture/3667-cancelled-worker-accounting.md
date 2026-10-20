@@ -110,3 +110,14 @@ retain the strict reviewed-worker and cleanup guarantees.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+- 2026-10-20: synchronized current-process control established the missing-job
+  cancellation boundary and failed at `total-wait-cardinality`. The original
+  diagnostic run also exposed the faster-start arm: the helper reaches the
+  zero-reviewed-workers check and exits as an unexpected invocation before
+  production cancellation. For session-resume's empty reviewed inventory, keep
+  that owned replay process silent and bounded until actual production
+  cancellation; never start a broker or publish a job/receipt for it. The outer
+  independent launch audit and real Wait must still prove its cancellation.

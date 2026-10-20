@@ -98,6 +98,12 @@ func lifecycleRecordingFiniteWorker(c lifecycleRecordingConfig, args []string) b
 	if err != nil {
 		fail()
 	}
+	if c.Process.Mode == "replay" && c.Process.Scenario == "session-resume" && len(c.WorkerWaits) == 0 {
+		// No reviewed native exchange exists. Keep this owned launch silent until
+		// production cancels it; only the outer launch/Wait audit can certify it.
+		<-time.After(45 * time.Second)
+		fail()
+	}
 	jobPath := ""
 	for i := 1; i <= claudetape.LifecycleWorkerLimit(c.Process.Scenario); i++ {
 		path := claudetape.FallbackWorkerJobPath(c.Process.Home, i)
