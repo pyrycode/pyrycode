@@ -125,7 +125,13 @@ func (p *sendNowPlacement) writeTarget(ctx context.Context, convID string, paylo
 	p.pending[convID] = append(p.pending[convID], e)
 	p.mu.Unlock()
 	e.writeErr = write(streamsup.WithTurnTarget(ctx, func(child io.Writer) {
+		// Output accepted while selecting stdin belongs to an earlier write.
+		after := e.after
+		if p.position != nil {
+			after = p.position()
+		}
 		p.mu.Lock()
+		e.after = after
 		e.child = child
 		p.mu.Unlock()
 	}))

@@ -49,7 +49,7 @@ func TestQueuedPlacementHelperProcess(t *testing.T) {
 }
 
 func TestQueuedPlacementOwnership(t *testing.T) {
-	for _, scenario := range []string{"echo_before_exit", "completion_before_exit", "result_only_completion", "send_now_grace", "exit_during_grace", "teardown_during_grace", "teardown", "same_id_successor", "cancel", "stale_close"} {
+	for _, scenario := range []string{"echo_before_exit", "completion_before_exit", "result_only_completion", "send_now_grace", "exit_during_grace", "saturated_child_exits", "teardown_during_grace", "teardown", "same_id_successor", "cancel", "stale_close"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -90,7 +90,7 @@ func TestQueuedPlacementOwnership(t *testing.T) {
 				place.mu.Unlock()
 				return e
 			}
-			now := scenario == "send_now_grace" || scenario == "exit_during_grace" || scenario == "teardown_during_grace"
+			now := scenario == "send_now_grace" || scenario == "exit_during_grace" || scenario == "teardown_during_grace" || scenario == "saturated_child_exits"
 			busy.observe("s", snOpener)
 			if now {
 				if ok, _, finished := busy.beginSendNow(testConvID); !ok {
@@ -115,11 +115,26 @@ func TestQueuedPlacementOwnership(t *testing.T) {
 			case "result_only_completion":
 				send(child, snEnd)
 				wantOld = true
-			case "send_now_grace", "exit_during_grace", "teardown_during_grace":
+			case "send_now_grace", "exit_during_grace", "teardown_during_grace", "saturated_child_exits":
 				send(child, snEnd)
 				placementDrainBarrier(t, ctx, sink)
 				if len(published) != 0 {
 					t.Fatal("send now skipped grace")
+				}
+				if scenario == "saturated_child_exits" {
+					entered, release := make(chan struct{}), make(chan struct{})
+					sink.dispatchPlacement(ctx, func() { close(entered); <-release })
+					awaitProvenanceSignal(t, entered)
+					for range cap(sink.ch) {
+						sink.offer(streamTurnEnvelope{sessionID: "foreign", ev: snEnd}, true)
+					}
+					for _, target := range []io.Writer{child, successor} {
+						if sink.offer(streamTurnEnvelope{sessionID: "s", incarnation: 7, child: target, exit: true, exitEpoch: sink.exits.Add(1)}, true) {
+							t.Error("exit did not exercise saturated retention")
+						}
+					}
+					close(release)
+					placementDrainBarrier(t, ctx, sink)
 				}
 				if scenario == "send_now_grace" {
 					busy.mu.Lock()

@@ -118,6 +118,11 @@ type confirmedStreamStop struct {
 	after uint64
 }
 
+type streamChildKey struct {
+	streamProducerKey
+	child io.Writer
+}
+
 // streamTurnSink is the late-bound, daemon-singleton fan-in that lines up two
 // disjoint lifetimes: N stream-json Parsers (one per session, each fixed at
 // runner construction, where no emitter handle exists) and the one emitter built
@@ -151,7 +156,7 @@ type streamTurnSink struct {
 	// a leaf lock: no I/O, publication or tracker operation runs underneath it.
 	offerMu     sync.Mutex
 	queued      uint64
-	stopped     map[streamProducerKey]confirmedStreamStop
+	stopped     map[streamChildKey]confirmedStreamStop
 	stoppedWake chan struct{}
 	// droppableCap is the high-water mark the droppable class may not cross,
 	// leaving cap(ch) - droppableCap slots that only a closing-class envelope can
@@ -254,7 +259,7 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 		runtimeWake:           make(chan struct{}, 1),
 		ch:                    make(chan streamTurnEnvelope, buf),
 		placementCommands:     make(chan func(), operatorMessageQueueSize),
-		stopped:               make(map[streamProducerKey]confirmedStreamStop),
+		stopped:               make(map[streamChildKey]confirmedStreamStop),
 		stoppedWake:           make(chan struct{}, 1),
 		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),
 		logger:                logger,
@@ -299,11 +304,11 @@ func (s *streamTurnSink) offer(env streamTurnEnvelope, closing bool) bool {
 	}
 }
 
-// retainExitLocked requires offerMu and keeps the newest stamp per incarnation.
+// retainExitLocked requires offerMu and keeps the newest stamp per child.
 // A child exit may acquire the lock after a later confirmed stop; that older
 // exit must never replace the stronger producer boundary.
 func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
-	key := streamProducerKey{env.sessionID, env.incarnation}
+	key := streamChildKey{streamProducerKey{env.sessionID, env.incarnation}, env.child}
 	if old, ok := s.stopped[key]; ok && old.env.exitEpoch >= env.exitEpoch {
 		return
 	}
@@ -315,9 +320,9 @@ func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
 }
 
 // runnerStopped runs only after Runner.Run joins its producer. It retains
-// one latest boundary per producer incarnation without relying on queue capacity, ordered
-// behind every envelope queued before that join. Coalescing repeated stops for
-// one incarnation moves the boundary later, after all of that producer's old tails.
+// the child's latest boundary without relying on queue capacity, ordered behind
+// every envelope queued before that join. Repeated stops for the same child move
+// its boundary later, after all of that producer's old tails.
 // The wake is a level trigger, never the owner of the notification.
 func (s *streamTurnSink) runnerStopped(sessionID string) {
 	s.offerMu.Lock()
