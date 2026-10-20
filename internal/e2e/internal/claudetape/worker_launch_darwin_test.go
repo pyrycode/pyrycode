@@ -171,12 +171,24 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 	if _, err := io.ReadFull(output, ready[:]); err != nil || ready[0] != 1 {
 		t.Fatal("worker ready")
 	}
+	var survivor *exec.Cmd
+	if os.Getenv("PYRY_LAUNCH_LIVE_GROUP") == "1" {
+		survivor = exec.CommandContext(ctx, "/bin/sleep", "30")
+		survivor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
+		if survivor.Start() != nil {
+			t.Fatal("owned group member")
+		}
+	}
 	evidence := launchOwnerEvidence{Daemon: os.Getpid(), Worker: cmd.Process.Pid}
 	encoder := json.NewEncoder(os.Stdout)
 	if encoder.Encode(evidence) != nil {
 		t.Fatal("publish launch")
 	}
-	if _, err := io.ReadFull(os.Stdin, ready[:]); err != nil || syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) != nil || cmd.Wait() == nil {
+	target := -cmd.Process.Pid
+	if survivor != nil {
+		target = cmd.Process.Pid
+	}
+	if _, err := io.ReadFull(os.Stdin, ready[:]); err != nil || syscall.Kill(target, syscall.SIGKILL) != nil || cmd.Wait() == nil {
 		t.Fatal("cancel and Wait")
 	}
 	status := cmd.ProcessState.Sys().(syscall.WaitStatus)
@@ -185,6 +197,10 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 		t.Fatal("publish actual Wait")
 	}
 	_, _ = io.Copy(io.Discard, os.Stdin)
+	if survivor != nil {
+		_ = survivor.Process.Kill() // actual owned command, never a recorded PID
+		_ = survivor.Wait()
+	}
 	os.Exit(0)
 }
 
@@ -260,8 +276,11 @@ func TestDarwinLaunchOwnership(t *testing.T) {
 
 func testFallbackCancelledLaunchOwnership(t *testing.T, scenario string) {
 	t.Helper()
-	for _, name := range []string{"owned", "unrelated-daemon", "unknown-registration", "unknown-chain", "changed-root", "changed-daemon", "changed-outer"} {
+	for _, name := range []string{"owned", "live-group", "unrelated-daemon", "unknown-registration", "unknown-chain", "changed-root", "changed-daemon", "changed-outer"} {
 		t.Run(name, func(t *testing.T) {
+			if name == "live-group" {
+				t.Setenv("PYRY_LAUNCH_LIVE_GROUP", "1")
+			}
 			home := t.TempDir()
 			if os.Chmod(home, 0700) != nil || os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
 				t.Fatal("private home")
@@ -285,6 +304,9 @@ func testFallbackCancelledLaunchOwnership(t *testing.T, scenario string) {
 				testDarwinSampled(t, audit, evidence.Worker)
 			}
 			audit.Stop()
+			if name == "unknown-registration" && audit.launches[evidence.Worker].Registration != "unknown" {
+				t.Fatal("unreadable registration treated as absent")
+			}
 			switch name {
 			case "unknown-chain":
 				audit.chain = nil
@@ -299,6 +321,9 @@ func testFallbackCancelledLaunchOwnership(t *testing.T, scenario string) {
 				audit.sample()
 			}
 			wait := cancelWorker()
+			if name == "live-group" && (syscall.Kill(wait.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(-wait.OwnerPID, 0) != nil) {
+				t.Fatal("expected reaped worker with a current owned group member")
+			}
 			t.Logf("root=%d daemon=%d worker=%d Wait=%+v chain=%+v launches=%+v", root, evidence.Daemon, evidence.Worker, wait, audit.chain, audit.launches)
 			if PublishLifecycleControl(filepath.Join(home, "recording-worker-observations.json"), []FallbackWorkerObservation{wait}) != nil {
 				t.Fatal("Wait control")

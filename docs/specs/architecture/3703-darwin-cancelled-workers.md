@@ -109,3 +109,10 @@ exchange distinctions, historical attribution limits, and offline versus live pr
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+- 2026-10-20: Native ABI proof confirms the raw executable-path query returns
+  zero on success; accept its terminated path only after executable-vnode checks.
+  `TestDarwinLaunchOwnership/live-group` independently rejects a reaped worker
+  whose actual owned group member survives. No accounting or timer changes.
