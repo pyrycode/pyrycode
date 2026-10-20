@@ -78,6 +78,11 @@ func TestMCPPrivacyRejectsPrivateCapabilitiesInEscapedUnknownFields(t *testing.T
 		if mcpPrivateSafe(outer, token, "/tmp/controlled-private-mcp.sock") == nil {
 			t.Fatal("nested JSON-valued private string accepted")
 		}
+		keyCarrier, _ := json.Marshal(map[string]string{inner: "literal unknown value"})
+		if mcpPrivateSafe(keyCarrier, token, "/tmp/controlled-private-mcp.sock") == nil {
+			t.Fatal("nested JSON-valued private key accepted")
+		}
+
 	}
 	if mcpPrivateSafe([]byte(`{"unknown":"complete literal <>& text"}`), token) != nil {
 		t.Fatal("unrelated unknown field rejected")

@@ -53,7 +53,7 @@ func mcpPrivateSafe(raw []byte, values ...string) error {
 			}
 		case map[string]any:
 			for key, child := range current {
-				if !check(key) || !walk(child, depth+1) {
+				if !walk(key, depth+1) || !walk(child, depth+1) {
 					return false
 				}
 			}
