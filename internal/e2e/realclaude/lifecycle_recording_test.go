@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -43,18 +42,7 @@ func readLifecycleRecordingConfig(path string) (lifecycleRecordingConfig, error)
 			return c, os.ErrInvalid
 		}
 	}
-	exe, e := os.Executable()
-	if e != nil {
-		return c, os.ErrInvalid
-	}
-	f, e := os.Open(exe)
-	if e != nil {
-		return c, os.ErrInvalid
-	}
-	h := sha256.New()
-	_, e = io.Copy(h, f)
-	_ = f.Close()
-	if e != nil || hex.EncodeToString(h.Sum(nil)) != c.SourceBinarySHA256 {
+	if lifecycleRecordingSource(c.SourceBinarySHA256) != nil {
 		return c, os.ErrInvalid
 	}
 	if c.Process.Mode == "replay" {

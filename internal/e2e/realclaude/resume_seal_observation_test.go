@@ -69,6 +69,9 @@ func observeResumeSeal(t *testing.T, c lifecycleRecordingConfig, stage string, s
 			suffixes = append(suffixes, ".receipt", ".stopped", ".action", ".action.ready")
 		} else {
 			suffixes = append(suffixes, ".prefix")
+			if stage == "original-cleanup" {
+				suffixes = append(suffixes, ".receipt")
+			}
 		}
 		for _, suffix := range suffixes {
 			expected[role+suffix] = true
@@ -102,13 +105,27 @@ func observeResumeSeal(t *testing.T, c lifecycleRecordingConfig, stage string, s
 		}
 		artifacts = append(artifacts, artifact{name, s})
 	}
-	raw, _ := json.Marshal(struct {
-		Stage        string
-		ElapsedNS    int64
-		Processes    []process
-		Expected     map[string]bool
-		Observed     []artifact
-		UnknownNames int
-	}{stage, time.Since(start).Nanoseconds(), ps, expected, artifacts, unknown})
+	evictions := -1
+	lifecycleWorkerDaemons.Lock()
+	stderr := lifecycleWorkerDaemons.logs[c.Process.Home]
+	lifecycleWorkerDaemons.Unlock()
+	if stderr != nil {
+		evictions = countIdleEvictionWARNs(stderr.String(), evictResumeBootstrapUUID)
+	}
+	observation := struct {
+		Stage         string
+		ElapsedNS     int64
+		IdleEvictions int
+		Processes     []process
+		Expected      map[string]bool
+		Observed      []artifact
+		UnknownNames  int
+	}{stage, time.Since(start).Nanoseconds(), evictions, ps, expected, artifacts, unknown}
+	if dir := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE"); dir != "" {
+		if daemonRecordingWrite(filepath.Join(dir, "session-resume-"+stage+".json"), observation) != nil {
+			t.Error("cannot retain resume seal observation")
+		}
+	}
+	raw, _ := json.Marshal(observation)
 	t.Logf("resume-seal observation=%s", raw)
 }

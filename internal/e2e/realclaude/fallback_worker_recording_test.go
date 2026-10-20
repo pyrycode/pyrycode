@@ -44,6 +44,9 @@ func lifecycleRecordingWorkerDaemon(t *testing.T, home string, pid int, stderr *
 	// Registered inside spawn, before the original caller registers daemon.stop.
 	// LIFO cleanup therefore observes actual production Waits after that stop.
 	t.Cleanup(func() {
+		if c.Process.Scenario == "session-resume" {
+			defer observeResumeSeal(t, c, "original-cleanup", time.Now())
+		}
 		observations, err := lifecycleWorkerObservations(stderr)
 		if err != nil {
 			t.Fatal(err)
