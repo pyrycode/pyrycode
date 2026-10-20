@@ -385,7 +385,8 @@ the receipt prefix and final tape, and final ownership, source and I/O audits
 remain required. See [timing receipt propagation](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts)
 and the [measured Linux diagnosis](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
 
-Session-resume launch ownership must reach the actual outer-owned invocation.
+Session-resume and Composer Stop launch ownership must reach the actual
+outer-owned invocation.
 Checking a helper against a daemon PID supplied by a control file accepted an
 unrelated daemon's otherwise qualifying helper even with a real SIGKILL/Wait.
 `StartFallbackLaunchAudit` binds the command immediately after Start;
@@ -397,15 +398,28 @@ owned and unrelated process trees before real cancellation, so rejection
 exercises the full ownership boundary.
 
 Production can complete a cancellation Wait before the helper registers a job.
-`ReadLifecycleWorkers` accepts that Linux boundary only with the
-independent current-launch audit, observed absent registration, actual completed
-group-cancellation SIGKILL Wait, and process/group death. Every Wait joins once;
+`ReadLifecycleWorkers` accepts that Linux boundary for session-resume and
+Composer Stop only with the independent current-launch audit, observed absent
+registration, a completed production SIGKILL Wait with group cancellation, and
+process/group death. Every Wait joins once;
 cancelled launches consume the two-attempt allowance but add no native exchange.
-`TestFallbackCancelledLaunchBoundary` keeps Wait-only, unknown, duplicate and
-foreign evidence failing. Exact reviewed exchange cardinality and complete
-native I/O/EOF remain required; see the
-[recording contract](../../testing/daemon-recordings.md#idle-eviction-and-literal-native-resume-inputs)
+`TestFallbackCancelledLaunchBoundary` synchronizes a current owned helper before
+registration, then cancels and reaps it; one launch and one Wait with zero
+registered workers must pass only with the independent audit. Wait-only, unknown,
+duplicate, foreign and unmatched evidence still fails. Exact reviewed exchange
+cardinality and complete native I/O/EOF remain required; see the
+[recording contract](../../testing/daemon-recordings.md#idle-eviction-and-literal-native-resume-inputs),
+[Composer Stop boundary](../../testing/daemon-recordings.md#physical-background-task-boundary)
 and [post-stop evidence retention](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts).
+
+A `total-wait-cardinality` rejection identifies a failed inventory join, but
+cannot establish cancellation before registration once the original home and
+counts are gone. Preserve `FallbackLaunchAudit.Save` diagnostics in an external
+private `PYRY_CLAUDE_TAPE_EVIDENCE` directory: current launch identities,
+registration states, registered owners and actual Wait flags/statuses distinguish
+unknown from absent without copying worker content. A passing replay with zero
+launches cannot explain an earlier mismatch. Synchronized controls prove the
+accounting boundary; offline replay establishes no new live-provider behavior.
 
 ## Failure-Injection Verification
 
