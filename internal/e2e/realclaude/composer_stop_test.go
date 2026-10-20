@@ -34,7 +34,9 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 	background := filepath.Join(h.workdir, "composer-background.fifo")
 	arrived, release := tpcapHoldFIFO(t, background)
 	defer release()
-	sealSendMessage(t, h.phone, h.initSend, 27750, convID, "composer-background", rafcapPrompt(background, time.Now().UnixNano()))
+	backgroundPrompt := rafcapPrompt(background, daemonRecordingNonce(t, time.Now().UnixNano()))
+	declarePhysicalRecording(t, h.home, "composer-background", 1, backgroundPrompt)
+	sealSendMessage(t, h.phone, h.initSend, 27750, convID, "composer-background", backgroundPrompt)
 	var setup stopHeldTaskSetup
 	ended := false
 	deadline := time.Now().Add(perTurnReplyBudget)
@@ -60,7 +62,9 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 	composerRequireReader(t, background, fifoLiveReaderPresent)
 	foregroundCommand, foregroundStarted, releaseForeground := composerForegroundGate(t, h.workdir)
 	defer releaseForeground()
-	sealSendMessage(t, h.phone, h.initSend, 27751, convID, "composer-foreground", composerForegroundPrompt(foregroundCommand))
+	foregroundPrompt := composerForegroundPrompt(foregroundCommand, daemonRecordingNonce(t, time.Now().UnixNano()))
+	declarePhysicalRecording(t, h.home, "composer-foreground", 2, foregroundPrompt)
+	sealSendMessage(t, h.phone, h.initSend, 27751, convID, "composer-foreground", foregroundPrompt)
 	deadline = time.Now().Add(perTurnReplyBudget)
 	for {
 		env := composerReceive(t, h, deadline)
@@ -234,8 +238,8 @@ func TestRealClaudeComposerStopClosedInputKillsHeldTask(t *testing.T) {
 	t.Log("closed input killed the held background task at foreground-result release")
 }
 
-func composerForegroundPrompt(command string) string {
-	return fmt.Sprintf("Use Bash in the foreground with timeout=120000 and run_in_background=false to run exactly: %s. Do not change the command. Wait for its result. run=%d", command, time.Now().UnixNano())
+func composerForegroundPrompt(command string, nonce int64) string {
+	return fmt.Sprintf("Use Bash in the foreground with timeout=120000 and run_in_background=false to run exactly: %s. Do not change the command. Wait for its result. run=%d", command, nonce)
 }
 
 func composerReceive(t *testing.T, h *perConvHarness, deadline time.Time) protocol.Envelope {

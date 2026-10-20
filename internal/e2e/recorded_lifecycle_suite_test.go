@@ -390,6 +390,19 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				t.Logf("daemon helper role=%s success=%t frames=%d error=%q", role, r.Success, r.Frames, r.Error)
 			}
 		}
+		if mode == "capture" && claudetape.PhysicalFamily(name) != "" {
+			// The detached broker publishes failure evidence after native EOF.
+			// Join actual current children before reading, even on a failed root.
+			_ = server.Join(15 * time.Second)
+			var failed claudetape.PhysicalFailedCapture
+			path := filepath.Join(children, "bootstrap.failed-native")
+			if claudetape.ReadLifecycleControl(path, claudetape.MaxBytes, &failed) == nil && failed.Kind == "failed-unpromotable-native-observation-v1" && failed.Scenario == name+"-bootstrap" && failed.Revision == revision && failed.SourceBinarySHA256 == sourceSHA {
+				destination := filepath.Join(evidenceDir, name+"-failed-unpromotable-native.json")
+				if claudetape.PublishPhysicalFailedCapture(destination, failed) == nil {
+					t.Log("failed native observation retained privately; supplies no fixture coverage")
+				}
+			}
+		}
 		t.Fatalf("original daemon assertions failed: mode=%s root=%s runs=%d passed=%d; private evidence=%s", mode, profile.Root, runs, passed, evidence.Name())
 	}
 	var receipt struct {
@@ -450,6 +463,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if cmd.Process != nil {
 			brokerPIDs[role] = cmd.Process.Pid
 		}
+	}
+	if err := claudetape.ValidatePhysicalBrokerOwnership(home, name, brokerPIDs); err != nil {
+		t.Fatal(err)
 	}
 	if err := claudetape.ValidateConversationBrokerOwnership(home, name, brokerPIDs); err != nil {
 		t.Fatal(err)
@@ -522,7 +538,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
+		physical, err := claudetape.ReadPhysicalScenarioContract(home, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		suite := &claudetape.LifecycleSuite{Physical: physical, Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
 		if err := suite.Save(process.Path, profile.Roles); err != nil {
 			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}

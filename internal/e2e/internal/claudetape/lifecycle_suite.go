@@ -14,6 +14,8 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
+		"stop-background-task":       {"TestRealClaudeStopBackgroundTaskCompletion", []string{"bootstrap"}},
+		"composer-stop":              {"TestRealClaudeComposerStopPreservesBackgroundTask", []string{"bootstrap"}},
 		"fallback-suggestion":        {"TestInteractiveStream_FallbackReplySuggestionSetThenClear", []string{"bootstrap"}},
 		"conversation-active-switch": {"TestInteractivePerConversationLiveness_ActiveSwitch", []string{"bootstrap", "created-1", "created-2"}},
 		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bootstrap", "bare", "prompted"}},
@@ -48,6 +50,8 @@ func LifecycleBootstrapFor(scenario string) string {
 		return bootstrap
 	}
 	switch scenario {
+	case "stop-background-task", "composer-stop":
+		return "33333333-3333-4333-8333-333333333333"
 	case "conversation-lifecycle", "conversation-system-prompt", "conversation-active-switch", "fallback-suggestion":
 		return LifecycleBootstrapSession
 	case "session-rotation":
@@ -59,6 +63,10 @@ func LifecycleBootstrapFor(scenario string) string {
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "stop-background-task", "composer-stop":
+		if role == "bootstrap" {
+			return "seal"
+		}
 	case "fallback-suggestion":
 		if role == "bootstrap" {
 			return "seal"
@@ -125,6 +133,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 	bootstrap := LifecycleBootstrapFor(scenario)
 	if role == "bootstrap" {
 		conv := ""
+		if PhysicalFamily(scenario) != "" {
+			conv = "44444444-4444-4444-8444-444444444444"
+		}
 		if scenario == "fallback-suggestion" {
 			conv = "28310000-0000-4000-8000-000000000002"
 		}
@@ -158,6 +169,7 @@ func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBindi
 }
 
 type LifecycleSuite struct {
+	Physical     *PhysicalScenarioContract  `json:"physical,omitempty"`
 	Settlement   *ConversationSettlement    `json:"settlement,omitempty"`
 	Version      int                        `json:"version"`
 	Scenario     string                     `json:"scenario"`
@@ -174,6 +186,13 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 		return fail
 	}
 	if !reflect.DeepEqual(s.Settlement, RequiredConversationSettlement(s.Scenario)) {
+		return fail
+	}
+	if PhysicalFamily(s.Scenario) != "" {
+		if s.Roles["bootstrap"] == nil || ValidatePhysicalScenarioContract(s.Scenario, s.Physical, s.Roles["bootstrap"].Tape) != nil {
+			return fail
+		}
+	} else if s.Physical != nil {
 		return fail
 	}
 	profile, ok := LifecycleProfiles()[s.Scenario]
@@ -233,7 +252,7 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 			return err
 		}
 	}
-	if s.Scenario == "fallback-suggestion" || s.Scenario == "conversation-system-prompt" || s.Scenario == "conversation-active-switch" {
+	if PhysicalFamily(s.Scenario) != "" || s.Scenario == "fallback-suggestion" || s.Scenario == "conversation-system-prompt" || s.Scenario == "conversation-active-switch" {
 		for _, role := range profile.Roles {
 			if s.Roles[role].Timeline == nil {
 				return fail
@@ -346,7 +365,7 @@ func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
 }
 func sameLifecycleProviderContract(a, b *LifecycleSuite, expected []string) error {
 	fail := errors.New("lifecycle outgoing contract changed")
-	if a.Validate(expected) != nil || b.Validate(expected) != nil || a.Scenario != b.Scenario {
+	if a.Validate(expected) != nil || b.Validate(expected) != nil || a.Scenario != b.Scenario || !reflect.DeepEqual(a.Physical, b.Physical) {
 		return fail
 	}
 	for _, role := range expected {
@@ -369,6 +388,17 @@ func sameLifecycleProviderContract(a, b *LifecycleSuite, expected []string) erro
 				return err
 			}
 			right, err = lifecycleHandoffContract(right, b.Roles["bound"].Tape)
+			if err != nil {
+				return err
+			}
+		}
+		if PhysicalFamily(a.Scenario) != "" {
+			var err error
+			left, err = physicalOutgoingContract(a.Scenario, left)
+			if err != nil {
+				return err
+			}
+			right, err = physicalOutgoingContract(b.Scenario, right)
 			if err != nil {
 				return err
 			}

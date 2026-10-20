@@ -12,12 +12,19 @@ import (
 // preserves the provider phase without pretending readiness is that timer's
 // activation epoch. Original timers, actions, EOF and ownership stay real.
 type LifecycleTimeline struct {
-	Kind            string  `json:"kind"`
-	OutputAfterNS   []int64 `json:"output_after_ns"`
-	OutputAfterUser []int   `json:"output_after_user,omitempty"`
+	Kind             string  `json:"kind"`
+	OutputAfterNS    []int64 `json:"output_after_ns"`
+	OutputAfterUser  []int   `json:"output_after_user,omitempty"`
+	OutputAfterInput []int   `json:"output_after_input,omitempty"`
 }
 
 const lifecycleTimelineKind = "provider-ready-stdout-v1"
+const lifecycleFrameTimelineKind = "stdin-forwarded-stdout-v3"
+
+func lifecycleFrameTimeline(scenario string) bool {
+	return scenario == "stop-background-task-bootstrap" || scenario == "composer-stop-bootstrap"
+}
+
 const lifecycleInputTimelineKind = "user-forwarded-stdout-v2"
 
 func lifecycleInputTimeline(scenario string) bool {
@@ -31,16 +38,21 @@ func lifecycleTimelineUser(raw []byte) bool {
 }
 
 func lifecycleTimelineEnabled(scenario string) bool {
-	return scenario == "fallback-suggestion-bootstrap" || scenario == "conversation-active-switch-bootstrap" || scenario == "conversation-active-switch-created-1" || scenario == "conversation-active-switch-created-2" || scenario == "session-resume-bootstrap" || scenario == "conversation-system-prompt-bare" || scenario == "conversation-system-prompt-bootstrap" || scenario == "conversation-system-prompt-prompted"
+	return lifecycleFrameTimeline(scenario) || scenario == "fallback-suggestion-bootstrap" || scenario == "conversation-active-switch-bootstrap" || scenario == "conversation-active-switch-created-1" || scenario == "conversation-active-switch-created-2" || scenario == "session-resume-bootstrap" || scenario == "conversation-system-prompt-bare" || scenario == "conversation-system-prompt-bootstrap" || scenario == "conversation-system-prompt-prompted"
 }
 func validateLifecycleTimeline(tape *LifecycleTape) error {
 	fail := errors.New("invalid native output timeline")
 	if tape.Timeline == nil {
 		return nil
 	}
-	if !lifecycleTimelineEnabled(tape.Tape.Scenario) || (tape.Timeline.Kind != lifecycleTimelineKind && (tape.Timeline.Kind != lifecycleInputTimelineKind || !lifecycleInputTimeline(tape.Tape.Scenario))) {
+	kind := tape.Timeline.Kind
+	if !lifecycleTimelineEnabled(tape.Tape.Scenario) || !(kind == lifecycleTimelineKind || kind == lifecycleInputTimelineKind && lifecycleInputTimeline(tape.Tape.Scenario) || kind == lifecycleFrameTimelineKind && lifecycleFrameTimeline(tape.Tape.Scenario)) {
 		return fail
 	}
+	if lifecycleFrameTimeline(tape.Tape.Scenario) && kind != lifecycleFrameTimelineKind {
+		return fail
+	}
+
 	outputs := 0
 	for _, frame := range tape.Tape.Frames {
 		if frame.Direction == "stdout" {
@@ -50,14 +62,24 @@ func validateLifecycleTimeline(tape *LifecycleTape) error {
 	if len(tape.Timeline.OutputAfterNS) != outputs {
 		return fail
 	}
-	anchored := tape.Timeline.Kind == lifecycleInputTimelineKind
-	if anchored && len(tape.Timeline.OutputAfterUser) != outputs || !anchored && len(tape.Timeline.OutputAfterUser) != 0 {
+	anchored := kind == lifecycleInputTimelineKind || kind == lifecycleFrameTimelineKind
+	anchors := tape.Timeline.OutputAfterUser
+	if kind == lifecycleFrameTimelineKind {
+		anchors = tape.Timeline.OutputAfterInput
+		if len(tape.Timeline.OutputAfterUser) != 0 {
+			return fail
+		}
+	} else if len(tape.Timeline.OutputAfterInput) != 0 {
 		return fail
 	}
+	if anchored && len(anchors) != outputs || !anchored && len(anchors) != 0 {
+		return fail
+	}
+
 	previous, lastAnchor := int64(-1), 0
 	user, ordinal := 0, 0
 	for _, frame := range tape.Tape.Frames {
-		if frame.Direction == "stdin" && lifecycleTimelineUser(frame.Data) {
+		if frame.Direction == "stdin" && (kind == lifecycleFrameTimelineKind || lifecycleTimelineUser(frame.Data)) {
 			user++
 		}
 		if frame.Direction != "stdout" {
@@ -65,7 +87,7 @@ func validateLifecycleTimeline(tape *LifecycleTape) error {
 		}
 		anchor := 0
 		if anchored {
-			anchor = tape.Timeline.OutputAfterUser[ordinal]
+			anchor = anchors[ordinal]
 			if anchor != user {
 				return fail
 			}
