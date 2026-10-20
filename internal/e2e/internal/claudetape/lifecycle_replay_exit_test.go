@@ -17,6 +17,9 @@ func TestLifecycleReplayAfterProviderExit(t *testing.T) {
 	for _, variant := range []string{"held-eofs", "early-eofs", "live-exhausted", "changed-input", "partial-input", "missing-input", "foreign-action", "missing-action", "terminal-rejected"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
+			if err := os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() {
 				var d LifecycleDiagnostic
 				if ReadLifecycleControl(filepath.Join(root, "diagnostic.json"), 16384, &d) == nil {
