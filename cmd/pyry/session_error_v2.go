@@ -113,7 +113,9 @@ func sessionErrorNotify(ch chan<- giveUpNotice, logger *slog.Logger, attachments
 		live = attachments[0]
 	}
 	return func(convID, reason string) {
-		src := live.capture(convID, "", false)
+		src, _, _ := liveResolveSource(live, convID, "", func(src daemonLiveSource) (daemonLiveSource, bool) {
+			return src, true
+		})
 		live.offer(src, protocol.TypeSessionError, protocol.SessionErrorPayload{ConversationID: convID, Code: protocol.CodeSessionBlocked, Message: reason}, "")
 		select {
 		case ch <- giveUpNotice{convID: convID, code: protocol.CodeSessionBlocked, reason: reason, live: src}:
