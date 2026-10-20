@@ -2,7 +2,6 @@ package claudetape
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -70,7 +71,7 @@ func physicalReadScript(path string) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0700 || info.Size() > 4096 {
 		return nil, os.ErrInvalid
 	}
-	file, err := os.Open(path)
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -141,11 +142,11 @@ func (s PhysicalOperationSpec) CommandMatches(home, command string) bool {
 		command = strings.TrimSpace(strings.TrimPrefix(command, "exec "))
 		// Match the original rig's closed executable-token grammar, never a
 		// substring, argument, substitution or compound command.
-		bare := !strings.ContainsAny(path, " \t\r\n'\"$`\\;&|<>()")
+		bare := regexp.MustCompile(`^[/a-zA-Z0-9._-]+$`).MatchString(path)
 		double := `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", `\`+"`").Replace(path) + `"`
 		return bare && command == path || command == physicalQuote(path) || command == double
 	case "composer-background":
-		return command == "cat "+filepath.Join(work, "composer-background.fifo")
+		return regexp.MustCompile(`^[/a-zA-Z0-9._-]+$`).MatchString(filepath.Join(work, "composer-background.fifo")) && command == "cat "+filepath.Join(work, "composer-background.fifo")
 	case "composer-foreground":
 		expected := fmt.Sprintf(`printf '%%s\n' "$$" > %s; while [ ! -f %s ]; do sleep 0.1; done`, physicalQuote(filepath.Join(work, "foreground-started")), physicalQuote(filepath.Join(work, "foreground-released")))
 		return command == expected
@@ -156,11 +157,16 @@ func (s PhysicalOperationSpec) CommandMatches(home, command string) bool {
 // OwnedPhysicalOperation owns only the current replay's exec.Cmd group. Native
 // task/tool IDs can select this capability later; they never become OS PIDs.
 type OwnedPhysicalOperation struct {
-	cmd     *exec.Cmd
-	cancel  context.CancelFunc
-	done    chan struct{}
-	waitErr error
-	status  FallbackWorkerStatus
+	cmd          *exec.Cmd
+	guard        *exec.Cmd
+	guardPipe    *os.File
+	home         string
+	mu           sync.Mutex
+	retired      bool
+	done         chan struct{}
+	watchdogDone chan struct{}
+	waitErr      error
+	status       FallbackWorkerStatus
 }
 
 func StartPhysicalOperation(home string, s PhysicalOperationSpec, input json.RawMessage) (*OwnedPhysicalOperation, error) {
@@ -202,21 +208,37 @@ func StartPhysicalOperation(home string, s PhysicalOperationSpec, input json.Raw
 			return nil, os.ErrInvalid
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-c", command)
+	// A separate unreaped group leader pins the PGID until every cancellation
+	// decision and group drain is complete. The operation's actual Wait may reap
+	// its own PID without transferring this group capability to a reused PID.
+	guardR, guardW, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	guard := exec.Command("sh", "-c", "read token <&3")
+	guard.ExtraFiles = []*os.File{guardR}
+	guard.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := guard.Start(); err != nil {
+		guardR.Close()
+		guardW.Close()
+		return nil, err
+	}
+	guardR.Close()
+	cmd := exec.Command("bash", "--noprofile", "--norc", "-c", command)
 	cmd.Dir = filepath.Join(home, "work")
 	cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "LANG=C"}
 	cmd.Stdin = bytes.NewReader(nil)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: guard.Process.Pid}
 	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
-		cancel()
+		_ = syscall.Kill(-guard.Process.Pid, syscall.SIGKILL)
+		_ = guard.Wait()
+		guardW.Close()
 		return nil, err
 	}
-	op := &OwnedPhysicalOperation{cmd: cmd, cancel: cancel, done: make(chan struct{})}
+	op := &OwnedPhysicalOperation{cmd: cmd, guard: guard, guardPipe: guardW, home: home, done: make(chan struct{}), watchdogDone: make(chan struct{})}
 	go func() {
 		defer close(op.done)
 		op.waitErr = cmd.Wait()
@@ -227,14 +249,38 @@ func StartPhysicalOperation(home string, s PhysicalOperationSpec, input json.Raw
 			}
 		}
 	}()
+	go func() {
+		timer := time.NewTimer(3 * time.Minute)
+		defer timer.Stop()
+		select {
+		case <-op.done:
+		case <-op.watchdogDone:
+		case <-timer.C:
+			_ = op.signalGroup()
+		}
+	}()
 	return op, nil
+}
+func (o *OwnedPhysicalOperation) signalGroup() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.retired {
+		return errors.New("physical group capability retired")
+	}
+	// guard.Wait is called only under this lock after retirement. Even a guard
+	// that died unexpectedly remains unreaped here, so this PID cannot be reused.
+	err := syscall.Kill(-o.guard.Process.Pid, syscall.SIGKILL)
+	if err == syscall.ESRCH {
+		return nil
+	}
+	return err
 }
 func (o *OwnedPhysicalOperation) Running() bool {
 	select {
 	case <-o.done:
 		return false
 	default:
-		return syscall.Kill(o.cmd.Process.Pid, 0) == nil
+		return o.cmd.Process.Signal(syscall.Signal(0)) == nil
 	}
 }
 func (o *OwnedPhysicalOperation) Wait(budget time.Duration) (FallbackWorkerStatus, error) {
@@ -242,6 +288,10 @@ func (o *OwnedPhysicalOperation) Wait(budget time.Duration) (FallbackWorkerStatu
 	case <-o.done:
 		if o.cmd.ProcessState == nil {
 			return FallbackWorkerStatus{}, errors.New("missing actual physical Wait")
+		}
+		var exit *exec.ExitError
+		if o.waitErr != nil && !errors.As(o.waitErr, &exit) {
+			return o.status, errors.New("physical Wait failed without an exit status")
 		}
 		return o.status, nil
 	case <-time.After(budget):
@@ -252,29 +302,101 @@ func (o *OwnedPhysicalOperation) Stop() (FallbackWorkerStatus, error) {
 	if !o.Running() {
 		return FallbackWorkerStatus{}, errors.New("physical operation was not held at stop")
 	}
-	o.cancel()
+	if err := o.signalGroup(); err != nil {
+		return FallbackWorkerStatus{}, err
+	}
 	status, err := o.Wait(3 * time.Second)
 	if err != nil || status != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
 		return status, errors.New("physical stop lacks actual SIGKILL Wait")
 	}
 	return status, nil
 }
-func (o *OwnedPhysicalOperation) Close() error {
-	defer o.cancel()
-	select {
-	case <-o.done:
-		return nil
-	default:
+func physicalGroupAlive(group int) (bool, error) {
+	raw, err := exec.Command("ps", "-axo", "pgid=,stat=").Output()
+	if err != nil {
+		return false, errors.New("physical group inventory unavailable")
 	}
-	o.cancel()
-	_, err := o.Wait(3 * time.Second)
-	return err
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return false, errors.New("physical group inventory malformed")
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return false, err
+		}
+		if pid == group && !strings.HasPrefix(fields[1], "Z") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (o *OwnedPhysicalOperation) Close() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.retired {
+		return nil
+	}
+	if err := syscall.Kill(-o.guard.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return err
+	}
+	if _, err := o.Wait(3 * time.Second); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		live, err := physicalGroupAlive(o.guard.Process.Pid)
+		if err != nil {
+			return err
+		}
+		if !live {
+			break
+		}
+		if time.Now().After(deadline) {
+			return errors.New("physical group did not drain while leader remained pinned")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// No future signal, including a delayed watchdog, may use this PGID once its
+	// leader is reaped. Retire under the same lock first, then perform actual Wait.
+	o.retired = true
+	close(o.watchdogDone)
+	o.guardPipe.Close()
+	err := o.guard.Wait()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		return errors.New("physical group guard Wait failed")
+	}
+	return nil
 }
 func (o *OwnedPhysicalOperation) CurrentPID() int { return o.cmd.Process.Pid }
 func (o *OwnedPhysicalOperation) RequireForegroundWitness(home string) error {
-	raw, err := os.ReadFile(filepath.Join(home, "work", "foreground-started"))
+	if home != o.home {
+		return errors.New("foreground home rebound")
+	}
+	if _, err := os.Lstat(filepath.Join(home, "work", "foreground-released")); !os.IsNotExist(err) {
+		return errors.New("foreground gate is released or unreadable")
+	}
+	path := filepath.Join(home, "work", "foreground-started")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64 {
+		return errors.New("invalid foreground witness")
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return err
+		return errors.New("foreground witness open failed")
+	}
+	defer file.Close()
+	actual, err := file.Stat()
+	if err != nil || !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
+		return errors.New("foreground witness replaced")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 65))
+	if err != nil || len(raw) > 64 {
+		return errors.New("foreground witness incomplete")
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid != o.CurrentPID() || !o.Running() {

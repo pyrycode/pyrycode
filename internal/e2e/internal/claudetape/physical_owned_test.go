@@ -3,6 +3,7 @@ package claudetape
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,13 +20,14 @@ func physicalControlHome(t *testing.T) string {
 	}
 	return home
 }
-func physicalControlFIFO(t *testing.T, home, name string) func() {
+func physicalControlFIFO(t *testing.T, home, name string) (<-chan struct{}, func()) {
 	t.Helper()
 	path := filepath.Join(home, "work", name)
 	if syscall.Mkfifo(path, 0600) != nil {
 		t.Fatal("original rig FIFO")
 	}
 	opened := make(chan *os.File, 1)
+	arrived := make(chan struct{})
 	go func() {
 		file, err := os.OpenFile(path, os.O_WRONLY, 0600)
 		if err != nil {
@@ -33,8 +35,9 @@ func physicalControlFIFO(t *testing.T, home, name string) func() {
 			return
 		}
 		opened <- file
+		close(arrived)
 	}()
-	return func() {
+	return arrived, func() {
 		select {
 		case file := <-opened:
 			if file == nil {
@@ -66,7 +69,7 @@ func physicalControlWaitFile(t *testing.T, path string) []byte {
 }
 func TestOwnedPhysicalOperationExecutesOriginalHoldAndActuallyStops(t *testing.T) {
 	home := physicalControlHome(t)
-	release := physicalControlFIFO(t, home, "stop-task.fifo")
+	arrived, release := physicalControlFIFO(t, home, "stop-task.fifo")
 	defer release()
 	s, _ := physicalSpec("stop-hold")
 	script := strings.ReplaceAll(s.Script, physicalHome, home)
@@ -81,9 +84,18 @@ func TestOwnedPhysicalOperationExecutesOriginalHoldAndActuallyStops(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer op.Close()
+	defer func() {
+		if err := op.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if string(physicalControlWaitFile(t, filepath.Join(home, "work", "stop-hold.executed"))) != "x" || !op.Running() {
 		t.Fatal("captured text substituted for actual script execution")
+	}
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("real FIFO reader never arrived")
 	}
 	status, err := op.Stop()
 	if err != nil || status != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) || syscall.Kill(op.CurrentPID(), 0) != syscall.ESRCH {
@@ -95,20 +107,33 @@ func TestOwnedPhysicalOperationExecutesOriginalHoldAndActuallyStops(t *testing.T
 }
 func TestOwnedPhysicalComposerStopPreservesRealBackgroundUntilRelease(t *testing.T) {
 	home := physicalControlHome(t)
-	release := physicalControlFIFO(t, home, "composer-background.fifo")
+	arrived, release := physicalControlFIFO(t, home, "composer-background.fifo")
 	background, _ := InspectPhysicalOperation(home, "composer-background")
 	bg, err := StartPhysicalOperation(home, background, physicalControlInput("cat "+filepath.Join(home, "work", "composer-background.fifo"), true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer bg.Close()
+	defer func() {
+		if err := bg.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("real background FIFO reader never arrived")
+	}
 	foreground, _ := InspectPhysicalOperation(home, "composer-foreground")
 	command := `printf '%s\n' "$$" > ` + physicalQuote(filepath.Join(home, "work", "foreground-started")) + `; while [ ! -f ` + physicalQuote(filepath.Join(home, "work", "foreground-released")) + ` ]; do sleep 0.1; done`
 	fg, err := StartPhysicalOperation(home, foreground, physicalControlInput(command, false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fg.Close()
+	defer func() {
+		if err := fg.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	raw := physicalControlWaitFile(t, filepath.Join(home, "work", "foreground-started"))
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if pid != fg.CurrentPID() || fg.RequireForegroundWitness(home) != nil {
@@ -175,6 +200,110 @@ func TestOwnedPhysicalOperationRejectsForeignInputWithoutExecuting(t *testing.T)
 			}
 			if _, err := os.Stat(filepath.Join(home, "executed-foreign")); !os.IsNotExist(err) {
 				t.Fatal("unapproved operation executed")
+			}
+		})
+	}
+}
+
+func TestOwnedPhysicalPositivePathGrammarRejectsShellExpansion(t *testing.T) {
+	for _, leaf := range []string{"wild*card", "bracket[xy]", "question?mark", "semi;touch foreign", "dollar$(touch foreign)"} {
+		t.Run(leaf, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), leaf)
+			if os.Mkdir(home, 0700) != nil || os.Mkdir(filepath.Join(home, "work"), 0700) != nil {
+				t.Fatal("private path")
+			}
+			stop, _ := physicalSpec("stop-hold")
+			background, _ := physicalSpec("composer-background")
+			if stop.CommandMatches(home, filepath.Join(home, "work", "stop-hold")) || background.CommandMatches(home, "cat "+filepath.Join(home, "work", "composer-background.fifo")) {
+				t.Fatal("unquoted shell expansion accepted")
+			}
+		})
+	}
+}
+func TestOwnedPhysicalGroupRemainsPinnedAfterOperationWait(t *testing.T) {
+	home := physicalControlHome(t)
+	arrived, release := physicalControlFIFO(t, home, "composer-background.fifo")
+	spec, _ := InspectPhysicalOperation(home, "composer-background")
+	op, err := StartPhysicalOperation(home, spec, physicalControlInput("cat "+filepath.Join(home, "work", "composer-background.fifo"), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := op.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("physical reader missing")
+	}
+	release()
+	if status, err := op.Wait(5 * time.Second); err != nil || status != (FallbackWorkerStatus{ExitCode: 0}) {
+		t.Fatal("actual operation Wait", err)
+	}
+	if op.guard.ProcessState != nil || op.guard.Process.Signal(syscall.Signal(0)) != nil {
+		t.Fatal("group owner reaped with operation PID")
+	}
+	// An independently test-owned member makes group draining non-vacuous after
+	// the actual main operation has exited and been reaped.
+	member := exec.Command("sleep", "30")
+	member.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: op.guard.Process.Pid}
+	if err := member.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Close(); err != nil {
+		_ = member.Process.Kill()
+		_ = member.Wait()
+		t.Fatal(err)
+	}
+	if err := member.Wait(); err == nil || member.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatal("owned group member survived cleanup")
+	}
+	if !op.retired || op.guard.ProcessState == nil {
+		t.Fatal("guard not retired and actually reaped after drain")
+	}
+	if err := op.signalGroup(); err == nil {
+		t.Fatal("delayed cancellation used retired group capability")
+	}
+}
+func TestOwnedPhysicalForegroundWitnessRejectsReleaseAndForeignReads(t *testing.T) {
+	for _, kind := range []string{"released", "foreign-home", "symlink", "fifo", "oversize"} {
+		t.Run(kind, func(t *testing.T) {
+			home := physicalControlHome(t)
+			spec, _ := InspectPhysicalOperation(home, "composer-foreground")
+			command := `printf '%s\n' "$$" > ` + physicalQuote(filepath.Join(home, "work", "foreground-started")) + `; while [ ! -f ` + physicalQuote(filepath.Join(home, "work", "foreground-released")) + ` ]; do sleep 0.1; done`
+			op, err := StartPhysicalOperation(home, spec, physicalControlInput(command, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := op.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			path := filepath.Join(home, "work", "foreground-started")
+			physicalControlWaitFile(t, path)
+			inputHome := home
+			switch kind {
+			case "released":
+				_ = os.WriteFile(filepath.Join(home, "work", "foreground-released"), nil, 0600)
+			case "foreign-home":
+				inputHome = t.TempDir()
+			case "symlink":
+				_ = os.Rename(path, path+"-original")
+				_ = os.Symlink(path+"-original", path)
+			case "fifo":
+				_ = os.Rename(path, path+"-original")
+				if syscall.Mkfifo(path, 0600) != nil {
+					t.Fatal("witness mutation")
+				}
+			case "oversize":
+				_ = os.WriteFile(path, []byte(strings.Repeat("1", 65)), 0600)
+			}
+			started := time.Now()
+			if err := op.RequireForegroundWitness(inputHome); err == nil || time.Since(started) > time.Second {
+				t.Fatal("released, foreign or unbounded witness accepted/read")
 			}
 		})
 	}
