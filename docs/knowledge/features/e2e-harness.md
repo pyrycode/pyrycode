@@ -350,6 +350,18 @@ only reasonable response in test code is to abort.
 
 ## Recorded lifecycle timing and settlement
 
+Private artifact validation must precede reading. An `Lstat` followed by an
+ordinary open leaves a replacement window: a FIFO can wait for a writer, and a
+symlink can expose target bytes before a later identity rejection. Inode equality
+also accepts a symlink back to the inspected original. `runnerPrivateRead` opens
+with `O_NOFOLLOW|O_NONBLOCK`, then checks the descriptor is regular, has mode
+exactly 0600 (including absence of special mode bits), fits the caller's size
+limit and matches the inspected inode before consuming bytes. Rejected
+descriptors are closed; accepted reads retain the limit-plus-one bound and
+content-free error contract. Parent-directory ownership and final artifact
+audits remain separate requirements. See the
+[read-ordering controls](development-verification-prove-that-tests-distinguish-the-change.md).
+
 `TestRecordedClaude` runs the original scenario assertions through recorded
 transport. `RunLifecycleBroker` keeps real input pipes and owned processes in
 replay. Strict `Player.Input` matching releases responses independently of the
