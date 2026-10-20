@@ -1,0 +1,125 @@
+{
+  "schema": 1,
+  "date": "2026-10-20",
+  "platform": "linux/amd64",
+  "toolchain": "go1.26.9",
+  "host": "build-hp-1 / pyrycode-dispatcher",
+  "base_revision": "bf1e90156c96c4addcd7faa8e70cd892f0cd28a8",
+  "tested_source_revision": "0f953fc6b6ca3f4f06aead2ab23b7716288f0729",
+  "source_sha256": {
+    "cmd/pyry/daemon_thread_compact_test.go": "1910637cf0b3977dcd4b37179bc458fd338d739ac1593ee1540cac80593fe3a9",
+    "cmd/pyry/daemon_thread_compact_read_test.go": "3026babcfb672b1a50e296625dc0e9e628e3ac4ec6a2ae08f9f82466d1c4be85"
+  },
+  "count_units": "Go test events, including parent tests and subtests; package result is separate.",
+  "historical_failure": {
+    "ticket": 3691,
+    "source_revision": "5a77448b37e7bf62645d32aeef797d19b476e5a3",
+    "log": "/work/Projects/pyrycode-agents/logs/verifier-gate_#3673_5.log",
+    "log_sha256": "f7796910a64fd32b3424a80c0901971f0bb23c720ec7b600719f64850f60b2fd",
+    "phase": "Initial compact query 1, before the projection-switch schedule was armed.",
+    "messages": [
+      "    daemon_thread_compact_switch_test.go:70: context deadline exceeded\n",
+      "    daemon_thread_compact_test.go:131: drain barrier: relay: conn not found: rekey: conn not found\n",
+      "fail"
+    ]
+  },
+  "runs": [
+    {
+      "purpose": "Unchanged original switch matrix and boundary, count=20",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=5m -race -count=20 -json -run '^(TestDaemonThreadCompactSwitch|TestDaemonThreadCompactBoundary)$' ./cmd/pyry",
+      "log": "/tmp/manual-flaky-baseline.jsonl",
+      "log_sha256": "af5acd098e492019572d7c52f095385eb36434e4f486105f3a36afa2d7e00142",
+      "counts": {
+        "run": 120,
+        "pass": 120,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_result": "pass",
+      "failure_messages": []
+    },
+    {
+      "purpose": "Forced handshake-response/open-queue gap; original reader",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=2m -race -count=1 -json -run '^TestCompactReadWaitsForOpenSession$' ./cmd/pyry",
+      "log": "/tmp/manual-flaky-startup-red.jsonl",
+      "log_sha256": "c3a5a07197dba34c8822871896db1bab7f5291f35ae344c16168543c88f8fca3",
+      "counts": {
+        "run": 1,
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "package_result": "fail",
+      "failure_messages": [
+        "daemon_thread_compact_read_test.go:42: context deadline exceeded",
+        "daemon_thread_compact_test.go:131: drain barrier: relay: conn not found: rekey: conn not found"
+      ]
+    },
+    {
+      "purpose": "Forced refusal after drain marker; original boundary assertion",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=2m -race -count=1 -json -run '^TestDaemonThreadCompactBoundaryDelayedRefusal$' ./cmd/pyry",
+      "log": "/tmp/manual-flaky-refusal-red.jsonl",
+      "log_sha256": "27e406afa3b029fd11a5f53473681d353ce7d7e23f034bb4a3829af495b4c95e",
+      "counts": {
+        "run": 1,
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "package_result": "fail",
+      "failure_messages": [
+        "daemon_thread_compact_test.go:428: racing compact load was not refused"
+      ]
+    },
+    {
+      "purpose": "Intermediate total-deadline experiment; withdrawn after large complete query failed",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=6m -race -count=1 -json -run '<same explicit affected selection as final>' ./cmd/pyry",
+      "log": "/tmp/manual-flaky-affected.jsonl",
+      "log_sha256": "bb2f9a27e50747e9819367c17b97451e09015a5673135a754291c83c7b116d87",
+      "counts": {
+        "run": 23,
+        "pass": 21,
+        "fail": 2,
+        "skip": 0
+      },
+      "package_result": "fail",
+      "failure_messages": [
+        "daemon_thread_compact_test.go:297: context deadline exceeded"
+      ]
+    },
+    {
+      "purpose": "Final source: both synchronized regressions, original boundary and complete switch matrix",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=5m -race -count=20 -json -run '^(TestCompactReadWaitsForOpenSession|TestDaemonThreadCompactBoundaryDelayedRefusal|TestDaemonThreadCompactSwitch|TestDaemonThreadCompactBoundary)$' ./cmd/pyry",
+      "log": "/tmp/manual-flaky-final-source-repeat.jsonl",
+      "log_sha256": "8f16091c12d1524a3f67bba22e9aa26477ff3d38a24eb1a56d9e7aa98b6733a2",
+      "counts": {
+        "run": 160,
+        "pass": 160,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_result": "pass",
+      "failure_messages": []
+    },
+    {
+      "purpose": "Final source: all compact-thread tests, including large wire, recovery, retirement and isolation",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=6m -race -count=1 -json -run '^(TestCompactReadWaitsForOpenSession|TestDaemonThreadCompactInstallation|TestDaemonThreadCompactNegotiation|TestDaemonThreadCompactWire|TestDaemonThreadCompactBoundary|TestDaemonThreadCompactBoundaryDelayedRefusal|TestDaemonThreadCompactRecovery|TestDaemonThreadCompactSwitch|TestDaemonThreadCompactLiveChannels|TestDaemonThreadCompactRetirement|TestDaemonThreadCompactProgress|TestDaemonThreadCompactConversationIsolation)$' ./cmd/pyry",
+      "log": "/tmp/manual-flaky-affected-final.jsonl",
+      "log_sha256": "39c73ace1ec74cae642bdcb067cd840bd0f80206936648d73a827e7e78939b09",
+      "counts": {
+        "run": 23,
+        "pass": 23,
+        "fail": 0,
+        "skip": 0
+      },
+      "package_result": "pass",
+      "failure_messages": []
+    }
+  ],
+  "limits": [
+    "The historical run lacks phase instrumentation. The forced admission gap reproduces both retained error messages; this proves the fixture defect without inventing historical scheduler measurements.",
+    "The original #3700 failure assertion was not accessible. The delayed-refusal control proves a second defect in that test; historical attribution remains unknown.",
+    "The intermediate total-deadline experiment was removed. Final source preserves the original large-reply timing and all publication/projection assertions.",
+    "These are focused manual checks, not a complete accepted dispatcher/verifier gate. Native wrap-up and other recorded-provider repairs remain separate."
+  ]
+}
