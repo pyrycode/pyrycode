@@ -75,3 +75,12 @@ Pending documentation stage: update `docs/testing/daemon-recordings.md`, “Sess
 - Threat model: offline test infrastructure only; no production relay/mobile boundary change. No deferred security findings.
 
 **Reviewer:** builder self-review; **Date:** 2026-10-20.
+
+## Verification evidence
+
+Linux x86_64, Go 1.26.9. Tested code source: `fac6430b85ce0a7e2c41ea6912a4959382bc4141`.
+The initial probe setup failure at `eb5deb24` remains retained; its private-directory mode was corrected before repair. Unrepaired `f3de8506` and diagnosed `d58eeb8f` each executed 10 test/subtest records: 6 passed, 4 failed, zero skipped (9 leaves: 6 passed, 3 failed). `held-eofs` reproduced `forward-provider-input` / `broken-pipe`, matched player 4/4 but delivered zero released responses; `early-eofs` demonstrated premature incomplete-player rejection before the final query arrived.
+
+Repaired affected controls executed/passed 57/57 records (53 leaves), zero failures/skips, including all nine controlled regression arms and the required actual-PID, blocked-pipe and failed-exec families. The separate #3670 stalled-transfer arm was excluded from selection, not marked passed. Witness-retention regression passed 1/1. Original replay passed 3/3 records (two leaves: clear-reset and the startup sibling selected by the launcher's supported literal path); its original child root `TestInteractiveStreamClearRunsDaemonReset` passed 1/1 without skips. The bound role consumed 83/83 frames and passed the outer immutable audit; both sampled provider output EOFs, action acknowledgement and terminal checks were true. Module vet and binary build passed; tagged harness vet also passed before the behavioral edit. Full suites remain pending for the dispatcher.
+
+Evidence: `/tmp/builder-3672/evidence-index.json`, `/tmp/builder-3672/controls-after-selected.jsonl`, `/tmp/builder-3672/regression-diagnosed.jsonl`, `/tmp/builder-3672/reset-after-focused.jsonl`, and `/tmp/builder-3672/reset-after/clear-reset-broker/source-and-inventory.json`. The index hashes retained files and references untouched `/tmp/builder-3665/evidence-index.json` plus recovered builder bundle `b9e2dc27d81a8968c5d333020e68ba6e2e60e0c10384d3d0259314f2d4ef1c42` (digest `6fdab8de1e99ce99546d6a2e43be4bfe4226d88056f03cbb134e5aaf85d5a8f1`). Historical #3660 failures remain historical, and sequence/cold-state/load attribution remains unknown. The PR retains exact commands and executable/fixture hashes.
