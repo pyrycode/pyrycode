@@ -123,13 +123,13 @@ func waitLifecycleOutput(origin time.Time, offset int64, now func() time.Time, s
 	return nil
 }
 
+// Preparation transforms immutable bytes only. Physical observation and actual
+// forwarding remain behind the absolute wait and its final delivery check.
 func forwardPreparedLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), prepare, forward func() error) error {
-	return forwardLifecycleOutput(origin, offset, now, sleep, func() error {
-		if err := prepare(); err != nil {
-			return err
-		}
-		return forward()
-	})
+	if err := prepare(); err != nil {
+		return err
+	}
+	return forwardLifecycleOutput(origin, offset, now, sleep, forward)
 }
 
 func forwardLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), forward func() error) error {

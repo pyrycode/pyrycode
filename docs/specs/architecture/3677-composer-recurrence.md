@@ -232,3 +232,16 @@ and duplicate-key validation still precede parsing/forwarding. Ring entries use
 only fixed numeric slots, with bounded cardinality and existing private retention.
 Worker ownership, cancellation, Wait, source, peer, I/O/EOF and final audits are
 unchanged. Documentation handoff remains pending with the attribution distinction.
+
+### 2026-10-20 — controlled cause and diagnostic CPU clarification
+
+At `7e61485b`, the synchronized exact-response proof failed with forwarding drift:
+waiting 34330542 ns then preparing for 120 ms consumed the gap unnecessarily.
+The repaired ordering passes all eight cases, including unchanged rejections for
+observer/write delay and absolute lateness. This controlled scheduling defect
+does not identify how the original 232879911 ns historical miss was divided.
+The ring additionally retains process CPU elapsed as a tenth slot (`-1` means
+unknown). This includes other broker goroutines and is diagnostic context, not
+precise per-stage CPU or scheduling attribution. Six privacy/parent controls
+ensure safeCLIJSON still rejects ambiguous and escaped/nested carriers before
+physical parsing. Complete-suite acceptance remains dispatcher work.

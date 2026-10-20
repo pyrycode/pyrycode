@@ -84,7 +84,11 @@ func TestComposerOutputPreparationSchedule(t *testing.T) {
 				t.Error("preparation gate was not reached")
 			}
 			close(release)
-			err = <-done
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("scheduling proof did not join")
+			}
 			var timing *LifecycleTimingError
 			if tc.failPrepare {
 				if !errors.Is(err, failure) || observations != 0 || writes != 0 {
@@ -101,6 +105,29 @@ func TestComposerOutputPreparationSchedule(t *testing.T) {
 				t.Fatal("control response invented physical proof")
 			}
 			t.Logf("due_ns=%d completed_ns=%d observations=%d writes=%d stage=%s", offset, current.Sub(origin).Nanoseconds(), observations, writes, tc.wantStage)
+		})
+	}
+}
+
+func TestComposerOutputValidationRejectsAmbiguousCarriers(t *testing.T) {
+	for name, raw := range map[string]string{
+		"duplicate-root":     `{"type":"control_response","type":"assistant"}`,
+		"duplicate-nested":   `{"type":"control_response","response":{"value":1,"value":2}}`,
+		"escaped-credential": `{"type":"control_response","response":"\u0073k-ant-synthetic-credential-1234567890"}`,
+		"nested-carrier":     `{"type":"control_response","response":"{\"shadow\":\"\\u0073k-ant-synthetic-credential-1234567890\",\"shadow\":\"clean\"}"}`,
+		"foreign-parent":     `{"type":"control_response","parent_tool_use_id":"foreign"}`,
+		"malformed-parent":   `{"type":"control_response","parent_tool_use_id":32}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := "/tmp/composer-validation"
+			p, err := NewPhysicalNativeObserver(context.Background(), home, "composer", LifecycleRoleBinding{Role: "bootstrap", SessionID: "33333333-3333-4333-8333-333333333333", ConversationID: "44444444-4444-4444-8444-444444444444", WorkDir: home + "/work"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if p.BeforeOutput([]byte(raw)) == nil || p.failed == nil || len(p.events) != 0 || len(p.facts) != 0 || len(p.operations) != 0 {
+				t.Fatal("unsafe response reached physical parsing or proof")
+			}
 		})
 	}
 }

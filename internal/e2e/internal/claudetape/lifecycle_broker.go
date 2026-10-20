@@ -316,11 +316,29 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		diagnostic.Stage = "deliver-output"
 		var outputWork [4]int64
 		outputOrdinal := timelineOutput
+		entry, cpu := time.Now(), lifecycleCPUTime()
+		var outputOrigin time.Time
+		var outputAnchor int
+		var outputDue int64
 		defer func() {
 			for i, elapsed := range outputWork {
 				if elapsed > diagnostic.OutputWorkMaxNS[i] {
 					diagnostic.OutputWorkMaxNS[i] = elapsed
 					diagnostic.OutputWorkMaxOrdinal[i] = outputOrdinal
+				}
+			}
+			if !outputOrigin.IsZero() {
+				elapsedCPU := lifecycleCPUTime()
+				if cpu < 0 || elapsedCPU < 0 {
+					elapsedCPU = -1
+				} else {
+					elapsedCPU -= cpu
+				}
+				sample := [10]int64{int64(outputOrdinal), int64(outputAnchor), outputDue, entry.Sub(outputOrigin).Nanoseconds(), outputWork[0], outputWork[1], outputWork[2], outputWork[3], time.Since(outputOrigin).Nanoseconds(), elapsedCPU}
+				if len(diagnostic.OutputTiming) < 64 {
+					diagnostic.OutputTiming = append(diagnostic.OutputTiming, sample)
+				} else {
+					diagnostic.OutputTiming[outputOrdinal%64] = sample
 				}
 			}
 		}()
@@ -377,6 +395,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				origin = timelineOrigins[anchor]
 			}
 			offset := tape.Timeline.OutputAfterNS[timelineOutput]
+			outputOrigin, outputAnchor, outputDue = origin, anchor, offset
 			if err := forwardPreparedLifecycleOutput(origin, offset, time.Now, time.Sleep, prepare, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
 				var timing *LifecycleTimingError
 				if errors.As(err, &timing) {
