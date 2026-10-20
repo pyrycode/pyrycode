@@ -1030,9 +1030,11 @@ proxy exit status is not invented. Ordinary daemon builds use the inert hook.
 The recording contains complete literal MCP requests, responses and stderr,
 joined to successfully forwarded native stdin/stdout counters. Exactly one
 approval and one send-file call must join the complete native tool ID/input,
-allow verdict, tool result and attachment ID. Claude can request approval after
-the final streamed input fragment but before its assembled assistant message;
-that prefix must reconstruct the complete input and match the main message,
+allow verdict, tool result and attachment ID. Native stdout and MCP use separate
+transports, so approval can arrive before the final input fragment is forwarded.
+The exact recorded barrier must already contain the source-owned tool start and
+an input prefix; its captured continuation must reconstruct the complete input
+and match the main message,
 tool and input identities. Native initialization must confirm `default` mode.
 Unknown fields stay literal. Fresh request comparison binds only the joined
 approval argument tool ID and the observed `claudecode/toolUseId` metadata leaves.

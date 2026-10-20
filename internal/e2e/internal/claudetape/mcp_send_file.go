@@ -482,14 +482,16 @@ func SameMCPSendFileRequests(a, b *MCPExchange, at, bt *Tape) error {
 	return nil
 }
 
-// SDKs can ask approval after the last input_json_delta but before publishing
-// the assembled assistant tool_use. Join that complete current native prefix to
-// the same full tool id/input checked independently by ValidateMCPSendFile.
+// Native stdout and MCP use separate transports. Approval can reach the broker
+// while the final input fragment is still awaiting stdout forwarding. Require a
+// source-owned tool start and input prefix at the exact RPC barrier, then validate
+// its complete captured continuation against the independently joined full tool.
+// Never move the recorded barrier or claim later bytes were already forwarded.
 func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []byte, barrier int) error {
 	outputs, starts, index := 0, 0, -1
 	initial := []byte(nil)
 	partial := ""
-	assembled, stopped := false, false
+	assembled, stopped, pastBarrier := false, false, false
 	messageID, role := "", ""
 	messageMain := false
 	initialized := 0
@@ -498,8 +500,17 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			continue
 		}
 		outputs++
-		if outputs > barrier {
-			break
+		if outputs > barrier && !pastBarrier {
+			if assembled {
+				return nil
+			}
+			if starts != 1 || partial == "" && !bytes.Equal(initial, input) {
+				return mcpError()
+			}
+			pastBarrier = true
+			if stopped {
+				break
+			}
 		}
 		envelope, err := mcpRawObject(frame.Data)
 		if err != nil {
@@ -512,7 +523,7 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			}
 			initialized++
 		}
-		if kind == "assistant" {
+		if kind == "assistant" && outputs <= barrier {
 			message, err := mcpRawObject(envelope["message"])
 			if err != nil {
 				return err
@@ -564,6 +575,9 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 				return mcpError()
 			}
 			stopped = true
+			if pastBarrier {
+				break
+			}
 			continue
 		}
 		if eventKind == "content_block_start" {

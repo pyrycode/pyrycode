@@ -187,21 +187,42 @@ func mcpStreamInputControl() (*MCPExchange, *Tape) {
 	}
 	return x, tape
 }
-func TestMCPSendFileStreamedInputMustBeCompleteAndSourceJoinedBeforeApproval(t *testing.T) {
-	for _, mutation := range []string{"valid", "early-barrier", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "child-message", "typed-parent", "typed-full-parent", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
+func TestMCPSendFileStreamedInputJoinsExactBarrierAndCompleteContinuation(t *testing.T) {
+	for _, mutation := range []string{"valid", "split-forward-barrier", "before-tool-start", "before-input-prefix", "missing-continuation", "late-foreign-input", "late-duplicate-input-key", "late-foreign-delta-index", "late-child-delta", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "child-message", "typed-parent", "typed-full-parent", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
 		t.Run(mutation, func(t *testing.T) {
 			x, tape := mcpStreamInputControl()
-			switch mutation {
-			case "early-barrier":
+			if strings.HasPrefix(mutation, "late-") {
 				for i := 6; i < len(x.Events); i++ {
 					x.Events[i].NativeStdoutCount = 4
 				}
+			}
+			switch strings.TrimPrefix(mutation, "late-") {
+			case "split-forward-barrier":
+				for i := 6; i < len(x.Events); i++ {
+					x.Events[i].NativeStdoutCount = 4
+				}
+			case "before-tool-start", "before-input-prefix":
+				barrier := 2
+				if mutation == "before-input-prefix" {
+					barrier = 3
+				}
+				for i := 6; i < len(x.Events); i++ {
+					x.Events[i].NativeStdoutCount = barrier
+				}
+			case "missing-continuation":
+				for i := 6; i < len(x.Events); i++ {
+					x.Events[i].NativeStdoutCount = 4
+				}
+				tape.Frames[5].Data = json.RawMessage(`{"type":"system","subtype":"unrelated"}`)
+
 			case "foreign-input":
 				tape.Frames[5].Data = bytes.ReplaceAll(tape.Frames[5].Data, []byte("2718281828"), []byte("foreign"))
 			case "duplicate-input-key":
 				tape.Frames[4].Data = bytes.Replace(tape.Frames[4].Data, []byte(`{\"path\":\"handover-`), []byte(`{\"path\":\"foreign\",\"path\":\"handover-`), 1)
 			case "foreign-id":
 				tape.Frames[3].Data = bytes.ReplaceAll(tape.Frames[3].Data, []byte("toolu_CONTROLLED1"), []byte("toolu_FOREIGN"))
+			case "child-delta":
+				tape.Frames[5].Data = bytes.Replace(tape.Frames[5].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign"`), 1)
 			case "child-stream":
 				tape.Frames[3].Data = bytes.Replace(tape.Frames[3].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign"`), 1)
 			case "child-message":
@@ -220,7 +241,7 @@ func TestMCPSendFileStreamedInputMustBeCompleteAndSourceJoinedBeforeApproval(t *
 				x.Events[8].Raw = strings.Replace(x.Events[8].Raw, `"claudecode/toolUseId":"toolu_CONTROLLED1"`, `"claudecode/toolUseId":"toolu_FOREIGN"`, 1)
 			}
 			_, err := ValidateMCPSendFile(x, tape)
-			if (err == nil) != (mutation == "valid") {
+			if (err == nil) != (mutation == "valid" || mutation == "split-forward-barrier") {
 				t.Fatal("streamed input boundary mismatch", err)
 			}
 		})
