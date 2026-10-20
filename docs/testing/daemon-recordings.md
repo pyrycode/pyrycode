@@ -1046,6 +1046,42 @@ Only the exact declared original paths in the two typed source fields can bridge
 worker HOME aliases to main HOME aliases; a different path, prefix, suffix or cwd
 alias fails. Full native main-source validation precedes that comparison.
 
+Composer Stop can cancel a finite fallback launch before its helper registers
+a job. The synchronized Linux `TestFallbackCancelledLaunchBoundary/composer-stop`
+demonstrates one independently owned launch and one completed cancellation Wait
+with zero registered workers. Without the independent audit, that inventory
+rejects at `total-wait-cardinality`. This establishes the accounting boundary;
+the historical gate failure's exact cause remains unproved because its original
+counts were lost. Passing ordinary focused replays observed zero launches,
+registrations and Waits. The [retained evidence manifest](../../internal/e2e/internal/claudetape/testdata/worker_inventory_3677.json)
+binds the failing and passing controls, replay reports, revisions and hashes.
+
+On Linux, `runRecordedLifecycleSuite` supplies its outer-owned
+`FallbackLaunchAudit` to `ReadLifecycleWorkers` for Composer Stop as well as
+session-resume. A jobless cancellation requires independently observed current
+helper identity and kernel ancestry through the daemon to the actual outer-owned
+root, observed absent registration, exactly one completed production SIGKILL Wait
+with group cancellation and exit observed, and process/group death. Unobserved
+launches and unreadable or partial registration remain unknown. Unknown,
+duplicate, foreign and unmatched evidence still fails; a Wait alone cannot
+authorize a launch, native exchange or receipt.
+
+Each registered worker exchange and independently proved cancelled launch joins
+exactly once to an actual production Wait. Cancelled launches consume the same
+two-attempt allowance but add no completed native worker exchanges. Reviewed
+fixture bytes and exchange cardinality, registered-worker source/peer checks,
+literal I/O/EOF, original foreground-stop/background-survival assertions and
+bounded cleanup remain required.
+
+Use an external private `PYRY_CLAUDE_TAPE_EVIDENCE` directory to retain
+`composer-stop-launch-audit.json` beyond disposable-home cleanup.
+`FallbackLaunchAudit.Save` joins the sampler before publishing at most 16384 bytes
+of current identities, registration states, actual Wait observations and source
+hashes. Known-state flags distinguish unknown observations from empty inventories;
+the diagnostic contains no raw protocol, argv, environment or credentials and
+confers no completion authority. Offline replay evidence establishes no new
+live-provider behavior; the original physical assertions remain live obligations.
+
 For fresh comparison, the exact stop-control `request.task_id` alone is bound to
 its validated native task/tool join in a disposable comparison copy. Native task
 IDs may vary between captures. Saved replay still requires its literal captured

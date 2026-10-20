@@ -137,6 +137,13 @@ func testLaunchOwner(t *testing.T) (int, launchOwnerEvidence, func() FallbackWor
 }
 
 func TestFallbackCancelledLaunchOwnership(t *testing.T) {
+	for _, scenario := range []string{"session-resume", "composer-stop"} {
+		t.Run(scenario, func(t *testing.T) { testFallbackCancelledLaunchOwnership(t, scenario) })
+	}
+}
+
+func testFallbackCancelledLaunchOwnership(t *testing.T, scenario string) {
+	t.Helper()
 	for _, name := range []string{"owned", "unrelated-daemon", "unknown-chain", "changed-root", "changed-daemon", "changed-outer"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
@@ -152,7 +159,7 @@ func TestFallbackCancelledLaunchOwnership(t *testing.T) {
 			}
 			exe, _ := os.Executable()
 			producer := lifecycleSuiteControl().Producer
-			audit := StartFallbackLaunchAudit(home, "session-resume", exe, producer.Revision, producer.BinarySHA256, os.Getpid(), root)
+			audit := StartFallbackLaunchAudit(home, scenario, exe, producer.Revision, producer.BinarySHA256, os.Getpid(), root)
 			audit.Stop()
 			switch name {
 			case "unknown-chain":
@@ -172,7 +179,7 @@ func TestFallbackCancelledLaunchOwnership(t *testing.T) {
 			if PublishLifecycleControl(filepath.Join(home, "recording-worker-observations.json"), []FallbackWorkerObservation{wait}) != nil {
 				t.Fatal("Wait control")
 			}
-			workers, err := ReadLifecycleWorkers(home, "session-resume", "replay", producer.Revision, producer.BinarySHA256, os.Getpid(), nil, audit)
+			workers, err := ReadLifecycleWorkers(home, scenario, "replay", producer.Revision, producer.BinarySHA256, os.Getpid(), nil, audit)
 			if len(workers) != 0 || (name == "owned") != (err == nil) {
 				t.Fatalf("ownership %s workers=%d inventory=%v", name, len(workers), err)
 			}
