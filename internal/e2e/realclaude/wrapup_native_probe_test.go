@@ -31,11 +31,16 @@ type wrapUpRootObservation struct {
 
 func (r wrapUpRootObservation) validate(broker *claudetape.WrapUpObservation) error {
 	o := r.Observation
-	if o == nil || o.Validate(false) != nil || !r.RootPassed || r.DeadlineActivation != "unknown" || r.InternalWriteAttempt != "unknown" || !slices.Contains([]string{"unknown", "deadline", "write_failed", "not_idle", "delivery_busy", "capture_busy", "readiness_failed", "terminal_failed"}, r.Outcome) || o.Revision != broker.Revision || o.SourceSHA256 != broker.SourceSHA256 || o.DaemonSHA256 != broker.DaemonSHA256 {
+	if o == nil || broker == nil || o.Validate(false) != nil || !r.RootPassed || r.DeadlineActivation != "unknown" || r.InternalWriteAttempt != "unknown" || !slices.Contains([]string{"unknown", "deadline", "write_failed", "not_idle", "delivery_busy", "capture_busy", "readiness_failed", "terminal_failed"}, r.Outcome) || o.Revision != broker.Revision || o.SourceSHA256 != broker.SourceSHA256 || o.DaemonSHA256 != broker.DaemonSHA256 {
 		return errors.New("invalid native root observation")
 	}
 	if len(o.Events) != 3 || o.Events[0].Stage != "reset_send" || o.Events[1].Stage != "reset_observed" || o.Events[2].Stage != "predecessor_gone" {
 		return errors.New("incomplete native root observation")
+	}
+	for _, event := range o.Events {
+		if event.Error != "none" || event.Kind != "other" || event.Bytes != 0 {
+			return errors.New("invalid native root phase")
+		}
 	}
 	return nil
 }
