@@ -43,7 +43,11 @@ func buildRecordedPoolBinary(t *testing.T) (string, string) {
 			return
 		}
 		recordedPoolBinary.revision = strings.TrimSpace(string(raw))
-		dir := t.TempDir()
+		dir, err := os.MkdirTemp("", "pyry-recorded-pool-")
+		if err != nil {
+			recordedPoolBinary.err = err
+			return
+		}
 		recordedPoolBinary.path = filepath.Join(dir, "pool.test")
 		cmd := exec.Command("go", "test", "-c", "-race", "-tags=e2e_realclaude", "-ldflags=-X github.com/pyrycode/pyrycode/internal/e2e/realclaude.poolRecordedRevision="+recordedPoolBinary.revision, "-o", recordedPoolBinary.path, "./realclaude")
 		cmd.Env = recordedPoolOfflineEnv()

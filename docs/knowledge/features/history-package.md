@@ -7,8 +7,9 @@ no caller; #2114 gave it its first two —
 the interactive emitter's `emit` chokepoint and session transitions — and
 \#2115 gave it a third: the operator's own typed message, written from
 the safe `msgqueue.QueuedMessage` projection. Stream Claude delivery commits
-at echo placement or idle fallback; Codex/no-stream delivery commits at write
-confirmation (see [Producers](history-package-producers.md#producers-2114-2115)). `#2116` is the
+at a receiving-child echo or normal answering-turn completion (with Send now's
+carried-close grace for no-echo completion); Codex/no-stream delivery commits at
+write confirmation (see [Producers](history-package-producers.md#producers-2114-2115)). `#2116` is the
 wire-serving consumer,
 `#2113` declares the cursor as an opaque wire string. Spec:
 [`specs/architecture/2112-conversation-history-log.md`](../../specs/architecture/2112-conversation-history-log.md).

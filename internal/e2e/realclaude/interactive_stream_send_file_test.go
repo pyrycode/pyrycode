@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -100,6 +101,27 @@ const sendFileAttachBudget = 15 * time.Second
 func TestInteractiveStreamSendFile(t *testing.T) {
 	runParallel(t)
 	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
+	if c, ok := lifecycleRecordingCurrent(t); ok && c.Process.Mode == "replay" {
+		// A posture acknowledgement may precede the tape's startup MCP status ask.
+		// Wait for the recorded first input boundary before sending the trigger.
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			var ready bool
+			if claudetape.ReadLifecycleControl(filepath.Join(c.Process.Home, "recording-turn-ready"), 16, &ready) == nil && ready {
+				break
+			}
+			if !time.Now().Before(deadline) {
+				t.Fatal("recorded send-file startup did not reach its first user turn")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if os.Getenv("PYRY_CLAUDE_TAPE_HOLD_INITIALIZE") == "1" {
+			var held bool
+			if claudetape.ReadLifecycleControl(filepath.Join(c.Process.Home, "recording-initialize-held"), 16, &held) != nil || !held {
+				t.Fatal("startup regression did not exercise its delayed initialize response")
+			}
+		}
+	}
 
 	// A per-run nonce keeps the filename (and so the trigger) distinct across runs,
 	// defeating any accidental caching without asserting on an echo.

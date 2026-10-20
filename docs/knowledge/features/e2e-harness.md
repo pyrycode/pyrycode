@@ -371,6 +371,15 @@ predecessor exit, even with an exhausted player. Capture retains bounded input
 forwarding and pipe-error rejection; replay still invokes its input observer
 through `forwardLifecycleFrame`'s exactly-once callback contract.
 
+Startup request order is a capture timing outcome. In replay, initialize
+completion alone does not mean the player expects its first user input: an
+asynchronous `mcp_status` request may still precede it. `ReplayTurnReady`
+signals the first `Player.AwaitsTurn` boundary; the send-file driver waits for
+its private one-shot marker before triggering input. Keep strict frame matching
+and the original modal, tool-reference and stored-attachment assertions.
+`TestRecordedMCPSendFileWaitsForStartup` delays initialize to expose this ordering
+without changing capture or live Claude behavior.
+
 Response delivery, action acknowledgement, player exhaustion and teardown are
 separate observations. Kill/rotation/eviction completion requires authorized
 owned termination, both provider output EOFs, complete strict input with no
@@ -490,8 +499,16 @@ observed pid + socket path across the process boundary.
 
 `ensurePyryBuilt(t)` builds pyry once per test process via `sync.Once` into a
 persistent `os.MkdirTemp` (intentionally not cleaned — `go test`'s own cleanup
-takes /tmp eventually, and there's no `TestMain` hook this package owns).
+takes /tmp eventually).
 `PYRY_E2E_BIN` short-circuits to a known-good binary on disk for CI.
+
+The recorded pool and MCP daemon caches also use process-lifetime
+`os.MkdirTemp` directories; `TestMain` removes those two directories after
+`m.Run`. A process-global `sync.Once` path cannot live in one caller's
+`t.TempDir`: parent cleanup deletes the executable before a later top-level
+consumer uses the cached path. Run preceding `TestRecordedClaude` scenarios and
+`TestRecordedMCPSendFileWaitsForStartup` together in one uncached process to
+exercise that lifetime; an isolated startup pass misses it.
 
 **An `-overlay` mutant does not reach a spawned daemon by default.** `ensurePyryBuilt`
 shells a plain `go build ./cmd/pyry` with none of the parent `go test` invocation's
