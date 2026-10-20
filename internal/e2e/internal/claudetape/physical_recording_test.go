@@ -150,22 +150,28 @@ func TestPhysicalFailedCaptureIsPrivateExclusiveAndUnpromotable(t *testing.T) {
 	path := filepath.Join(home, "recording-children", "bootstrap.json")
 	config := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "capture", Scenario: "stop-background-task-bootstrap", Path: path, Producer: Producer{Revision: strings.Repeat("a", 40)}}}
 	_, tape := physicalRecordingControl(t)
+	// A real stream prefix routinely exceeds the authorization control limit.
+	large, _ := json.Marshal(map[string]string{"type": "assistant", "text": strings.Repeat("x", 32768)})
+	tape.Frames = append(tape.Frames, Frame{Direction: "stdout", Data: large})
 	failed := &LifecycleTape{Tape: tape}
 	diagnostic := strings.TrimSuffix(path, ".json") + ".failed-native"
-	if RetainPhysicalFailedCapture(diagnostic, config, strings.Repeat("b", 64), failed, 6) != nil {
+	if RetainPhysicalFailedCapture(diagnostic, config, strings.Repeat("b", 64), failed, 7) != nil {
 		t.Fatal("failed observation retention")
 	}
 	info, err := os.Lstat(diagnostic)
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("failed observation is not private")
 	}
-	if RetainPhysicalFailedCapture(diagnostic, config, strings.Repeat("b", 64), failed, 6) == nil {
+	if RetainPhysicalFailedCapture(diagnostic, config, strings.Repeat("b", 64), failed, 7) == nil {
 		t.Fatal("failed observation overwritten")
 	}
-	if RetainPhysicalFailedCapture(path, config, strings.Repeat("b", 64), failed, 6) == nil {
+	if RetainPhysicalFailedCapture(path, config, strings.Repeat("b", 64), failed, 7) == nil {
 		t.Fatal("failed observation published as native fixture")
 	}
 	raw, err := os.ReadFile(diagnostic)
+	if len(raw) <= 16384 {
+		t.Fatal("diagnostic control never exercised the native carrier bound")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +179,45 @@ func TestPhysicalFailedCaptureIsPrivateExclusiveAndUnpromotable(t *testing.T) {
 		t.Fatal("failed native diagnostic promoted as coverage")
 	}
 	var stored PhysicalFailedCapture
-	if ReadLifecycleControl(diagnostic, MaxBytes, &stored) != nil || stored.Kind != "failed-unpromotable-native-observation-v1" || stored.Frames != 6 || len(stored.Tape.Frames) != len(tape.Frames) {
+	if ReadLifecycleControl(diagnostic, MaxBytes, &stored) != nil || stored.Kind != "failed-unpromotable-native-observation-v1" || stored.Frames != 7 || len(stored.Tape.Frames) != len(tape.Frames) {
 		t.Fatal("failed evidence lost the actual rejecting observation")
+	}
+	destination := filepath.Join(home, "stop-background-task-failed-unpromotable-native.json")
+	if PublishPhysicalFailedCapture(destination, stored) != nil {
+		t.Fatal("outer retention lost large failed native evidence")
+	}
+	copied, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(copied, raw) {
+		t.Fatal("outer retention changed failed native evidence")
+	}
+
+}
+
+func TestPhysicalFailedCaptureRejectsOversizePrivateAndWrongDestination(t *testing.T) {
+	for _, mutation := range []string{"oversize", "private", "wrong-path"} {
+		t.Run(mutation, func(t *testing.T) {
+			home := physicalControlHome(t)
+			_, tape := physicalRecordingControl(t)
+			text := strings.Repeat("x", MaxBytes)
+			if mutation == "private" {
+				text = "sk-ant-controlled-test-secret"
+			}
+			if mutation == "wrong-path" {
+				text = "controlled safe text"
+			}
+			raw, _ := json.Marshal(map[string]string{"type": "assistant", "text": text})
+			tape.Frames = append(tape.Frames, Frame{Direction: "stdout", Data: raw})
+			value := PhysicalFailedCapture{Kind: "failed-unpromotable-native-observation-v1", Scenario: tape.Scenario, Revision: strings.Repeat("a", 40), SourceBinarySHA256: strings.Repeat("b", 64), Frames: len(tape.Frames), Tape: tape}
+			path := filepath.Join(home, "stop-background-task-failed-unpromotable-native.json")
+			if mutation == "wrong-path" {
+				path = filepath.Join(home, "stop-background-task.json")
+			}
+			if PublishPhysicalFailedCapture(path, value) == nil {
+				t.Fatal("unsafe failed diagnostic publication", mutation)
+			}
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatal("rejected diagnostic left a ready file", mutation)
+			}
+		})
 	}
 }

@@ -421,9 +421,21 @@ func RetainPhysicalFailedCapture(path string, c LifecycleBrokerConfig, source st
 		return errors.New("unowned failed physical capture")
 	}
 	value := PhysicalFailedCapture{Kind: "failed-unpromotable-native-observation-v1", Scenario: c.Scenario, Revision: c.Producer.Revision, SourceBinarySHA256: source, Frames: frames, Tape: tape.Tape}
+	return PublishPhysicalFailedCapture(path, value)
+}
+
+// PublishPhysicalFailedCapture uses the native-carrier bound, not the much
+// smaller authorization-control bound. Both broker and outer retention use this
+// exact publisher. It exposes only complete private immutable diagnostics.
+func PublishPhysicalFailedCapture(path string, value PhysicalFailedCapture) error {
+	scenario := strings.TrimSuffix(value.Scenario, "-bootstrap")
+	basename := filepath.Base(path)
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || value.Kind != "failed-unpromotable-native-observation-v1" || !lifecycleFrameTimeline(value.Scenario) || value.Revision == "" || !physicalSHA256.MatchString(value.SourceBinarySHA256) || value.Tape == nil || value.Tape.Scenario != value.Scenario || value.Frames != len(value.Tape.Frames) || (basename != "bootstrap.failed-native" && basename != scenario+"-failed-unpromotable-native.json") {
+		return errors.New("unowned physical diagnostic publication")
+	}
 	raw, err := json.Marshal(value)
 	if err != nil || len(raw) > MaxBytes || safeCLIJSON(raw) != nil {
 		return errors.New("unsafe failed physical observation")
 	}
-	return PublishLifecycleControl(path, value)
+	return publishClosedFile(filepath.Dir(path), filepath.Base(path), raw)
 }

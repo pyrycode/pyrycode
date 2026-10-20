@@ -391,11 +391,14 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 		if mode == "capture" && claudetape.PhysicalFamily(name) != "" {
+			// The detached broker publishes failure evidence after native EOF.
+			// Join actual current children before reading, even on a failed root.
+			_ = server.Join(15 * time.Second)
 			var failed claudetape.PhysicalFailedCapture
 			path := filepath.Join(children, "bootstrap.failed-native")
 			if claudetape.ReadLifecycleControl(path, claudetape.MaxBytes, &failed) == nil && failed.Kind == "failed-unpromotable-native-observation-v1" && failed.Scenario == name+"-bootstrap" && failed.Revision == revision && failed.SourceBinarySHA256 == sourceSHA {
 				destination := filepath.Join(evidenceDir, name+"-failed-unpromotable-native.json")
-				if claudetape.PublishLifecycleControl(destination, failed) == nil {
+				if claudetape.PublishPhysicalFailedCapture(destination, failed) == nil {
 					t.Log("failed native observation retained privately; supplies no fixture coverage")
 				}
 			}
