@@ -37,7 +37,7 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
         env.pop('PYRY_CLAUDE_TAPE_FRESH', None)
     if report_dir:
         evidence = report_dir / ((label or mode) + '-native-events')
-        evidence.mkdir(parents=True, exist_ok=False)
+        evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
         env['PYRY_CLAUDE_TAPE_EVIDENCE'] = str(evidence.resolve())
     else:
         env.pop('PYRY_CLAUDE_TAPE_EVIDENCE', None)

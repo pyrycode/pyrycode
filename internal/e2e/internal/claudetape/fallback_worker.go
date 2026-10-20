@@ -632,7 +632,13 @@ func ValidateLifecycleWorkers(scenario string, roles map[string]*LifecycleTape, 
 // ReadLifecycleWorkers closes the complete private attempt inventory after the
 // original daemon cleanup. Every attempt must have an actual broker receipt and
 // matching production Wait/status observation; unknown or partial attempts fail.
-func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, parent int, roles map[string]*LifecycleTape) ([]LifecycleWorker, error) {
+func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, parent int, roles map[string]*LifecycleTape) (workers []LifecycleWorker, resultErr error) {
+	stage := "private-root"
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("finite worker inventory stage=%s", stage)
+		}
+	}()
 	fail := errors.New("finite worker inventory changed")
 	if mode != "capture" && mode != "replay" {
 		return nil, fail
@@ -649,15 +655,17 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 	if err != nil {
 		return nil, fail
 	}
+	stage = "production-observations"
 	var observations []FallbackWorkerObservation
 	if ReadLifecycleControl(filepath.Join(home, "recording-worker-observations.json"), 16384, &observations) != nil {
 		return nil, fail
 	}
+	stage = "original-daemon"
 	var daemon struct{ PID int }
 	if ReadLifecycleControl(filepath.Join(home, "recording-worker-daemon.json"), 16384, &daemon) != nil || daemon.PID <= 1 {
 		return nil, fail
 	}
-	workers := []LifecycleWorker{}
+	workers = []LifecycleWorker{}
 	expected := map[string]bool{}
 	owners := map[int]bool{}
 	for i := 1; i <= LifecycleWorkerLimit(scenario); i++ {
@@ -665,11 +673,13 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 		if _, err := os.Lstat(jobPath); os.IsNotExist(err) {
 			break
 		}
+		stage = "exclusive-job"
 		var job FallbackWorkerJob
 		if ReadLifecycleControl(jobPath, 16384, &job) != nil || job.Version != 1 || job.OwnerPID <= 1 || owners[job.OwnerPID] || !fallbackWorkerGroupShape(job) || job.DaemonPID != daemon.PID || job.BrokerParentPID != parent || job.Scenario != scenario || job.Home != home || job.SourceBinarySHA256 != sourceSHA || job.Producer.Revision != revision || fallbackWorkerArgs(job.Args) != nil || job.Path != strings.TrimSuffix(jobPath, ".job")+".json" || job.Abort != strings.TrimSuffix(jobPath, ".job")+".abort" {
 			return nil, fail
 		}
 		owners[job.OwnerPID] = true
+		stage = "worker-carrier"
 		file, err := os.Open(job.Path)
 		if err != nil {
 			return nil, fail
@@ -679,13 +689,16 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 		if err != nil || !reflect.DeepEqual(tape.Args, job.Args) {
 			return nil, fail
 		}
+		stage = "worker-producer"
 		if mode == "capture" && (!reflect.DeepEqual(tape.Producer, job.Producer) || job.Producer.BinarySHA256 != sourceSHA) {
 			return nil, fail
 		}
+		stage = "native-receipt"
 		var receipt FallbackWorkerReceipt
 		if ReadLifecycleControl(strings.TrimSuffix(jobPath, ".job")+".receipt", 16384, &receipt) != nil || receipt.Version != 1 || !receipt.Success || receipt.OwnerPID != job.OwnerPID || receipt.GroupPID != job.GroupPID || receipt.BrokerPID <= 1 || receipt.BrokerPID == job.OwnerPID || receipt.Status != tape.Status || receipt.Frames != len(tape.Frames) || mode == "capture" && (receipt.NativePID <= 1 || receipt.NativePID == receipt.OwnerPID || receipt.NativePID == receipt.BrokerPID) || mode == "replay" && receipt.NativePID != 0 {
 			return nil, fail
 		}
+		stage = "receipt-tape-digest"
 		raw, err := runnerPrivateRead(job.Path, MaxBytes)
 		if err != nil {
 			return nil, fail
@@ -695,6 +708,7 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 			return nil, fail
 		}
 
+		stage = "actual-production-wait"
 		matches := 0
 		for _, observation := range observations {
 			if observation.OwnerPID == fallbackWorkerObservationPID(job) {
@@ -704,10 +718,12 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 				}
 			}
 		}
+		stage = "wait-cardinality-and-death"
 		if matches != 1 || syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(job.GroupPID, 0) != syscall.ESRCH {
 			return nil, fail
 		}
 		worker := LifecycleWorker{Tape: tape}
+		stage = "source-derivation"
 		sourceMatches := 0
 		for role, provider := range roles {
 			sources, err := FallbackExchanges(provider.Tape)
@@ -722,6 +738,7 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 				}
 			}
 		}
+		stage = "unique-completed-source"
 		if sourceMatches != 1 {
 			return nil, fail
 		}
@@ -730,9 +747,11 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 			expected[fmt.Sprintf("%06d%s", i, suffix)] = true
 		}
 	}
+	stage = "total-wait-cardinality"
 	if len(observations) != len(workers) {
 		return nil, fail
 	}
+	stage = "closed-private-inventory"
 	for _, entry := range entries {
 		if !expected[entry.Name()] {
 			return nil, fail

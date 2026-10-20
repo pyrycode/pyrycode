@@ -463,6 +463,10 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes)
 	if err != nil {
+		destination := filepath.Join(evidenceDir, name+"-invalid-worker-diagnostic.json")
+		if diagnosticErr := claudetape.SaveLifecycleWorkerDiagnostic(home, name, destination, tapes); diagnosticErr == nil {
+			t.Log("validated invalid/unpromoted worker carriers retained privately")
+		}
 		t.Fatal(err)
 	}
 	if len(workerLaunchHashes) != len(workers) {
