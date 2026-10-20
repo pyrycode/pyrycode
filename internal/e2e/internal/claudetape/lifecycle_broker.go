@@ -116,6 +116,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	defer func() {
 		diagnostic.Frames = count
 		diagnostic.ErrorClass = lifecycleErrorClass(resultErr)
+		diagnostic.Completed = resultErr == nil
 		if c.OnDiagnostic != nil {
 			c.OnDiagnostic(diagnostic)
 		}
@@ -257,6 +258,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
+		diagnostic.Stage = "deliver-output"
 		emit := func(extra time.Time) error {
 			restored, err := binding.Frame(raw, true)
 			if err != nil {
@@ -297,6 +299,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		frames++
+		diagnostic.OutputsDelivered++
 		return observeCompletion("stdout", raw)
 	}
 	if player != nil {
@@ -348,6 +351,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if e != nil {
 				return e
 			}
+			diagnostic.InputsMatched++
 			frames++
 			// Consume through the stand-in's pipe as well: closure and the owned PID
 			// have real process semantics even though provider responses are replayed.
@@ -388,6 +392,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		if err := write(target, append(raw, '\n')); err != nil {
 			return err
+		}
+		if direction == "stdin" {
+			diagnostic.ProviderInputsForwarded++
 		}
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
@@ -535,6 +542,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
+		diagnostic.ActionAcknowledged = true
 		return nil
 	}
 	finish := func() (int, error) {
@@ -559,17 +567,21 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, e
 			}
 			if c.BeforeSeal != nil {
+				diagnostic.Stage = "terminal-check"
 				if err := c.BeforeSeal(tape.Tape); err != nil {
 					return frames, err
 				}
 			}
+			diagnostic.TerminalChecked = true
 			return frames, nil
 		}
 		if c.BeforeSeal != nil {
+			diagnostic.Stage = "terminal-check"
 			if err := c.BeforeSeal(tape.Tape); err != nil {
 				return frames, err
 			}
 		}
+		diagnostic.TerminalChecked = true
 		return frames, tape.Save(c.Path)
 	}
 	for time.Now().Before(deadline) {
@@ -579,6 +591,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 		}
 		diagnostic.Stage = "read-input"
+		diagnostic.IOObserved = true
 		if err := read(inputFD, &pendingInput, &inputEOF, "stdin"); err != nil {
 			return frames, err
 		}

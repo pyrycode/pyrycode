@@ -119,8 +119,17 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	daemonSum := sha256.Sum256(daemonBytes)
+	fixtureBytes, err := os.ReadFile(process.Path)
+	if err != nil && mode == "replay" {
+		t.Fatal("cannot identify reviewed fixture")
+	}
+	fixtureSHA := ""
+	if err == nil {
+		fixtureSum := sha256.Sum256(fixtureBytes)
+		fixtureSHA = hex.EncodeToString(fixtureSum[:])
+	}
 	t.Cleanup(func() {
-		retainLifecycleWitnesses(t, home, retained, name, revision, sourceSHA, hex.EncodeToString(daemonSum[:]))
+		retainLifecycleWitnesses(t, home, retained, name, revision, sourceSHA, hex.EncodeToString(daemonSum[:]), fixtureSHA)
 	})
 	if mode == "capture" {
 		info, err := buildinfo.ReadFile(daemon)

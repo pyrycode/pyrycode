@@ -13,6 +13,8 @@ type LifecycleDiagnostic struct {
 	Stage, ErrorClass                                             string
 	Frames, PlayerNext, PlayerFrames, PendingInput, PendingOutput int
 	InputEOF, OutputEOF, StderrEOF, Sealed, ActionAccepted        bool
+	IOObserved, ActionAcknowledged, TerminalChecked, Completed    bool
+	InputsMatched, OutputsDelivered, ProviderInputsForwarded      int
 }
 
 func lifecycleInputKind(raw []byte) string {
