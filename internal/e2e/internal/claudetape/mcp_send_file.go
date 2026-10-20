@@ -223,7 +223,7 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 				if initialized != 1 || kind != "assistant" || mcpString(message["role"]) != "assistant" || mcpString(block["id"]) != facts.ToolID || !bytes.Equal(physicalCanonicalJSON(block["input"]), fileInput) || approveRequest.event.UserOrdinal != 1 {
 					return facts, mcpError()
 				}
-				if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
+				if !mcpMainParent(envelope) {
 					return facts, mcpError()
 				}
 				toolMessageID = mcpString(message["id"])
@@ -491,6 +491,7 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 	partial := ""
 	assembled, stopped := false, false
 	messageID, role := "", ""
+	messageMain := false
 	initialized := 0
 	for _, frame := range tape.Frames {
 		if frame.Direction != "stdout" {
@@ -546,6 +547,7 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 				return err
 			}
 			messageID, role = mcpString(message["id"]), mcpString(message["role"])
+			messageMain = mcpMainParent(envelope)
 		}
 		if eventKind == "message_stop" {
 			messageID, role = "", ""
@@ -558,6 +560,9 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			return mcpError()
 		}
 		if starts == 1 && current == index && eventKind == "content_block_stop" {
+			if stopped || !messageMain || !mcpMainParent(envelope) {
+				return mcpError()
+			}
 			stopped = true
 			continue
 		}
@@ -572,10 +577,10 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			if mcpString(block["type"]) != "tool_use" || (mcpString(block["id"]) != tool && mcpString(block["name"]) != mcpSendFileTool) {
 				continue
 			}
-			if mcpString(block["id"]) != tool || mcpString(block["name"]) != mcpSendFileTool || starts != 0 || initialized != 1 || messageID == "" || messageID != fullMessage || role != "assistant" {
+			if mcpString(block["id"]) != tool || mcpString(block["name"]) != mcpSendFileTool || starts != 0 || initialized != 1 || messageID == "" || messageID != fullMessage || role != "assistant" || !messageMain {
 				return mcpError()
 			}
-			if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
+			if !mcpMainParent(envelope) {
 				return mcpError()
 			}
 			initial = physicalCanonicalJSON(block["input"])
@@ -596,7 +601,7 @@ func validateMCPToolInputPrefix(tape *Tape, tool, fullMessage string, input []by
 			if json.Unmarshal(delta["partial_json"], &text) != nil || len(text) > MaxBytes-len(partial) {
 				return mcpError()
 			}
-			if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
+			if !mcpMainParent(envelope) {
 				return mcpError()
 			}
 			partial += text
@@ -642,4 +647,13 @@ func mcpCallToolMetadata(params map[string]json.RawMessage, tool string) (bool, 
 		return false, mcpError()
 	}
 	return true, nil
+}
+
+func mcpMainParent(envelope map[string]json.RawMessage) bool {
+	raw, present := envelope["parent_tool_use_id"]
+	if !present || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return true
+	}
+	var parent string
+	return json.Unmarshal(raw, &parent) == nil && parent == ""
 }

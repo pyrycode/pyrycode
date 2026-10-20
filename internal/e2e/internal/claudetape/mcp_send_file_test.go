@@ -188,7 +188,7 @@ func mcpStreamInputControl() (*MCPExchange, *Tape) {
 	return x, tape
 }
 func TestMCPSendFileStreamedInputMustBeCompleteAndSourceJoinedBeforeApproval(t *testing.T) {
-	for _, mutation := range []string{"valid", "early-barrier", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
+	for _, mutation := range []string{"valid", "early-barrier", "foreign-input", "duplicate-input-key", "foreign-id", "child-stream", "child-message", "typed-parent", "typed-full-parent", "foreign-message", "reused-index", "foreign-delta-index", "foreign-meta"} {
 		t.Run(mutation, func(t *testing.T) {
 			x, tape := mcpStreamInputControl()
 			switch mutation {
@@ -204,6 +204,12 @@ func TestMCPSendFileStreamedInputMustBeCompleteAndSourceJoinedBeforeApproval(t *
 				tape.Frames[3].Data = bytes.ReplaceAll(tape.Frames[3].Data, []byte("toolu_CONTROLLED1"), []byte("toolu_FOREIGN"))
 			case "child-stream":
 				tape.Frames[3].Data = bytes.Replace(tape.Frames[3].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign"`), 1)
+			case "child-message":
+				tape.Frames[2].Data = bytes.Replace(tape.Frames[2].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign"`), 1)
+			case "typed-parent":
+				tape.Frames[3].Data = bytes.Replace(tape.Frames[3].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":{}`), 1)
+			case "typed-full-parent":
+				tape.Frames[6].Data = bytes.Replace(tape.Frames[6].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":42`), 1)
 			case "foreign-message":
 				tape.Frames[2].Data = bytes.ReplaceAll(tape.Frames[2].Data, []byte("controlled-message"), []byte("foreign-message"))
 			case "reused-index":
