@@ -45,7 +45,7 @@ type ProxyServer struct {
 // native children of the supplied role owner. Real server work stays in a
 // separately owned process; replay must not claim native parent/group semantics.
 func NewProxyServer(ctx context.Context, b LaunchBinding, c *Coordinator, validateStderr func([]byte) error) (*ProxyServer, error) {
-	if ctx == nil {
+	if ctx == nil || ctx.Err() != nil {
 		return nil, protocolError()
 	}
 	deadline, ok := ctx.Deadline()
@@ -177,11 +177,12 @@ func (s *ProxyServer) Join(budget time.Duration) ([]ServerProof, error) {
 		s.mu.Unlock()
 		<-done
 	}
+	cancelled := s.ctx.Err() != nil
 	s.cancel()
 	defer os.RemoveAll(s.root)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failed || len(s.proofs) != len(s.claimed) {
+	if cancelled || s.failed || len(s.proofs) != len(s.claimed) {
 		return nil, protocolError()
 	}
 	return append([]ServerProof(nil), s.proofs...), nil
@@ -189,7 +190,7 @@ func (s *ProxyServer) Join(budget time.Duration) ([]ServerProof, error) {
 
 func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []string, files [3]*os.File, c *Coordinator, validateStderr func([]byte) error) (ServerProof, error) {
 	proof := ServerProof{Kind: kind, NativeOwnerPID: b.NativeOwnerPID, ExitCode: -1}
-	if b.validate() != nil {
+	if ctx == nil || ctx.Err() != nil || b.validate() != nil {
 		return proof, protocolError()
 	}
 	if _, err := b.serverArgs([]string{kind, "-pyry-socket", b.Socket}); err != nil {
@@ -252,11 +253,15 @@ func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []str
 		err    error
 	}
 	done := make(chan result, 4)
+	inputEOF := make(chan struct{})
 	pump := func(name string, reader io.Reader, direction Direction, writer io.Writer) {
 		count, eof, err := forwardLines(reader, func(raw []byte) error {
 			return c.ForwardRPC(kind, direction, raw, func(raw []byte) error { return WriteLine(writer, raw) })
 		})
 		if direction == ClientToServer {
+			if err == nil && eof {
+				close(inputEOF)
+			}
 			inW.Close()
 		}
 		done <- result{kind: name, count: count, eof: eof, err: err}
@@ -276,6 +281,17 @@ func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []str
 		// A server that exits with native stdin still open did not observe genuine
 		// input EOF. Interrupt that remaining read, so the missing EOF fails promptly.
 		files[0].Close()
+		select {
+		case <-inputEOF:
+		default:
+			// Even exit zero is premature while client input has not reached
+			// genuine EOF. Wake any scheduler waiting for an absent reply.
+			if err == nil {
+				err = protocolError()
+			}
+			cancel()
+			c.Abort()
+		}
 		done <- result{kind: "wait", err: err}
 	}()
 	failed := false
@@ -284,6 +300,7 @@ func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []str
 		if v.err != nil {
 			failed = true
 			cancel()
+			c.Abort()
 		}
 		switch v.kind {
 		case "input":
@@ -308,7 +325,7 @@ func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []str
 			}
 		}
 	}
-	if failed || proof.ExitCode != 0 || !proof.StderrEOF || c.CloseRPC(kind, proof.InputEOF, proof.OutputEOF, nil) != nil {
+	if ctx.Err() != nil || failed || proof.ExitCode != 0 || !proof.StderrEOF || c.CloseRPC(kind, proof.InputEOF, proof.OutputEOF, nil) != nil {
 		return proof, protocolError()
 	}
 	return proof, nil
