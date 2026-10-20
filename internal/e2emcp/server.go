@@ -25,6 +25,12 @@ type ServerProof struct {
 	Stderr                                    string
 }
 
+// launchFailureStage contains fixed source labels only; no IPC bytes, environment,
+// capability or arbitrary OS error can enter diagnostics through it.
+type launchFailureStage string
+
+func (s launchFailureStage) Error() string { return string(s) }
+
 type ProxyServer struct {
 	logs                *ServerLogs
 	binding             LaunchBinding
@@ -38,6 +44,7 @@ type ProxyServer struct {
 	claimed             map[string]bool
 	proofs              []ServerProof
 	failed              bool
+	failureStage        string
 	conns               map[*net.UnixConn]bool
 	accepting, handling sync.WaitGroup
 }
@@ -93,6 +100,19 @@ func NewProxyServer(ctx context.Context, b LaunchBinding, c *Coordinator, valida
 }
 func (s *ProxyServer) StderrSnapshot() (map[string]string, error) { return s.logs.Snapshot() }
 func (s *ProxyServer) Capability() (socket, token string)         { return s.listener.Addr().String(), s.token }
+func (s *ProxyServer) FailureStage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failureStage
+}
+func (s *ProxyServer) badAt(stage string) {
+	s.mu.Lock()
+	if s.failureStage == "" {
+		s.failureStage = stage
+	}
+	s.mu.Unlock()
+	s.bad()
+}
 func (s *ProxyServer) bad() {
 	// A forwarding callback may hold the coordinator mutex while blocked in an
 	// actual pipe write. Cancel/close owned I/O before waiting on that mutex.
@@ -111,7 +131,11 @@ func (s *ProxyServer) handle(conn *net.UnixConn) {
 	defer func() { conn.Close(); s.mu.Lock(); delete(s.conns, conn); s.mu.Unlock() }()
 	launch, files, err := receiveLaunch(conn, s.binding, s.token)
 	if err != nil {
-		s.bad()
+		stage := "launch-rejected"
+		if observed, ok := err.(launchFailureStage); ok {
+			stage = string(observed)
+		}
+		s.badAt(stage)
 		return
 	}
 	defer func() {
@@ -136,13 +160,13 @@ func (s *ProxyServer) handle(conn *net.UnixConn) {
 	}
 	s.mu.Unlock()
 	if duplicate || s.coordinator.Register(kind) != nil {
-		s.bad()
+		s.badAt("launch-register")
 		return
 	}
 	proof, err := runOwnedServer(s.ctx, s.binding, kind, env, files, s.coordinator, s.validateStderr, s.logs)
 	proof.NativeProxyPID = launch.peerPID
 	if err != nil {
-		s.bad()
+		s.badAt("server-forward-or-join")
 		return
 	}
 	s.mu.Lock()

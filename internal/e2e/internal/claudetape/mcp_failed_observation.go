@@ -10,6 +10,7 @@ import (
 // It retains safe observed native data and only complete successful MCP/log
 // forwards. Unobserved bytes, EOF and exit codes are deliberately not invented.
 type MCPFailedObservation struct {
+	ProxyFailureStage                      string
 	Kind                                   string
 	Scenario, Revision, SourceBinarySHA256 string
 	OwnerPID, BrokerPID, Frames            int
@@ -28,6 +29,9 @@ func (s *MCPRecordingSession) RetainFailure(tape *LifecycleTape, frames int) err
 		return e
 	}
 	diagnostic := MCPFailedObservation{Kind: "failed-unpromotable-mcp-observation-v1", Scenario: s.config.Scenario, Revision: s.config.Producer.Revision, SourceBinarySHA256: s.source, OwnerPID: s.config.OwnerPID, BrokerPID: s.broker, Frames: frames, NativeObservation: tape, MCPCompleteForwards: s.coordinator.DiagnosticSnapshot(), StderrSuccessfullyForwarded: logs}
+	if s.proxy != nil {
+		diagnostic.ProxyFailureStage = s.proxy.FailureStage()
+	}
 	raw, e := json.Marshal(diagnostic)
 	if e != nil || s.privateSafe(raw) != nil {
 		return mcpError()

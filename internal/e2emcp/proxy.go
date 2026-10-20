@@ -109,6 +109,12 @@ func newToken() (string, error) {
 // before any server is started. Its files are borrowed only on successful return;
 // every rejected SCM_RIGHTS capability is closed here.
 func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxyLaunch, files [3]*os.File, err error) {
+	stage := "launch-start"
+	defer func() {
+		if err != nil {
+			err = launchFailureStage(stage)
+		}
+	}()
 	fail := func() (proxyLaunch, [3]*os.File, error) {
 		for _, f := range files {
 			if f != nil {
@@ -120,6 +126,7 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	if !validToken(token) || c.SetReadDeadline(time.Now().Add(10*time.Second)) != nil {
 		return fail()
 	}
+	stage = "launch-rights"
 	var one [1]byte
 	control := make([]byte, syscall.CmsgSpace(3*4))
 	n, oob, flags, _, e := c.ReadMsgUnix(one[:], control)
@@ -162,17 +169,20 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	if e != nil || parseErr != nil || flags&(syscall.MSG_TRUNC|syscall.MSG_CTRUNC) != 0 || n != 1 || one[0] != 1 || len(messages) != 1 || len(owned) != 3 {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-fd-kind"
 	for i, f := range owned {
 		info, x := f.Stat()
 		if x != nil || info.Mode()&os.ModeNamedPipe == 0 {
 			return proxyLaunch{}, files, protocolError()
 		}
+		stage = "launch-fd-identity"
 		for j := 0; j < i; j++ {
 			other, _ := owned[j].Stat()
 			if other == nil || os.SameFile(info, other) {
 				return proxyLaunch{}, files, protocolError()
 			}
 		}
+		stage = "launch-fd-access"
 		mode := modes[i]
 		want := unix.O_WRONLY
 		if i == 0 {
@@ -182,38 +192,47 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 			return proxyLaunch{}, files, protocolError()
 		}
 	}
+	stage = "launch-length"
 	var length [4]byte
 	if _, e = io.ReadFull(c, length[:]); e != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-size"
 	size := binary.BigEndian.Uint32(length[:])
 	if size == 0 || size > maxLaunchBytes {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-payload"
 	payload := make([]byte, int(size))
 	if _, e = io.ReadFull(c, payload); e != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-envelope"
 	var extra [1]byte
 	n, e = c.Read(extra[:])
 	if n != 0 || e != io.EOF || !closedFields(payload, "Version", "Token", "Args", "Env", "Cwd") {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-token"
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&launch) != nil || decoder.Decode(new(any)) != io.EOF || launch.Version != 1 || subtle.ConstantTimeCompare([]byte(launch.Token), []byte(token)) != 1 {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-peer"
 	pid, parent, exe, e := currentPeer(c)
 	if e != nil || parent != b.NativeOwnerPID || exe != b.Binary || b.validate() != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-cwd"
 	if launch.Cwd != b.WorkDir {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-args"
 	if _, e = b.serverArgs(launch.Args); e != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
+	stage = "launch-environment"
 	if _, e = b.serverEnvironment(launch.Env); e != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
