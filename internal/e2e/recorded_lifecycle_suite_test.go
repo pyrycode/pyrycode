@@ -63,7 +63,6 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	t.Logf("lifecycle broker evidence=%s revision=%s source_binary_sha256=%s", retained, revision, sourceSHA)
-	t.Cleanup(func() { retainLifecycleWitnesses(t, home, retained, name, revision, sourceSHA) })
 	process := claudetape.PoolProcessConfig{Mode: mode, Scenario: name, Home: home, WorkDir: filepath.Join(home, "work"), Path: filepath.Join(dir, name+".json"), Claim: filepath.Join(home, "claim"), Finish: filepath.Join(home, "finish")}
 	switch mode {
 	case "capture":
@@ -120,6 +119,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	daemonSum := sha256.Sum256(daemonBytes)
+	t.Cleanup(func() {
+		retainLifecycleWitnesses(t, home, retained, name, revision, sourceSHA, hex.EncodeToString(daemonSum[:]))
+	})
 	if mode == "capture" {
 		info, err := buildinfo.ReadFile(daemon)
 		if err != nil {

@@ -13,7 +13,7 @@ import (
 
 // retainLifecycleWitnesses copies only closed control artifacts, never transcripts.
 // It runs after broker cleanup and before the disposable home is removed.
-func retainLifecycleWitnesses(t *testing.T, home, destination, scenario, revision, sourceSHA string) {
+func retainLifecycleWitnesses(t *testing.T, home, destination, scenario, revision, sourceSHA, daemonSHA string) {
 	t.Helper()
 	paths := []string{"receipt", "finish", "recording-endpoint.json"}
 	for _, role := range claudetape.LifecycleProfiles()[scenario].Roles {
@@ -23,9 +23,9 @@ func retainLifecycleWitnesses(t *testing.T, home, destination, scenario, revisio
 		}
 	}
 	manifest := struct {
-		Revision, SourceBinarySHA256 string
-		Present, Missing             []string
-	}{Revision: revision, SourceBinarySHA256: sourceSHA}
+		Revision, SourceBinarySHA256, DaemonSHA256 string
+		Present, Missing                           []string
+	}{Revision: revision, SourceBinarySHA256: sourceSHA, DaemonSHA256: daemonSHA}
 	for _, path := range paths {
 		if _, err := os.Lstat(filepath.Join(home, path)); os.IsNotExist(err) {
 			manifest.Missing = append(manifest.Missing, path)
@@ -60,5 +60,34 @@ func retainLifecycleWitnesses(t *testing.T, home, destination, scenario, revisio
 	}
 	if err := file.Close(); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestRetainLifecycleWitnesses(t *testing.T) {
+	home, destination := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, "recording-children"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := claudetape.PublishLifecycleControl(filepath.Join(home, "recording-children", "bound.action"), claudetape.LifecycleKill{PID: 42, Signal: "rotate-session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "recording-children", "bound.json"), []byte("private transcript"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	retainLifecycleWitnesses(t, home, destination, "clear-reset", "revision", "source", "daemon")
+	entries, err := os.ReadDir(destination)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("retained inventory: files=%d err=%v", len(entries), err)
+	}
+	var action claudetape.LifecycleKill
+	if err := claudetape.ReadLifecycleControl(filepath.Join(destination, "recording-children-bound.action"), 16384, &action); err != nil || action.PID != 42 {
+		t.Fatal("original action missing", err)
+	}
+	var manifest struct {
+		Revision, SourceBinarySHA256, DaemonSHA256 string
+		Present, Missing                           []string
+	}
+	if err := claudetape.ReadLifecycleControl(filepath.Join(destination, "source-and-inventory.json"), 16384, &manifest); err != nil || manifest.DaemonSHA256 != "daemon" || len(manifest.Present) != 1 || len(manifest.Missing) == 0 {
+		t.Fatal("incomplete source/missing inventory", err)
 	}
 }
