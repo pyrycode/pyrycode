@@ -194,5 +194,26 @@
     "static_checks": {"passed": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3677-repair/pyry ./cmd/pyry"], "logs": ["/tmp/builder-3677-repair/vet.log", "/tmp/builder-3677-repair/e2e-vet.log", "/tmp/builder-3677-repair/realclaude-vet.log", "/tmp/builder-3677-repair/build.log"], "each_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
     "previous_investigation": "3ad252474069132d5cba62de808ce884e92c15b8752361ee9ab8689e1f87d6f2 executed zero diagnostics; not a running dependency. Adjacent sequence now executed locally through ordinary admission."
   },
+  "staticcheck_rework": {
+    "failed_revision": "009327342edc2324782f0c62acfa481abe9715bb",
+    "passed_revision": "f3512069a0f77314997a5f9c29c422191c5bf75f",
+    "change": "Remove the overwritten initial clock read; each output substage retains its own timer. No behavioral or validation changes.",
+    "conditions": "Linux Go 1.26.9 amd64 CGO=1; fresh replay process and per-root homes; existing /home/agent/.cache/go-build retained without purge. Loadavg before checks 7.88/5.72/6.59; per-output host contention unknown. Replay acquired managed admission after 151 s behind the affected package. Historical cold state/load remain unknown.",
+    "report_root": "/tmp/builder-3677-staticcheck-rework-20261020",
+    "commands": {"staticcheck": "make staticcheck", "package": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape", "replay": "PYRY_CLAUDE_TAPE_MODE=replay PYRY_CLAUDE_TAPE_SCENARIOS='[\"fallback-suggestion\",\"composer-stop\"]' PYRY_CLAUDE_TAPE_EVIDENCE=/tmp/builder-3677-staticcheck-rework-20261020/replay python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e", "vet": "go vet ./...", "build": "go build -o /tmp/builder-3677-staticcheck-rework-20261020/pyry ./cmd/pyry"},
+    "staticcheck_before": {"report": "staticcheck-before.txt", "sha256": "d41fe109dc300d3f6a21df8b7bec1aaf48129b1c98ec8b024f4047a5a221a4db", "exit": 2, "findings": ["SA4006", "SA4017"], "format": "exact local stdout/stderr transcription with command and revision"},
+    "staticcheck_after": {"report": "staticcheck-after.log", "sha256": "c8e9928c03a1c6d4b7dee7e24a234475d71225f9162769d960e05fdfd483f661", "exit": 0},
+    "package": {"report": "controls.jsonl", "sha256": "ec12eacc903266abfd9a233558b0edfb9440552a01578768dcef5f241034f1a2", "counts": [1052,1052,0,0], "leaves": [948,948,0,0], "scheduling": [9,9,0,0], "privacy": [7,7,0,0], "composer_cancellation": [13,13,0,0], "composer_ownership": [7,7,0,0]},
+    "replay": {"report": "replay.jsonl", "sha256": "be625ce400de7270a0c2154b7cbed6ecbab70d165ec978dbe7c91482978492d6", "counts": [3,3,0,0], "sequence": ["fallback-suggestion", "composer-stop"], "original_roots": [2,2,0,0], "final_worker_and_artifact_audits": "passed"},
+    "original_root_reports": {"replay/composer-stop-replay.jsonl": "98e3204be90d6a5936aad04b87a8fadcdff6bf83cc1ee08438a251ab04573e13", "replay/fallback-suggestion-replay.jsonl": "fe4f9581a1bbc3fe701b0548b1f0962b80d0ce9e710649384ce31d73172badd8"},
+    "helper_sha256": "615f054cb5a0f26fc8525d0d7f30107157f8a3fd90b1097afc8f1a27ae5d50e5",
+    "daemon_sha256": "d56410f5f135f098d8bdeb757ed43f9289ef1928846546276584d2f296651660",
+    "fixtures": "Both fixture hashes match preparation_repair.fixture_sha256; no fixture bytes changed.",
+    "composer_artifact_hashes": {"replay/composer-stop-broker/source-and-inventory.json": "d2c70d97276d2b2bbb6d06f48ea941956d0a7331e1b0e6954f949c0c6770e0fa", "replay/composer-stop-broker/recording-children-bootstrap.receipt": "76a395deb7d2096b124cbfbe0013745cabd4e36ecf1fecefcde928bc5e513278", "replay/composer-stop-launch-audit.json": "1593143456c523dd72be3adf97e1d864a0c6340625117f4a6bc09dfcf3f44df6", "replay/composer-stop-broker/bootstrap.diagnostic.json": "8b00f09f796f9898d6f8bbb607ac9f48e6f191490afa35dfd0953c1601fb1280"},
+    "composer_audit": {"invalid": false, "waits_known": true, "registrations_known": true, "launches_registrations_waits": [0,0,0]},
+    "composer_output68": [68,3,34330542,364059,4936397,30298136,0,54523,64870288,38075000],
+    "other_static_checks": {"passed": ["go vet ./...", "go build ./cmd/pyry"], "reports": ["vet.log", "build.log"], "each_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    "acceptance": "Builder checks passed. Complete accepted dispatcher gate and independent review remain pending; no new historical attribution."
+  },
   "pending": ["independent verifier review", "dispatcher complete-suite acceptance", "documentation-stage handoff"]
 }

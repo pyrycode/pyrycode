@@ -271,3 +271,7 @@ no new test or independent behavior is needed. Security verdict remains PASS:
 all validation, diagnostic bounds and trust boundaries are unchanged.
 Run staticcheck, the affected race package and adjacent replay, vet and build.
 Complete accepted gate execution remains pending with the dispatcher.
+
+At `f3512069`, staticcheck, vet and build passed; affected race tests passed
+1052/1052 events, and the adjacent replay passed 3/3 outer events and 2/2
+original roots with final audits, zero failures/skips. The manifest retains hashes.
