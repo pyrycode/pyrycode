@@ -18,8 +18,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 )
 
-// The standard live root keeps its original daemon, settings, 5-second idle
-// timer and fallback. Recording adds only private launch/Wait observations.
+// The standard live root keeps its original daemon, settings, timers
+// and fallback. Recording adds only private launch/Wait observations.
 func lifecycleRecordingWorkerDaemon(t *testing.T, home string, pid int, stderr *lockedBuffer) {
 	t.Helper()
 	c, ok := lifecycleRecordingCurrent(t)

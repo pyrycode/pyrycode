@@ -311,10 +311,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if e = write(originals[3], append(raw, '\n')); e != nil {
 				return fail
 			}
+			recordTimelineInput(normalized)
 			if e := observeCompletion("stdin", normalized); e != nil {
 				return e
 			}
-			recordTimelineInput(normalized)
 			if c.OnInput != nil {
 				if e := c.OnInput(normalized); e != nil {
 					return e
@@ -340,9 +340,6 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := write(target, append(raw, '\n')); err != nil {
 			return err
 		}
-		if err := observeCompletion(direction, normalized); err != nil {
-			return err
-		}
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
 			if tape.Timeline.Kind == lifecycleInputTimelineKind {
@@ -354,6 +351,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		if direction == "stdin" {
 			recordTimelineInput(normalized)
+		}
+		if err := observeCompletion(direction, normalized); err != nil {
+			return err
 		}
 		if direction == "stdin" && c.OnInput != nil {
 			return c.OnInput(normalized)
