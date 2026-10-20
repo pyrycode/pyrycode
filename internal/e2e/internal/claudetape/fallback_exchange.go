@@ -114,8 +114,10 @@ func FallbackExchanges(tape *Tape) (map[int]FallbackExchange, error) {
 }
 
 // These byte limits mirror cmd/pyry's replyExchangePrefix/Assistant policy.
-// The original root's dependency fingerprint must include those functions when
-// a worker profile is promoted. Invalid UTF-8 is never a valid source edge.
+// Source review and fresh capture must check those production functions when
+// promoting a worker profile. Root inventory fingerprints cover realclaude
+// helpers; the literal actual worker input proves observable policy agreement.
+// Invalid UTF-8 is never a valid source edge.
 func fallbackHead(text string, n int) string {
 	if !utf8.ValidString(text) {
 		return ""
