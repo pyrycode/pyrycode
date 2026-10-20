@@ -352,9 +352,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		emit := func(extra time.Time) error {
 			var err error
-			work := time.Now()
 			if c.BeforeOutput != nil {
-				work = time.Now()
+				work := time.Now()
 				err := c.BeforeOutput(restored)
 				outputWork[1] = time.Since(work).Nanoseconds()
 				if err != nil {
@@ -362,14 +361,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				}
 			}
 			if c.ReplayOutput != nil {
-				work = time.Now()
+				work := time.Now()
 				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
 				outputWork[2] = time.Since(work).Nanoseconds()
 				if err != nil {
 					return err
 				}
 			}
-			work = time.Now()
+			work := time.Now()
 			err = forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
 			outputWork[3] = time.Since(work).Nanoseconds()
 			return err

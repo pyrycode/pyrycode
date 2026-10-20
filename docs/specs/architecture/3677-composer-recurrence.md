@@ -259,3 +259,15 @@ unknown because the original receipt predates substage diagnostics. Documentatio
 must record restoration before waiting, unchanged physical delivery/deadline
 checks and this attribution limit. Independent review and full acceptance remain
 pending; macOS is outside this ticket's verification scope.
+
+### 2026-10-20 — verifier finding 1: unused timer initialization
+
+Reproduced SA4006 and SA4017 with `make staticcheck` on `00932734`.
+Remove the overwritten initial clock read in `RunLifecycleBroker`'s `emit`;
+each observer, projection and actual-forward timer starts in its own scope.
+This changes no scheduling, failure branch, identity or completion contract.
+Existing timing/regression and physical/ownership controls provide coverage;
+no new test or independent behavior is needed. Security verdict remains PASS:
+all validation, diagnostic bounds and trust boundaries are unchanged.
+Run staticcheck, the affected race package and adjacent replay, vet and build.
+Complete accepted gate execution remains pending with the dispatcher.
