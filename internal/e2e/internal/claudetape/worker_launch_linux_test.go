@@ -68,8 +68,10 @@ func testFallbackCancelledLaunchBoundary(t *testing.T, scenario string) {
 		}
 		return err
 	}
-	if err := read(); err == nil || !strings.Contains(err.Error(), "total-wait-cardinality") {
-		t.Fatal("Wait alone authorized a launch", err)
+	withoutAudit := read()
+	t.Logf("scenario=%s launches=%+v registered=0 completed_Waits=%+v unaudited_inventory=%v", scenario, audit.launches, observation, withoutAudit)
+	if withoutAudit == nil || !strings.Contains(withoutAudit.Error(), "total-wait-cardinality") {
+		t.Fatal("Wait alone authorized a launch", withoutAudit)
 	}
 	if err := read(audit); err != nil {
 		t.Fatalf("proved cancelled launch rejected: %v", err)

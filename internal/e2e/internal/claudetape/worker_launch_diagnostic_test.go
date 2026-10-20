@@ -1,6 +1,7 @@
 package claudetape
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -43,7 +44,8 @@ func TestFallbackLaunchDiagnosticRegistration(t *testing.T) {
 				RegisteredOwners   []int
 				WaitsKnown         bool
 			}
-			if ReadLifecycleControl(destination, 16384, &saved) != nil {
+			raw, err := runnerPrivateRead(destination, 16384)
+			if err != nil || json.Unmarshal(raw, &saved) != nil {
 				t.Fatal("diagnostic")
 			}
 			want := []int{}
@@ -53,7 +55,6 @@ func TestFallbackLaunchDiagnosticRegistration(t *testing.T) {
 			if saved.RegistrationsKnown != (kind == "absent" || kind == "registered") || !reflect.DeepEqual(saved.RegisteredOwners, want) || saved.WaitsKnown {
 				t.Fatalf("unknown and absent conflated: %+v", saved)
 			}
-			raw, err := os.ReadFile(destination)
 			info, statErr := os.Stat(destination)
 			if err != nil || statErr != nil || info.Mode().Perm() != 0600 || strings.Contains(string(raw), "private-input-must-not-leak") {
 				t.Fatal("diagnostic exposed job content or permissions")
