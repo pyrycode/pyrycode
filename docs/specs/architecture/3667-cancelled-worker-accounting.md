@@ -133,3 +133,12 @@ retain the strict reviewed-worker and cleanup guarantees.
   completed production group-cancellation SIGKILL Wait; no jobs/native exchanges
   existed. Evidence: `/tmp/builder-3667/observed-wait-red/`. This resolves the open
   question and establishes the boundary before enabling final accounting.
+- 2026-10-20: implementation `65382c1d` passed the original race-enabled replay
+  with 2/2 outer test events and 1/1 original daemon root, zero failures/skips.
+  Both actual launches remained registered as absent and joined exactly once to
+  real completed group-cancellation Waits; native inventory stayed exactly empty.
+  A prior same-source prefix failure remains failed and is tracked independently
+  in #3668 (Backlog, priority:low). Affected controls passed 77/77 events (73 leaf
+  tests), with vet, tagged vet and build green. Committed evidence record:
+  `internal/e2e/testdata/3667-cancelled-worker-evidence.json`. Full verification and
+  the documentation handoff remain pending with their owning stages.
