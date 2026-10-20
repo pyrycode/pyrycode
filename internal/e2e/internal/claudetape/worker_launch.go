@@ -66,7 +66,7 @@ func (a *FallbackLaunchAudit) Stop() {
 
 func (a *FallbackLaunchAudit) cancelled(home, scenario, revision, sourceSHA string, parent, daemon int, observations []FallbackWorkerObservation) (map[int]bool, error) {
 	a.Stop()
-	if a.home != home || a.scenario != scenario || a.revision != revision || a.sourceSHA != sourceSHA || a.parent != parent || scenario != "session-resume" || a.invalid || len(a.launches) > LifecycleWorkerLimit(scenario) {
+	if a.home != home || a.scenario != scenario || a.revision != revision || a.sourceSHA != sourceSHA || a.parent != parent || (scenario != "session-resume" && scenario != "composer-stop") || a.invalid || len(a.launches) > LifecycleWorkerLimit(scenario) {
 		return nil, os.ErrInvalid
 	}
 	joined := map[int]bool{}

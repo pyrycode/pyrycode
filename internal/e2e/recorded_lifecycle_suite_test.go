@@ -515,13 +515,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			t.Fatal(err)
 		}
 	}
-	// Composer Stop observations remain diagnostic until its cancellation boundary
-	// is independently validated by the final inventory.
-	inventoryAudit := launchAudit
-	if name == "composer-stop" {
-		inventoryAudit = nil
-	}
-	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes, inventoryAudit)
+	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes, launchAudit)
 	if err != nil {
 		destination := filepath.Join(evidenceDir, name+"-invalid-worker-diagnostic.json")
 		if diagnosticErr := claudetape.SaveLifecycleWorkerDiagnostic(home, name, destination, tapes); diagnosticErr == nil {
