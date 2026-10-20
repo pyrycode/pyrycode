@@ -82,6 +82,10 @@ func conversationCompletionScenario(scenario string) (string, string, bool) {
 // identically in capture and replay. The final audit re-derives the receipt from
 // the sealed tape and pins its bytes before and after original cleanup.
 func NewConversationCompletionObserver(c LifecycleBrokerConfig, template *Tape) func(string, []byte) error {
+	return newConversationCompletionObserver(c, template, completedConversationExchange)
+}
+
+func newConversationCompletionObserver(c LifecycleBrokerConfig, template *Tape, derive func(*Tape) (FallbackExchange, error)) func(string, []byte) error {
 	_, role, enabled := conversationCompletionScenario(c.Scenario)
 	if !enabled {
 		return func(string, []byte) error { return nil }
@@ -94,7 +98,13 @@ func NewConversationCompletionObserver(c LifecycleBrokerConfig, template *Tape) 
 		if published {
 			return nil
 		}
-		source, err := completedConversationExchange(&observed)
+		// Only a native result can complete the exchange. Full-prefix validation
+		// between streaming frames would consume their absolute output schedule.
+		var header struct{ Type string }
+		if direction != "stdout" || json.Unmarshal(raw, &header) != nil || header.Type != "result" {
+			return nil
+		}
+		source, err := derive(&observed)
 		if err != nil {
 			return nil
 		}
