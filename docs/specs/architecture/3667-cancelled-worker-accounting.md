@@ -126,3 +126,10 @@ retain the strict reviewed-worker and cleanup guarantees.
   this preserves evidence and does not change the failed verdict. Bind the audit
   capability to its source revision/hash, outer parent and actual daemon, and
   retain unknown or previously observed registration as non-absent.
+- 2026-10-20: source `17aefe75` passed the unchanged original root (1 executed,
+  1 passed, no skips), then reproduced `total-wait-cardinality`. The private
+  launch audit independently observed PIDs 56648 and 56718 under daemon 56518,
+  with registration absent and distinct kernel starts. Both had exactly one
+  completed production group-cancellation SIGKILL Wait; no jobs/native exchanges
+  existed. Evidence: `/tmp/builder-3667/observed-wait-red/`. This resolves the open
+  question and establishes the boundary before enabling final accounting.

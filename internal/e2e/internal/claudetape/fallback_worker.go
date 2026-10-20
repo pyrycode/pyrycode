@@ -662,8 +662,9 @@ func ValidateLifecycleWorkers(scenario string, roles map[string]*LifecycleTape, 
 }
 
 // ReadLifecycleWorkers closes the complete private attempt inventory after the
-// original daemon cleanup. Every attempt must have an actual broker receipt and
-// matching production Wait/status observation; unknown or partial attempts fail.
+// original daemon cleanup. Native attempts require a broker receipt and matching
+// production Wait. An independent launch audit may additionally prove a cancelled
+// launch without a registered native exchange; unknown or partial attempts fail.
 func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, parent int, roles map[string]*LifecycleTape, audits ...*FallbackLaunchAudit) (workers []LifecycleWorker, resultErr error) {
 	stage := "private-root"
 	defer func() {
@@ -696,6 +697,17 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 	var daemon struct{ PID int }
 	if ReadLifecycleControl(filepath.Join(home, "recording-worker-daemon.json"), 16384, &daemon) != nil || daemon.PID <= 1 {
 		return nil, fail
+	}
+	stage = "current-launch-audit"
+	cancelled := map[int]bool{}
+	if len(audits) > 1 {
+		return nil, fail
+	}
+	if len(audits) == 1 && audits[0] != nil {
+		cancelled, err = audits[0].cancelled(home, scenario, revision, sourceSHA, parent, daemon.PID, observations)
+		if err != nil {
+			return nil, fail
+		}
 	}
 	workers = []LifecycleWorker{}
 	expected := map[string]bool{}
@@ -789,7 +801,7 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 		}
 	}
 	stage = "total-wait-cardinality"
-	if len(observations) != len(workers) {
+	if len(observations) != len(workers)+len(cancelled) || len(workers)+len(cancelled) > LifecycleWorkerLimit(scenario) {
 		return nil, fail
 	}
 	stage = "closed-private-inventory"

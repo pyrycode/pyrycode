@@ -108,11 +108,12 @@ func (a *FallbackLaunchAudit) Save(destination string) error {
 	var observations []FallbackWorkerObservation
 	err := ReadLifecycleControl(filepath.Join(a.home, "recording-worker-observations.json"), 16384, &observations)
 	raw, e := json.Marshal(struct {
-		Launches   map[int]workerLaunch
-		Invalid    bool
-		WaitsKnown bool
-		Waits      []FallbackWorkerObservation
-	}{a.launches, a.invalid, err == nil, observations})
+		Revision, SourceBinarySHA256 string
+		Launches                     map[int]workerLaunch
+		Invalid                      bool
+		WaitsKnown                   bool
+		Waits                        []FallbackWorkerObservation
+	}{a.revision, a.sourceSHA, a.launches, a.invalid, err == nil, observations})
 	if e != nil || len(raw) > 16384 {
 		return os.ErrInvalid
 	}
