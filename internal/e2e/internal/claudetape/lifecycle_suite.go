@@ -392,6 +392,17 @@ func sameLifecycleProviderContract(a, b *LifecycleSuite, expected []string) erro
 				return err
 			}
 		}
+		if PhysicalFamily(a.Scenario) != "" {
+			var err error
+			left, err = physicalOutgoingContract(a.Scenario, left)
+			if err != nil {
+				return err
+			}
+			right, err = physicalOutgoingContract(b.Scenario, right)
+			if err != nil {
+				return err
+			}
+		}
 		if a.Roles[role].End != b.Roles[role].End || SameContract(left, right) != nil {
 			return fail
 		}

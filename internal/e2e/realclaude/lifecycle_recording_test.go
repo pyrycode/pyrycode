@@ -373,7 +373,7 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	prefix := filepath.Join(c.Process.Home, "recording-children", job.Role)
-	if daemonRecordingWrite(prefix+".broker-pid", os.Getpid()) != nil {
+	if claudetape.PublishLifecycleControl(prefix+".broker-pid", os.Getpid()) != nil {
 		os.Exit(2)
 	}
 	b, e := claudetape.NewLifecycleDaemonBinding(job.Args, c.Process.Home, job.WorkDir, job.Daemon, job.Socket, c.Process.Scenario, job.Role)

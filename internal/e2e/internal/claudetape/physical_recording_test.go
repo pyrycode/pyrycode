@@ -221,3 +221,53 @@ func TestPhysicalFailedCaptureRejectsOversizePrivateAndWrongDestination(t *testi
 		})
 	}
 }
+
+func TestPhysicalFreshComparisonBindsOnlyValidatedStopSelector(t *testing.T) {
+	for _, mutation := range []string{"fresh-task-id", "unjoined-selector", "missing-join", "changed-user", "extra-selector"} {
+		t.Run(mutation, func(t *testing.T) {
+			_, left := physicalRecordingControl(t)
+			_, right := physicalRecordingControl(t)
+			base := lifecycleSuiteControl().Roles["bootstrap"].Tape
+			for _, tape := range []*Tape{left, right} {
+				tape.Version = base.Version
+				tape.Producer = base.Producer
+				tape.Args = base.Args
+				tape.Files = base.Files
+			}
+			for i := range right.Frames {
+				right.Frames[i].Data = bytes.ReplaceAll(right.Frames[i].Data, []byte(`"task"`), []byte(`"current-fresh-task"`))
+			}
+			switch mutation {
+			case "unjoined-selector":
+				right.Frames[4].Data = bytes.ReplaceAll(right.Frames[4].Data, []byte(`"current-fresh-task"`), []byte(`"foreign"`))
+			case "missing-join":
+				right.Frames = append(right.Frames[:3], right.Frames[4:]...)
+			case "changed-user":
+				right.Frames[0].Data = bytes.ReplaceAll(right.Frames[0].Data, []byte("Run exactly"), []byte("Please run exactly"))
+			case "extra-selector":
+				var value map[string]any
+				json.Unmarshal(right.Frames[4].Data, &value)
+				value["request"].(map[string]any)["pid"] = 123
+				right.Frames[4].Data, _ = json.Marshal(value)
+			}
+			before, _ := json.Marshal(right)
+			a, errA := physicalOutgoingContract("stop-background-task", left)
+			b, errB := physicalOutgoingContract("stop-background-task", right)
+			success := errA == nil && errB == nil && SameContract(a, b) == nil
+			if success != (mutation == "fresh-task-id") {
+				t.Fatalf("physical fresh comparison %s: success=%t left=%v right=%v", mutation, success, errA, errB)
+			}
+			after, _ := json.Marshal(right)
+			if !bytes.Equal(before, after) {
+				t.Fatal("comparison mutated the stored native tape")
+			}
+			if errB == nil {
+				for i, frame := range right.Frames {
+					if frame.Direction == "stdout" && !bytes.Equal(frame.Data, b.Frames[i].Data) {
+						t.Fatal("comparison rewrote native producer frame")
+					}
+				}
+			}
+		})
+	}
+}

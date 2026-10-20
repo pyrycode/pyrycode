@@ -4,9 +4,11 @@ package realclaude
 
 import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Declaration follows the original constructor and precedes the real phone
@@ -29,14 +31,30 @@ func declarePhysicalRecording(t *testing.T, home, kind string, sequence int, use
 		t.Fatal(err)
 	}
 	prefix := filepath.Join(home, "recording-children", "bootstrap")
+	// Phone handshake can finish before the bootstrap wrapper enters its
+	// broker. The immutable broker PID is published only after the outer owner
+	// has validated the complete job and kernel peer. Wait for that causal
+	// publication, not for a provider response or a rig result witness.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		_, err := os.Lstat(prefix + ".broker-pid")
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) || !time.Now().Before(deadline) {
+			t.Fatal("physical producer readiness timed out")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var broker int
+	if claudetape.ReadLifecycleControl(prefix+".broker-pid", 16384, &broker) != nil {
+		t.Fatal("physical broker readiness is malformed")
+	}
 	job, err := readLifecycleJob(prefix + ".job")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var broker int
-	if claudetape.ReadLifecycleControl(prefix+".broker-pid", 16384, &broker) != nil {
-		t.Fatal("physical broker not ready")
-	}
+
 	record := claudetape.PhysicalDeclarationRecord{Version: 1, Revision: poolRecordedRevision, SourceBinarySHA256: c.SourceBinarySHA256, OwnerPID: job.Config.OwnerPID, BrokerPID: broker, Declaration: claudetape.PhysicalOperationDeclaration{Version: 1, UserSequence: sequence, Owner: binding, Spec: spec, UserText: user}}
 	if claudetape.ValidatePhysicalDeclarationRecord(record, binding, kind, poolRecordedRevision, c.SourceBinarySHA256, job.Config.OwnerPID, broker, sequence) != nil || claudetape.PublishLifecycleControl(claudetape.PhysicalDeclarationPath(prefix, sequence), record) != nil {
 		t.Fatal("physical declaration changed or repeated")

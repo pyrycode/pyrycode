@@ -1002,3 +1002,9 @@ Finite fallback attempts retain their complete literal worker IO and actual stat
 Only the exact declared original paths in the two typed source fields can bridge
 worker HOME aliases to main HOME aliases; a different path, prefix, suffix or cwd
 alias fails. Full native main-source validation precedes that comparison.
+
+For fresh comparison, the exact stop-control `request.task_id` alone is bound to
+its validated native task/tool join in a disposable comparison copy. Native task
+IDs may vary between captures. Saved replay still requires its literal captured
+selector; user/tool text, native frames, persisted tapes and other selectors are
+never changed by this comparison binding.

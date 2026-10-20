@@ -439,3 +439,71 @@ func PublishPhysicalFailedCapture(path string, value PhysicalFailedCapture) erro
 	}
 	return publishClosedFile(filepath.Dir(path), filepath.Base(path), raw)
 }
+
+// physicalOutgoingContract binds only the targeted stop selector in a comparison
+// copy to its fully validated native task/tool join. Fresh native task IDs vary;
+// replay still consumes the original saved selector literally. No provider frame,
+// tool input, user text or stored tape is rewritten by this comparison helper.
+func physicalOutgoingContract(scenario string, tape *Tape) (*Tape, error) {
+	contract, err := physicalContractFromTape(scenario, tape)
+	if err != nil {
+		return nil, err
+	}
+	facts, err := physicalContractFacts(scenario, contract, tape)
+	if err != nil {
+		return nil, err
+	}
+	if PhysicalFamily(scenario) != "stop-hold" {
+		return tape, nil
+	}
+	task := ""
+	for _, fact := range facts {
+		if fact.Kind == "native-task-joined" {
+			if task != "" {
+				return nil, errors.New("extra native physical task join")
+			}
+			task = fact.TaskID
+		}
+	}
+	if task == "" {
+		return nil, errors.New("missing native physical task join")
+	}
+	raw, err := json.Marshal(tape)
+	if err != nil {
+		return nil, err
+	}
+	var copy Tape
+	if json.Unmarshal(raw, &copy) != nil {
+		return nil, errors.New("invalid physical comparison copy")
+	}
+	selectors := 0
+	for i, frame := range copy.Frames {
+		if frame.Direction != "stdin" {
+			continue
+		}
+		value, err := object(frame.Data)
+		if err != nil {
+			return nil, err
+		}
+		if value["type"] != "control_request" {
+			continue
+		}
+		request, ok := value["request"].(map[string]any)
+		if !ok || request["subtype"] != "stop_task" {
+			continue
+		}
+		if request["task_id"] != task {
+			return nil, errors.New("physical stop selector lacks native source join")
+		}
+		request["task_id"] = "${PHYSICAL_TASK:stop-hold}"
+		copy.Frames[i].Data, err = json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		selectors++
+	}
+	if selectors != 1 {
+		return nil, errors.New("missing original targeted stop control")
+	}
+	return &copy, nil
+}
