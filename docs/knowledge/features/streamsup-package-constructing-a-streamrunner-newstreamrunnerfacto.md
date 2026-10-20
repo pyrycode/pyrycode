@@ -12,8 +12,22 @@ The returned closure maps `cfg` through `mapStreamsupConfig` and shapes its args
 with `withApprovalArgs`, passing `cfg.PermissionMode`, `cfg.OperatorBypass` and
 `approval.stdio`. `newStreamSessionTag(cfg.SessionID)` supplies the live identity
 shared by both fan-in lanes and the parser's holds. `newSessionParser` receives
-the decorated session sink, and its parser becomes `scfg.Stdout`.
-`scfg.OnChildExit` retires pending stdio requests and retained tasks before reporting
+the decorated session sink. The factory constructs one `streamRunnerWatchdog`
+with a `streamsup.Watchdog` and sets
+`scfg.Stdout = io.MultiWriter(watchdog.detector.Writer(), parser)` so tracking
+precedes parsing on the same child stdout. It explicitly retains
+`scfg.ControlParser = parser`: wrapping stdout hides the concrete parser that
+runner construction otherwise discovers, losing automatic control queries and
+child-exit parser cleanup unless this field is preserved.
+`OnStall` sends `turnevent.Stall{}` through the decorated parser sink and live tag,
+so retained readings and interactive publication belong to the producing
+conversation across active-cursor changes and session rotation. The pending
+approval callback reads `tag.ID()` at firing and resolves that conversation via
+`streamPendingPermission`/`approvalParkedReport`; its content-free diagnostic
+annotates the onset without suppressing it, changing the wire payload or
+confirming an OS-permission cause. Production leaves Idle zero for the
+240-second default; `approval.watchdogIdle` is a private fixture seam.
+`scfg.OnChildExit` resets watchdog debt, then retires pending stdio requests and retained tasks before reporting
 the exit through `sink.exitForSessionTag(tag)`; `scfg.OnSessionRotate = tag.Rotate` — see [Session rotation
 notification](streamsup-package-session-rotation-notification-onsessionrotate.md) for why the tag is
 minted here, ahead of both halves, rather than threaded through either signature; `scfg.OnCrashLoop =
@@ -22,7 +36,19 @@ notification](streamsup-package-crash-episode-notification-oncrashloop.md); `scf
 approval.account` (#2824 — nil unless this instance has a configured Claude account source; see [Claude
 account source](claude-account-source.md)); `streamsup.New(scfg)`;
 on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
-an adapter retaining the runner, parser holds, settings installer and wrap-up capture.
+an adapter retaining the runner, watchdog, parser holds, settings installer and wrap-up capture.
+
+The watchdog and tracker survive child respawns and sequential Run calls.
+`streamRunner.Run` starts polling and cancels/joins it before return; a later Run
+can start a fresh poller after eviction/reactivation. `WriteUserTurn` uses
+`Watchdog.TrackUserTurn` to arm only after successful delivery while preserving
+owed-state stdout events observed during that delivery. The adapter's mutex
+orders this transaction against exit reset, preventing a predecessor write from
+arming an idle replacement; stdin teardown precedes reset so blocked writes can
+finish. No tracker lock spans stdin I/O. Detection emits without restarting the
+child or clearing busy/delivery state. See the
+[watchdog lifecycle and ordering contract](streamsup-package-idle-stall-watchdog-receive-side-emit-not-kill.md)
+for the response-before-arming trap and deterministic regression controls.
 
 **`withApprovalArgs` (#1168, extended #2043, #2065, #3515)** selects the interactive
 child's host-response transport using stored posture, operator bypass and
