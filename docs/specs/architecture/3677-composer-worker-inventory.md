@@ -110,3 +110,26 @@ does not establish new live-provider behavior.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+### 2026-10-20 — controlled boundary versus historical attribution
+
+The synchronized Composer Stop control at `f9aefcc3` failed: its real current
+owned helper was observed before registration, then group-killed and reaped;
+the unaudited inventory rejected one Wait versus zero registered workers, and
+the supplied independent audit rejected at the scenario guard. This demonstrates
+the cancelled-before-registration accounting boundary with actual process evidence.
+Two fresh ordinary replays (`f9aefcc3`, `9af02f24`) passed their original roots
+and recorded zero launches, zero registrations and zero Waits. These passes do
+not establish the exact cause of the historical gate occurrence, whose counts
+are unavailable. The implementation will admit only the independently proved
+boundary; every unmatched or unknown observation continues to fail. No helper
+delay, new replay attempt, timeout change or fixture edit is required.
+
+Historical attribution remains open and will use the managed investigation
+request with the retained refinement bundle and current diagnostic reports.
+Request a Composer Stop replay with its original preceding scenario sequence
+under gate contention, rather than executing a complete suite in this builder.
+The source/worker repair and focused rejection proofs remain builder work;
+wider diagnostic execution and complete-suite acceptance remain pending handoff.
