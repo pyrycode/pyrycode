@@ -303,23 +303,34 @@ func closedFields(raw []byte, names ...string) bool {
 // connectedUnixStream validates the actual received descriptor, not sender
 // metadata. Kernel peer/source authentication remains mandatory independently.
 func connectedUnixStream(f *os.File) error {
-	fd := int(f.Fd())
-	kind, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
-	if err != nil || kind != unix.SOCK_STREAM {
-		return protocolError()
-	}
-	local, err := unix.Getsockname(fd)
+	raw, err := f.SyscallConn()
 	if err != nil {
 		return protocolError()
 	}
-	if _, ok := local.(*unix.SockaddrUnix); !ok {
-		return protocolError()
-	}
-	peer, err := unix.Getpeername(fd)
-	if err != nil {
-		return protocolError()
-	}
-	if _, ok := peer.(*unix.SockaddrUnix); !ok {
+	valid := false
+	err = raw.Control(func(descriptor uintptr) {
+		fd := int(descriptor)
+		kind, e := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
+		if e != nil || kind != unix.SOCK_STREAM {
+			return
+		}
+		local, e := unix.Getsockname(fd)
+		if e != nil {
+			return
+		}
+		if _, ok := local.(*unix.SockaddrUnix); !ok {
+			return
+		}
+		peer, e := unix.Getpeername(fd)
+		if e != nil {
+			return
+		}
+		if _, ok := peer.(*unix.SockaddrUnix); !ok {
+			return
+		}
+		valid = true
+	})
+	if err != nil || !valid {
 		return protocolError()
 	}
 	return nil
