@@ -925,3 +925,13 @@ outside it. Final inventory joins the actual production Wait to the observer
 PID and separately requires both helper and group owner to be gone. Fixture PIDs
 are never signal targets. Complete native I/O, EOF, status and source-turn input
 remain strict, as do the original set and higher-revision explicit-null clear.
+
+Finite worker records keep the native child's actual `exec.Cmd.Wait` status in its
+immutable tape and separately owned receipt. The additive optional
+`production_wait` records only the proved case where that native child exited 0
+before daemon cleanup actually reaped its wrapper with SIGKILL and a logged group
+cancellation. Absence retains the original exact native/production status rule.
+Replay closes native output, withholds wrapper completion until the original
+daemon actually cancels the current owned group, then checks its real Wait.
+Native status, optional production Wait, worker counts and source identity all
+remain exact in fresh comparisons. Failed diagnostics never become fixtures.

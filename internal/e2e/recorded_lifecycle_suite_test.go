@@ -165,6 +165,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 	}
+	workerWaits := []*claudetape.FallbackProductionWait{}
 	workerLimit := claudetape.LifecycleWorkerLimit(name)
 	if workerLimit > 0 {
 		if os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
@@ -181,6 +182,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				t.Fatal(err)
 			}
 			for i, worker := range suite.Workers {
+				workerWaits = append(workerWaits, worker.ProductionWait)
 				path := strings.TrimSuffix(claudetape.FallbackWorkerJobPath(home, i+1), ".job") + ".json"
 				if worker.Tape.Save(path) != nil {
 					t.Fatal("cannot stage reviewed finite worker")
@@ -196,11 +198,12 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal("cannot prepare daemon recording wrapper")
 	}
 	config := struct {
+		WorkerWaits                              []*claudetape.FallbackProductionWait `json:",omitempty"`
 		BrokerParentPID                          int
 		Process                                  claudetape.PoolProcessConfig
 		Root, Receipt, Wrapper                   string
 		DaemonSHA256, Daemon, SourceBinarySHA256 string
-	}{os.Getpid(), process, profile.Root, filepath.Join(home, "receipt"), wrapper, hex.EncodeToString(daemonSum[:]), daemon, sourceSHA}
+	}{workerWaits, os.Getpid(), process, profile.Root, filepath.Join(home, "receipt"), wrapper, hex.EncodeToString(daemonSum[:]), daemon, sourceSHA}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -268,6 +271,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		workerServer, err = claudetape.NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), jobs, func(path string, peer int) (*exec.Cmd, error) {
 			var job claudetape.FallbackWorkerJob
 			if claudetape.ReadLifecycleControl(path, 16384, &job) != nil || claudetape.ValidateFallbackWorkerLaunch(job, path, peer, os.Getpid(), process, sourceSHA) != nil {
+				return nil, os.ErrInvalid
+			}
+			if claudetape.ValidateFallbackReplayWait(job, path, mode, home, workerWaits) != nil {
 				return nil, os.ErrInvalid
 			}
 			launchRaw, err := os.ReadFile(path)

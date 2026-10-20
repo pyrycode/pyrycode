@@ -95,6 +95,12 @@ func lifecycleRecordingFiniteWorker(c lifecycleRecordingConfig, args []string) b
 			fail()
 		}
 		job := claudetape.FallbackWorkerJob{Version: 1, OwnerPID: os.Getpid(), GroupPID: syscall.Getpgrp(), DaemonPID: daemon.PID, BrokerParentPID: c.BrokerParentPID, Scenario: c.Process.Scenario, Home: c.Process.Home, WorkDir: cwd, Claude: c.Process.Claude, Path: strings.TrimSuffix(path, ".job") + ".json", Abort: strings.TrimSuffix(path, ".job") + ".abort", SourceBinarySHA256: c.SourceBinarySHA256, Args: args, Producer: c.Process.Producer}
+		if c.Process.Mode == "replay" {
+			if i > len(c.WorkerWaits) {
+				fail()
+			}
+			job.ReplayWait = c.WorkerWaits[i-1]
+		}
 		if err := claudetape.PublishLifecycleControl(path, job); err == nil {
 			jobPath = path
 			break

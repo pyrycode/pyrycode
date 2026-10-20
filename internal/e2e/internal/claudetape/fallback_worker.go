@@ -40,7 +40,24 @@ type FallbackWorkerTape struct {
 	Status         FallbackWorkerStatus `json:"status"`
 }
 type FallbackWorkerStatus struct{ ExitCode, Signal int }
+
+// FallbackProductionWait preserves a cancellation of the production wrapper
+// after the separately owned native child has already exited successfully.
+// It never replaces the native tape or its independently owned receipt.
+type FallbackProductionWait struct {
+	Status      FallbackWorkerStatus `json:"status"`
+	GroupCancel bool                 `json:"group_cancel"`
+}
+
+func ValidateFallbackProductionWait(native FallbackWorkerStatus, wait *FallbackProductionWait) error {
+	if wait != nil && (native != (FallbackWorkerStatus{ExitCode: 0}) || wait.Status != (FallbackWorkerStatus{ExitCode: -1, Signal: int(syscall.SIGKILL)}) || !wait.GroupCancel) {
+		return errors.New("unsupported native/production wait relationship")
+	}
+	return nil
+}
+
 type FallbackWorkerJob struct {
+	ReplayWait                                                       *FallbackProductionWait `json:",omitempty"`
 	DaemonPID                                                        int
 	Version, OwnerPID, GroupPID, BrokerParentPID                     int
 	Scenario, Home, WorkDir, Claude, Path, Abort, SourceBinarySHA256 string
@@ -193,7 +210,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		}
 	}()
 	fail := errors.New("finite fallback broker failed")
-	if job.Version != 1 || job.OwnerPID <= 1 || !fallbackWorkerGroupShape(job) || job.BrokerParentPID != os.Getppid() || (mode != "capture" && mode != "replay") || fallbackWorkerArgs(job.Args) != nil {
+	if job.Version != 1 || job.OwnerPID <= 1 || !fallbackWorkerGroupShape(job) || job.BrokerParentPID != os.Getppid() || (mode != "capture" && mode != "replay") || ValidateFallbackProductionWait(FallbackWorkerStatus{ExitCode: 0}, job.ReplayWait) != nil || fallbackWorkerArgs(job.Args) != nil || mode == "capture" && job.ReplayWait != nil {
 		return fail
 	}
 	for fd := 3; fd <= 9; fd++ {
@@ -276,7 +293,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		}
 		tape, e := DecodeFallbackWorker(file)
 		file.Close()
-		if e != nil || !reflect.DeepEqual(tape.Args, job.Args) || tape.Input != normalized {
+		if e != nil || !reflect.DeepEqual(tape.Args, job.Args) || tape.Input != normalized || ValidateFallbackProductionWait(tape.Status, job.ReplayWait) != nil {
 			return fail
 		}
 		for _, frame := range tape.Frames {
@@ -291,9 +308,17 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		}
 		status = tape.Status
 		frames = tape.Frames
-		if status.Signal != 0 {
-			deadline := time.Now().Add(35 * time.Second)
-			for syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH {
+		// EOF is observable before the production wrapper completes. In particular,
+		// an observer can drain stdout before its child is cancelled by the daemon.
+		_ = output.Close()
+		_ = diagnostic.Close()
+		if status.Signal != 0 || job.ReplayWait != nil {
+			waitBudget := min(35*time.Second, budget)
+			deadline := time.Now().Add(waitBudget)
+			for syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(job.GroupPID, 0) != syscall.ESRCH {
+				if _, err := os.Lstat(job.Abort); err == nil {
+					return fail
+				}
 				if time.Now().After(deadline) {
 					return fail
 				}
@@ -461,11 +486,11 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 	_ = statusPipe.SetWriteDeadline(time.Now().Add(time.Second))
 	_, writeErr := statusPipe.Write(statusRaw)
 	if writeErr != nil {
-		if status.Signal != int(syscall.SIGKILL) {
+		if status.Signal != int(syscall.SIGKILL) && status != (FallbackWorkerStatus{ExitCode: 0}) {
 			return fail
 		}
 		deadline := time.Now().Add(time.Second)
-		for syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH {
+		for syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(job.GroupPID, 0) != syscall.ESRCH {
 			if time.Now().After(deadline) {
 				return fail
 			}
@@ -526,6 +551,12 @@ func ConnectFallbackWorker(socket, job string, env []string) (FallbackWorkerStat
 	if e != nil || n != len(job) || oob != len(rights) || c.CloseWrite() != nil {
 		return zero, fail
 	}
+	// This API runs only inside the dedicated finite helper. The broker now owns
+	// duplicated capabilities; retaining the helper's original stdout/stderr would
+	// hide native EOF until wrapper exit and deadlock an observing parent at Wait.
+	_ = os.Stdin.Close()
+	_ = os.Stdout.Close()
+	_ = os.Stderr.Close()
 	for _, f := range []*os.File{unusedW1, envR, unusedR2, statusW} {
 		_ = f.Close()
 	}
@@ -573,7 +604,7 @@ func ValidateFallbackWorkerLaunch(job FallbackWorkerJob, path string, peer, pare
 	for i := 1; i <= LifecycleWorkerLimit(base.Scenario); i++ {
 		validPath = validPath || path == FallbackWorkerJobPath(base.Home, i)
 	}
-	if !validPath || job.Version != 1 || job.OwnerPID != peer || peer <= 1 || !fallbackWorkerGroupShape(job) || job.BrokerParentPID != parent || job.Scenario != base.Scenario || job.Home != base.Home || job.Claude != base.Claude || job.Path != strings.TrimSuffix(path, ".job")+".json" || job.Abort != strings.TrimSuffix(path, ".job")+".abort" || job.SourceBinarySHA256 != sourceSHA || !reflect.DeepEqual(job.Producer, base.Producer) || fallbackWorkerArgs(job.Args) != nil {
+	if !validPath || job.Version != 1 || job.OwnerPID != peer || peer <= 1 || !fallbackWorkerGroupShape(job) || job.BrokerParentPID != parent || job.Scenario != base.Scenario || job.Home != base.Home || job.Claude != base.Claude || job.Path != strings.TrimSuffix(path, ".job")+".json" || job.Abort != strings.TrimSuffix(path, ".job")+".abort" || job.SourceBinarySHA256 != sourceSHA || !reflect.DeepEqual(job.Producer, base.Producer) || fallbackWorkerArgs(job.Args) != nil || base.Mode == "capture" && job.ReplayWait != nil || ValidateFallbackProductionWait(FallbackWorkerStatus{ExitCode: 0}, job.ReplayWait) != nil {
 		return fail
 	}
 	var daemon struct{ PID int }
@@ -599,9 +630,10 @@ type FallbackWorkerObservation struct {
 	Status                                   FallbackWorkerStatus
 }
 type LifecycleWorker struct {
-	SourceRole   string              `json:"source_role"`
-	UserSequence int                 `json:"user_sequence"`
-	Tape         *FallbackWorkerTape `json:"tape"`
+	SourceRole     string                  `json:"source_role"`
+	UserSequence   int                     `json:"user_sequence"`
+	Tape           *FallbackWorkerTape     `json:"tape"`
+	ProductionWait *FallbackProductionWait `json:"production_wait,omitempty"`
 }
 
 func ValidateLifecycleWorkers(scenario string, roles map[string]*LifecycleTape, workers []LifecycleWorker) error {
@@ -612,7 +644,7 @@ func ValidateLifecycleWorkers(scenario string, roles map[string]*LifecycleTape, 
 	used := map[string]bool{}
 	for _, worker := range workers {
 		role := roles[worker.SourceRole]
-		if role == nil || worker.Tape == nil || worker.Tape.Validate() != nil {
+		if role == nil || worker.Tape == nil || worker.Tape.Validate() != nil || ValidateFallbackProductionWait(worker.Tape.Status, worker.ProductionWait) != nil {
 			return fail
 		}
 		sources, err := FallbackExchanges(role.Tape)
@@ -709,12 +741,19 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 		}
 
 		stage = "actual-production-wait"
+		worker := LifecycleWorker{Tape: tape}
 		matches := 0
 		for _, observation := range observations {
 			if observation.OwnerPID == fallbackWorkerObservationPID(job) {
 				matches++
-				if !observation.WaitCompleted || !observation.ExitObserved || observation.Status != tape.Status || tape.Status.Signal != 0 && !observation.GroupCancel {
+				if !observation.WaitCompleted || !observation.ExitObserved || tape.Status.Signal != 0 && !observation.GroupCancel {
 					return nil, fail
+				}
+				if observation.Status != tape.Status {
+					worker.ProductionWait = &FallbackProductionWait{Status: observation.Status, GroupCancel: observation.GroupCancel}
+					if ValidateFallbackProductionWait(tape.Status, worker.ProductionWait) != nil {
+						return nil, fail
+					}
 				}
 			}
 		}
@@ -722,7 +761,9 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 		if matches != 1 || syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(job.GroupPID, 0) != syscall.ESRCH {
 			return nil, fail
 		}
-		worker := LifecycleWorker{Tape: tape}
+		if mode == "capture" && job.ReplayWait != nil || mode == "replay" && !reflect.DeepEqual(job.ReplayWait, worker.ProductionWait) {
+			return nil, fail
+		}
 		stage = "source-derivation"
 		sourceMatches := 0
 		for role, provider := range roles {
@@ -769,7 +810,7 @@ func SameLifecycleWorkers(a, b *LifecycleSuite) error {
 	}
 	for i, left := range a.Workers {
 		right := b.Workers[i]
-		if left.SourceRole != right.SourceRole || left.UserSequence != right.UserSequence || left.Tape.Status != right.Tape.Status || !reflect.DeepEqual(left.Tape.Args, right.Tape.Args) {
+		if left.SourceRole != right.SourceRole || left.UserSequence != right.UserSequence || left.Tape.Status != right.Tape.Status || !reflect.DeepEqual(left.ProductionWait, right.ProductionWait) || !reflect.DeepEqual(left.Tape.Args, right.Tape.Args) {
 			return fail
 		}
 		// Both complete literal edges have already validated against their own
@@ -832,4 +873,28 @@ func ValidateFallbackWorkerCompletion(raw []byte, brokerPID int, path string) er
 		return fail
 	}
 	return nil
+}
+
+// ValidateFallbackReplayWait binds the replay-only cancellation plan to the
+// exact saved attempt index held by the outer parent, independently of the job.
+func ValidateFallbackReplayWait(job FallbackWorkerJob, path, mode, home string, waits []*FallbackProductionWait) error {
+	fail := errors.New("finite replay wait plan changed")
+	if mode == "capture" {
+		if job.ReplayWait != nil || len(waits) != 0 {
+			return fail
+		}
+		return nil
+	}
+	if mode != "replay" || len(waits) > LifecycleWorkerLimit(job.Scenario) {
+		return fail
+	}
+	for i, wait := range waits {
+		if path == FallbackWorkerJobPath(home, i+1) {
+			if ValidateFallbackProductionWait(FallbackWorkerStatus{ExitCode: 0}, wait) != nil || !reflect.DeepEqual(job.ReplayWait, wait) {
+				return fail
+			}
+			return nil
+		}
+	}
+	return fail
 }

@@ -18,6 +18,7 @@ import (
 )
 
 type lifecycleRecordingConfig struct {
+	WorkerWaits                                                      []*claudetape.FallbackProductionWait `json:",omitempty"`
 	BrokerParentPID                                                  int
 	Process                                                          claudetape.PoolProcessConfig
 	Root, Receipt, Wrapper, Daemon, DaemonSHA256, SourceBinarySHA256 string
@@ -32,6 +33,14 @@ func readLifecycleRecordingConfig(path string) (lifecycleRecordingConfig, error)
 	p, ok := claudetape.LifecycleProfiles()[c.Process.Scenario]
 	if !ok || c.BrokerParentPID <= 1 || p.Root != c.Root || poolRecordedRevision == "" || c.Process.Producer.Revision != poolRecordedRevision || !filepath.IsAbs(c.Process.Home) || c.Process.WorkDir != filepath.Join(c.Process.Home, "work") || c.Process.Finish != filepath.Join(c.Process.Home, "finish") || c.Receipt != filepath.Join(c.Process.Home, "receipt") || c.Wrapper != filepath.Join(c.Process.Home, "recording-bin", "claude") || !filepath.IsAbs(c.Daemon) || len(c.SourceBinarySHA256) != 64 || len(c.DaemonSHA256) != 64 {
 		return c, os.ErrInvalid
+	}
+	if len(c.WorkerWaits) > claudetape.LifecycleWorkerLimit(c.Process.Scenario) || c.Process.Mode == "capture" && len(c.WorkerWaits) != 0 {
+		return c, os.ErrInvalid
+	}
+	for _, wait := range c.WorkerWaits {
+		if claudetape.ValidateFallbackProductionWait(claudetape.FallbackWorkerStatus{ExitCode: 0}, wait) != nil {
+			return c, os.ErrInvalid
+		}
 	}
 	exe, e := os.Executable()
 	if e != nil {
