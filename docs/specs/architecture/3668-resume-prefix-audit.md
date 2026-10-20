@@ -248,3 +248,28 @@ source and both original replays. Reuse main's richer terminal diagnostic and
 retention rather than retain redundant progress plumbing. No new repair behavior
 or regression implementation is needed; final written work remains below 800.
 Security review stays PASS under the existing private evidence and EOF authority.
+
+## Revisions
+
+### 2026-10-20 — remaining prefix/terminal publication race
+
+At `4aafaccc`, the original resume root failed 1/0/1/0; retain
+`/tmp/builder-3668/rework-passing/session-resume/`. Configuration completed at
+14 ms, finish published at 21 ms with live owner 278779/broker 278785. The broker
+sealed successfully, then real idle eviction published `resumed.receipt` before
+the audit's final inventory check at 1392 ms. The earlier conclusion that caching
+alone sufficed is disproved; historical passes remain passes, not reliability proof.
+
+Before publishing a successful seal-ended terminal receipt, wait for the original
+root's existing successful prefix receipt. Publish that root receipt atomically
+after the unchanged prefix audit. Actual EOF already gates broker return; pipe
+closure happens before waiting, avoiding a daemon-Wait cycle. Missing prefix
+acknowledgement waits only within the existing 30-second seal budget and aborts
+on the existing abort file. Failed broker receipts remain immediate failures.
+No new authoritative artifact, timer, fixture or audit exception is introduced.
+`TestLifecycleTerminalPublicationWaitsForPrefixAudit` synchronizes at the missing
+root receipt, proves the terminal file stays absent, then releases publication;
+invalid acknowledgement and cancellation remain errors. Run its failing former
+publication and repaired proofs, pinned-prefix controls, and the original replay.
+Security PASS: bounded private reads, atomic root publication, no new goroutine,
+same trusted receipt producer and actual EOF; unknown observations remain unknown.
