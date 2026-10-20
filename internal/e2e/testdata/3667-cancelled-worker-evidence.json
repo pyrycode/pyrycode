@@ -4,6 +4,57 @@
   "toolchain": "go1.26.9",
   "evidence_root": "/tmp/builder-3667/",
   "counts_order": ["executed", "passed", "failed", "skipped"],
+  "ownership_rework": {
+    "finding": 1,
+    "os": "Linux 7.0.0-28-generic linux/amd64",
+    "toolchain": "go1.26.9",
+    "plan_revision": "98514e03740f1b13e58fdf7bfc5422bd042dcc64",
+    "evidence_root": "/tmp/builder-3667/ownership-rework/",
+    "regression_red": {
+      "source_tree_equivalent_revision": "03c6f98f6f28344423c9fd93950312d5debe99cf",
+      "note": "Run started before the regression commit; same test source, unrepaired inventory.",
+      "selection": "^TestFallbackCancelledLaunchOwnership$",
+      "counts": [3, 1, 2, 0],
+      "leaf_tests": 2,
+      "failure": "unrelated-daemon helper with actual cancellation/Wait accepted",
+      "path": "red.jsonl",
+      "sha256": "2e90341da52900a193fa60868ef62d01e597cb9f6f65b71f4b0fbf345bb54d37"
+    },
+    "repaired_revision": "849125968bcc398f84810eca71aafaac286e1b8c",
+    "controls": {
+      "selection": "^(TestFallbackCancelledLaunchOwnership|TestFallbackCancelledLaunchBoundary|TestFallbackWorkerClosedCarrier|TestFallbackWorkerNativeProcessBoundary|TestFallbackWorkerInventoryRejectsForeignEvidence|TestFallbackWorkerCompletionRejectsCleanupRewrite|TestFallbackProductionWaitRejectsUnsupportedShapes|TestFallbackReplayWaitBindsSavedIndex)$",
+      "counts": [84, 84, 0, 0],
+      "leaf_tests": 79,
+      "path": "final-controls.jsonl",
+      "sha256": "b49066ba394f5b94f566fbf3dfcff9c3cc5b33112b47d4f2c21339721fb21154"
+    },
+    "original_replay": {
+      "selection": "^TestRecordedClaude$; PYRY_CLAUDE_TAPE_SCENARIOS=[\"session-resume\"]; -race -tags=e2e -count=1",
+      "counts": [2, 2, 0, 0],
+      "original_daemon_root_counts": [1, 1, 0, 0],
+      "native_exchanges": 0,
+      "path": "replay.jsonl",
+      "sha256": "1a82b3e676043fbf12920f23ec86ad2cd14f9324b3b69c3bd2836a41c9479036",
+      "original_events_path": "replay/session-resume-replay.jsonl",
+      "original_events_sha256": "0769597549e98827eaffc7312b638c899e80948074edb2fdc3e44be0d07f6fdc",
+      "audit_path": "replay/session-resume-launch-audit.json",
+      "audit_sha256": "e5b486ca3a6a8cdf8332b5fdca5bfb8fb4ebc8d148e65482003765c599959a3e",
+      "helper_sha256": "ce98af5578c33c23ec347b9a87994c308fb9cb9b2e0c4290c5edf2e26eeac267",
+      "ownership_chain_pids": [131918, 131898, 131891, 131867, 131629],
+      "cancelled_helper_pids": [131989, 132088],
+      "registration": "absent for both launches; each has one actual completed group-cancellation SIGKILL Wait"
+    },
+    "static_checks": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3667/ownership-rework/pyry ./cmd/pyry"],
+    "earlier_full_gate": {
+      "revision": "9ed3b03a737957112c81eac336e3669f4fa7f083",
+      "verifier_run": "9e7bb653a48aca769eb674cec067a771db87ae5704cb7e686fc424ad3b9ac562",
+      "bundle_digest": "4eaeaff1a13588ad7aeaf8df78d51ea4df7021ed2ee231c421ad4dda34b53190",
+      "retained_bundle": "/tmp/builder-3667/rework-inherited/9e7bb653a48aca769eb674cec067a771db87ae5704cb7e686fc424ad3b9ac562/",
+      "original_unit_counts": [30367, 30338, 2, 27],
+      "original_integration_counts": [1900, 1893, 5, 2],
+      "status": "Original failures remain failed; verifier accepted inherited comparisons tracked in #3674 and the named relay flaky rerun. Focused proof does not replace the full-gate evidence."
+    }
+  },
   "replay_command": "PYRY_CLAUDE_TAPE_SCENARIOS='[\"session-resume\"]' PYRY_CLAUDE_TAPE_EVIDENCE=<private-external-directory> python3 scripts/test-admission.py -- go test -timeout=30m -race -tags=e2e -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e",
   "regression_red": {
     "source_tree_equivalent_commit": "e6b6c8c8e04f380cbe4561e0e5fe4b9ac7e8c42e",

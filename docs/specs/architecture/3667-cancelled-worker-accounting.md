@@ -160,3 +160,21 @@ retain the strict reviewed-worker and cleanup guarantees.
   tests), with vet, tagged vet and build green. Committed evidence record:
   `internal/e2e/testdata/3667-cancelled-worker-evidence.json`. Full verification and
   the documentation handoff remain pending with their owning stages.
+- 2026-10-20 (finding 1 proof): prospective plan `98514e03` preceded regression
+  `03c6f98f` and repair `84912596`. The synchronized pre-repair run accepted an
+  unrelated daemon's otherwise qualifying helper and actual SIGKILL/Wait:
+  3 events executed, 1 passed, 2 failed, 0 skipped (2 leaf cases). After repair,
+  84/84 focused race events passed (79 leaves), including owned, unrelated,
+  unknown-chain and changed root/daemon/outer identity controls. The unchanged
+  original session-resume replay passed 2/2 outer events and 1/1 daemon root,
+  no failures/skips, on Linux/amd64 Go 1.26.9. Its retained chain connects
+  daemon 131918 through the original root/test2json to owned command 131867 and
+  outer 131629. Both observed helpers had absent registration and exactly one
+  completed real group-cancellation SIGKILL Wait; native inventory remained empty.
+  Evidence and SHA-256 references are retained under
+  `/tmp/builder-3667/ownership-rework/` and in the committed evidence record.
+  Vet, tagged harness vet and build passed. The earlier complete-gate failures
+  remain failed, accepted as inherited in verifier run
+  `9e7bb653a48aca769eb674cec067a771db87ae5704cb7e686fc424ad3b9ac562`
+  and tracked in #3674; focused proof does not replace them. Complete normal
+  verification and the exact documentation handoff remain with later stages.
