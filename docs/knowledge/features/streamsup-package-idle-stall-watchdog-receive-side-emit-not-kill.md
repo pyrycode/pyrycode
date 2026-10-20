@@ -1,76 +1,141 @@
 # Idle/stall watchdog — receive-side, emit-not-kill (#1094), arms from the send side (#1504)
 
-Lifts the type-aware idle watchdog from `streamrunner` (`internal/agentrun/streamrunner/watchdog.go`)
-with one crucial divergence: the one-shot runner **kills** on idle stall; `streamsup`'s watchdog **emits
-and never kills**. The T1 spike (#1075, claude 2.1.199) measured a pending permission approval blocking
-claude synchronously until the approval tool answers — minutes of *owed* silence with `awaiting` true the
-whole time. A watchdog that killed on `awaiting && idle` would destroy a legitimately-blocked-on-approval
-turn.
+The production interactive Claude runner uses `streamsup.Watchdog` to report
+silence while an assistant response is owed. `WatchdogConfig.Idle == 0` selects
+240 seconds; the poll interval is `idle/8`, clamped to `[5ms, 5s]`. A poll fires
+when owed silence exceeds Idle, once per contiguous stall episode. Detection
+emits and never kills: `Watchdog` holds no process handle or cancellation
+function. An approval can legitimately block Claude for minutes, so silence
+alone neither warrants termination nor confirms an OS-permission cause.
 
 ```go
 type WatchdogConfig struct {
     Idle              time.Duration               // 0 → 240s
-    PendingPermission func() bool                 // the content-free timing hook; nil → always-false
-    OnStall           func(pendingPermission bool) // the stall signal; nil → no-op
+    PendingPermission func() bool                 // nil → false; annotation only
+    OnStall           func(pendingPermission bool) // onset callback; nil → no-op
     Logger            *slog.Logger                 // nil → slog.Default
 }
 
 func NewWatchdog(cfg WatchdogConfig) *Watchdog
-func (w *Watchdog) Writer() io.Writer          // the tracker; compose into Config.Stdout
-func (w *Watchdog) UserTurnSent()              // #1504 — a user turn's bytes reached the child; arms + restamps
-func (w *Watchdog) ChildExited()               // #1504 — the watched child is gone; voids what it owed
-func (w *Watchdog) Start(ctx context.Context)  // launches the one poll goroutine
-func (w *Watchdog) Wait()                       // blocks until the poll goroutine exits
+func (w *Watchdog) Writer() io.Writer
+func (w *Watchdog) TrackUserTurn(write func() error) error
+func (w *Watchdog) UserTurnSent()
+func (w *Watchdog) ChildExited()
+func (w *Watchdog) Start(ctx context.Context)
+func (w *Watchdog) Wait()
 ```
 
-**Two pieces, additive, zero `runner.go`/`parser.go` diff.** An unexported `stallTracker` (`io.Writer`)
-carries its own type-tracking state over the same stdout stream the #1088 `Parser` already reads —
-deliberately, since the `Parser` holds no `awaiting` flag (the half of "turn-stateless" #1385 left
-unchanged; the `Parser` does now hold one rate-bound token counter, `thinkingSinceEmit`, unrelated to
-what this tracker needs). The caller fans
-stdout to both with `io.MultiWriter(parser, wd.Writer())` (deferred to the wiring slice). The tracker
-reads only each line's top-level `type` — never event content (AC3) — to track whether claude *owes an
-assistant turn*: `assistant`→not-awaiting (a tool run's silence that follows is expected and never trips
-the watchdog — the type-aware core), `user`/`tool_result`→awaiting, `result`→not-awaiting. A single poll
-goroutine (`Start`/`Wait`) ticks at `watchdogTickFor(Idle)` (`idle/8` clamped to `[5ms, 5s]`, lifted
-verbatim) and, on the edge of `awaiting && silent > Idle` (latched once per stall episode), evaluates
-`PendingPermission()` and calls `OnStall(pending)`.
+## Production ownership and Run reactivation
 
-**The tracker starts not-awaiting, and the send side — not stdout — is the primary arm (#1504).** The
-original `awaiting: true` construction-time default was lifted from `streamrunner`, whose runner *is*
-the send side and so may assume an owed turn the instant it is built. `streamsup`'s watchdog is
-constructed away from the send side: the interactive child spawns on `Activate`/`RestartFresh` and
-emits `system`/`init` before any user turn exists — a message may not arrive for hours — and `init` is
-activity-only, so the old default fired a false stall 240s after every spawn, and again after every
-crash-mid-turn respawn. Because claude does **not** echo the delivered prompt back as a `user` line on
-this surface (measured; see the "Two tiers" section below), starting `awaiting: false` with no other
-change would have turned that false positive into a silent false negative — a turn that produces
-nothing would never arm the watchdog at all. The fix is two explicit lifecycle signals instead:
-`UserTurnSent()` (sets `awaiting=true` **and** restamps `lastEvent`, so an idle child's stale
-`lastEvent` doesn't fire on the very next tick) and `ChildExited()` (sets `awaiting=false` and restamps
-`lastEvent`, voiding whatever the departed child owed so the respawned child starts clean). Both are
-lifecycle facts the still-unfiled wiring slice already holds — `UserTurnSent` after a `WriteUserTurn`
-that returns `nil` (its two refusals, `ErrNoLiveChild` and `turncommit.ErrDropped`, write zero bytes and
-must not arm it), `ChildExited` from the supervise loop's respawn point — but wiring them into
-`Config.Stdout`/`Run` is deferred; this slice is additive to `watchdog.go` alone, no production caller.
-One `Watchdog` per `Runner`, not one per child: `Config.Stdout` is fixed at `New` and never re-wired, so
-a per-child watchdog would have no way to reach a respawned child's stdout. See
-[codebase/1504.md](../codebase/1504.md).
+[`newStreamRunnerFactory`](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)
+constructs one watchdog per runner and sets
+`scfg.Stdout = io.MultiWriter(watchdog.detector.Writer(), parser)`. The tracker
+receives the same stdout bytes before the parser. `scfg.ControlParser = parser`
+preserves control-response handling and parser cleanup that runner construction
+could otherwise lose when the concrete parser is hidden by `io.MultiWriter`.
+`Config.Stdout` stays fixed across child respawns, so constructing a watchdog per
+child would leave the replacement disconnected from its tracker.
 
-**The hook annotates the signal, it does not gate it.** Both a genuine wedge (`pending=false`) and an
-approval-wait (`pending=true`) call `OnStall` — the distinction lives in the argument, not in whether the
-callback fires; gating the emit off while pending was considered and rejected (the ticket says the
-watchdog *emits* while a permission is pending, it doesn't stay silent).
+`streamRunner.Run` starts the poller with a derived context, drives the underlying
+runner, then cancels and joins the poller with `Wait` before returning.
+`Watchdog.Start` allocates a fresh completion channel on each start; callers must
+cancel and join the previous lifetime first. This supports `Session.runActive`
+reusing the same adapter after eviction/reactivation, with one poller during each
+Run and the same tracker across child respawns and sequential Run calls.
+Concurrent starts are outside this lifecycle contract.
 
-**Emit-not-kill is enforced structurally.** `Watchdog` holds no `context.CancelFunc` and no process
-handle — `WatchdogConfig` has no field to wire one in — so a future edit cannot reintroduce a kill without
-changing the type's shape. The one-shot runner's KILL machinery (`idleStallResult`, `idleStallUsage`,
-`writeIdleStallResult`, the synthetic `result` trailer, `sawResult`) was deliberately not lifted. See
-[codebase/1094.md](../codebase/1094.md) for the full design writeup and code-review notes.
+## Arming, stdout progress and exit ordering
 
-Deferred: the pending-permission signal's **producer** (the approval flow — mcp-approve stdio tool,
-control-socket verb, spawn-arg injection) lands in #1079/#1080 with its own security review; this hook is
-a local, content-free `func() bool` only, which is why this slice is not `security-sensitive`.
+A fresh tracker starts not-awaiting. `system`/`init` is activity only, so a newly
+spawned child can idle indefinitely without firing. Claude does not echo a
+delivered prompt as a `user` line on this surface; stdout alone cannot arm a turn
+that produces nothing. `streamRunner.WriteUserTurn` therefore wraps delivery in
+`streamRunnerWatchdog.write`, which calls `Watchdog.TrackUserTurn`. Only a
+successful write can arm owed silence and restart its clock. Refusals such as
+`ErrNoLiveChild` and `turncommit.ErrDropped`, failed pipe writes and control
+requests do not arm it; write errors retain their underlying meaning.
+
+Successful delivery must preserve any response already consumed on stdout.
+Calling `UserTurnSent` unconditionally after the write can overwrite an
+`assistant` or completed `result` observed before the writer resumes, falsely
+stalling a healthy tool wait or completed turn. `TrackUserTurn` snapshots the
+tracker's owed-state revision before delivery and commits arming only if delivery
+succeeds and that revision is unchanged. `assistant`, `result`, `user`,
+`tool_result` and child exit advance the revision, even when awaiting itself does
+not change. Activity-only lines do not advance it and cannot prevent a silent
+turn from arming. `UserTurnSent` remains available for callers that already order
+arming before stdout responses. No tracker lock spans the delivery callback or
+stdin I/O.
+
+The adapter also serializes deliveries and `ChildExited` with its own mutex.
+Teardown closes stdin before invoking the exit callback, allowing a blocked write
+to finish before reset acquires that mutex. Reset voids the departed child's owed
+state and restarts the clock before the supervisor can spawn a replacement.
+Without this ordering, a successful predecessor write racing exit could arm an
+idle replacement. Existing stdio-request retirement, task cleanup and the
+session-tagged exit sink remain chained after watchdog reset. See the
+[concurrency revision](../../specs/architecture/3682-production-stream-watchdog.md#revisions).
+
+## Type-aware silence and conversation-scoped publication
+
+`stallTracker` reads only each complete line's top-level `type`, never event
+content. Every complete line refreshes activity, including malformed or unknown
+lines. `assistant` clears awaiting: subsequent tool silence is healthy.
+`user`/`tool_result` makes another assistant response owed; `result` clears it.
+Partial-line buffering remains bounded.
+
+The factory's `OnStall` sends `turnevent.Stall{}` through the parser's decorated
+session sink, using the same live `streamSessionTag` as other events. The
+[fan-in and drain](streamsup-package-draining-turnevents-into-the-interactive-emitter-fan-in.md)
+route it to the producing conversation's retained live state/control readings
+and interactive `stall` publication, even when another conversation is active.
+`RestartFresh` rotates that tag, so later stalls carry the replacement session's
+identity. Stall onset leaves the child alive and does not clear turn-busy or
+delivery state; normal response, result and exit handling retain their roles.
+The control socket and other conversations remain usable.
+
+At firing, `PendingPermission` reads the live tag and calls the composition
+root's `streamPendingPermission`. It resolves `conversationForSession` and asks
+`approvalParkedReport`, installed from `streamApprovalBridge.ApprovalParked`
+before pool execution. An unbound session or missing report answers false;
+another conversation's pending approval cannot annotate this stall. Both pending
+and non-pending states emit. The boolean appears only as `pending_permission`
+in the content-free diagnostic alongside `idle_seconds`; the production callback
+publishes the unchanged empty `turnevent.Stall` variant. `protocol.StallPayload`
+gains no approval or cause field. The watchdog neither resolves approvals nor
+changes their verdicts or timeouts, and pending approval does not establish the
+cause of the silence. Publication remains onset-only, with no recovery wire
+event; another onset requires a poll to observe the stall condition clear.
+
+## Production regression coverage
+
+`TestStreamWatchdog_ProductionLifecycle` uses the real factory, child stdin/stdout,
+fan-in, retained state and emitter to check onset, unchanged PID/restart count,
+busy retention, resumed output, child-exit cleanup, an idle replacement,
+non-active conversation attribution, rotation and same-adapter Run reactivation.
+It also checks control-socket and another conversation's responsiveness.
+`TestStreamWatchdog_Controls` covers failed/refused writes and assistant/tool
+silence; `TestStreamWatchdog_ApprovalScope` checks own-versus-other approval
+annotation after rotation and that the stall leaves the approval parked.
+Existing approval tests continue to cover verdicts and timeouts.
+
+`TestStreamWatchdog_WriteExitOrdering` pauses a successful real pipe write before
+arming, overlaps child exit, then proves the replacement stays idle and a later
+silent turn still stalls. `TestStreamWatchdog_ResponseBeforeArming` instead waits
+for production assistant-delta or turn-end publication before releasing the
+writer. Because tracking precedes parsing, that publication proves the response
+already reached the tracker. Both tool-wait and completed-result cases must stay
+quiet, then detect a later silent turn with the same child. Ordinary race tests
+without the forced pause passed while this false-stall path was broken.
+`TestWatchdog_TrackUserTurn` adds activity-only and user/tool-result controls.
+
+These factory regressions use a private 200 ms threshold seam; production keeps
+the 240-second default. The retained Linux evidence in
+[PR #3689](https://github.com/pyrycode/pyrycode/pull/3689) identifies exact revisions,
+selectors and executed/passed/failed/skipped counts, including the missing-wiring
+failure and response-before-arming failure before their repairs. It does not
+claim an elapsed production-threshold run, live-Claude behavior or an
+OS-permission cause. macOS is outside this ticket's verification scope.
 
 ## Poll observation and latch-rearm testing
 
