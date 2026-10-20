@@ -259,6 +259,9 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	if daemonRecordingRead(filepath.Join(c.Process.Home, "recording-endpoint.json"), &endpoint) != nil || endpoint.Daemon != c.Daemon {
 		fail()
 	}
+	if lifecycleRecordingFiniteWorker(c, args) {
+		return
+	}
 	session := ""
 	for i, a := range args {
 		if (a == "--session-id" || a == "--resume") && i+1 < len(args) {

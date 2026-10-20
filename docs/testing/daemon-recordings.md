@@ -813,3 +813,33 @@ and exact private inventories are pinned across unchanged daemon cleanup. Later
 native appends may extend the saved prefix but cannot rewrite it. Current Claude
 writing, actual reload and semantic recall remain obligations of the retained
 original live root.
+
+The idle-resume profile also permits up to two finite suggestion workers, one
+per completed original turn. The first native resume attempt exposed an unowned
+invocation during its unchanged five-second idle window. That attempt failed the
+strict cleanup inventory and produced no accepted fixture; its stream receipts
+alone do not count as coverage. The generic failure marker does not prove the
+invocation's argv or count. The production two-second suggestion timeout is the
+source-supported path that the new finite-worker boundary must observe directly.
+
+Finite workers use a separate kernel-authenticated pipe broker owned by the
+outer test parent. That broker starts and waits the actual native child in the
+current production worker's process group. Group cancellation reaches the helper
+and native child while leaving their recorder alive. It retains exact closed
+print argv/inline settings, the actual empty temporary cwd, complete stdin and
+EOF, both complete output streams and EOF, and native Wait status. Credentials
+travel only in the helper's in-memory environment pipe and are never serialized.
+The private post-cleanup inventory additionally joins every exclusive launch to
+its current kernel peer, unchanged source/job bytes and the original daemon's
+actual worker Wait observation. A signalled replay waits for actual production
+cancellation; a fixture cannot manufacture a successful cancellation.
+
+Each literal worker exchange must match exactly one completed turn in its own
+provider tape, derived through the production parser. Only the last main-agent
+message contributes assistant prose; nested-agent text, thinking, incomplete and
+failed turns cannot supply it. The derivation follows production's UTF-8 byte
+limits and opening/closing-text retention. Replay checks the entire literal input.
+Fresh comparison validates both complete source edges first and permits only the
+assistant output to differ; source role, user sequence, user text, argv and status
+remain strict. Workers in other lifecycle profiles remain unsupported until their
+own original invocation, timing and ownership paths have been reviewed.

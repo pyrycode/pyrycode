@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 )
 
 const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
@@ -142,6 +143,7 @@ type LifecycleSuite struct {
 	DaemonSHA256 string                     `json:"daemon_sha256"`
 	Roles        map[string]*LifecycleTape  `json:"roles"`
 	Snapshots    map[string]SessionSnapshot `json:"snapshots,omitempty"`
+	Workers      []LifecycleWorker          `json:"workers,omitempty"`
 }
 
 func (s *LifecycleSuite) Validate(expected []string) error {
@@ -213,6 +215,14 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 		if err := validateLifecycleResumeInput(s.Roles["resumed"].Tape, s.Snapshots["bootstrap"]); err != nil {
 			return err
 		}
+	}
+	for _, worker := range s.Workers {
+		if worker.Tape == nil || !reflect.DeepEqual(worker.Tape.Producer, s.Producer) {
+			return fail
+		}
+	}
+	if err := ValidateLifecycleWorkers(s.Scenario, s.Roles, s.Workers); err != nil {
+		return err
 	}
 	raw, err := json.Marshal(s)
 	if err != nil || len(raw) > MaxBytes || safeCLIJSON(raw) != nil {
@@ -297,7 +307,7 @@ func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
 			return fail
 		}
 	}
-	return nil
+	return SameLifecycleWorkers(a, b)
 }
 
 // LifecycleJob is private per-launch evidence, never serialized into fixtures.

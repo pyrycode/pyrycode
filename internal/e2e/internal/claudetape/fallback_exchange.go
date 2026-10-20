@@ -61,6 +61,9 @@ func FallbackExchanges(tape *Tape) (map[int]FallbackExchange, error) {
 		}
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	for _, frame := range tape.Frames {
+		if (frame.Direction == "stdin" || frame.Direction == "stdout") && safeCLIJSON(frame.Data) != nil {
+			return nil, fail
+		}
 		if frame.Direction == "stdin" {
 			env, err := object(frame.Data)
 			if err != nil {
