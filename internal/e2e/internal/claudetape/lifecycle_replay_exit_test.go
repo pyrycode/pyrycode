@@ -162,6 +162,8 @@ func TestLifecycleReplayAfterProviderExit(t *testing.T) {
 					line, err := reader.ReadBytes('\n')
 					var got, expected any
 					if err != nil || json.Unmarshal(line, &got) != nil || json.Unmarshal([]byte(want), &expected) != nil {
+						var failed lifecycleProbeReceipt
+						waitLifecycleProbe(t, filepath.Join(root, "receipt.json"), &failed)
 						t.Fatal("matched final response lost", err)
 					}
 					a, _ := json.Marshal(got)
