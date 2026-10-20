@@ -759,6 +759,26 @@ note or file is synthesized for this root. Bootstrap and successor remain alive
 until the original daemon cleanup; the bound predecessor journals all traffic
 through its actual output EOF.
 
+The reviewed capture includes the outgoing wrap-up user input even though the
+stored handoff is skipped. In this native run the broker forwarded interrupt,
+then wrap-up input, before forwarding the interrupt acknowledgement. Strict
+replay retains that order: the acknowledgement is released only after both exact
+inputs match. The old 25-frame bound recording omitted that user input; its
+strict completion failure remains in the source history. The replacement is the
+complete 28-frame native bound prefix, with bootstrap and successor captured in
+the same run. No synthetic frame, extra delay or deadline change supplies it.
+
+Three reviewed witnesses under `realclaude/testdata/clear-wrapup-skipped-native*`
+retain the complete carrier, content-free broker observations and original-root
+observations. Their existing bounded readers validate source/helper/daemon
+identity, complete native EOFs and the original root pass before capture is
+accepted. Measured arrival and successful forwarding are distinct phases. The
+root recorded `deadline`, while internal deadline activation and unseen write
+attempts remain unknown. These timestamps diagnose the old carrier and do not
+schedule replay. A passing offline root and its outer ownership/inventory audit
+establish faithful replay for this recording; the final live gate still tests
+current provider behavior.
+
 `clear-reset` runs the original successful `/clear` root with the same three
 owned roles and distinct original seed IDs. The original planted build tag uses
 the existing deterministic recording nonce hook. All original precondition,

@@ -107,6 +107,7 @@ type LifecycleBrokerConfig struct {
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
 	OnTerminalState  func(bool, bool, bool, bool)     `json:"-"`
+	Observation      *WrapUpObservation               `json:"-"`
 	OnDiagnostic     func(LifecycleDiagnostic)        `json:"-"`
 
 	// ReplayTurnReady runs once after startup playback reaches its first user input.
@@ -266,6 +267,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 	}
 	_ = originals[6].Close()
+	c.Observation.Add("ready", nil, nil)
 	frames, total := 0, 0
 	turnReady := false
 	signalTurnReady := func() error {
@@ -396,6 +398,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 	}()
 	accept := func(direction string, raw []byte) error {
+		if direction == "stdin" {
+			c.Observation.Add("received", raw, nil)
+		}
 		if direction == "stdout" && observeAction != nil {
 			if err := observeAction(); err != nil {
 				return err
@@ -480,11 +485,16 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			callback = c.ForwardInput
 		}
 		if err := forwardLifecycleFrame(raw, callback, func(actual []byte) error { return write(target, append(actual, '\n')) }); err != nil {
+			if direction == "stdin" {
+				c.Observation.Add("forwarded", raw, err)
+			}
 			return err
 		}
 		if direction == "stdin" {
+			c.Observation.Add("forwarded", raw, nil)
 			diagnostic.ProviderInputsForwarded++
 		} else {
+			c.Observation.Add("output", raw, nil)
 			diagnostic.OutputsDelivered++
 		}
 		if direction == "stdout" && tape.Timeline != nil {
@@ -579,6 +589,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			if n == 0 {
 				*eof = true
+				switch direction {
+				case "stdin":
+					c.Observation.Add("stdin_eof", nil, nil)
+				case "stdout":
+					c.Observation.Add("stdout_eof", nil, nil)
+				case "stderr":
+					c.Observation.Add("stderr_eof", nil, nil)
+				}
 				if direction == "stdin" {
 					_ = originals[3].Close()
 				}
@@ -641,6 +659,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
+		c.Observation.Add("action", nil, nil)
 		diagnostic.ActionAcknowledged = true
 		return nil
 	}

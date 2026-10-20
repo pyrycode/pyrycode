@@ -521,6 +521,9 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			}
 		}
 	}
+	if c.Process.Mode == "capture" && c.Process.Scenario == "clear-wrapup-skipped" && job.Role == "bound" {
+		job.Config.Observation = claudetape.NewWrapUpObservation(poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256)
+	}
 	job.Config.OnDiagnostic = func(d claudetape.LifecycleDiagnostic) {
 		if json.NewEncoder(os.Stdout).Encode(d) != nil {
 			os.Exit(2)
@@ -543,6 +546,12 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) { _ = mcp.RetainFailure(tape, frames) }
 	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
+	if observation := job.Config.Observation; observation != nil {
+		observation.Add("complete", nil, e)
+		if err := observation.Save(wrapUpEvidencePath(t, "clear-wrapup-skipped-bound-native.json")); err != nil && e == nil {
+			e = err
+		}
+	}
 	if mcp != nil {
 		if err := mcp.Close(e == nil); err != nil && e == nil {
 			e = err

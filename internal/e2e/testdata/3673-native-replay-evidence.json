@@ -1,0 +1,111 @@
+{
+  "schema": "manual-wrapup-replay-evidence-v1",
+  "platform": "linux/amd64",
+  "toolchain": "go1.26.9",
+  "tested_source_revision": "d27a2b6850cb9571e8ece17aef14825a0d252bd2",
+  "replay_source_state": "Code unchanged from tested revision; reviewed carrier replaced by exact captured native suite for green. Documentation/metadata-only commits follow.",
+  "plan_commit": "8978f2c1",
+  "artifact_commit": "b203a892",
+  "native_capture_directory": "/tmp/pyry-3673-native-2370994384",
+  "native_counts": {
+    "run": 1,
+    "pass": 1,
+    "fail": 0,
+    "skip": 0
+  },
+  "native_artifact_and_log_sha256": {
+    "clear-wrapup-skipped-native.json": "1f2364921fef15690b8d2bb3e302ed1a71a225ca29738c8e56a2a37fb96278ca",
+    "clear-wrapup-skipped-native-root.json": "6c3df24d5e68878948f7e1534d267814b4f5a9628ef37e07db5f32e8b733defc",
+    "clear-wrapup-skipped-native-suite.json": "1562223ff725d73bdf058a3f00cfb461788932a329edbebaac1a75f05ff54571",
+    "driver-counts.json": "7bfc952db5029e924c227a5e30c349d98a254831bab1541f21800cf8c61cf745",
+    "native-root-run.jsonl": "926065304a3899fddf3d2bf126c019ad1d2ce9f294013edb114f08d0becad1f3",
+    "capture.jsonl": "e6745aa6fb92396128a31fd8f3efabf642f0b1ba8720c58853064220ad34aa07"
+  },
+  "old_replay_carrier_sha256": "c43f952e2b68e64e0efea65ff9c60dc989fbd86cf4807480256e787b684b1ea6",
+  "new_replay_carrier_sha256": "1562223ff725d73bdf058a3f00cfb461788932a329edbebaac1a75f05ff54571",
+  "replay_helper_sha256": "338eee404a32ffd278965f9a179ab7f36b99c58da0ff7fefcffa2906c04d7a06",
+  "replay_daemon_sha256": "c0014a02456ceedf9c414d6b3797d4921143386655e48374cb6acff6f1c77cab",
+  "admission": "All runtime checks use python3 scripts/test-admission.py --",
+  "commands": {
+    "native": "go test -timeout=26m -tags=e2e_realclaude -race -count=1 -json -run ^TestInteractiveStreamClearWrapUpSkipped$ ./internal/e2e/realclaude",
+    "replay_red_and_green": "go test -timeout=4m -tags=e2e -race -count=1 -json -run ^TestRecordedClaude/clear-wrapup-skipped$ ./internal/e2e",
+    "broker": "go test -timeout=5m -race -count=1 -json ./internal/e2e/internal/claudetape",
+    "controls": "go test -timeout=4m -tags=e2e_realclaude -race -count=1 -json -run ^(TestWrapUpCaptureSource|TestWrapUpCaptureDriverEvidence|TestWrapUpNativeRootObservation)$ ./internal/e2e/realclaude"
+  },
+  "reports": {
+    "manual-wrapup-broker": {
+      "path": "/tmp/manual-wrapup-broker.jsonl",
+      "sha256": "6d380b842d8890a392eaf41a73decdb4fc86163998ad06c31120826e705f0ddc",
+      "counts_including_parent_tests": {
+        "run": 1008,
+        "pass": 1008,
+        "fail": 0,
+        "skip": 0
+      },
+      "leaves": {
+        "run": 909,
+        "pass": 909,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    "manual-wrapup-validated-controls": {
+      "path": "/tmp/manual-wrapup-validated-controls.jsonl",
+      "sha256": "81da3ff92658951f2e521dfc9de484ae2ec2f1b53d773c745ba7247237ecdc31",
+      "counts_including_parent_tests": {
+        "run": 16,
+        "pass": 16,
+        "fail": 0,
+        "skip": 0
+      },
+      "leaves": {
+        "run": 14,
+        "pass": 14,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    "replay-red": {
+      "path": "/tmp/manual-wrapup-replay-red.jsonl",
+      "sha256": "ada6a6c8ef315bd7706f94bb8ed0cfcc933c4b9aee7244e1594585d82d569a5e",
+      "scenario_counts": {
+        "run": 1,
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "original_root_counts": {
+        "run": 1,
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "audit_directory": "/tmp/pyry-lifecycle-evidence-3692941454",
+      "local_audit_archive_sha256": "f97f9018f5eb584e8e0c8e2bbc99fbc3276e66beeb010fa3c950287fb8787983"
+    },
+    "replay-green": {
+      "path": "/tmp/manual-wrapup-replay-green.jsonl",
+      "sha256": "6f2c169ad86bc630fad03b57986075d390c5ef0413ba0cfa1c2d16f728a1393a",
+      "scenario_counts": {
+        "run": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "original_root_counts": {
+        "run": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      },
+      "audit_directory": "/tmp/pyry-lifecycle-evidence-3635989515",
+      "local_audit_archive_sha256": "1e0df1e50de4d2212b866f6f442dcdb52af19246699919f9f9638438d3e608ea"
+    }
+  },
+  "limits": [
+    "Fresh isolated capture source and original test HOME; preceding replay selection is only the original clear case plus the harness startup control.",
+    "Broker controls preceded the final native-reader controls; the latter waited 95s for normal admission. Other host contention and historical scheduler phase remain unknown.",
+    "Measured broker input forwarding does not establish internal deadline activation or unseen write attempts.",
+    "The single native root and exact offline replay pass do not establish complete-suite acceptance; final dispatcher gates remain pending."
+  ]
+}
