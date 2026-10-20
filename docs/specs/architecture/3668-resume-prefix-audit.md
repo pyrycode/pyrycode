@@ -184,3 +184,38 @@ no new lifecycle reject branches. No documentation-only acceptance was assigned.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+### 2026-10-20 — clear-reset verifier regression investigation
+
+Preserve the supported resume repair and the verifier's FAIL at `896c5618`:
+two candidate clear-reset roots failed at 82 frames; base `998460bc` passed.
+Merge `f55cb009` preserves main's MCP hooks and terminal observations; affected
+broker tests, source controls, tagged vet and daemon build pass. Branch #3673
+adds separate capture-only wrap-up observations in these files; no dependency.
+
+Before changing behavior, retain the original focused uncached Linux replay,
+then add one terminal broker observation with fixed stage/error class, frame
+ordinal/player cursor, action acknowledgement, pending-input size and actual EOF
+states. Retain current owner/broker identities and observed owner liveness in a
+private external file. No native content or arbitrary error text is emitted;
+missing observations remain unknown. Callbacks run synchronously on the existing
+broker loop and confer no ownership. Final request/response and rotation ordering
+will determine whether removed hashing exposed a forwarding race. Record that
+causal evidence before specifying any repair and synchronized regression.
+
+Reassessed scope: one existing lifecycle repair plus investigation of its shared
+hook regression; estimated total below 800 written lines, one diagnostic type,
+two new consumers, unchanged three criteria and no new rejection branches.
+Security review remains PASS: numeric/fixed terminal data only, exclusive 0600
+files outside the closed artifact inventory, no new goroutines or signal targets.
+Run focused broker/artifact controls and both original replays; normal complete
+verification and final dispatcher build remain pending.
+
+## Documentation handoff
+
+- Pending documentation stage: recording-harness documentation must describe the
+  per-process source digest/error and continued per-call expected identity check.
+- Pending documentation stage: distinguish live sealing, inventory sampling and
+  later audit return; preserve historical failures and observation limits.
