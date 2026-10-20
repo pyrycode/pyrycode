@@ -200,15 +200,17 @@ package's own `Parser` maps to `TextChunk`/`TurnEnd`. See
 [fakeclaude-binary.md § Stream-json mode](fakeclaude-binary.md#stream-json-mode-1140)
 and [codebase/1140.md](../codebase/1140.md).
 
-## Out of scope (follow-on slices)
+## Production stall detection
 
-- **Composing the #1094 watchdog's `Writer()` into `Config.Stdout` alongside the #1098 `Parser`** — still
-  not done; `newStreamRunnerFactory`'s closure sets `scfg.Stdout` to the `Parser` alone, with
-  `OnStall`/`PendingPermission` unsupplied. Needs an `io.MultiWriter(parser, wd.Writer())` composition
-  and a decision on what a `stall(false)` does downstream.
-- **The pending-permission signal producer** (#1079/#1080) — the approval flow that would report a
-  pending permission to the #1094 hook.
-
+`newStreamRunnerFactory` owns one watchdog per Claude runner, feeding stdout to
+its tracker and parser and preserving `ControlParser`. Successful delivery arms
+owed silence without overwriting stdout progress; child exit resets it before
+respawn. Run cancellation joins polling before reactivation. Stalls use the live
+session tag for conversation-scoped retained state and interactive publication;
+pending approval annotates the diagnostic only. Detection never kills the child
+or establishes an OS-permission cause. See the
+[watchdog contract](streamsup-package-idle-stall-watchdog-receive-side-emit-not-kill.md)
+and [factory composition](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md).
 
 ## Sections
 
