@@ -62,3 +62,19 @@ func TestLifecycleTimelineUsesAbsoluteDueTimes(t *testing.T) {
 		t.Fatal("scheduler stall silently changed phase")
 	}
 }
+
+func TestLifecycleTimelineRejectsLateFinalForward(t *testing.T) {
+	origin := time.Now()
+	current := origin
+	writes := 0
+	now := func() time.Time { return current }
+	sleep := func(d time.Duration) { current = current.Add(d) }
+	err := forwardLifecycleOutput(origin, int64(time.Second), now, sleep, func() error { writes++; current = current.Add(200 * time.Millisecond); return nil })
+	if err == nil || writes != 1 {
+		t.Fatal("final native output backpressure escaped timing audit")
+	}
+	current = origin
+	if err := forwardLifecycleOutput(origin, int64(time.Second), now, sleep, func() error { current = current.Add(50 * time.Millisecond); return nil }); err != nil {
+		t.Fatal("bounded successful forwarding rejected", err)
+	}
+}

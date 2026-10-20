@@ -200,7 +200,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		deadline = c.Deadline
 	}
 	expired := func() bool { return !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline)) }
-	write := func(f *os.File, raw []byte) error {
+	writeBounded := func(f *os.File, raw []byte, extraDeadline time.Time) error {
 		if len(raw) == 0 {
 			return nil
 		}
@@ -214,31 +214,38 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if sealed && sealDeadline.Before(writeDeadline) {
 			writeDeadline = sealDeadline
 		}
+		if !extraDeadline.IsZero() && extraDeadline.Before(writeDeadline) {
+			writeDeadline = extraDeadline
+		}
 		if f.SetWriteDeadline(writeDeadline) != nil {
 			return fail
 		}
 		_, err := f.Write(raw)
 		return err
 	}
+	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
+		emit := func(extra time.Time) error {
+			restored, err := binding.Frame(raw, true)
+			if err != nil {
+				return err
+			}
+			return writeBounded(originals[1], append(restored, '\n'), extra)
+		}
 		if tape.Timeline != nil {
 			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
 				return fail
 			}
-			if err := waitLifecycleOutput(timelineOrigin, tape.Timeline.OutputAfterNS[timelineOutput], time.Now, time.Sleep); err != nil {
+			offset := tape.Timeline.OutputAfterNS[timelineOutput]
+			if err := forwardLifecycleOutput(timelineOrigin, offset, time.Now, time.Sleep, func() error { return emit(timelineOrigin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
 				return err
 			}
 			timelineOutput++
+		} else if err := emit(time.Time{}); err != nil {
+			return err
 		}
-		restored, e := binding.Frame(raw, true)
-		if e != nil {
-			return e
-		}
-		e = write(originals[1], append(restored, '\n'))
-		if e == nil {
-			frames++
-		}
-		return e
+		frames++
+		return nil
 	}
 	if player != nil {
 		for _, raw := range player.Prefix() {

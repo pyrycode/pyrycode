@@ -61,3 +61,16 @@ func waitLifecycleOutput(origin time.Time, offset int64, now func() time.Time, s
 	}
 	return nil
 }
+
+func forwardLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), forward func() error) error {
+	if err := waitLifecycleOutput(origin, offset, now, sleep); err != nil {
+		return err
+	}
+	if err := forward(); err != nil {
+		return err
+	}
+	if now().After(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) {
+		return errors.New("native output timeline forwarding drift")
+	}
+	return nil
+}

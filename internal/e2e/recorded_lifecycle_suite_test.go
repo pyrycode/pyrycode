@@ -446,9 +446,16 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if workerServer != nil {
 		if err := workerServer.Join(15 * time.Second); err != nil {
 			for _, proof := range workerProofs {
-				var diagnostic struct{ WorkerError string }
-				if len(proof.raw) < 1024 && json.Unmarshal(proof.raw, &diagnostic) == nil && len(diagnostic.WorkerError) < 256 && claudetape.Safe([]byte(diagnostic.WorkerError)) == nil {
-					t.Log(diagnostic.WorkerError)
+				decoder := json.NewDecoder(bytes.NewReader(proof.raw))
+				for {
+					var record json.RawMessage
+					if decoder.Decode(&record) != nil {
+						break
+					}
+					var diagnostic struct{ WorkerError string }
+					if len(record) < 1024 && json.Unmarshal(record, &diagnostic) == nil && diagnostic.WorkerError != "" && len(diagnostic.WorkerError) < 256 && claudetape.Safe([]byte(diagnostic.WorkerError)) == nil {
+						t.Log(diagnostic.WorkerError)
+					}
 				}
 			}
 			t.Fatal(err)
