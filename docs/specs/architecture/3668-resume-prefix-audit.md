@@ -73,8 +73,55 @@ belongs to the dispatcher; no live-provider capture is required.
 
 ## Open questions
 
-- Which precise liveness/publication boundary failed? Resolve with retained
-  observations and controlled proof before the repair commit.
+- Resolved by the 2026-10-20 causal investigation below.
+
+## Revisions
+
+### 2026-10-20 — causal evidence before repair
+
+Unchanged source `998460bc38fb322aa03d4db0717fe2ca3c3e7f08` reproduced the
+child-inventory failure after recall; retain `/tmp/builder-3668/baseline/`.
+Diagnostic source `ee66a5762572295ce54569fb6353aec1e042a785` reproduced
+the liveness failure, one original root executed/failed, zero passed/skipped;
+retain `/tmp/builder-3668/observed/`. Helper SHA-256 was
+`33b9ee281c99e17cd17e9158789e9811875a92d33f1910d9e83485ee0005a3bc`;
+daemon SHA-256 was `0928376df3d28ce0405717b5f505041a41f3f8969fe1557dac8178d7db5f2f0f`.
+Reviewed fixture SHA-256 remains
+`1a1e6faee135a83b4deba4b2a84630bc846526e69c5db8c793e72b7eb80cb002`.
+
+Recall ended at 08:16:41.088 UTC. At finish entry, resumed owner 196163 and
+broker 196169 were present with no prefix/receipt. After configuration validation,
+1.459 seconds after entry, both were absent and a failed receipt existed.
+The broker independently observed stdout/stderr EOF and no seal. Bootstrap
+owner 196035 had already ended successfully with broker 196084, as required.
+The only work between these snapshots was `lifecycleRecordingCurrent`, whose
+validator reopens and hashes the entire source executable on every hook.
+The activation-based five-second timer continues during this read; cold resumed
+helper/broker startup consumes most of that window. Host load observations were
+approximately 10–15 (one-minute load); incidental contention is recorded, not
+used to waive a failure. The historical inventory symptoms are consistent with
+an early resumed receipt, but their exact missing/extra names remain unknown.
+
+Repair contract: validate the current executable's content identity once per
+process, before that process can pass its first configuration validation. Reuse
+only that digest for subsequent hooks; still privately read, decode and validate
+the complete config, root, revision, credentials and expected source digest on
+every call. A different expected digest must reject even after a cache hit, and
+a failed initial source read must stay failed. This removes repeated hashing
+from seal entry without enlarging the idle window or changing any action.
+No fixture, daemon, ownership or artifact-audit behavior changes.
+
+Synchronized regression `TestLifecycleSourceValidationDoesNotRepeatAtSeal`
+blocks the first source read until explicitly released, joins initial validation,
+then makes any second read fail and checks seal-time validation succeeds using
+the established identity. Foreign expected identities and initial-read failures
+remain rejected, including concurrent callers. Observe it fail before caching
+and pass after. Re-run the original replay and all affected artifact/ownership
+controls. Strengthen observations with numeric eviction count and post-cleanup
+stage, and retain an exact private JSON observation rather than relying on
+test2json line fragmentation. Revised estimate remains below 650 written lines,
+zero exported types, at most four consumers and no additional state-machine
+reject branches.
 
 ## Security review
 
