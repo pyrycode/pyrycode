@@ -853,3 +853,19 @@ actual broker `exec.Cmd` PID, the on-disk receipt and exact tape bytes. Rewritin
 safe prose after receipt, even with a forged disk digest, cannot replace output
 observed from the native process. Inherited transport descriptors are marked
 close-on-exec before the broker starts native Claude.
+
+Idle-resume additionally retains successful bootstrap stdout forwarding offsets
+from broker readiness. Fast output changes the phase between the activation-based
+five-second idle timer and the two-second fallback window; a native capture with
+no worker cannot supply an invented replay worker. This closed timeline restores
+absolute output due times, keeps strict input/action order, and rejects more than
+100 ms scheduling drift instead of compressing gaps. Readiness follows activation
+and is only an approximate epoch; the original timer/WARN/owned EOF still decide
+eviction. No fixture can trigger that eviction. All stdout offsets must be present,
+monotonic and bounded; other profiles reject this timeline. Fresh worker counts
+remain strict even when different native API latencies cause different attempts.
+
+A native attempt with no worker that cannot replay its timing remains unpromoted.
+Another attempt passed the original root but failed its outer broker join; it also
+remains unpromoted. Worker failures now expose only fixed stage diagnostics over
+the separate broker capability, never argv, environment or native output text.

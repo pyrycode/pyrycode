@@ -16,15 +16,19 @@ import (
 // literal, opaque data and is never used as a process or signal target. Kill
 // authorization uses the current owned launch, checked by the outer test parent.
 type LifecycleTape struct {
-	Version int    `json:"version"`
-	Tape    *Tape  `json:"tape"`
-	End     string `json:"end"`
-	Stderr  string `json:"stderr"`
+	Timeline *LifecycleTimeline `json:"timeline,omitempty"`
+	Version  int                `json:"version"`
+	Tape     *Tape              `json:"tape"`
+	End      string             `json:"end"`
+	Stderr   string             `json:"stderr"`
 }
 
 func (t *LifecycleTape) Validate() error {
 	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation" && t.End != "rotate-session" && t.End != "idle-evict") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
 		return errors.New("invalid lifecycle tape")
+	}
+	if validateLifecycleTimeline(t) != nil {
+		return errors.New("invalid native output timeline")
 	}
 	raw, err := json.Marshal(t.Tape)
 	if err != nil {
@@ -166,6 +170,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return 0, e
 		}
 	}
+	if lifecycleTimelineEnabled(c.Scenario) {
+		if c.Mode == "capture" {
+			tape.Timeline = &LifecycleTimeline{Kind: lifecycleTimelineKind, OutputAfterNS: []int64{}}
+		} else if tape.Timeline == nil {
+			return 0, errors.New("missing required native output timeline")
+		}
+	}
 	// Cache FDs before setting nonblocking; File.Fd can itself restore blocking.
 	inputFD, outFD, errFD := int(originals[0].Fd()), int(originals[4].Fd()), int(originals[5].Fd())
 	for _, fd := range []int{inputFD, outFD, errFD} {
@@ -173,6 +184,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return 0, fail
 		}
 	}
+	timelineOrigin := time.Now()
+	timelineOutput := 0
 	if _, err = originals[6].Write([]byte{1}); err != nil {
 		return 0, fail
 	}
@@ -208,6 +221,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return err
 	}
 	writeOutput := func(raw []byte) error {
+		if tape.Timeline != nil {
+			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
+				return fail
+			}
+			if err := waitLifecycleOutput(timelineOrigin, tape.Timeline.OutputAfterNS[timelineOutput], time.Now, time.Sleep); err != nil {
+				return err
+			}
+			timelineOutput++
+		}
 		restored, e := binding.Frame(raw, true)
 		if e != nil {
 			return e
@@ -284,6 +306,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		if err := write(target, append(raw, '\n')); err != nil {
 			return err
+		}
+		if direction == "stdout" && tape.Timeline != nil {
+			tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, time.Since(timelineOrigin).Nanoseconds())
 		}
 		if direction == "stdin" && c.OnInput != nil {
 			return c.OnInput(normalized)
@@ -422,6 +447,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return frames, fail
 		}
 		if player != nil {
+			if tape.Timeline != nil && timelineOutput != len(tape.Timeline.OutputAfterNS) {
+				return frames, fail
+			}
 			if player.Complete() != nil {
 				return frames, fail
 			}

@@ -3,6 +3,7 @@
 package realclaude
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -123,7 +124,8 @@ func TestFallbackWorkerBrokerProcess(t *testing.T) {
 	if claudetape.ReadLifecycleControl(jobPath, 16384, &job) != nil || claudetape.ValidateFallbackWorkerLaunch(job, jobPath, job.OwnerPID, c.BrokerParentPID, c.Process, c.SourceBinarySHA256) != nil || os.Getppid() != c.BrokerParentPID {
 		os.Exit(2)
 	}
-	if claudetape.RunFallbackWorkerBroker(job, c.Process.Mode) != nil {
+	if err := claudetape.RunFallbackWorkerBroker(job, c.Process.Mode); err != nil {
+		_ = json.NewEncoder(os.Stdout).Encode(struct{ WorkerError string }{err.Error()})
 		os.Exit(2)
 	}
 	os.Exit(0)

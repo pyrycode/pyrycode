@@ -21,6 +21,12 @@ func resumeSuiteControl(note string) *LifecycleSuite {
 		tape.End = LifecycleEnd(suite.Scenario, role)
 		tape.Tape.Scenario = suite.Scenario + "-" + role
 		if role == "bootstrap" {
+			tape.Timeline = &LifecycleTimeline{Kind: lifecycleTimelineKind}
+			for _, frame := range tape.Tape.Frames {
+				if frame.Direction == "stdout" {
+					tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, 1)
+				}
+			}
 			tape.Tape.Version = 2
 			tape.Tape.Frames = append(tape.Tape.Frames, Frame{Direction: ClientCheckpointDirection, Data: json.RawMessage(`{"type":"client_checkpoint","sequence":1,"action":"lifecycle_idle_eviction","conversation_id":"${LIFECYCLE_CONVERSATION}"}`)})
 		} else {

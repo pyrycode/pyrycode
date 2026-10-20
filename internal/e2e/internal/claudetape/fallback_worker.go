@@ -185,7 +185,13 @@ func workerText(text, home, cwd string, restore bool) string {
 func RunFallbackWorkerBroker(job FallbackWorkerJob, mode string) error {
 	return runFallbackWorkerBroker(job, mode, 45*time.Second)
 }
-func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Duration) error {
+func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Duration) (resultErr error) {
+	stage := "validate"
+	defer func() {
+		if resultErr != nil {
+			resultErr = fmt.Errorf("finite fallback broker stage=%s", stage)
+		}
+	}()
 	fail := errors.New("finite fallback broker failed")
 	if job.Version != 1 || job.OwnerPID <= 1 || job.GroupPID != job.OwnerPID || job.BrokerParentPID != os.Getppid() || (mode != "capture" && mode != "replay") || fallbackWorkerArgs(job.Args) != nil {
 		return fail
@@ -219,6 +225,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		}
 		return raw, nil
 	}
+	stage = "read-environment"
 	envRaw, err := readClosed(environment, 1024*1024)
 	if err != nil {
 		return fail
@@ -250,6 +257,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 	if home != job.Home || mode == "capture" && !credential || mode == "replay" && credential {
 		return fail
 	}
+	stage = "read-input"
 	raw, err := readClosed(input, 32768)
 	if err != nil || !utf8.Valid(raw) || !uniqueSuiteKeys(raw) || safeCLIJSON(raw) != nil {
 		return fail
@@ -377,6 +385,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		if !ok || !stdoutOK || !stderrOK || stdoutFile.SetReadDeadline(deadline) != nil || stderrFile.SetReadDeadline(deadline) != nil {
 			return fail
 		}
+		stage = "native-start"
 		if cmd.Start() != nil {
 			return fail
 		}
@@ -402,7 +411,9 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		readers.Add(2)
 		go func() { defer readers.Done(); consume("stdout", stdout, output) }()
 		go func() { defer readers.Done(); consume("stderr", stderr, diagnostic) }()
+		stage = "native-output-eof"
 		readers.Wait()
+		stage = "native-wait"
 		waitErr := cmd.Wait()
 		env = nil
 		if bad || ctx.Err() != nil || cmd.ProcessState == nil {
@@ -423,10 +434,12 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 			}
 		}
 		tape := &FallbackWorkerTape{DirectoryMode: 0700, DirectoryEmpty: true, Version: 1, Producer: job.Producer, Args: append([]string(nil), job.Args...), Input: normalized, InputEOF: true, Frames: frames, StdoutEOF: true, StderrEOF: true, Status: status}
+		stage = "publish-tape"
 		if tape.Save(job.Path) != nil {
 			return fail
 		}
 	}
+	stage = "publish-proof"
 	tapeRaw, err := runnerPrivateRead(job.Path, MaxBytes)
 	if err != nil {
 		return fail
@@ -443,6 +456,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 	}
 	_ = output.Close()
 	_ = diagnostic.Close()
+	stage = "return-status"
 	statusRaw, _ := json.Marshal(status)
 	_ = statusPipe.SetWriteDeadline(time.Now().Add(time.Second))
 	_, writeErr := statusPipe.Write(statusRaw)

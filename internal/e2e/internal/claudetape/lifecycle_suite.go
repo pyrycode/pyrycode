@@ -209,6 +209,9 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 		}
 	}
 	if s.Scenario == "session-resume" {
+		if s.Roles["bootstrap"].Timeline == nil {
+			return fail
+		}
 		if _, exists := s.Roles["bootstrap"].Tape.Files["$resume-input"]; exists {
 			return fail
 		}
