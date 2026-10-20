@@ -111,3 +111,50 @@ exchanges, and offline replay establishes no new live-provider behavior.
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-20
+
+## Revisions
+
+### 2026-10-20 — recovered failure and focused diagnostic limit
+
+The original candidate log and matching retained bootstrap receipt both identify
+`forwarding`, output 68, anchor 3. The original root timed out after that failure;
+inventory was never reached. Its audit contains one independently owned jobless
+launch and one actual completed cancellation Wait, not an unmatched Wait count.
+The original 07:59 sighting separately retains `total-wait-cardinality` at
+`c98f455bcf14be5b7c2b171e7de3771373bc5b63`; its original launch/Wait counts
+remain unknown. The two historical failures are preserved as different stages.
+
+Current main `73f826e2` and diagnostic source `3e0e649d` both passed Composer Stop
+and the original root without skips. Both observed an independently owned
+unregistered helper, actual completed cancellation and zero registrations, and
+passed final worker/artifact joins. The original same-tree comparison also has
+one owned jobless cancellation, recovered from its retained audit. Thus this
+recurrence supplies no evidence for broadening inventory authority.
+
+The new diagnostic records per-output restoration, physical observer, replay
+projection and actual forwarding durations, plus bounded per-stage maxima and
+their output ordinals. This changes no acceptance, schedule or process behavior.
+At `3e0e649d`, output 68 took 14101131 ns restoring and 70917595 ns observing;
+the largest actual-forward duration was 5392594 ns at output 62. These passing
+measurements cannot attribute the original 232879911 ns lateness.
+
+`TestComposerControlResponseDiagnostic` uses the exact reviewed output 68 to
+separate duplicate-key validation, privacy validation, envelope decoding,
+compaction and production parsing. It verifies this control response creates
+no physical operation or facts. Its content-free measurements likewise do not
+reproduce the historical miss. This diagnostic test is added to Files read and
+the touched surface; it does not replace a synchronized causal regression.
+
+The affected package passed 1008/1008 test events, zero failures/skips, including
+the existing cancellation, ownership, inventory and timing rejects. The isolated
+response diagnostic passed 1/1. These are diagnostic passes, not a reliability
+repair. No demonstrated behavioral repair or failing-before/passing-after
+regression has been selected. Both Open questions remain unresolved.
+
+Request managed recovery assessment of the historical preceding scenario sequence
+on the pushed diagnostic revision, with bounded substage evidence on failure.
+The full original sequence has Composer Stop at position 68, immediately after
+fallback-suggestion; a fresh one-scenario process lacks that preceding state.
+Historical cache/load contributions remain unknown. The request executes zero
+tests and is pending, as are the causal repair and complete-suite acceptance.
+Documentation must preserve this explicit attribution limit.
