@@ -331,6 +331,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			return write(target, append(raw, '\n'))
 		}
+		if direction == "stdin" {
+			diagnostic.InputKind = lifecycleInputKind(raw)
+			diagnostic.Stage = "bind-input"
+		}
 		normalized, e := binding.Frame(raw, false)
 		if e != nil {
 			return e
@@ -339,6 +343,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if direction != "stdin" {
 				return fail
 			}
+			diagnostic.Stage = "match-input"
 			released, e := player.Input(normalized)
 			if e != nil {
 				return e

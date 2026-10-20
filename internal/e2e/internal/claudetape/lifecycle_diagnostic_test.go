@@ -18,3 +18,16 @@ func TestLifecycleDiagnosticErrorClass(t *testing.T) {
 		}
 	}
 }
+
+func TestLifecycleDiagnosticInputKind(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`{"type":"user","message":{"content":"secret"}}`, "user"},
+		{`{"type":"control_request","request":{"subtype":"interrupt"}}`, "control_request/interrupt"},
+		{`{"type":"secret payload"}`, "other"},
+		{`{"type":"control_request","request":{"subtype":"secret payload"}}`, "control_request/other"},
+	} {
+		if got := lifecycleInputKind([]byte(tc.raw)); got != tc.want {
+			t.Fatalf("kind=%q want=%q", got, tc.want)
+		}
+	}
+}
