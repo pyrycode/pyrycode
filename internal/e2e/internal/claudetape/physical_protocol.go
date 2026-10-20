@@ -28,6 +28,7 @@ import (
 // must separately audit declarations and native proof.
 type PhysicalReplayProtocol struct {
 	sealed, closed bool
+	observeOnly    bool
 	cancelledSeen  bool
 	ctx            context.Context
 	binding        LifecycleRoleBinding
@@ -71,16 +72,26 @@ type physicalProtocolOperation struct {
 }
 
 func NewPhysicalReplayProtocol(ctx context.Context, home, family string, binding LifecycleRoleBinding) (*PhysicalReplayProtocol, error) {
+	return newPhysicalProtocol(ctx, home, family, binding, false)
+}
+
+// NewPhysicalNativeObserver validates native protocol shape only. It never
+// launches or signals a process, returns no OS Wait status, and cannot supply
+// the original test's physical witnesses. Those assertions must run unchanged.
+func NewPhysicalNativeObserver(ctx context.Context, home, family string, binding LifecycleRoleBinding) (*PhysicalReplayProtocol, error) {
+	return newPhysicalProtocol(ctx, home, family, binding, true)
+}
+func newPhysicalProtocol(ctx context.Context, home, family string, binding LifecycleRoleBinding, observeOnly bool) (*PhysicalReplayProtocol, error) {
 	if ctx == nil || ctx.Err() != nil || binding.Role != "bootstrap" || !poolUUID.MatchString(binding.SessionID) || !poolUUID.MatchString(binding.ConversationID) || binding.WorkDir != filepath.Join(home, "work") {
 		return nil, errors.New("unowned physical protocol binding")
 	}
-	if _, err := physicalWork(home); err != nil {
+	if _, err := physicalWork(home); err != nil && !observeOnly {
 		return nil, err
 	}
 	if family != "stop-hold" && family != "composer" {
 		return nil, errors.New("unknown physical protocol family")
 	}
-	p := &PhysicalReplayProtocol{ctx: ctx, binding: binding, home: home, family: family, byTool: map[string]*physicalProtocolOperation{}, byTask: map[string]*physicalProtocolOperation{}, controlIDs: map[string]bool{}}
+	p := &PhysicalReplayProtocol{observeOnly: observeOnly, ctx: ctx, binding: binding, home: home, family: family, byTool: map[string]*physicalProtocolOperation{}, byTask: map[string]*physicalProtocolOperation{}, controlIDs: map[string]bool{}}
 	p.parser = streamsup.NewParser(func(event turnevent.Event) { p.events = append(p.events, event) }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return p, nil
 }
@@ -111,7 +122,7 @@ func (p *PhysicalReplayProtocol) Arm(declaration PhysicalOperationDeclaration) e
 	if p.family == "composer" {
 		expected = []string{"composer-background", "composer-foreground"}
 	}
-	if p.armed != nil || p.next >= len(expected) || spec.Kind != expected[p.next] || spec.CheckCurrentInput(p.home) != nil {
+	if p.armed != nil || p.next >= len(expected) || spec.Kind != expected[p.next] || spec.Validate() != nil || (!p.observeOnly && spec.CheckCurrentInput(p.home) != nil) {
 		return p.reject()
 	}
 	if p.family == "composer" && p.next == 1 && !p.setupCompleted {
@@ -161,19 +172,26 @@ func (p *PhysicalReplayProtocol) BeforeOutput(raw []byte) error {
 			if p.armed == nil || p.users != p.armed.UserSequence || ev.Title != "Bash" || ev.ParentToolCallID != "" || ev.ToolCallID == "" || len(ev.ToolCallID) > 256 || p.byTool[ev.ToolCallID] != nil {
 				return p.reject()
 			}
-			owned, err := StartPhysicalOperation(p.home, p.armed.Spec, ev.RawInput)
-			if err != nil {
+			var owned *OwnedPhysicalOperation
+			if _, err := PhysicalInputCommand(p.home, p.armed.Spec, ev.RawInput); err != nil {
 				return p.reject()
+			}
+			if !p.observeOnly {
+				var err error
+				owned, err = StartPhysicalOperation(p.home, p.armed.Spec, ev.RawInput)
+				if err != nil {
+					return p.reject()
+				}
 			}
 			operation := &physicalProtocolOperation{spec: p.armed.Spec, toolID: ev.ToolCallID, owned: owned}
 			declaration := *p.armed
 			p.armed = nil
 			p.operations = append(p.operations, operation)
 			p.byTool[ev.ToolCallID] = operation
-			p.facts = append(p.facts, PhysicalProtocolFact{Kind: "actual-operation-started", ToolID: ev.ToolCallID, Declaration: &declaration, Input: append(json.RawMessage(nil), ev.RawInput...), InputSHA256: physicalProtocolDigest(ev.RawInput)})
+			p.facts = append(p.facts, PhysicalProtocolFact{Kind: p.factKind("actual-operation-started", "native-tool-observed"), ToolID: ev.ToolCallID, Declaration: &declaration, Input: physicalCanonicalJSON(ev.RawInput), InputSHA256: physicalProtocolDigest(physicalCanonicalJSON(ev.RawInput))})
 		case turnevent.BackgroundTaskStarted:
 			operation := p.byTool[ev.ToolCallID]
-			if operation == nil || operation.spec.Kind == "composer-foreground" || operation.taskID != "" || ev.TaskID == "" || len(ev.TaskID) > 256 || p.byTask[ev.TaskID] != nil || ev.TaskType != "local_bash" || len(ev.TruncatedFields) > 0 || !operation.owned.Running() {
+			if operation == nil || operation.spec.Kind == "composer-foreground" || operation.taskID != "" || ev.TaskID == "" || len(ev.TaskID) > 256 || p.byTask[ev.TaskID] != nil || ev.TaskType != "local_bash" || len(ev.TruncatedFields) > 0 || !operation.running() {
 				return p.reject()
 			}
 			operation.taskID = ev.TaskID
@@ -202,7 +220,7 @@ func (p *PhysicalReplayProtocol) BeforeOutput(raw []byte) error {
 					return p.reject()
 				}
 				if !operation.terminalSeen {
-					p.facts = append(p.facts, PhysicalProtocolFact{Kind: "native-task-terminal-after-actual-wait", ToolID: operation.toolID, TaskID: operation.taskID})
+					p.facts = append(p.facts, PhysicalProtocolFact{Kind: p.factKind("native-task-terminal-after-actual-wait", "native-task-terminal-observed"), ToolID: operation.toolID, TaskID: operation.taskID})
 				}
 				operation.terminalSeen = true
 			}
@@ -218,18 +236,18 @@ func (p *PhysicalReplayProtocol) BeforeOutput(raw []byte) error {
 		case turnevent.TurnEnd:
 			if p.family == "composer" && !p.interrupted && p.users == 1 {
 				background, _ := p.composerOperations()
-				if p.setupCompleted || ev.Reason != turnevent.TurnEndReasonEndTurn || ev.Outcome != "success" || ev.IsError || background == nil || background.taskID == "" || !background.rosterSeen || !background.owned.Running() {
+				if p.setupCompleted || ev.Reason != turnevent.TurnEndReasonEndTurn || ev.Outcome != "success" || ev.IsError || background == nil || background.taskID == "" || !background.rosterSeen || !background.running() {
 					return p.reject()
 				}
 				p.setupCompleted = true
 			}
 			if p.interrupted {
 				background, foreground := p.composerOperations()
-				if p.cancelledSeen || ev.Reason != turnevent.TurnEndReasonCancelled || foreground == nil || !foreground.stopped || background == nil || !background.owned.Running() {
+				if p.cancelledSeen || ev.Reason != turnevent.TurnEndReasonCancelled || foreground == nil || !foreground.stopped || background == nil || !background.running() {
 					return p.reject()
 				}
 				p.cancelledSeen = true
-				p.facts = append(p.facts, PhysicalProtocolFact{Kind: "cancelled-turn-with-live-background", ToolID: foreground.toolID, TaskID: background.taskID})
+				p.facts = append(p.facts, PhysicalProtocolFact{Kind: p.factKind("cancelled-turn-with-live-background", "native-cancelled-turn-with-background-state"), ToolID: foreground.toolID, TaskID: background.taskID})
 			}
 		}
 	}
@@ -273,12 +291,14 @@ func (p *PhysicalReplayProtocol) checkRoster() error {
 					return p.reject()
 				}
 				if !operation.terminalSeen {
-					p.facts = append(p.facts, PhysicalProtocolFact{Kind: "native-roster-omission-after-actual-wait", ToolID: operation.toolID, TaskID: operation.taskID})
+					p.facts = append(p.facts, PhysicalProtocolFact{Kind: p.factKind("native-roster-omission-after-actual-wait", "native-roster-omission-observed"), ToolID: operation.toolID, TaskID: operation.taskID})
 				}
 				operation.terminalSeen = true
 			}
-			if _, err := operation.owned.WaitContext(p.ctx, 100*time.Millisecond); err != nil {
-				return p.reject()
+			if operation.owned != nil {
+				if _, err := operation.owned.WaitContext(p.ctx, 100*time.Millisecond); err != nil {
+					return p.reject()
+				}
 			}
 		}
 	}
@@ -302,9 +322,11 @@ func (p *PhysicalReplayProtocol) requireTerminal(operation *physicalProtocolOper
 		if p.family != "stop-hold" || !operation.stopped || operation.completed {
 			return p.reject()
 		}
-		actual, err := operation.owned.WaitContext(p.ctx, 100*time.Millisecond)
-		if err != nil || actual != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
-			return p.reject()
+		if operation.owned != nil {
+			actual, err := operation.owned.WaitContext(p.ctx, 100*time.Millisecond)
+			if err != nil || actual != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
+				return p.reject()
+			}
 		}
 	case "completed":
 		background, foreground := p.composerOperations()
@@ -314,13 +336,16 @@ func (p *PhysicalReplayProtocol) requireTerminal(operation *physicalProtocolOper
 		if operation.completed {
 			return nil
 		}
-		actual, err := operation.owned.WaitContext(p.ctx, 5*time.Second)
-		if err != nil || actual != (FallbackWorkerStatus{ExitCode: 0}) {
-			return p.reject()
+		var status *FallbackWorkerStatus
+		if operation.owned != nil {
+			actual, err := operation.owned.WaitContext(p.ctx, 5*time.Second)
+			if err != nil || actual != (FallbackWorkerStatus{ExitCode: 0}) {
+				return p.reject()
+			}
+			status = &actual
 		}
 		operation.completed = true
-		copy := actual
-		p.facts = append(p.facts, PhysicalProtocolFact{Kind: "actual-background-completed", ToolID: operation.toolID, TaskID: operation.taskID, Status: &copy})
+		p.facts = append(p.facts, PhysicalProtocolFact{Kind: p.factKind("actual-background-completed", "native-background-completion-observed"), ToolID: operation.toolID, TaskID: operation.taskID, Status: status})
 	default:
 		// An unreviewed or failed provider terminal cannot lend a successful local
 		// process witness to the original completion assertion.
@@ -370,7 +395,7 @@ func (p *PhysicalReplayProtocol) BeforeInput(raw []byte) error {
 		}
 		p.users++
 		declaration := *p.armed
-		p.facts = append(p.facts, PhysicalProtocolFact{Kind: "actual-user-forwarded", Declaration: &declaration, InputSHA256: physicalProtocolDigest(raw)})
+		p.facts = append(p.facts, PhysicalProtocolFact{Kind: "actual-user-forwarded", Declaration: &declaration, Input: physicalCanonicalJSON(raw), InputSHA256: physicalProtocolDigest(physicalCanonicalJSON(raw))})
 		return nil
 	}
 	if header.Type != "control_request" {
@@ -412,29 +437,33 @@ func (p *PhysicalReplayProtocol) BeforeInput(raw []byte) error {
 			return p.reject()
 		}
 		operation = p.byTask[header.Request.TaskID]
-		if operation == nil || !operation.rosterSeen || operation.stopped || operation.completed || !operation.owned.Running() {
+		if operation == nil || !operation.rosterSeen || operation.stopped || operation.completed || !operation.running() {
 			return p.reject()
 		}
 	} else {
 		background, foreground := p.composerOperations()
-		if p.family != "composer" || p.interrupted || background == nil || background.taskID == "" || !background.rosterSeen || !background.owned.Running() || foreground == nil || foreground.owned.RequireForegroundWitness(p.home) != nil {
+		if p.family != "composer" || p.interrupted || background == nil || background.taskID == "" || !background.rosterSeen || !background.running() || foreground == nil || (!p.observeOnly && foreground.owned.RequireForegroundWitness(p.home) != nil) {
 			return p.reject()
 		}
 		operation = foreground
 	}
-	status, err := operation.owned.StopContext(p.ctx)
-	if err != nil || status != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
-		return p.reject()
+	var status *FallbackWorkerStatus
+	if operation.owned != nil {
+		actual, err := operation.owned.StopContext(p.ctx)
+		if err != nil || actual != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
+			return p.reject()
+		}
+		status = &actual
 	}
 	operation.stopped = true
 	if header.Request.Subtype == "interrupt" {
 		background, _ := p.composerOperations()
-		if !background.owned.Running() {
+		if !background.running() {
 			return p.reject()
 		}
 		p.interrupted = true
 	}
-	p.facts = append(p.facts, PhysicalProtocolFact{Kind: "actual-" + header.Request.Subtype, ToolID: operation.toolID, TaskID: operation.taskID, ControlID: header.RequestID, Status: &status})
+	p.facts = append(p.facts, PhysicalProtocolFact{Kind: p.factKind("actual-"+header.Request.Subtype, "native-"+header.Request.Subtype+"-request-observed"), ToolID: operation.toolID, TaskID: operation.taskID, ControlID: header.RequestID, Status: status})
 	return nil
 }
 func (p *PhysicalReplayProtocol) Finish() ([]PhysicalProtocolFact, error) {
@@ -462,7 +491,7 @@ func (p *PhysicalReplayProtocol) Finish() ([]PhysicalProtocolFact, error) {
 		} else if !operation.stopped || operation.completed || (operation.spec.Kind == "stop-hold" && !operation.terminalSeen) {
 			return nil, p.reject()
 		}
-		if operation.owned.Running() {
+		if operation.running() {
 			return nil, p.reject()
 		}
 	}
@@ -483,8 +512,10 @@ func (p *PhysicalReplayProtocol) Close() error {
 	p.closed = true
 	var failures []string
 	for _, operation := range p.operations {
-		if err := operation.owned.Close(); err != nil {
-			failures = append(failures, "owned operation group did not drain")
+		if operation.owned != nil {
+			if err := operation.owned.Close(); err != nil {
+				failures = append(failures, "owned operation group did not drain")
+			}
 		}
 	}
 	if len(failures) > 0 {
@@ -496,4 +527,33 @@ func (p *PhysicalReplayProtocol) Close() error {
 func physicalProtocolDigest(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func (p *PhysicalReplayProtocol) factKind(replay, native string) string {
+	if p.observeOnly {
+		return native
+	}
+	return replay
+}
+
+// running in observation mode is protocol state, never an OS liveness claim.
+func (o *physicalProtocolOperation) running() bool {
+	if o.owned != nil {
+		return o.owned.Running()
+	}
+	return !o.stopped && !o.completed
+}
+
+func physicalCanonicalJSON(raw []byte) json.RawMessage {
+	var value any
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	if d.Decode(&value) != nil || d.Decode(new(any)) != io.EOF {
+		return nil
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return canonical
 }
