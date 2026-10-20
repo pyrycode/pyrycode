@@ -3,6 +3,31 @@
 Infrastructure, staging and evidence contracts for the
 [real-Claude suite](e2e-realclaude.md).
 
+## Recorded lifecycle failure receipts
+
+`TestLifecycleTapeBrokerProcess` is also the broker entrypoint for offline
+recorded replay. It preserves a typed `LifecycleTimingError` in
+`LifecycleReceipt.Timing`; arbitrary provider and I/O errors retain generic
+`lifecycle boundary failed` wording. The three static timeline error messages
+remain allowed. Diagnostic data contains no frame content, credentials, paths or
+arbitrary error text.
+
+The diagnostic records zero-based output ordinal, causal input anchor (0 for readiness),
+origin-relative `DueNS`/`CurrentNS`, signed `LatenessNS` and the stage
+`before-wait`, `after-wait` or `forwarding`. `StartupNS` measures work before
+readiness; `ReadyNS` is elapsed time since readiness. `CompletionNS` and
+`WitnessNS` measure the last replay input's completion-observation and `OnInput`
+work; `PriorOutputCompletionNS` measures observation after the previous output.
+These separate broker work from waiting and forwarding rather than attributing
+every late output to scheduler delay.
+
+On failure, `runRecordedLifecycleSuite` logs the diagnostic with scenario and
+role from bounded receipt data before disposable-home cleanup. It also logs
+source revision and actual helper/daemon SHA256 identities, so retained test
+output can be tied to the executed binaries. Preserve that output outside the
+temporary home. See [absolute timing and settlement](e2e-harness.md#recorded-lifecycle-timing-and-settlement)
+and [retained failure/pass evidence](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
+
 ## Test infrastructure
 
 The background-reply rig keeps the Agent backgrounded while a Bash-only

@@ -112,13 +112,13 @@ func waitLifecycleOutput(origin time.Time, offset int64, now func() time.Time, s
 	due := origin.Add(time.Duration(offset))
 	current := now()
 	if current.After(due.Add(100 * time.Millisecond)) {
-		return errors.New("native output timeline missed absolute due time")
+		return lifecycleTimingFailure("before-wait", origin, offset, current)
 	}
 	if current.Before(due) {
 		sleep(due.Sub(current))
 	}
-	if now().After(due.Add(100 * time.Millisecond)) {
-		return errors.New("native output timeline scheduling drift")
+	if current = now(); current.After(due.Add(100 * time.Millisecond)) {
+		return lifecycleTimingFailure("after-wait", origin, offset, current)
 	}
 	return nil
 }
@@ -128,10 +128,39 @@ func forwardLifecycleOutput(origin time.Time, offset int64, now func() time.Time
 		return err
 	}
 	if err := forward(); err != nil {
+		if current := now(); current.After(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) {
+			return lifecycleTimingFailure("forwarding", origin, offset, current)
+		}
 		return err
 	}
-	if now().After(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) {
-		return errors.New("native output timeline forwarding drift")
+	if current := now(); current.After(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) {
+		return lifecycleTimingFailure("forwarding", origin, offset, current)
 	}
 	return nil
+}
+
+// LifecycleTimingError contains only broker-generated timing metadata, never
+// native frame data or arbitrary I/O error text. Ordinals are zero based.
+type LifecycleTimingError struct {
+	Stage                        string
+	Output, Anchor               int
+	DueNS, CurrentNS, LatenessNS int64
+	StartupNS, ReadyNS           int64
+	CompletionNS, WitnessNS      int64
+	PriorOutputCompletionNS      int64
+}
+
+func (e *LifecycleTimingError) Error() string {
+	switch e.Stage {
+	case "before-wait":
+		return "native output timeline missed absolute due time"
+	case "after-wait":
+		return "native output timeline scheduling drift"
+	default:
+		return "native output timeline forwarding drift"
+	}
+}
+
+func lifecycleTimingFailure(stage string, origin time.Time, offset int64, current time.Time) error {
+	return &LifecycleTimingError{Stage: stage, DueNS: offset, CurrentNS: current.Sub(origin).Nanoseconds(), LatenessNS: current.Sub(origin.Add(time.Duration(offset))).Nanoseconds()}
 }
