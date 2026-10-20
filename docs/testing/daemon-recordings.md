@@ -745,3 +745,15 @@ prefix is not. Fixtures contain captured native outputs, so fresh captures compa
 all outgoing requests while independently validating their own transcript witness.
 Current provider transcript creation, rotation interpretation and signal behavior
 remain covered by the retained original live root.
+
+`clear-wrapup-skipped` adds the original bounded `/clear` root. Its bootstrap,
+actually revived bound conversation and fresh successor have three closed roles.
+The original seeded UUIDs stay distinct. Both conversation launches must match
+the current persisted binding; the successor also requires the actual predecessor
+PID to be gone and its external broker to have finished. A typed rotation
+checkpoint precedes the unchanged `/clear` send. The production one-millisecond
+wrap-up bound, reset-edge assertions, transition counts, eight-second quiet
+window, seeded-note byte comparison and successor prompt checks still run. No
+note or file is synthesized for this root. Bootstrap and successor remain alive
+until the original daemon cleanup; the bound predecessor journals all traffic
+through its actual output EOF.

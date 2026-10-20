@@ -15,11 +15,15 @@ func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
 		"conversation-lifecycle": {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
 		"session-rotation":       {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
+		"clear-wrapup-skipped":   {"TestInteractiveStreamClearWrapUpSkipped", []string{"bootstrap", "bound", "rotated"}},
 	}
 }
 
 const LifecycleRotationSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 const LifecycleRotationConversation = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+const LifecycleSkipBootstrap = "24860000-0000-4000-8000-000000000001"
+const LifecycleSkipSession = "24860000-0000-4000-8000-000000000002"
+const LifecycleSkipConversation = "24860000-0000-4000-8000-000000000003"
 
 func LifecycleBootstrapFor(scenario string) string {
 	switch scenario {
@@ -27,11 +31,20 @@ func LifecycleBootstrapFor(scenario string) string {
 		return LifecycleBootstrapSession
 	case "session-rotation":
 		return LifecycleRotationSession
+	case "clear-wrapup-skipped":
+		return LifecycleSkipBootstrap
 	}
 	return ""
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "clear-wrapup-skipped":
+		switch role {
+		case "bootstrap", "rotated":
+			return "seal"
+		case "bound":
+			return "rotate-session"
+		}
 	case "conversation-lifecycle":
 		switch role {
 		case "bootstrap":
@@ -84,6 +97,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 }
 
 func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBinding) bool {
+	if scenario == "clear-wrapup-skipped" && (b.ConversationID != LifecycleSkipConversation || role == "bound" && b.SessionID != LifecycleSkipSession || role == "rotated" && b.SessionID == LifecycleSkipSession) {
+		return false
+	}
 	return LifecycleEnd(scenario, role) != "" && role != "bootstrap" && b.Role == role && poolUUID.MatchString(b.SessionID) && b.SessionID != LifecycleBootstrapFor(scenario) && poolUUID.MatchString(b.ConversationID) && b.WorkDir == filepath.Join(home, "work") && (scenario != "session-rotation" || b.ConversationID == LifecycleRotationConversation)
 }
 

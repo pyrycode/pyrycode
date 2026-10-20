@@ -23,7 +23,7 @@ type ClientCheckpoint struct {
 }
 
 func RequiresClientCheckpoint(name string) bool {
-	return name == "session-rotation-bootstrap" || name == "conversation-lifecycle-created-1" || name == "ordinary-queue-placement" || name == "interrupt-running" || name == "interrupt-thinking" || name == "subagent-text"
+	return name == "clear-wrapup-skipped-bound" || name == "session-rotation-bootstrap" || name == "conversation-lifecycle-created-1" || name == "ordinary-queue-placement" || name == "interrupt-running" || name == "interrupt-thinking" || name == "subagent-text"
 }
 
 // DecodeClientCheckpoint accepts a closed, duplicate-free action object. These

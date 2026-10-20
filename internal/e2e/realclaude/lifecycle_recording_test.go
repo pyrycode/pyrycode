@@ -222,7 +222,7 @@ func finishLifecycleRecording(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if daemonRecordingWrite(c.Receipt, daemonRecordingReceipt{Success: true, Frames: 2, ArtifactSHA256: digest}) != nil {
+	if daemonRecordingWrite(c.Receipt, daemonRecordingReceipt{Success: true, Frames: len(profile.Roles), ArtifactSHA256: digest}) != nil {
 		t.Fatal("lifecycle root receipt repeated")
 	}
 }
@@ -269,7 +269,12 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 		}
 	}
 	var role claudetape.LifecycleRoleBinding
-	if c.Process.Scenario == "session-rotation" {
+	if c.Process.Scenario == "clear-wrapup-skipped" {
+		role, e = lifecycleRecordingSkippedResetRole(c, session)
+		if e != nil {
+			fail()
+		}
+	} else if c.Process.Scenario == "session-rotation" {
 		role, e = lifecycleRecordingRotationRole(c, session)
 		if e != nil {
 			fail()

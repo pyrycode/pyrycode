@@ -1135,6 +1135,23 @@
       "retained_live": [
         "Current Claude rotation, response, native transcript production and real process termination remain live. Replay runs the original rotation controls, persistence, transition attribution, second-send ACK and coexisting physical JSONL assertions; native transcript bytes are restored only after the matching request reaches its owned provider boundary."
       ]
+    },
+    {
+      "name": "clear-wrapup-skipped",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStreamClearWrapUpSkipped"
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamClearWrapUpSkipped": "67be72c3e281ad3106507cbcc777c9e384093cf235c23e5d610daa0bd86510c5"
+      },
+      "retained_live": [
+        "Current Claude startup, response, native rotation and process termination remain live. Replay runs the original one-millisecond wrap-up deadline, skipped reset edges, exact transition counts, quiet window, untouched seeded note and successor prompt assertions. The real daemon still performs the deadline, reset and signal operations."
+      ]
     }
   ],
   "batches": {
@@ -1278,6 +1295,13 @@
     ],
     "session-rotation": [
       "session-rotation"
+    ],
+    "clear-wrapup-skipped": [
+      "clear-wrapup-skipped"
+    ],
+    "session-resets": [
+      "session-rotation",
+      "clear-wrapup-skipped"
     ]
   },
   "reviews": {
@@ -1325,11 +1349,6 @@
       "disposition": "needs_harness",
       "reason": "Reset edges, exactly one transition, stored handoff and successor prompt are useful deterministic claims. Requires predecessor/wrap-up/successor roles, typed session rotation and file-input inventory. Actual predecessor-to-successor recall remains live.",
       "contract_sha256": "6a40ef4d51704ced4e58e01a05eb199bd6573afbd85e9c7c45efd6324cb80bf3"
-    },
-    "TestInteractiveStreamClearWrapUpSkipped": {
-      "disposition": "needs_harness",
-      "reason": "Skipped wrap-up must preserve a preexisting note and three reset edges. Needs rotation roles plus explicit deadline/clock or cancellation checkpoint; quick replay must not accidentally turn a timed-out wrap-up into a successful one.",
-      "contract_sha256": "67be72c3e281ad3106507cbcc777c9e384093cf235c23e5d610daa0bd86510c5"
     },
     "TestInteractiveStreamDormantResetAfterRestart": {
       "disposition": "needs_harness",
