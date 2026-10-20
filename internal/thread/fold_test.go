@@ -42,7 +42,7 @@ func TestStandaloneItems(t *testing.T) {
 		{"model_refusal_fallback", `{"original_model":"a","fallback_model":"b","banner":"fallback"}`, "notice", "fallback", true},
 		{"model_refusal_no_fallback", `{"original_model":"a","banner":"refused"}`, "notice", "refused", true},
 		{"unrecognized_message", `{"site":"stdout","message_type":"new","raw":"odd\noutput","truncated":true}`, "notice", "Unrecognized message", true},
-		{"attachment_offered", `{"attachment_id":"file","filename":"image.png"}`, "notice", "image.png", false},
+		{"attachment_offered", `{"attachment_id":"file","filename":"image.png"}`, "notice", "image.png", true},
 		{"prompt_answered", `{"correlation_id":"q","decision":"answer","behavior":"allow","context":{"questions":[{"index":0,"text":"Which?","values":[{"text":"yes","meaning":"agree"}]}]},"truncated":false}`, "notice", "Prompt answered: answer", true},
 	}
 	for _, source := range []*history.SessionProvenance{nil, testSource("claude", "s"), testSource("codex", "c"), testSource("none", "")} {

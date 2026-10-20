@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -419,6 +420,10 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		r := claudetape.LifecycleReceipt{Success: err == nil, Frames: n, OwnerPID: job.Config.OwnerPID, BrokerPID: os.Getpid()}
 		if err != nil {
 			r.Error = "lifecycle boundary failed"
+			var timing *claudetape.LifecycleTimingError
+			if errors.As(err, &timing) {
+				r.Timing = timing
+			}
 			switch err.Error() {
 			case "native output timeline missed absolute due time", "native output timeline scheduling drift", "native output timeline forwarding drift":
 				r.Error = err.Error()

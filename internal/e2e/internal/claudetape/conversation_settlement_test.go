@@ -6,7 +6,50 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestConversationCompletionPreservesOutputSchedule(t *testing.T) {
+	for _, mode := range []string{"capture", "replay"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.Chmod(home, 0700); err != nil {
+				t.Fatal(err)
+			}
+			tape := fallbackExchangeControl()
+			frames := []Frame{tape.Frames[0]}
+			for range 15 {
+				frames = append(frames, Frame{Direction: "stdout", Data: json.RawMessage(`{"type":"rate_limit_event"}`)})
+			}
+			tape.Frames = append(frames, tape.Frames[1:]...)
+			c := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: mode, Scenario: "conversation-system-prompt-bare", Path: filepath.Join(home, "bare.json"), Producer: tape.Producer}, OwnerPID: os.Getpid() + 100000}
+			origin := time.Unix(0, 0)
+			current := origin
+			derivations := 0
+			observe := newConversationCompletionObserver(c, tape, func(observed *Tape) (FallbackExchange, error) {
+				derivations++
+				current = current.Add(35 * time.Millisecond)
+				return completedConversationExchange(observed)
+			})
+			ordinal := 0
+			for _, frame := range tape.Frames {
+				if frame.Direction == "stdout" {
+					ordinal++
+					if err := forwardLifecycleOutput(origin, int64(time.Duration(ordinal)*20*time.Millisecond), func() time.Time { return current }, func(d time.Duration) { current = current.Add(d) }, func() error { return nil }); err != nil {
+						t.Fatalf("completion work delayed output %d: %v", ordinal, err)
+					}
+				}
+				if err := observe(frame.Direction, frame.Data); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var receipt ConversationCompletion
+			if derivations != 1 || ReadLifecycleControl(filepath.Join(home, "bare.completed"), 16384, &receipt) != nil || ValidateConversationCompletion(receipt, "bare", tape.Producer.Revision, c.OwnerPID, os.Getpid(), tape) != nil {
+				t.Fatalf("scheduled outputs lost their actual complete source; derivations=%d", derivations)
+			}
+		})
+	}
+}
 
 func TestConversationCompletionRequiresActuallyObservedSuccessfulResult(t *testing.T) {
 	for _, mode := range []string{"capture", "replay"} {
