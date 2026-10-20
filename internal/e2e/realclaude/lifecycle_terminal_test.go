@@ -90,7 +90,7 @@ func TestLifecycleTerminalPublicationRejectsInvalidPrefix(t *testing.T) {
 			case "invalid-digest":
 				ack.ArtifactSHA256 = "unknown"
 			}
-			if variant != "cancelled" {
+			if variant != "cancelled" && variant != "failed-terminal" {
 				if err := claudetape.PublishLifecycleControl(root, ack); err != nil {
 					t.Fatal(err)
 				}
