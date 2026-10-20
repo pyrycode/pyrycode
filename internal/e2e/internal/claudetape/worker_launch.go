@@ -116,6 +116,21 @@ func (a *FallbackLaunchAudit) Save(destination string) error {
 	a.Stop()
 	var observations []FallbackWorkerObservation
 	err := ReadLifecycleControl(filepath.Join(a.home, "recording-worker-observations.json"), 16384, &observations)
+	// Report only bounded identities, never worker argv, input or protocol bytes.
+	registered := []int{}
+	registrationsKnown := true
+	for i := 1; i <= LifecycleWorkerLimit(a.scenario); i++ {
+		path := FallbackWorkerJobPath(a.home, i)
+		if _, e := os.Lstat(path); os.IsNotExist(e) {
+			continue
+		}
+		var job FallbackWorkerJob
+		if ReadLifecycleControl(path, 16384, &job) != nil || job.OwnerPID <= 1 {
+			registrationsKnown = false
+			continue
+		}
+		registered = append(registered, job.OwnerPID)
+	}
 	raw, e := json.Marshal(struct {
 		Revision, SourceBinarySHA256 string
 		Launches                     map[int]workerLaunch
@@ -123,7 +138,9 @@ func (a *FallbackLaunchAudit) Save(destination string) error {
 		Invalid                      bool
 		WaitsKnown                   bool
 		Waits                        []FallbackWorkerObservation
-	}{a.revision, a.sourceSHA, a.launches, a.chain, a.invalid, err == nil, observations})
+		RegistrationsKnown           bool
+		RegisteredOwners             []int
+	}{a.revision, a.sourceSHA, a.launches, a.chain, a.invalid, err == nil, observations, registrationsKnown, registered})
 	if e != nil || len(raw) > 16384 {
 		return os.ErrInvalid
 	}

@@ -337,7 +337,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal("cannot run original daemon assertions")
 	}
-	if name == "session-resume" {
+	if name == "session-resume" || name == "composer-stop" {
 		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary, revision, sourceSHA, os.Getpid(), cmd.Process.Pid)
 		defer launchAudit.Stop()
 	}
@@ -515,7 +515,13 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			t.Fatal(err)
 		}
 	}
-	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes, launchAudit)
+	// Composer Stop observations remain diagnostic until its cancellation boundary
+	// is independently validated by the final inventory.
+	inventoryAudit := launchAudit
+	if name == "composer-stop" {
+		inventoryAudit = nil
+	}
+	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes, inventoryAudit)
 	if err != nil {
 		destination := filepath.Join(evidenceDir, name+"-invalid-worker-diagnostic.json")
 		if diagnosticErr := claudetape.SaveLifecycleWorkerDiagnostic(home, name, destination, tapes); diagnosticErr == nil {
