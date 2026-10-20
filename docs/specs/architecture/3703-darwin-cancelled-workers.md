@@ -99,8 +99,11 @@ exchange distinctions, historical attribution limits, and offline versus live pr
 - Tokens/cryptography: no credentials, keys or new cryptographic operations.
 - Files: existing private control readers/publication are reused; cwd must be
   canonical private 0700 with kernel vnode matching the inspected directory.
-- Subprocesses: observation starts/signals none. Tests signal only actual owned
-  commands using bounded contexts, then reap them; no shell interpolation.
+- Subprocesses: observation starts/signals none. The owning test daemon cancels
+  the worker group before its sole Wait releases the child PID. Closing the
+  parent's input also requests this cancellation; reported evidence never grants
+  cleanup authority. Owned survivor commands are separately killed and reaped.
+  Root cleanup is bounded by its command context; no shell interpolation.
 - Network/I/O: no network; fixed-size native buffers and bounded argument parsing.
 - Errors/logs: native argv/environment are ephemeral and excluded from diagnostics.
 - Concurrency: mutex protects sampler/test reads; Stop joins before consumption.
@@ -117,3 +120,22 @@ exchange distinctions, historical attribution limits, and offline versus live pr
   `TestDarwinLaunchOwnership/live-group` independently rejects a reaped worker
   whose actual owned group member survives. No accounting or timer changes.
   Child discovery uses fixed-buffer `PROC_PPID_ONLY`, rejecting a full buffer.
+- 2026-10-20 rework, verifier findings 1 and 2: replace the deprecated direct
+  Darwin syscall boundary with libproc's `proc_pidinfo`, `proc_pidpath` and
+  `proc_listchildpids` wrappers through cgo. Preserve bounded buffers, strict
+  native return checks and all identity rechecks. Without cgo these queries
+  return unknown, preserving buildability and fail-closed inventory accounting;
+  native acceptance uses cgo on macOS. No new dependency or consumer API.
+  Remove cleanup's reported-worker-PID signal: the prior security claim was
+  incorrect because a completed Wait could release that PID before a decoder
+  timeout. Parent pipe closure now reaches the daemon, which cancels before
+  reaping even on EOF or its bounded context expiry. No worker context callback
+  may signal after that Wait. Cover unreadable evidence before cancellation and
+  after reaping, including an owned surviving group member and an unrelated
+  live group. `TestDarwinLaunchCleanup` must pass with uncached race checks.
+  These repairs restore the existing observation/ownership invariant; they add
+  no independently useful behavior. Estimated repair: 200–260 written lines,
+  zero exported types, zero migrated consumers, no new accounting branches.
+  Native files have no concurrent feature-branch overlap at rework planning.
+  Run affected package race tests, original replay, staticcheck, vet and build;
+  preserve all earlier failed evidence. Complete gates remain dispatcher-owned.
