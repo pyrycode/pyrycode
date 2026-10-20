@@ -1190,7 +1190,7 @@
     {
       "name": "conversation-system-prompt",
       "boundary": "lifecycle_suite",
-      "comparison_policy": "strict_ordered",
+      "comparison_policy": "native_conversation_workers",
       "stdio_permission": false,
       "initial_yolo": false,
       "claude_args": [],
@@ -1207,7 +1207,7 @@
     {
       "name": "conversation-active-switch",
       "boundary": "lifecycle_suite",
-      "comparison_policy": "strict_ordered",
+      "comparison_policy": "native_conversation_workers",
       "stdio_permission": false,
       "initial_yolo": false,
       "claude_args": [],

@@ -330,6 +330,12 @@ func (s *LifecycleSuite) Save(path string, expected []string) error {
 	return nil
 }
 func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
+	if err := sameLifecycleProviderContract(a, b, expected); err != nil {
+		return err
+	}
+	return SameLifecycleWorkers(a, b)
+}
+func sameLifecycleProviderContract(a, b *LifecycleSuite, expected []string) error {
 	fail := errors.New("lifecycle outgoing contract changed")
 	if a.Validate(expected) != nil || b.Validate(expected) != nil || a.Scenario != b.Scenario {
 		return fail
@@ -362,7 +368,7 @@ func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
 			return fail
 		}
 	}
-	return SameLifecycleWorkers(a, b)
+	return nil
 }
 
 // LifecycleJob is private per-launch evidence, never serialized into fixtures.

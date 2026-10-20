@@ -78,3 +78,42 @@ func TestLifecycleTimelineRejectsLateFinalForward(t *testing.T) {
 		t.Fatal("bounded successful forwarding rejected", err)
 	}
 }
+
+func TestLifecycleInputTimelineBindsActualPrecedingUser(t *testing.T) {
+	role := resumeSuiteControl("native").Roles["bootstrap"]
+	role.Tape.Scenario = "conversation-system-prompt-prompted"
+	// One native output before and one after the successfully forwarded user.
+	role.Tape.Frames = []Frame{{Direction: "stdout", Data: json.RawMessage(`{"type":"system","subtype":"init"}`)}, {Direction: "stdin", Data: json.RawMessage(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}`)}, {Direction: "stdout", Data: json.RawMessage(`{"type":"result","subtype":"success"}`)}}
+	role.Timeline = &LifecycleTimeline{Kind: lifecycleInputTimelineKind, OutputAfterNS: []int64{int64(time.Second), int64(200 * time.Millisecond)}, OutputAfterUser: []int{0, 1}}
+	if validateLifecycleTimeline(role) != nil {
+		t.Fatal("valid independent user epoch rejected")
+	}
+	for _, anchors := range [][]int{nil, {0}, {0, 0}, {1, 1}, {0, 2}, {0, -1}} {
+		role.Timeline.OutputAfterUser = anchors
+		if validateLifecycleTimeline(role) == nil {
+			t.Fatal("missing, stale or future user anchor accepted")
+		}
+	}
+	role.Timeline.OutputAfterUser = []int{0, 1}
+	role.Tape.Scenario = "session-resume-bootstrap"
+	if validateLifecycleTimeline(role) == nil {
+		t.Fatal("idle activation phase reanchored to input")
+	}
+}
+func TestLifecycleInputTimelineDoesNotResetAnExistingUserPhase(t *testing.T) {
+	ready := time.Now()
+	user := ready.Add(3 * time.Second)
+	current := user
+	now := func() time.Time { return current }
+	sleep := func(d time.Duration) { current = current.Add(d) }
+	if waitLifecycleOutput(ready, int64(200*time.Millisecond), now, sleep) == nil {
+		t.Fatal("old readiness schedule concealed late user")
+	}
+	if waitLifecycleOutput(user, int64(200*time.Millisecond), now, sleep) != nil || !current.Equal(user.Add(200*time.Millisecond)) {
+		t.Fatal("native user-relative latency not retained")
+	}
+	current = current.Add(500 * time.Millisecond)
+	if waitLifecycleOutput(user, int64(400*time.Millisecond), now, sleep) == nil {
+		t.Fatal("second output reset user epoch or caught up")
+	}
+}

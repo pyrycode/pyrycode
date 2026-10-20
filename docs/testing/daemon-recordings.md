@@ -933,5 +933,32 @@ before daemon cleanup actually reaped its wrapper with SIGKILL and a logged grou
 cancellation. Absence retains the original exact native/production status rule.
 Replay closes native output, withholds wrapper completion until the original
 daemon actually cancels the current owned group, then checks its real Wait.
-Native status, optional production Wait, worker counts and source identity all
-remain exact in fresh comparisons. Failed diagnostics never become fixtures.
+Strict fresh policies retain exact native status, optional production Wait,
+worker counts and source identity; the two conversation profiles declare their
+separate fresh policy below. Failed diagnostics never become fixtures.
+
+The two conversation profiles use the named fresh-comparison policy
+`native_conversation_workers`. Complete main-provider argv, input files and
+ordered requests remain exact. Every observed finite worker independently needs
+its full source-declared production argv (including the system prompt), one
+completed owned source turn, complete native IO and actual terminal proof. The
+only source keys are prompted/1 and bare/1, or created-1/1 and created-2/1, with
+one attempt per key and at most two. Native exits other than 0 or actual SIGKILL
+remain unsupported. Fresh comparison reports both complete worker inventories,
+including native and separate production statuses; it does not assert worker
+lifecycle equivalence or attribute a missing worker to a particular timer.
+Saved and fresh replays each still require their own exact observed inventory.
+The fallback-suggestion and session-resume profiles keep strict fresh worker
+comparison. A source AST guard pins the complete production fallback argv even
+when a worker has no counterpart in the other capture.
+
+New captures for those conversation profiles and fallback-suggestion record
+`user-forwarded-stdout-v2` timing. Each output carries the ordinal of its actual
+preceding forwarded user input (zero means broker readiness) and its native
+forwarding offset from that epoch. Replay requires that same preceding input and
+preserves absolute output due times within each user epoch, including the
+100ms scheduling/forwarding drift check. A later output cannot reset an existing
+epoch. This separates provider response latency from variable queue/startup
+latency without changing production timers. Legacy timelines remain supported;
+session-resume bootstrap keeps its readiness-based timeline because its idle
+timer starts at activation. No old accepted fixture is rewritten.

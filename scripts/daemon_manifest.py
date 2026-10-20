@@ -56,7 +56,7 @@ def load(path=PATH):
         if boundary != 'daemon_stdio' and (row['live_tests'] != [roots[row['name']]] or row['stdio_permission'] or row['initial_yolo'] or row['claude_args']):
             raise ValueError('Original-root recording must own exact configuration/root')
         policy = row['comparison_policy']
-        if policy not in ('strict_ordered', 'native_coding_prefix') or (policy == 'native_coding_prefix') != (row['name'] == 'native-suggestions'):
+        if policy not in ('strict_ordered', 'native_coding_prefix', 'native_conversation_workers') or (policy == 'native_conversation_workers' and row['name'] not in ('conversation-system-prompt', 'conversation-active-switch')) or (policy == 'native_coding_prefix') != (row['name'] == 'native-suggestions'):
             raise ValueError('Unsupported scenario comparison policy')
         names(row['live_tests'], r'Test[A-Za-z0-9_]+')
         if not isinstance(row['retained_live'], list) or not row['retained_live'] or any(not isinstance(x, str) or not x.strip() for x in row['retained_live']):
