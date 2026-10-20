@@ -165,14 +165,13 @@ func ReadWrapUpObservationJSON(path string, limit int, value any) error {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(limit) || limit > MaxBytes || limit <= 0 {
 		return fail
 	}
-	f, err := os.Open(path)
+	f, err := openWrapUpObservation(path, info, limit)
 	if err != nil {
 		return fail
 	}
-	opened, statErr := f.Stat()
 	raw, readErr := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	closeErr := f.Close()
-	if statErr != nil || !os.SameFile(info, opened) || readErr != nil || closeErr != nil || len(raw) > limit {
+	if readErr != nil || closeErr != nil || len(raw) > limit {
 		return fail
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
@@ -181,4 +180,17 @@ func ReadWrapUpObservationJSON(path string, limit int, value any) error {
 		return fail
 	}
 	return nil
+}
+
+func openWrapUpObservation(path string, expected os.FileInfo, limit int) (*os.File, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("invalid native observation file")
+	}
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() > int64(limit) || !os.SameFile(expected, opened) {
+		_ = f.Close()
+		return nil, errors.New("invalid native observation file")
+	}
+	return f, nil
 }

@@ -1,10 +1,13 @@
 package claudetape
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWrapUpObservationKinds(t *testing.T) {
@@ -48,6 +51,41 @@ func TestWrapUpObservationKinds(t *testing.T) {
 	}
 	if ReadWrapUpObservationJSON(link, 16384, &restored) == nil {
 		t.Fatal("symlink fixture accepted")
+	}
+}
+
+func TestWrapUpObservationRetainsTruncatedPrefix(t *testing.T) {
+	for _, reason := range []string{"event_limit", "elapsed_limit"} {
+		t.Run(reason, func(t *testing.T) {
+			o := NewWrapUpObservation(strings.Repeat("a", 40), strings.Repeat("b", 64), strings.Repeat("c", 64))
+			o.Add("ready", nil, nil)
+			if reason == "event_limit" {
+				for len(o.Events) < 128 {
+					o.Add("received", nil, nil)
+				}
+			} else {
+				o.start = time.Now().Add(-21 * time.Minute)
+			}
+			prefix := append([]WrapUpObservationEvent(nil), o.Events...)
+			o.Add("received", nil, nil)
+			o.Add("complete", nil, nil)
+			if !reflect.DeepEqual(o.Events, prefix) {
+				t.Fatal("exhaustion changed the valid prefix")
+			}
+			path := t.TempDir() + "/partial.json"
+			if err := o.Save(path); err != nil {
+				t.Fatalf("failed to retain partial evidence: %v", err)
+			}
+			var restored WrapUpObservation
+			if ReadWrapUpObservationJSON(path, 16384, &restored) != nil || restored.Validate(false) != nil || restored.Validate(true) == nil || !reflect.DeepEqual(restored.Events, prefix) {
+				t.Fatal("partial evidence lost or accepted as complete")
+			}
+			raw, err := os.ReadFile(path)
+			var classification struct{ Truncated string }
+			if err != nil || json.Unmarshal(raw, &classification) != nil || classification.Truncated != reason {
+				t.Fatal("missing explicit truncation classification")
+			}
+		})
 	}
 }
 
