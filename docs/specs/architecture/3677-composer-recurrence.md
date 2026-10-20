@@ -1,0 +1,113 @@
+# Composer Stop recurrence
+
+## Files read
+
+- `internal/e2e/internal/claudetape/fallback_worker.go` → `ReadLifecycleWorkers`: inventory runs after the original root succeeds.
+- `internal/e2e/internal/claudetape/worker_launch.go` → `cancelled`, `Save`: independently owned cancellations and known-state diagnostics.
+- `internal/e2e/internal/claudetape/worker_launch_linux.go` → `sample`, `observe`, `ownDaemon`: current ancestry and registration observations.
+- `internal/e2e/internal/claudetape/lifecycle_broker.go` → `RunLifecycleBroker`: restoration, physical observer and actual write share the absolute forwarding check.
+- `internal/e2e/internal/claudetape/lifecycle_timeline.go` → `forwardLifecycleOutput`: unchanged 100 ms drift checks.
+- `internal/e2e/internal/claudetape/daemon_binding.go` → `Frame`: restoration of declared identities and paths.
+- `internal/e2e/internal/claudetape/physical_protocol.go` → `BeforeOutput`: parser and current physical operation checks.
+- `internal/e2e/realclaude/lifecycle_recording_test.go` → `TestLifecycleTapeBrokerProcess`: installs the physical observer and retains typed timing errors.
+- `internal/e2e/recorded_lifecycle_suite_test.go` → `runRecordedLifecycleSuite`: external evidence and final audits.
+- `internal/e2e/internal/claudetape/lifecycle_timeline_test.go` → timing rejection controls.
+- `docs/knowledge/features/e2e-harness.md` → recorded lifecycle timing and settlement: Wait cannot prove launch or completion.
+- `docs/knowledge/features/development-verification.md`, `CODING-STYLE.md`, `docs/testing/daemon-recordings.md` → causal proof, artifact survival and physical guarantees.
+
+## Context
+
+The original #3683 full log is recoverable on pyrybox, with its expected SHA256
+`24eaed58ed9a2132ab8a5cef066644945aefaa4181c945911a5db17e9705d591`.
+At candidate `4b1e799a50b3c25fe89b5eeca4934c0e4e203b2e`, Composer Stop failed
+before inventory: original root 1/0/1/0, bootstrap forwarding drift at output 68,
+anchor 3, due 34330542 ns, current 267210453 ns, lateness 232879911 ns.
+The matching retained audit independently observed worker 499676, daemon 499563,
+absent registration, one completed SIGKILL cancellation Wait, and zero registered
+workers. This is not a demonstrated inventory rejection. Historical process/group
+death is not independently recoverable from a later live census.
+
+Preserve this recurrence and the original 2026-10-20T07:59:47.077Z sighting; the
+older lost inventory counts stay unknown. A current-main focused replay passed
+1/1 original root and 2/2 outer events without skips. It does not explain the
+historical failure. No decision record is needed.
+
+## Design
+
+One behavior slice: diagnose and repair the demonstrated Composer Stop boundary
+with its causal regression. First retain numeric elapsed work for restoration,
+BeforeOutput, replay transformation and actual forwarding in the existing typed
+timing error. Diagnose before changing acceptance. If necessary retain bounded
+maximum stage durations on success too. These observations confer no authority.
+Record the measured cause and repair contract prospectively in Revisions before
+behavior changes. An external required repair follows its existing owner.
+
+Preserve fixture bytes/cardinality, current source and peer checks, literal I/O
+and EOF, two attempts, original physical assertions and bounded cleanup. No retry,
+timeout, tolerance, epoch or schedule changes. Forecast <=600 written lines,
+zero new exported types/interfaces, <=3 consumers, three criteria and no new
+state-machine reject branches; reassess once the cause is measured.
+
+Overlap: #3673 adds local observation hooks to `RunLifecycleBroker`; #3686 changes
+the direct foreground-witness fixture. Neither supplies a required dependency.
+
+## Concurrency model
+
+The existing broker loop owns elapsed measurements. No new goroutine or lock.
+The existing sampler is joined before immutable audit reads and publication.
+
+## State transitions and identity reuse
+
+| Event | Race-enabled proof |
+| --- | --- |
+| Owned cancellation before registration, completed Wait and death | Existing `TestFallbackCancelledLaunchBoundary` and `TestFallbackCancelledLaunchOwnership` |
+| Duplicate/foreign/unmatched Wait or unknown ownership/registration | Existing cancellation and worker inventory rejection controls |
+| Late input, scheduling overshoot, final-forward backpressure | Existing `TestLifecycleTimingDiagnostic`, `TestLifecycleTimelineUsesAbsoluteDueTimes`, `TestLifecycleTimelineRejectsLateFinalForward` |
+| Original foreground stop, background survival, final worker/artifact audit | `TestRecordedClaude/composer-stop` |
+
+The new causal regression is named in the prospective repair revision after diagnosis.
+
+## Error handling
+
+All current rejection and completion checks remain mandatory. Numeric elapsed
+observations are diagnostic only; missing historical observations remain unknown.
+Retain reports externally and commit a content-free manifest with exact hashes.
+
+## Testing strategy
+
+Use Linux managed admission, race detection and disabled caching. The launcher
+refused the ticket's anchored parent/subtest selector before execution; supported
+`-run '^TestRecordedClaude$'` with the exact one-scenario environment allowlist
+selects the same leaf. Record both commands honestly. Run the affected claudetape
+package, focused replay, module vet and binary build. Dispatcher owns full-suite
+acceptance; macOS and fresh live capture are outside this ticket's scope.
+
+## Open questions
+
+- Which forwarding substage accounts for the recovered 232879911 ns lateness?
+- Can the same boundary be forced synchronously without relaxing timing checks?
+
+## Documentation handoff
+
+Pending documentation stage: update `docs/testing/daemon-recordings.md`,
+“Physical background-task boundary”, with the newly demonstrated boundary and
+retained evidence, distinguishing controlled proof from historical attribution.
+Preserve that cancelled launches consume attempts without completed native
+exchanges, and offline replay establishes no new live-provider behavior.
+
+## Security review
+
+**Verdict:** PASS
+
+- Trust boundaries: elapsed measurements cannot authorize a launch, receipt or completion; `ReadLifecycleWorkers` retains its independent joins.
+- Tokens: no credential or environment inspection; diagnostic additions contain numeric durations only.
+- Files: existing private, bounded, exclusive retention remains; evidence manifests include only reviewed metadata and hashes.
+- Subprocesses: no command or process-group changes; actual owned cancellation and Wait remain required.
+- Cryptography: existing SHA256 provenance only; no key or nonce changes.
+- Network/I/O: unchanged literal pipe forwarding and size/deadline limits; no network changes.
+- Errors/logs: SHOULD FIX: retain only fixed names and numbers, never raw frame or arbitrary I/O error text, in added timing diagnostics.
+- Concurrency: measurements stay in the single broker loop; no shared mutable state is introduced.
+- Threat model: offline evidence ownership is the boundary; live-provider behavior and relay authorization are unchanged.
+
+**Reviewer:** builder (self-review per security-review checklist)
+**Date:** 2026-10-20
