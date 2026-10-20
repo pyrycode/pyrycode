@@ -872,7 +872,7 @@ the separate broker capability, never argv, environment or native output text.
 
 ## Per-conversation system prompt isolation
 
-`conversation-system-prompt` proposes the unchanged original two-conversation
+`conversation-system-prompt` captures the unchanged original two-conversation
 reply test. Its bootstrap, prompted and bare providers have separate exclusive
 kernel-owned claims. The two nonbootstrap roles are published from the original
 persisted seed and checked against its fixed session/conversation identities.
