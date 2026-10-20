@@ -1,0 +1,114 @@
+{
+  "ticket": 3686,
+  "counts_order": ["executed", "passed", "failed", "skipped"],
+  "environment": {
+    "os": "Linux 7.0.0-38-generic x86_64",
+    "toolchain": "go1.26.9 linux/amd64",
+    "GOOS": "linux",
+    "GOARCH": "amd64",
+    "CGO_ENABLED": "1",
+    "GOFLAGS": "",
+    "GOMAXPROCS": "unset; runtime default",
+    "race": true,
+    "count": 1,
+    "timeout": "30m"
+  },
+  "revisions": {
+    "starting": "d8984ad1eccb1000060da29faa0e9c2c2bcd6cf6",
+    "prospective_plan": "77041d03a6973523cc8cb4082eee189e3405dfd9",
+    "regression_with_unchanged_polling": "bf0e9346b6c25ee9395a022c6b8bc17efe40079e",
+    "repair": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7"
+  },
+  "historical_failure": {
+    "revision": "4aafaccc03c0add2b3a3f82fba43e5e5f6ebafd0",
+    "os": "Linux 7.0.0-28-generic x86_64",
+    "toolchain": "go1.26.9 linux/amd64",
+    "test": "TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease",
+    "diagnostic": "actual foreground cancellation rejected",
+    "test_counts": [1, 0, 1, 0],
+    "package_counts": [985, 984, 1, 0],
+    "package_leaf_counts": [889, 888, 1, 0],
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape/...",
+    "path": "/tmp/builder-3668/rework-controls.jsonl",
+    "sha256": "50845595e94e133087d3ac86ffe18669cda2b4e96fdf5f2639e6825cd0703516",
+    "retained_reference": "09b00361798e8decb20462cfc90f87473d19a8ab:internal/e2e/testdata/3668-rework-evidence.json#unrelated_package_failure",
+    "retrieved_bundle": {
+      "ticket": 3668,
+      "runId": "51d515070ae31762af375d16289d45d3cb644bcd0b74bfa2a2134e29ae9a8a3f",
+      "digest": "5a1337f934398b166a195a65deeb231572d1eebe342f7f609e7fbf5fb8770ed2",
+      "path": "/tmp/builder-3686/evidence-3668/51d515070ae31762af375d16289d45d3cb644bcd0b74bfa2a2134e29ae9a8a3f"
+    },
+    "original_jsonl_in_downloaded_bundle": false,
+    "status": "FAILED; retained by reference, not converted by subsequent passes"
+  },
+  "historical_same_tree_rerun": {
+    "revision": "Same-tree rerun reported by PR 3680; exact rerun revision not independently retained",
+    "reported_by": "https://github.com/pyrycode/pyrycode/pull/3680",
+    "counts": [1, 1, 0, 0],
+    "path": "/tmp/builder-3668/physical-named-rerun.jsonl",
+    "sha256": "b598a4f3733654865aca6b57d506522e4263bbb14c802cdbbd738f867bf90ff8",
+    "conclusion": "Non-reproduction only; no base failure or load cause established"
+  },
+  "baseline": {
+    "revision": "d8984ad1eccb1000060da29faa0e9c2c2bcd6cf6",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease$' ./internal/e2e/internal/claudetape/...",
+    "counts": [1, 1, 0, 0],
+    "retained": "baseline.jsonl",
+    "sha256": "b4aa1cfce58358c16b39430a90df2ed8eb5399b7beec76861b8d25b1c2d5ff40"
+  },
+  "cancelled_admission": {
+    "path": "/tmp/builder-3686/regression-red.stderr",
+    "exit": 143,
+    "counts": [0, 0, 0, 0],
+    "reason": "Explicitly cancelled after over fifteen minutes queued; no test result"
+  },
+  "controlled_red": {
+    "revision": "bf0e9346b6c25ee9395a022c6b8bc17efe40079e",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -overlay /tmp/builder-3686/unchanged-overlay.json -run '^TestPhysicalForegroundWitnessWaitsForPublication$' ./internal/e2e/internal/claudetape/...",
+    "counts": [1, 0, 1, 0],
+    "exit": 1,
+    "retained": "regression-red.jsonl",
+    "sha256": "6c8c6675673e574b0c97986b8fdb35f50e7ea584e4db675dca6ee6425085c1f2",
+    "diagnostic": "foreground readiness returned incomplete witness empty after 1 reads",
+    "overlay_sha256": "6864632071776b1808c4ee62f9448b6329ada9f1ac294f78e8118e653aebb9fb",
+    "overlay_sources": {
+      "physical_owned_test.go": "c33d1e14257b08282cff74d7ac8477753ae398280d521bba754983801f439cfe",
+      "physical_protocol_test.go": "bdfc3706144db9b868949a52aa09c4b7bfb007282b5dd2b96ea1d2ffafdeb433",
+      "physical_witness_test.go": "93a38719562a26adf8ed62702ddec9cbbaac900ce86b3584522ce4b23a96502e"
+    },
+    "overlay_identity": "Each replacement's git blob hash equals its file in the stated revision",
+    "conclusion": "Readable-file polling can return before a real shell publishes its complete PID"
+  },
+  "repair_package": {
+    "revision": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape/...",
+    "path": "/tmp/builder-3686/package-green.jsonl",
+    "status": "cancelled before execution after over seven minutes queued",
+    "exit": 143,
+    "counts": [0, 0, 0, 0]
+  },
+  "physical_selector_refusal": {
+    "selection": "^Test(Physical|OwnedPhysical)",
+    "path": "/tmp/builder-3686/physical-green.stderr",
+    "exit": 1,
+    "counts": [0, 0, 0, 0],
+    "reason": "Managed scope policy rejected unbounded name pattern; replaced with explicit test names, not treated as a test failure or permission denial"
+  },
+  "repair_physical_controls": {
+    "revision": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7; later commits contain evidence only",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^(TestPhysicalForegroundWitnessWaitsForPublication|TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease|TestOwnedPhysicalComposerStopPreservesRealBackgroundUntilRelease|TestOwnedPhysicalForegroundWitnessRejectsReleaseAndForeignReads|TestOwnedPhysicalOperationExecutesOriginalHoldAndActuallyStops|TestOwnedPhysicalGroupRemainsPinnedAfterOperationWait|TestPhysicalProtocolStopRequiresActualWaitAndNativeTerminal|TestPhysicalProtocolStopTerminalAllowsClosedFinish|TestPhysicalProtocolRejectsUnownedOrPrematureEvidence|TestPhysicalProtocolRejectsChildPartialAndForeignToolBeforeExecution)$' ./internal/e2e/internal/claudetape/...",
+    "path": "/tmp/builder-3686/physical-exact-green.jsonl",
+    "status": "BLOCKED: cancelled while still queued at builder wall-clock limit; repaired controls must run before builder completion",
+    "exit": 143,
+    "counts": [0, 0, 0, 0],
+    "admission_log": "/tmp/builder-3686/physical-exact-green.stderr"
+  },
+  "static_checks": {
+    "revision": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7",
+    "commands": ["go vet ./...", "go build -o /tmp/builder-3686/pyry ./cmd/pyry"],
+    "status": "passed",
+    "logs": ["/tmp/builder-3686/vet.log", "/tmp/builder-3686/build.log"],
+    "each_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "limits": "Controlled publication ordering demonstrates the defect, not the historical rejection branch or a load cause. Production protocol, physical commands, ownership and Wait implementation are unchanged. Full acceptance belongs to dispatcher/verifier. No live-provider check applies. macOS is outside this Linux ticket's verification scope."
+}

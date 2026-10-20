@@ -61,14 +61,28 @@ func physicalControlInput(command string, background bool) json.RawMessage {
 }
 func physicalControlWaitFile(t *testing.T, path string) []byte {
 	t.Helper()
+	return physicalControlReadWitness(t, path, os.ReadFile, func([]byte) bool { return true })
+}
+func physicalControlWaitForeground(t *testing.T, op *OwnedPhysicalOperation) []byte {
+	t.Helper()
+	return physicalControlReadWitness(t, filepath.Join(op.home, "work", "foreground-started"), os.ReadFile, func(raw []byte) bool {
+		return string(raw) == strconv.Itoa(op.CurrentPID())+"\n" && op.RequireForegroundWitness(op.home) == nil
+	})
+}
+func physicalControlReadWitness(t *testing.T, path string, readFile func(string) ([]byte, error), ready func([]byte) bool) []byte {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	var lastSize int
 	for time.Now().Before(deadline) {
-		if raw, err := os.ReadFile(path); err == nil {
+		raw, err := readFile(path)
+		lastErr, lastSize = err, len(raw)
+		if err == nil && ready(raw) {
 			return raw
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("actual operation never produced witness")
+	t.Fatalf("actual operation never produced ready witness (last bytes: %d, read error: %v)", lastSize, lastErr)
 	return nil
 }
 func TestOwnedPhysicalOperationExecutesOriginalHoldAndActuallyStops(t *testing.T) {
@@ -138,7 +152,7 @@ func TestOwnedPhysicalComposerStopPreservesRealBackgroundUntilRelease(t *testing
 			t.Error(err)
 		}
 	}()
-	raw := physicalControlWaitFile(t, filepath.Join(home, "work", "foreground-started"))
+	raw := physicalControlWaitForeground(t, fg)
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if pid != fg.CurrentPID() || fg.RequireForegroundWitness(home) != nil {
 		t.Fatal("foreground PID was fabricated or belongs to another process")
@@ -272,7 +286,7 @@ func TestOwnedPhysicalGroupRemainsPinnedAfterOperationWait(t *testing.T) {
 	}
 }
 func TestOwnedPhysicalForegroundWitnessRejectsReleaseAndForeignReads(t *testing.T) {
-	for _, kind := range []string{"released", "foreign-home", "symlink", "fifo", "oversize"} {
+	for _, kind := range []string{"released", "foreign-home", "symlink", "fifo", "oversize", "empty", "partial-pid", "foreign-pid"} {
 		t.Run(kind, func(t *testing.T) {
 			home := physicalControlHome(t)
 			spec, _ := InspectPhysicalOperation(home, "composer-foreground")
@@ -287,7 +301,7 @@ func TestOwnedPhysicalForegroundWitnessRejectsReleaseAndForeignReads(t *testing.
 				}
 			}()
 			path := filepath.Join(home, "work", "foreground-started")
-			physicalControlWaitFile(t, path)
+			physicalControlWaitForeground(t, op)
 			inputHome := home
 			switch kind {
 			case "released":
@@ -304,6 +318,16 @@ func TestOwnedPhysicalForegroundWitnessRejectsReleaseAndForeignReads(t *testing.
 				}
 			case "oversize":
 				_ = os.WriteFile(path, []byte(strings.Repeat("1", 65)), 0600)
+			case "empty", "partial-pid", "foreign-pid":
+				text := ""
+				if kind == "partial-pid" {
+					text = strconv.Itoa(op.CurrentPID() / 10)
+				} else if kind == "foreign-pid" {
+					text = strconv.Itoa(os.Getpid()) + "\n"
+				}
+				if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			started := time.Now()
 			if err := op.RequireForegroundWitness(inputHome); err == nil || time.Since(started) > time.Second {
