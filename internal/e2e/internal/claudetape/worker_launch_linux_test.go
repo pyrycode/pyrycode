@@ -19,6 +19,13 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 }
 
 func TestFallbackCancelledLaunchBoundary(t *testing.T) {
+	for _, scenario := range []string{"session-resume", "composer-stop"} {
+		t.Run(scenario, func(t *testing.T) { testFallbackCancelledLaunchBoundary(t, scenario) })
+	}
+}
+
+func testFallbackCancelledLaunchBoundary(t *testing.T, scenario string) {
+	t.Helper()
 	home := t.TempDir()
 	if os.Chmod(home, 0700) != nil || os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
 		t.Fatal("private home")
@@ -30,7 +37,7 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer := lifecycleSuiteControl().Producer
-	audit := StartFallbackLaunchAudit(home, "session-resume", exe, producer.Revision, producer.BinarySHA256, os.Getpid(), root)
+	audit := StartFallbackLaunchAudit(home, scenario, exe, producer.Revision, producer.BinarySHA256, os.Getpid(), root)
 	audit.Stop()
 	audit.observe(pid, evidence.Daemon)
 	if len(audit.launches) != 1 || audit.launches[pid].Registration != "absent" {
@@ -55,7 +62,7 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 		t.Fatal("Wait")
 	}
 	read := func(a ...*FallbackLaunchAudit) error {
-		workers, err := ReadLifecycleWorkers(home, "session-resume", "replay", producer.Revision, producer.BinarySHA256, os.Getpid(), nil, a...)
+		workers, err := ReadLifecycleWorkers(home, scenario, "replay", producer.Revision, producer.BinarySHA256, os.Getpid(), nil, a...)
 		if len(workers) != 0 {
 			t.Fatal("invented a native exchange")
 		}
@@ -70,7 +77,7 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 	for _, kind := range []string{"unknown-launch", "unknown-registration", "registered", "wrong-source", "pid-reuse", "duplicate", "foreign", "no-cancel", "no-wait", "no-exit", "wrong-signal", "extra-launch"} {
 		t.Run(kind, func(t *testing.T) {
 			launch := audit.launches[pid]
-			candidate := &FallbackLaunchAudit{home: home, scenario: "session-resume", revision: producer.Revision, sourceSHA: producer.BinarySHA256, parent: os.Getpid(), outer: audit.outer, root: audit.root, chain: audit.chain, stop: make(chan struct{}), done: audit.done, launches: map[int]workerLaunch{pid: launch}}
+			candidate := &FallbackLaunchAudit{home: home, scenario: scenario, revision: producer.Revision, sourceSHA: producer.BinarySHA256, parent: os.Getpid(), outer: audit.outer, root: audit.root, chain: audit.chain, stop: make(chan struct{}), done: audit.done, launches: map[int]workerLaunch{pid: launch}}
 			observations := []FallbackWorkerObservation{observation}
 			switch kind {
 			case "unknown-launch":
