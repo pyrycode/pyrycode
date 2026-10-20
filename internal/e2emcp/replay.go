@@ -11,7 +11,7 @@ type replaySchedule struct {
 	next        int
 	connections map[string]bool
 	match       func(RPCEvent, []byte) error
-	finished    chan struct{}
+	stopWatch   func() bool
 }
 
 // NewReplayCoordinator checks the complete immutable source trace, then gates
@@ -61,19 +61,15 @@ func NewReplayCoordinator(ctx context.Context, events []RPCEvent, validate func(
 			return nil, err
 		}
 	}
-	c.replay = &replaySchedule{ctx: ctx, events: append([]RPCEvent(nil), events...), connections: connections, match: match, finished: make(chan struct{})}
-	go func() {
-		select {
-		case <-ctx.Done():
-			c.mu.Lock()
-			if !c.closed {
-				c.failed = true
-				c.notify()
-			}
-			c.mu.Unlock()
-		case <-c.replay.finished:
+	c.replay = &replaySchedule{ctx: ctx, events: append([]RPCEvent(nil), events...), connections: connections, match: match}
+	c.replay.stopWatch = context.AfterFunc(ctx, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if !c.closed {
+			c.failed = true
+			c.notify()
 		}
-	}()
+	})
 	return c, nil
 }
 func (c *Coordinator) notify() {

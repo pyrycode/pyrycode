@@ -2,6 +2,7 @@ package claudetape
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -91,6 +92,7 @@ func (t *LifecycleTape) Save(path string) error {
 
 type LifecycleBrokerConfig struct {
 	PoolProcessConfig
+	Context          context.Context `json:"-"`
 	OwnerPID         int
 	BrokerParentPID  int
 	Deadline         time.Time
@@ -116,6 +118,9 @@ type LifecycleKill struct {
 // SIGKILL authorization. A seal-ended role must still be alive at its seal.
 func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count int, resultErr error) {
 	fail := errors.New("lifecycle broker failed")
+	if c.Context != nil && c.Context.Err() != nil {
+		return 0, fail
+	}
 	parent := c.OwnerPID
 	if c.BrokerParentPID != 0 {
 		parent = c.BrokerParentPID
@@ -145,6 +150,22 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	originals := []*os.File{os.NewFile(3, "original-input"), os.NewFile(4, "original-output"), os.NewFile(5, "original-stderr"), os.NewFile(6, "provider-input"), os.NewFile(7, "provider-output"), os.NewFile(8, "provider-stderr"), os.NewFile(9, "ready")}
 	for _, f := range originals {
 		defer f.Close()
+	}
+	if c.Context != nil {
+		stopped := make(chan struct{})
+		defer close(stopped)
+		go func() {
+			select {
+			case <-c.Context.Done():
+				// Only Go-managed pollable writers can be blocked under a forwarding
+				// mutex. Keep raw-read descriptors open until this loop returns, so a
+				// cached syscall.Read fd cannot be recycled underneath the loop.
+				for _, i := range []int{1, 2, 3, 6} {
+					originals[i].Close()
+				}
+			case <-stopped:
+			}
+		}()
 	}
 	claim, err := os.OpenFile(c.Claim, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -234,7 +255,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if !c.Deadline.IsZero() && c.Deadline.Before(deadline) {
 		deadline = c.Deadline
 	}
-	expired := func() bool { return !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline)) }
+	expired := func() bool {
+		return c.Context != nil && c.Context.Err() != nil || !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline))
+	}
 	writeBounded := func(f *os.File, raw []byte, extraDeadline time.Time) error {
 		if len(raw) == 0 {
 			return nil
@@ -540,6 +563,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return nil
 	}
 	finish := func() (int, error) {
+		if c.Context != nil && c.Context.Err() != nil {
+			return frames, errors.New("cancelled lifecycle cannot seal")
+		}
 		if LifecycleAction(c.End) != "" && !actionAccepted {
 			return frames, errors.New("missing original delete checkpoint")
 		}
@@ -561,6 +587,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return frames, err
 				}
 			}
+			if c.Context != nil && c.Context.Err() != nil {
+				return frames, errors.New("cancelled lifecycle cannot finish")
+			}
 			return frames, nil
 		}
 		if c.BeforeSeal != nil {
@@ -568,9 +597,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, err
 			}
 		}
+		if c.Context != nil && c.Context.Err() != nil {
+			return frames, errors.New("cancelled lifecycle cannot publish")
+		}
 		return frames, tape.Save(c.Path)
 	}
 	for time.Now().Before(deadline) {
+		if c.Context != nil && c.Context.Err() != nil {
+			return frames, errors.New("lifecycle forwarding context cancelled")
+		}
 		if c.Abort != "" {
 			if _, err := os.Lstat(c.Abort); err == nil {
 				return frames, errors.New("lifecycle owner aborted recording")

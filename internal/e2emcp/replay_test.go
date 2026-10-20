@@ -254,3 +254,54 @@ func TestMCPReplayRejectsAlreadyCancelledOwner(t *testing.T) {
 		t.Fatal("cancelled owner accepted")
 	}
 }
+
+func TestMCPReplayCancellationAfterCompleteCannotPublishPrefixOrTerminal(t *testing.T) {
+	for _, stage := range []string{"prefix", "terminal"} {
+		t.Run(stage, func(t *testing.T) {
+			expected := replaySourceTrace(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			c, err := NewReplayCoordinator(ctx, expected, replayValidation, replayLiteral)
+			if err != nil || c.Register(replayConnection) != nil {
+				t.Fatal("replay")
+			}
+			if c.NativeInput(false, func() error { return nil }) != nil {
+				t.Fatal("initial input")
+			}
+			for _, event := range expected[:3] {
+				if c.ForwardRPC(event.Connection, event.Direction, []byte(event.Raw), func([]byte) error { return nil }) != nil {
+					t.Fatal("handshake")
+				}
+			}
+			if c.NativeOutput(func() error { return nil }) != nil || c.NativeInput(true, func() error { return nil }) != nil {
+				t.Fatal("native source")
+			}
+			if c.ForwardRPC(replayConnection, expected[3].Direction, []byte(expected[3].Raw), func([]byte) error { return nil }) != nil || c.NativeOutput(func() error { return nil }) != nil || c.ForwardRPC(replayConnection, expected[4].Direction, []byte(expected[4].Raw), func([]byte) error { return nil }) != nil {
+				t.Fatal("complete source")
+			}
+			if stage == "terminal" {
+				if _, err := c.Checkpoint(); err != nil || c.CloseRPC(replayConnection, true, true, nil) != nil {
+					t.Fatal("prefix/close")
+				}
+			}
+			// Suppress the asynchronous observer before cancelling the real context,
+			// reproducing a watcher that has not run yet without changing ctx semantics.
+			if !c.replay.stopWatch() {
+				t.Fatal("owner unexpectedly cancelled early")
+			}
+			cancel()
+			if c.failed {
+				t.Fatal("control depended on asynchronous failure")
+			}
+			if stage == "prefix" {
+				if _, err := c.Checkpoint(); err == nil {
+					t.Fatal("cancelled prefix accepted")
+				}
+			} else {
+				if _, err := c.Finish(); err == nil {
+					t.Fatal("cancelled terminal accepted")
+				}
+			}
+		})
+	}
+}

@@ -161,7 +161,7 @@ func (c *Coordinator) CloseRPC(connection string, inputEOF, outputEOF bool, wait
 func (c *Coordinator) Finish() ([]RPCEvent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || c.closed || len(c.sessions) == 0 || c.replay != nil && c.replay.next != len(c.replay.events) {
+	if c.failed || c.closed || len(c.sessions) == 0 || c.replay != nil && (c.replay.ctx.Err() != nil || c.replay.next != len(c.replay.events)) {
 		return nil, c.reject()
 	}
 	for _, session := range c.sessions {
@@ -171,7 +171,7 @@ func (c *Coordinator) Finish() ([]RPCEvent, error) {
 	}
 	c.closed = true
 	if c.replay != nil {
-		close(c.replay.finished)
+		c.replay.stopWatch()
 	}
 	c.notify()
 	return append([]RPCEvent(nil), c.events...), nil
@@ -219,7 +219,7 @@ func (c *Coordinator) Abort() { c.mu.Lock(); defer c.mu.Unlock(); c.failed = tru
 func (c *Coordinator) Checkpoint() ([]RPCEvent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || c.closed || c.checkpointed || len(c.sessions) == 0 || c.replay != nil && c.replay.next != len(c.replay.events) {
+	if c.failed || c.closed || c.checkpointed || len(c.sessions) == 0 || c.replay != nil && (c.replay.ctx.Err() != nil || c.replay.next != len(c.replay.events)) {
 		return nil, c.reject()
 	}
 	for _, session := range c.sessions {
