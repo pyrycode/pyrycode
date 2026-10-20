@@ -497,6 +497,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		}
 		t.Fatalf("lifecycle role evidence changed during original cleanup: audit=%v digest_matches=%t", err, digest == receipt.ArtifactSHA256)
 	}
+	if name == "session-resume" {
+		t.Logf("lifecycle prefix_sha256=%s cleanup_sha256=%s", receipt.ArtifactSHA256, digest)
+	}
 	if workerServer != nil {
 		if err := workerServer.Join(15 * time.Second); err != nil {
 			for _, proof := range workerProofs {

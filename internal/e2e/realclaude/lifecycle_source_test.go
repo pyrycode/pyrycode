@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -35,6 +36,9 @@ var lifecycleRecordingSource = newLifecycleSourceValidation(func() (string, erro
 })
 
 func newLifecycleSourceValidation(read func() (string, error)) func(string) error {
+	// The executable identifies this process for its whole lifetime. Each config
+	// must still name that identity; an initial read failure cannot be retried.
+	read = sync.OnceValues(read)
 	return func(expected string) error {
 		digest, err := read()
 		if err != nil || digest != expected {
