@@ -14,6 +14,7 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
+		"mcp-send-file":              {"TestInteractiveStreamSendFile", []string{"bootstrap"}},
 		"stop-background-task":       {"TestRealClaudeStopBackgroundTaskCompletion", []string{"bootstrap"}},
 		"composer-stop":              {"TestRealClaudeComposerStopPreservesBackgroundTask", []string{"bootstrap"}},
 		"fallback-suggestion":        {"TestInteractiveStream_FallbackReplySuggestionSetThenClear", []string{"bootstrap"}},
@@ -50,6 +51,8 @@ func LifecycleBootstrapFor(scenario string) string {
 		return bootstrap
 	}
 	switch scenario {
+	case "mcp-send-file":
+		return "77777777-7777-4777-8777-777777777777"
 	case "stop-background-task", "composer-stop":
 		return "33333333-3333-4333-8333-333333333333"
 	case "conversation-lifecycle", "conversation-system-prompt", "conversation-active-switch", "fallback-suggestion":
@@ -63,7 +66,7 @@ func LifecycleBootstrapFor(scenario string) string {
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
-	case "stop-background-task", "composer-stop":
+	case "mcp-send-file", "stop-background-task", "composer-stop":
 		if role == "bootstrap" {
 			return "seal"
 		}
@@ -136,6 +139,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 		if PhysicalFamily(scenario) != "" {
 			conv = "44444444-4444-4444-8444-444444444444"
 		}
+		if MCPScenario(scenario) {
+			conv = "55555555-5555-4555-8555-555555555555"
+		}
 		if scenario == "fallback-suggestion" {
 			conv = "28310000-0000-4000-8000-000000000002"
 		}
@@ -169,6 +175,7 @@ func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBindi
 }
 
 type LifecycleSuite struct {
+	MCP          map[string]*MCPExchange    `json:"mcp,omitempty"`
 	Physical     *PhysicalScenarioContract  `json:"physical,omitempty"`
 	Settlement   *ConversationSettlement    `json:"settlement,omitempty"`
 	Version      int                        `json:"version"`
@@ -183,6 +190,16 @@ type LifecycleSuite struct {
 func (s *LifecycleSuite) Validate(expected []string) error {
 	fail := errors.New("invalid lifecycle suite")
 	if s == nil {
+		return fail
+	}
+	if MCPScenario(s.Scenario) {
+		if len(s.MCP) != 1 || s.Roles["bootstrap"] == nil {
+			return fail
+		}
+		if _, e := ValidateMCPSendFile(s.MCP["bootstrap"], s.Roles["bootstrap"].Tape); e != nil {
+			return e
+		}
+	} else if len(s.MCP) != 0 {
 		return fail
 	}
 	if !reflect.DeepEqual(s.Settlement, RequiredConversationSettlement(s.Scenario)) {
@@ -366,6 +383,9 @@ func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
 func sameLifecycleProviderContract(a, b *LifecycleSuite, expected []string) error {
 	fail := errors.New("lifecycle outgoing contract changed")
 	if a.Validate(expected) != nil || b.Validate(expected) != nil || a.Scenario != b.Scenario || !reflect.DeepEqual(a.Physical, b.Physical) {
+		return fail
+	}
+	if MCPScenario(a.Scenario) && SameMCPSendFileRequests(a.MCP["bootstrap"], b.MCP["bootstrap"], a.Roles["bootstrap"].Tape, b.Roles["bootstrap"].Tape) != nil {
 		return fail
 	}
 	for _, role := range expected {
