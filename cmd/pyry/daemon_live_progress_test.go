@@ -93,7 +93,7 @@ func TestDaemonLiveQueuedTurnProgress(t *testing.T) {
 					w, mgr := testDaemonRelayWire(t, b, relayWiring{}, nil, func(cfg *relay.V2SessionConfig) {
 						current := cfg.LiveStateCurrent
 						cfg.LiveStateCurrent = func(r relay.LiveState) bool {
-							if boundary == "relay" && testTurnProgressPhase(t, r.Envelope) == event.phase {
+							if boundary == "relay" && r.Envelope.Type == protocol.TypeTurnState && !r.Envelope.SessionStateCleared {
 								hold(t.Context())
 							}
 							return current(r)

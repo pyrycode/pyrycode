@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -266,6 +267,15 @@ func daemonLiveCurrent(o *daemonLiveState, r relay.LiveState) bool {
 			revision = max(revision, retained.Revision)
 		}
 		return r.Revision == revision
+	}
+	// Queued turn progress is an edge consumers need even after a later idle
+	// replaces retention. Generation fencing above and relay revision watermarks
+	// still reject retired sources and delivery that would roll a consumer back.
+	if r.Envelope.Type == protocol.TypeTurnState && retained != nil && r.Revision > 0 && r.Revision <= retained.Revision {
+		var phase protocol.TurnStatePayload
+		if json.Unmarshal(r.Envelope.Payload, &phase) == nil && (phase.State == "thinking" || phase.State == "responding") {
+			return true
+		}
 	}
 	return retained != nil && retained.Revision == r.Revision
 }
