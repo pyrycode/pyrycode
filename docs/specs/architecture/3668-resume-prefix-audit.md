@@ -281,3 +281,22 @@ withdrawn diagnostic. Apply the shared policy's one-consumer floor: separating
 the publication helper or its regression would produce an unusable sibling.
 This remains the same prefix/cleanup invariant, with no new exported type,
 two local callers, three criteria and fewer than ten new reject branches.
+
+### 2026-10-20 — final rework proof
+
+Implementation `5e018d4c` passes both original roots 1/1 without skips; resume's
+prefix and complete digest both equal `952fcb37c8cba6b301bd15fea15d23266a9b5e14c5863ad247b8b34ec5a9151e`.
+Reset consumes all 83 frames with real output/stderr EOF and terminal checks.
+The former forwarding mutation fails its held-EOF regression; immediate terminal
+publication fails all five publication leaves. Final source/publication controls
+pass 9/9 events, and lifecycle/snapshot controls pass 173/173 (159 leaves), all
+without skips. Module/tagged vets and daemon build pass. The broader affected
+package's separate physical cancellation failure remains failed and is tracked
+in #3686; its one named same-tree rerun passed. No existing test was skipped.
+`internal/e2e/testdata/3668-rework-evidence.json` pins identities, commands, counts
+and private failed/passing paths, including unknown historical unit binaries.
+Commit `833bb805` only strengthens the failed-terminal missing-acknowledgement
+test; its focused controls and tagged vet pass. Normal full verification remains
+dispatcher-owned. Pending documentation stage: update `docs/testing/daemon-recordings.md`,
+"Idle eviction and literal native resume inputs", with source identity validation,
+live-seal/sample/audit-return distinctions and the terminal-publication barrier.
