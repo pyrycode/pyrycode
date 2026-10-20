@@ -13,7 +13,7 @@ func TestFallbackLaunchDiagnosticRegistration(t *testing.T) {
 	for _, kind := range []string{"absent", "registered", "partial", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			home := t.TempDir()
-			if os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
+			if os.Chmod(home, 0700) != nil || os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
 				t.Fatal("worker directory")
 			}
 			path := FallbackWorkerJobPath(home, 1)
@@ -35,7 +35,11 @@ func TestFallbackLaunchDiagnosticRegistration(t *testing.T) {
 			done := make(chan struct{})
 			close(done)
 			audit := &FallbackLaunchAudit{home: home, scenario: "composer-stop", stop: make(chan struct{}), done: done}
-			destination := filepath.Join(t.TempDir(), "audit.json")
+			evidence := t.TempDir()
+			if os.Chmod(evidence, 0700) != nil {
+				t.Fatal("private evidence directory")
+			}
+			destination := filepath.Join(evidence, "audit.json")
 			if err := audit.Save(destination); err != nil {
 				t.Fatal(err)
 			}
