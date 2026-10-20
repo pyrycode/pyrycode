@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -86,8 +85,7 @@ func (a *FallbackLaunchAudit) ownDaemon(pid int) bool {
 // native buffers and argv/environment never enter retained diagnostics.
 func workerProcInfo(pid, flavor int, address uintptr, size int) ([]byte, error) {
 	raw := make([]byte, size)
-	n, _, err := unix.Syscall6(unix.SYS_PROC_INFO, 2, uintptr(pid), uintptr(flavor), address, uintptr(unsafe.Pointer(&raw[0])), uintptr(size))
-	if err != 0 || int(n) != size {
+	if workerNativeProcInfo(pid, flavor, address, raw) != size {
 		return nil, os.ErrInvalid
 	}
 	return raw, nil
@@ -117,8 +115,8 @@ func (a *FallbackLaunchAudit) sample() {
 	// PROC_PPID_ONLY lists current children with a fixed memory bound. A full
 	// buffer is ambiguous and cannot establish a closed observation.
 	var children [256]int32
-	n, _, err := unix.Syscall6(unix.SYS_PROC_INFO, 1, 6, uintptr(daemon.PID), 0, uintptr(unsafe.Pointer(&children[0])), unsafe.Sizeof(children))
-	if err != 0 || n >= unsafe.Sizeof(children) || n%4 != 0 {
+	n := workerNativeChildPIDs(daemon.PID, children[:])
+	if n <= 0 || n >= len(children)*4 || n%4 != 0 {
 		return
 	}
 	for _, child := range children[:n/4] {
@@ -211,8 +209,7 @@ func (a *FallbackLaunchAudit) observe(pid, daemon int) {
 func (a *FallbackLaunchAudit) executableMatches(pid int) bool {
 	// PROC_PIDPATHINFO reports the actual executable, independent of argv[0].
 	var path [4096]byte
-	_, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, 2, uintptr(pid), 11, 0, uintptr(unsafe.Pointer(&path[0])), uintptr(len(path)))
-	if errno != 0 {
+	if workerNativePath(pid, path[:]) <= 0 {
 		return false
 	}
 	executable := workerNativeString(path[:])

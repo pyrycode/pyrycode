@@ -1,7 +1,6 @@
 package claudetape
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -142,9 +141,7 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestFallbackLaunchOwnerProcess$")
+	cmd := exec.Command(exe, "-test.run=^TestFallbackLaunchOwnerProcess$")
 	cmd.Env = append(os.Environ(), "PYRY_LAUNCH_OWNER_CONTROL=daemon")
 	cmd.Stdin, cmd.Stdout = os.Stdin, os.Stdout
 	if role == "root" {
@@ -153,10 +150,31 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	cmd = exec.CommandContext(ctx, exe, append([]string{"-test.run=^TestLifecycleTapeHelperProcess$", "--"}, fallbackWorkerControlArgs()...)...)
+	testRunLaunchDaemon(t, exe)
+	os.Exit(0)
+}
+
+func testRunLaunchDaemon(t *testing.T, exe string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	// A pollable duplicate bounds control reads, including EOF on failed evidence
+	// decoding. Only this daemon signals its child, before the child's sole Wait.
+	fd, err := syscall.Dup(int(os.Stdin.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		_ = syscall.Close(fd)
+		t.Fatal(err)
+	}
+	control := os.NewFile(uintptr(fd), "owner-control")
+	defer control.Close()
+	if control.SetReadDeadline(deadline) != nil {
+		t.Fatal("control deadline")
+	}
+	cmd := exec.Command(exe, append([]string{"-test.run=^TestLifecycleTapeHelperProcess$", "--"}, fallbackWorkerControlArgs()...)...)
 	cmd.Env = append(os.Environ(), "PYRY_CANCELLED_LAUNCH_CONTROL=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -166,18 +184,27 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 	if err != nil || cmd.Start() != nil {
 		t.Fatal("worker start")
 	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	defer func() {
+		if cmd.ProcessState == nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // unreaped child pins its group identity
+			_ = cmd.Wait()
+		}
+	}()
+	if output.(*os.File).SetReadDeadline(deadline) != nil {
+		t.Fatal("worker readiness deadline")
+	}
 	var ready [1]byte
 	if _, err := io.ReadFull(output, ready[:]); err != nil || ready[0] != 1 {
 		t.Fatal("worker ready")
 	}
 	var survivor *exec.Cmd
 	if os.Getenv("PYRY_LAUNCH_LIVE_GROUP") == "1" {
-		survivor = exec.CommandContext(ctx, "/bin/sleep", "30")
+		survivor = exec.Command("/bin/sleep", "30")
 		survivor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
 		if survivor.Start() != nil {
 			t.Fatal("owned group member")
 		}
+		defer func() { _ = survivor.Process.Kill(); _ = survivor.Wait() }()
 	}
 	evidence := launchOwnerEvidence{Daemon: os.Getpid(), Worker: cmd.Process.Pid}
 	encoder := json.NewEncoder(os.Stdout)
@@ -188,7 +215,9 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 	if survivor != nil {
 		target = cmd.Process.Pid
 	}
-	if _, err := io.ReadFull(os.Stdin, ready[:]); err != nil || syscall.Kill(target, syscall.SIGKILL) != nil || cmd.Wait() == nil {
+	// A byte, EOF or deadline all request retirement while the child is owned.
+	_, _ = io.ReadFull(control, ready[:])
+	if syscall.Kill(target, syscall.SIGKILL) != nil || cmd.Wait() == nil {
 		t.Fatal("cancel and Wait")
 	}
 	status := cmd.ProcessState.Sys().(syscall.WaitStatus)
@@ -196,66 +225,14 @@ func TestFallbackLaunchOwnerProcess(t *testing.T) {
 	if !status.Signaled() || status.Signal() != syscall.SIGKILL || encoder.Encode(evidence) != nil {
 		t.Fatal("publish actual Wait")
 	}
-	_, _ = io.Copy(io.Discard, os.Stdin)
-	if survivor != nil {
-		_ = survivor.Process.Kill() // actual owned command, never a recorded PID
-		_ = survivor.Wait()
-	}
-	os.Exit(0)
+	_, _ = io.Copy(io.Discard, control)
 }
 
 func testLaunchOwner(t *testing.T) (int, launchOwnerEvidence, func() FallbackWorkerObservation) {
 	t.Helper()
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cwd, err := os.MkdirTemp("", "pyry-reply-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(cwd) })
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestFallbackLaunchOwnerProcess$")
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "PYRY_LAUNCH_OWNER_CONTROL=root")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = time.Second
-	input, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	output, err := cmd.StdoutPipe()
-	if err != nil || cmd.Start() != nil {
-		t.Fatal("root start")
-	}
+	cmd, input, output, _ := testStartLaunchOwner(t)
 	var evidence launchOwnerEvidence
-	waited := false
 	decoder := json.NewDecoder(output)
-	t.Cleanup(func() {
-		defer cancel()
-		defer func() {
-			if cmd.ProcessState == nil {
-				if evidence.Worker > 1 {
-					_ = syscall.Kill(-evidence.Worker, syscall.SIGKILL)
-				}
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				_ = cmd.Wait()
-			}
-		}()
-		if evidence.Worker > 1 && !waited {
-			if _, err := input.Write([]byte{1}); err != nil || decoder.Decode(&evidence) != nil {
-				t.Error("cleanup cancellation/Wait")
-				return
-			}
-		}
-		_ = input.Close()
-		if cmd.Wait() != nil {
-			t.Error("cleanup root Wait")
-		}
-	})
-	_ = output.(*os.File).SetReadDeadline(time.Now().Add(5 * time.Second))
 	if decoder.Decode(&evidence) != nil || evidence.Daemon <= 1 || evidence.Worker <= 1 {
 		t.Fatal("current daemon/helper identities")
 	}
@@ -263,7 +240,6 @@ func testLaunchOwner(t *testing.T) (int, launchOwnerEvidence, func() FallbackWor
 		if _, err := input.Write([]byte{1}); err != nil || decoder.Decode(&evidence) != nil {
 			t.Fatal("completed cancellation Wait")
 		}
-		waited = true
 		return evidence.Wait
 	}
 }
