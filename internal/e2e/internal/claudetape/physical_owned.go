@@ -171,44 +171,63 @@ type OwnedPhysicalOperation struct {
 	status       FallbackWorkerStatus
 }
 
-func StartPhysicalOperation(home string, s PhysicalOperationSpec, input json.RawMessage) (*OwnedPhysicalOperation, error) {
-	if s.CheckCurrentInput(home) != nil {
-		return nil, errors.New("physical operation inputs unproved")
+// PhysicalInputCommand validates a closed command without reading or creating
+// rig files. This is input-shape proof only; actual replay execution must use
+// StartPhysicalOperation so current script/FIFO/mode/witness checks still run.
+func PhysicalInputCommand(home string, s PhysicalOperationSpec, input json.RawMessage) (string, error) {
+	if !filepath.IsAbs(home) || filepath.Clean(home) != home || s.Validate() != nil {
+		return "", os.ErrInvalid
 	}
 	if !uniqueSuiteKeys(input) || safeCLIJSON(input) != nil {
-		return nil, os.ErrInvalid
+		return "", os.ErrInvalid
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(input, &fields) != nil {
-		return nil, os.ErrInvalid
+		return "", os.ErrInvalid
 	}
 	for key := range fields {
 		if key != "command" && key != "run_in_background" && key != "description" && key != "timeout" {
-			return nil, errors.New("unknown physical tool input")
+			return "", errors.New("unknown physical tool input")
 		}
 	}
 	var command string
 	if json.Unmarshal(fields["command"], &command) != nil || !s.CommandMatches(home, command) {
-		return nil, errors.New("foreign physical command")
+		return "", errors.New("foreign physical command")
 	}
 	background := false
-	if raw, ok := fields["run_in_background"]; ok && json.Unmarshal(raw, &background) != nil {
-		return nil, os.ErrInvalid
+	if raw, ok := fields["run_in_background"]; ok {
+		if !bytes.Equal(bytes.TrimSpace(raw), []byte("true")) && !bytes.Equal(bytes.TrimSpace(raw), []byte("false")) {
+			return "", os.ErrInvalid
+		}
+		if json.Unmarshal(raw, &background) != nil {
+			return "", os.ErrInvalid
+		}
 	}
 	if background != (s.Kind != "composer-foreground") {
-		return nil, errors.New("physical task posture changed")
+		return "", errors.New("physical task posture changed")
 	}
 	if raw, ok := fields["description"]; ok {
 		var text string
-		if json.Unmarshal(raw, &text) != nil || len(text) > 4096 {
-			return nil, os.ErrInvalid
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &text) != nil || len(text) > 4096 {
+			return "", os.ErrInvalid
 		}
 	}
 	if raw, ok := fields["timeout"]; ok {
 		var timeout int
 		if json.Unmarshal(raw, &timeout) != nil || timeout < 1 || timeout > 240000 {
-			return nil, os.ErrInvalid
+			return "", os.ErrInvalid
 		}
+	}
+	return command, nil
+}
+
+func StartPhysicalOperation(home string, s PhysicalOperationSpec, input json.RawMessage) (*OwnedPhysicalOperation, error) {
+	if s.CheckCurrentInput(home) != nil {
+		return nil, errors.New("physical operation inputs unproved")
+	}
+	command, err := PhysicalInputCommand(home, s, input)
+	if err != nil {
+		return nil, err
 	}
 	// A separate unreaped group leader pins the PGID until every cancellation
 	// decision and group drain is complete. The operation's actual Wait may reap
