@@ -40,3 +40,12 @@ Verdict: PASS for the planned evidence and documentation changes.
 Validate all JSON reports, original-root counts and fixture/report digests. Run the current configured shared gate on final main and retain every step. Verify the evidence/doc-only diff with JSON parsing, whitespace checks and the maintained documentation guard; no test is needed solely to mirror an informational JSON artifact.
 
 After this reviewed artifact lands, reconcile covered tickets through the protected central workflow using fresh revisions and confirmed idle reservations. Preserve distinct failures and unrelated restrictions. Resume daemon admissions gradually only after final main acceptance; keep active runs and user changes intact.
+
+
+## Completed validation
+
+Final main `25e5e50d` passed all ten current configured shared-gate steps. Fresh race-unit leaves: 28,122 passed, zero failed, 27 skipped. Fake-daemon leaves: 1,928 passed, zero failed, two skipped; all 70 recorded scenarios passed. The four original scenario/daemon-root pairs each passed 1/1 with zero skips and complete final audits. Their retained source-bound reports supply independent original-root counts. Session-resume's pinned prefix and cleanup digests match.
+
+Post-merge checks passed 140 MCP leaves over ten full repetitions, including ten passes of each reported backpressure leaf; the compact selection passed 160 events (100 leaves) over twenty repetitions, including twenty passes of the named admission leaf and both boundary roots. The combined send-file/startup selection passed both original roots with complete audits. Tagged source/publication/capture controls passed 22 leaves with race detection. The already accepted full live source has the identical committed tree and passed 2,248 leaves with zero failures and 27 named skips; its required original bounded wrap-up root passed without a skip.
+
+The 526-line generated evidence record was reviewed against the raw-report hashes, exact merge ancestry and source/helper/daemon/fixture identities. JSON parsing and whitespace checks pass. This branch contains only the evidence artifact, this plan and the existing documentation handoff completion, approximately 600 written lines. Original failures and unmeasured historical input/scheduling phases remain explicitly preserved. Generated native captures were privately retained without replacing final main's reviewed fixtures. No runtime implementation or regression test was added by this acceptance branch.
