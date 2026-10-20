@@ -7130,18 +7130,24 @@ same string [`attachment_chunk`](#attachment_chunk) carries when the bytes come
 back. A client may render the announced name and expect the fetched frames to
 agree; it does not have to reconcile two spellings of one file.
 
-**The offer is LIVE-ONLY, and this is where it parts company with
-[`modal_shown`](#modal_shown)** despite sharing that frame's origin and fan-out.
-There is **no outstanding-offer registry, no list verb, and no connect-time
-replay**: an offer broadcast while a client was disconnected is simply not
-received, and nothing will re-send it. `modal_shown` is replayed because an
-unanswered approval **blocks** `claude` and has to be re-raised; an offer blocks
-nothing, so a registry would buy a growing daemon-side store of
-`claude`-authored strings and no client guarantee. **A client must therefore not
-treat the offers it has seen as the set of files a conversation holds** — it is
-the set it happened to be connected for. There is no verb that answers the
-larger question, and until there is, an id learned from an offer is the only way
-into a host-produced file.
+**The raw offer frame is live-only.** It has no outstanding-offer registry,
+list verb or connect-time raw-frame replay. Legacy clients receive the existing
+announcement when connected.
+
+**Since #3660, successful host offers are also durable conversation facts.**
+After the confined file is stored, the daemon appends the same three-field
+`attachment_offered` payload to its existing conversation history before
+announcing success. History records the actual producing session and agent and
+marks the offer displayable. A history failure returns the existing static file
+storage refusal and sends no success announcement.
+
+Clients using the daemon-built thread obtain a shown `notice` item with subtype
+`attachment_offered`. Its content retains `conversation_id`, `attachment_id` and
+`filename`. The normal thread identity, order, revision and producing session
+survive reload and reconnect queries. A client renders the existing file control
+from that admitted item and fetches it through `request_attachment`. It must not
+create authoritative content from the separate raw announcement. There is still
+no independent attachment-list endpoint or second retrieval path.
 
 **Correlation is `conversation_id` and nothing else**, following
 [`modal_shown`](#modal_shown), the frame with the same origin: a permission

@@ -395,7 +395,7 @@ func standalone(e history.Entry, item *Item, counts ...*ingestionWorkCounts) boo
 			return false
 		}
 		item.Summary = p.Filename
-		item.Shown = false
+		item.Shown = true
 	case "prompt_answered":
 		var p promptAnswer
 		if !decode(e.Payload, &p, "correlation_id", "decision", "context") {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/attachments"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
@@ -88,7 +89,7 @@ func newAttachFixtureWithAnnounce(t *testing.T, hook bool) *attachFixture {
 			return nil
 		}
 		return sessions.ErrSessionNotFound
-	}, f.instanceDir, announce, nil)
+	}, f.instanceDir, attachmentOfferRecorder(history.New(f.instanceDir), func(sessions.SessionID) (string, error) { return "claude", nil }), announce, nil)
 	return f
 }
 
