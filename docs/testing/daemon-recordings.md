@@ -759,6 +759,26 @@ note or file is synthesized for this root. Bootstrap and successor remain alive
 until the original daemon cleanup; the bound predecessor journals all traffic
 through its actual output EOF.
 
+The reviewed capture includes the outgoing wrap-up user input even though the
+stored handoff is skipped. In this native run the broker forwarded interrupt,
+then wrap-up input, before forwarding the interrupt acknowledgement. Strict
+replay retains that order: the acknowledgement is released only after both exact
+inputs match. The old 25-frame bound recording omitted that user input; its
+strict completion failure remains in the source history. The replacement is the
+complete 28-frame native bound prefix, with bootstrap and successor captured in
+the same run. No synthetic frame, extra delay or deadline change supplies it.
+
+Three reviewed witnesses under `realclaude/testdata/clear-wrapup-skipped-native*`
+retain the complete carrier, content-free broker observations and original-root
+observations. Their existing bounded readers validate source/helper/daemon
+identity, complete native EOFs and the original root pass before capture is
+accepted. Measured arrival and successful forwarding are distinct phases. The
+root recorded `deadline`, while internal deadline activation and unseen write
+attempts remain unknown. These timestamps diagnose the old carrier and do not
+schedule replay. A passing offline root and its outer ownership/inventory audit
+establish faithful replay for this recording; the final live gate still tests
+current provider behavior.
+
 `clear-reset` runs the original successful `/clear` root with the same three
 owned roles and distinct original seed IDs. The original planted build tag uses
 the existing deterministic recording nonce hook. All original precondition,
@@ -835,6 +855,22 @@ and exact private inventories are pinned across unchanged daemon cleanup. Later
 native appends may extend the saved prefix but cannot rewrite it. Current Claude
 writing, actual reload and semantic recall remain obligations of the retained
 original live root.
+
+Recording validates the executing helper's content identity once per process.
+Subsequent hooks reuse that digest or its initial read error, while still reading
+and validating the complete current configuration and expected source identity
+on every call. A foreign expected digest still rejects after a cache hit. This
+keeps repeated executable hashing outside the live resumed provider's seal path
+without changing the activation-based idle timer.
+
+A live prefix seal, an exact inventory sample and the later audit return are
+separate observations. A seal-ended broker may observe genuine provider EOF
+while the original root is auditing the prefix. It withholds its successful final
+receipt until that root atomically publishes the digest it actually audited.
+Failed terminal evidence remains immediate. The post-cleanup audit still requires
+the final receipt and the same pinned digest; no extra inventory entry or
+fabricated EOF is accepted. The provider must be alive at its actual seal, while
+its observed state after audit return may already reflect real idle eviction.
 
 The idle-resume profile permits at most two finite suggestion-worker attempts,
 one per completed original turn; proved cancelled launches consume this same
@@ -1062,6 +1098,14 @@ owner identity and tape/declaration bytes are pinned before and after cleanup.
 A physical-only stdout schedule anchors to every actually forwarded stdin frame,
 including stop/interrupt, preserving absolute offsets within each input phase.
 Production timers and original phone/control actions remain unchanged.
+
+Foreground readiness in the physical Composer controls requires the complete
+matching PID witness from the currently owned shell. Opening the shell's
+redirected witness file can precede its `printf`; a successful file read alone
+does not establish readiness. The controlled publication proof holds that exact
+empty-file interval, then releases the shell and requires its complete witness.
+Cancellation must still produce the actual owned SIGKILL Wait and preserve the
+background operation until its original release.
 
 Finite fallback attempts retain their complete literal worker IO and actual status.
 Only the exact declared original paths in the two typed source fields can bridge

@@ -161,11 +161,14 @@ func TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease(t 
 	released := physicalQuote(filepath.Join(home, "work", "foreground-released"))
 	command := `printf '%s\n' "$$" > ` + foreground + `; while [ ! -f ` + released + ` ]; do sleep 0.1; done`
 	physicalProtocolJSON(t, p, physicalProtocolTool("foreground-tool", command, false))
-	physicalControlWaitFile(t, filepath.Join(home, "work", "foreground-started"))
+	physicalControlWaitForeground(t, p.operations[1].owned)
 	if p.BeforeInput([]byte(`{"type":"control_request","request_id":"actual-interrupt","request":{"subtype":"interrupt"}}`)) != nil {
 		t.Fatal("actual foreground cancellation rejected")
 	}
 	background, fg := p.composerOperations()
+	if status, err := fg.owned.Wait(time.Second); err != nil || status != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) || syscall.Kill(fg.owned.CurrentPID(), 0) != syscall.ESRCH {
+		t.Fatal("actual foreground was not killed and reaped with Wait9", err)
+	}
 	if !background.owned.Running() || !fg.stopped {
 		t.Fatal("foreground cancellation did not preserve real background")
 	}
