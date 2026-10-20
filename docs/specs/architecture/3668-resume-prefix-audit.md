@@ -273,3 +273,11 @@ invalid acknowledgement and cancellation remain errors. Run its failing former
 publication and repaired proofs, pinned-prefix controls, and the original replay.
 Security PASS: bounded private reads, atomic root publication, no new goroutine,
 same trusted receipt producer and actual EOF; unknown observations remain unknown.
+
+The private-reader implementation deliberately hides missing-file errors, so
+observe absence with `Lstat` before its bounded validation; other read errors fail.
+Final source/test/plan work is approximately 850–900 written lines including the
+withdrawn diagnostic. Apply the shared policy's one-consumer floor: separating
+the publication helper or its regression would produce an unusable sibling.
+This remains the same prefix/cleanup invariant, with no new exported type,
+two local callers, three criteria and fewer than ten new reject branches.

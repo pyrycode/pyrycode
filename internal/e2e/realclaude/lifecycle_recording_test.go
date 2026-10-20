@@ -256,7 +256,7 @@ func finishLifecycleRecording(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if daemonRecordingWrite(c.Receipt, daemonRecordingReceipt{Success: true, Frames: len(profile.Roles), ArtifactSHA256: digest}) != nil {
+	if claudetape.PublishLifecycleControl(c.Receipt, daemonRecordingReceipt{Success: true, Frames: len(profile.Roles), ArtifactSHA256: digest}) != nil {
 		t.Fatal("lifecycle root receipt repeated")
 	}
 }
@@ -436,7 +436,11 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		}
 		return r
 	}
-	job.Config.OnSeal = func(n int) error { return daemonRecordingWrite(prefix+".prefix", receipt(n, nil)) }
+	var sealDeadline time.Time
+	job.Config.OnSeal = func(n int) error {
+		sealDeadline = time.Now().Add(30 * time.Second)
+		return daemonRecordingWrite(prefix+".prefix", receipt(n, nil))
+	}
 	job.Config.OnInput = lifecycleRecordingInputWitness(job, c.Process.Home, c.Process.Scenario)
 	var physical *claudetape.PhysicalRecordingSession
 	if claudetape.PhysicalFamily(c.Process.Scenario) != "" {
@@ -511,7 +515,19 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			e = err
 		}
 	}
-	if daemonRecordingWrite(prefix+".receipt", receipt(n, e)) != nil {
+	publish := func() error { return daemonRecordingWrite(prefix+".receipt", receipt(n, e)) }
+	if claudetape.LifecycleSeals(job.Config.End) {
+		publish = func() error {
+			return publishLifecycleTerminalReceipt(prefix+".receipt", c.Receipt, len(claudetape.LifecycleProfiles()[c.Process.Scenario].Roles), receipt(n, e), func() error {
+				if _, err := os.Lstat(job.Config.Abort); !os.IsNotExist(err) || !time.Now().Before(sealDeadline) {
+					return os.ErrDeadlineExceeded
+				}
+				time.Sleep(5 * time.Millisecond)
+				return nil
+			})
+		}
+	}
+	if publish() != nil {
 		os.Exit(2)
 	}
 	if e != nil {
