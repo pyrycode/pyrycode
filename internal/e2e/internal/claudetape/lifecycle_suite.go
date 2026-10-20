@@ -14,7 +14,7 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
-		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bare", "bootstrap", "prompted"}},
+		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bootstrap", "bare", "prompted"}},
 		"conversation-lifecycle":     {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
 		"session-rotation":           {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
 		"session-resume":             {"TestInteractiveStreamResumeAfterEviction", []string{"bootstrap", "resumed"}},
