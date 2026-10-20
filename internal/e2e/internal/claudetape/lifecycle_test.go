@@ -121,6 +121,9 @@ func TestLifecycleProbeProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "broker":
+		if os.Getenv("PYRY_LIFECYCLE_PROBE_REJECT_TERMINAL") == "1" {
+			j.Config.BeforeSeal = func(*Tape) error { return os.ErrInvalid }
+		}
 		if probeWrite(filepath.Join(j.Root, "broker-pid.json"), os.Getpid()) != nil {
 			os.Exit(2)
 		}
