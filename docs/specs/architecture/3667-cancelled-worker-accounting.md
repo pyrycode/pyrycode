@@ -98,7 +98,7 @@ retain the strict reviewed-worker and cleanup guarantees.
 
 **Findings:**
 
-- Trust boundaries: SHOULD FIX: a numeric Wait cannot authorize a launch. Mint audit entries only from current kernel parent/group/executable/argv/cwd checks; keep audit fields private and bind the capability to home/scenario/source.
+- Trust boundaries: a numeric Wait or file-supplied daemon PID cannot authorize a launch. Bind the audit to the actual outer-owned command immediately after Start, retaining its kernel PID/start/parent/group and the current outer identity. Before accepting any helper, establish and recheck the bounded daemon-to-command-to-outer kernel ancestry. Retain that chain and the daemon start identity with each launch; unknown, unrelated or changed ancestry fails closed. Existing helper image/argv/cwd/group checks and home/scenario/source binding remain required.
 - Tokens: no credential reads or retention; diagnostics exclude environment and payloads.
 - Files: reuse private control readers; inspect only closed daemon/job paths, bounded proc files and private evidence writes. Require the observed cwd's private empty directory.
 - Subprocesses: observer launches no process and sends no signals. Regression uses owned helper processes with bounded kill/Wait cleanup.
@@ -113,6 +113,24 @@ retain the strict reviewed-worker and cleanup guarantees.
 
 ## Revisions
 
+- 2026-10-20 (verifier finding 1, prospective repair): the original audit did
+  not prove the daemon's ownership. Add a closed kernel ancestry chain rooted
+  in the actual command returned by the outer invocation's Start, rather than
+  accepting a daemon PID from a control file. Start observation immediately
+  after that command starts; missed early observations remain unknown and fail.
+  Retain and recheck PID/start/parent/group for every member, bound to the current
+  outer process; retain daemon start identity on each helper observation. No
+  signalling or original assertion/timer changes. One invariant repair, estimated
+  300 written lines, no exported types, one consumer, unchanged criteria and
+  fewer than ten rejection categories. Branches #3666 and #3672 overlap only
+  separate diagnostic blocks in the suite runner; build through locally.
+  `TestFallbackCancelledLaunchOwnership` will synchronize real root/daemon/helper
+  processes, sample before group cancellation, then join the real Wait. An
+  unrelated sibling root with an otherwise identical helper must fail; owned
+  ancestry passes, while changed/unknown identities fail. Existing cancellation
+  controls and original race replay remain required. The sampler stays joined
+  before diagnostic access; bounded process controls kill and Wait on cleanup.
+  The full-gate inherited failures in #3674 remain failed and dispatcher-owned.
 - 2026-10-20: synchronized current-process control established the missing-job
   cancellation boundary and failed at `total-wait-cardinality`. The original
   diagnostic run also exposed the faster-start arm: the helper reaches the
