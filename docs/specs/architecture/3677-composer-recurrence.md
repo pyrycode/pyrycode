@@ -180,3 +180,55 @@ records commands, source/fixture/binary identities, counts and hashed report pat
 The original 232879911 ns miss is still failed and unattributed. Causal repair,
 synchronized regression and full acceptance remain pending; this diagnostic PR
 must not be treated as a completed reliability repair.
+
+### 2026-10-20 — prospective preparation-boundary repair
+
+The managed adjacent fallback-suggestion → composer-stop sequence at `36e3a91c`
+passed both original roots and all three outer events without skips. Composer
+restoration peaked at 25114440 ns at output 68; observation peaked at 57297041 ns
+at output 121. Its current audit knows zero launches, registrations and Waits.
+This pass does not attribute the historical 232879911 ns miss or job-publish order.
+
+Source establishes a wasted scheduling boundary: `writeOutput` waits until due
+before restoring immutable bytes with `DaemonBinding.Frame`. That pure transform
+can use the interval before due without advancing any physical event. Separate
+preparation from delivery with `forwardPreparedLifecycleOutput`: restore once
+before the existing absolute wait; run BeforeOutput, replay projection, actual
+forwarding and final-write checks at delivery. Capture is unchanged. No epoch,
+offset, allowance, retry, fixture, process or completion contract changes.
+Remove the redundant outer duplicate-key check in BeforeOutput only, because
+safeCLIJSON independently performs that same check before decoding every carrier.
+
+First extract the existing ordering unchanged, then run
+`TestComposerOutputPreparationSchedule` against it. Use the exact reviewed output
+68 and offset, a channel-gated real restoration and deterministic clock charged
+120 ms for preparation. Waiting first causes forwarding drift; preparing first
+uses the existing gap and still meets due + 100 ms. Reject 200 ms preparation,
+late input, scheduler overshoot, physical-observer delay, final-write backpressure
+and preparation errors. No observer or write may run early or after preparation
+failure. Existing physical/privacy rejection controls remain mandatory; extend
+duplicate/nested-credential rejection if necessary. This proves a controlled
+cause at the actual restoration/forwarding boundary; historical substage and
+scheduler contributions remain unknown.
+
+Retain a bounded ring of 64 numeric output samples in LifecycleDiagnostic:
+ordinal, anchor, due, entry, restoration, observation, projection, actual write,
+completion, all elapsed nanoseconds relative to the selected unchanged anchor.
+Together with existing stage maxima this distinguishes work from unused gaps
+without granting completion authority. No new goroutine in the broker; test
+gates release and join their worker on every path.
+
+Files additionally read/touched: `lifecycle_timeline.go` (new private scheduling
+seam), `composer_output_diagnostic_test.go` (exact reviewed response), and
+`lifecycle_diagnostic.go` (numeric sample ring). No feature branch currently
+overlaps the three implementation files. Forecast including preserved work:
+under 800 written lines, zero exported types/interfaces, two consumers, three
+criteria, no new state-machine rejection branches. This remains one repair with
+its regression. Both original sightings remain in the evidence manifest.
+
+Security amendment: PASS. Pure restoration neither reads current process state
+nor launches/signals workers; physical validation remains at delivery. Privacy
+and duplicate-key validation still precede parsing/forwarding. Ring entries use
+only fixed numeric slots, with bounded cardinality and existing private retention.
+Worker ownership, cancellation, Wait, source, peer, I/O/EOF and final audits are
+unchanged. Documentation handoff remains pending with the attribution distinction.
