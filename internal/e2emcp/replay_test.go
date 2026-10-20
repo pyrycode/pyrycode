@@ -224,8 +224,12 @@ func TestMCPReplayRejectsUnclosedOrChangedSourceBeforeForward(t *testing.T) {
 				return
 			}
 			done := make(chan error, 1)
+			forwarded := make(chan struct{}, 1)
 			go func() {
-				done <- c.ForwardRPC(replayConnection, events[0].Direction, []byte(events[0].Raw), func([]byte) error { t.Fatal("unavailable causal input was invented"); return nil })
+				done <- c.ForwardRPC(replayConnection, events[0].Direction, []byte(events[0].Raw), func([]byte) error {
+					forwarded <- struct{}{}
+					return protocolError()
+				})
 			}()
 			if mutation == "cancel" {
 				cancel()
@@ -239,6 +243,11 @@ func TestMCPReplayRejectsUnclosedOrChangedSourceBeforeForward(t *testing.T) {
 				}
 			case <-time.After(time.Second):
 				t.Fatal("cancelled causal waiter not released")
+			}
+			select {
+			case <-forwarded:
+				t.Fatal("unavailable causal input was invented")
+			default:
 			}
 			if _, err := c.Finish(); err == nil {
 				t.Fatal("cancelled source sealed")
