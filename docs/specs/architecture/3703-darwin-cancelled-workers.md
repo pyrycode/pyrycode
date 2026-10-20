@@ -139,3 +139,7 @@ exchange distinctions, historical attribution limits, and offline versus live pr
   Native files have no concurrent feature-branch overlap at rework planning.
   Run affected package race tests, original replay, staticcheck, vet and build;
   preserve all earlier failed evidence. Complete gates remain dispatcher-owned.
+- 2026-10-20: The first rework package check exposed libproc's child-list return
+  contract: `proc_listchildpids` takes buffer bytes but returns a PID count,
+  unlike the former raw syscall's byte count. `sample` now bounds and slices
+  using that count; full buffers remain unknown. The failed check is retained.

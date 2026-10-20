@@ -116,10 +116,10 @@ func (a *FallbackLaunchAudit) sample() {
 	// buffer is ambiguous and cannot establish a closed observation.
 	var children [256]int32
 	n := workerNativeChildPIDs(daemon.PID, children[:])
-	if n <= 0 || n >= len(children)*4 || n%4 != 0 {
+	if n <= 0 || n >= len(children) {
 		return
 	}
-	for _, child := range children[:n/4] {
+	for _, child := range children[:n] {
 		if child > 1 {
 			a.observe(int(child), daemon.PID)
 		}
