@@ -2,6 +2,7 @@ package claudetape
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -91,16 +92,21 @@ func (t *LifecycleTape) Save(path string) error {
 
 type LifecycleBrokerConfig struct {
 	PoolProcessConfig
+	Context          context.Context `json:"-"`
 	OwnerPID         int
 	BrokerParentPID  int
 	Deadline         time.Time
 	End, Kill, Abort string
-	OnSeal           func(int) error              `json:"-"`
-	OnInput          func([]byte) error           `json:"-"`
-	BeforeOutput     func([]byte) error           `json:"-"`
-	BeforeSeal       func(*Tape) error            `json:"-"`
-	OnFailure        func(*LifecycleTape, int)    `json:"-"`
-	OnTerminalState  func(bool, bool, bool, bool) `json:"-"`
+	Ready            func(io.Writer) error            `json:"-"`
+	ForwardInput     func([]byte, func() error) error `json:"-"`
+	ForwardOutput    func([]byte, func() error) error `json:"-"`
+	ReplayOutput     func([]byte) ([]byte, error)     `json:"-"`
+	OnSeal           func(int) error                  `json:"-"`
+	OnInput          func([]byte) error               `json:"-"`
+	BeforeOutput     func([]byte) error               `json:"-"`
+	BeforeSeal       func(*Tape) error                `json:"-"`
+	OnFailure        func(*LifecycleTape, int)        `json:"-"`
+	OnTerminalState  func(bool, bool, bool, bool)     `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -114,9 +120,15 @@ type LifecycleKill struct {
 func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count int, resultErr error) {
 	startup := time.Now()
 	fail := errors.New("lifecycle broker failed")
+	if c.Context != nil && c.Context.Err() != nil {
+		return 0, fail
+	}
 	parent := c.OwnerPID
 	if c.BrokerParentPID != 0 {
 		parent = c.BrokerParentPID
+	}
+	if c.Mode == "capture" && c.ReplayOutput != nil {
+		return 0, fail
 	}
 	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session" && c.End != "idle-evict") {
 		return 0, fail
@@ -132,7 +144,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	// Register inherited pipe writers with the runtime poller before wrapping
 	// them. NewFile only offers deadlines when the descriptor is nonblocking.
-	for _, fd := range []int{4, 5, 6} {
+	for _, fd := range []int{4, 5, 6, 9} {
 		if syscall.SetNonblock(fd, true) != nil {
 			return 0, fail
 		}
@@ -140,6 +152,22 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	originals := []*os.File{os.NewFile(3, "original-input"), os.NewFile(4, "original-output"), os.NewFile(5, "original-stderr"), os.NewFile(6, "provider-input"), os.NewFile(7, "provider-output"), os.NewFile(8, "provider-stderr"), os.NewFile(9, "ready")}
 	for _, f := range originals {
 		defer f.Close()
+	}
+	if c.Context != nil {
+		stopped := make(chan struct{})
+		defer close(stopped)
+		go func() {
+			select {
+			case <-c.Context.Done():
+				// Only Go-managed pollable writers can be blocked under a forwarding
+				// mutex. Keep raw-read descriptors open until this loop returns, so a
+				// cached syscall.Read fd cannot be recycled underneath the loop.
+				for _, i := range []int{1, 2, 3, 6} {
+					originals[i].Close()
+				}
+			case <-stopped:
+			}
+		}()
 	}
 	claim, err := os.OpenFile(c.Claim, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -216,6 +244,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if _, err = originals[6].Write([]byte{1}); err != nil {
 		return 0, fail
 	}
+	if c.Ready != nil {
+		if err := c.Ready(originals[6]); err != nil {
+			return 0, fail
+		}
+	}
 	_ = originals[6].Close()
 	frames, total := 0, 0
 	sealed := false
@@ -226,7 +259,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if !c.Deadline.IsZero() && c.Deadline.Before(deadline) {
 		deadline = c.Deadline
 	}
-	expired := func() bool { return !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline)) }
+	expired := func() bool {
+		return c.Context != nil && c.Context.Err() != nil || !time.Now().Before(deadline) || (sealed && !time.Now().Before(sealDeadline))
+	}
 	writeBounded := func(f *os.File, raw []byte, extraDeadline time.Time) error {
 		if len(raw) == 0 {
 			return nil
@@ -262,7 +297,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return err
 				}
 			}
-			return writeBounded(originals[1], append(restored, '\n'), extra)
+			if c.ReplayOutput != nil {
+				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
+				if err != nil {
+					return err
+				}
+			}
+			return forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
 		}
 		if tape.Timeline != nil {
 			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
@@ -349,7 +390,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			frames++
 			// Consume through the stand-in's pipe as well: closure and the owned PID
 			// have real process semantics even though provider responses are replayed.
-			if e = write(originals[3], append(raw, '\n')); e != nil {
+			inputForward := func() error { return write(originals[3], append(raw, '\n')) }
+			e = forwardLifecycleFrame(raw, c.ForwardInput, func([]byte) error { return inputForward() })
+			if e != nil {
 				return fail
 			}
 			recordTimelineInput(normalized)
@@ -387,9 +430,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return err
 			}
 		}
-		if err := write(target, append(raw, '\n')); err != nil {
+		callback := c.ForwardOutput
+		if direction == "stdin" {
+			callback = c.ForwardInput
+		}
+		if err := forwardLifecycleFrame(raw, callback, func(actual []byte) error { return write(target, append(actual, '\n')) }); err != nil {
 			return err
 		}
+
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
 			if tape.Timeline.Kind == lifecycleInputTimelineKind || tape.Timeline.Kind == lifecycleFrameTimelineKind {
@@ -539,6 +587,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return nil
 	}
 	finish := func() (int, error) {
+		if c.Context != nil && c.Context.Err() != nil {
+			return frames, errors.New("cancelled lifecycle cannot seal")
+		}
 		if LifecycleAction(c.End) != "" && !actionAccepted {
 			return frames, errors.New("missing original delete checkpoint")
 		}
@@ -560,6 +611,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return frames, err
 				}
 			}
+			if c.Context != nil && c.Context.Err() != nil {
+				return frames, errors.New("cancelled lifecycle cannot finish")
+			}
 			return frames, nil
 		}
 		if c.BeforeSeal != nil {
@@ -567,9 +621,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, err
 			}
 		}
+		if c.Context != nil && c.Context.Err() != nil {
+			return frames, errors.New("cancelled lifecycle cannot publish")
+		}
 		return frames, tape.Save(c.Path)
 	}
 	for time.Now().Before(deadline) {
+		if c.Context != nil && c.Context.Err() != nil {
+			return frames, errors.New("lifecycle forwarding context cancelled")
+		}
 		if c.Abort != "" {
 			if _, err := os.Lstat(c.Abort); err == nil {
 				return frames, errors.New("lifecycle owner aborted recording")
@@ -639,4 +699,32 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		time.Sleep(5 * time.Millisecond)
 	}
 	return frames, errors.New("lifecycle broker deadline exceeded")
+}
+
+// Trusted synchronous observers receive a copy and must invoke the supplied
+// actual write exactly once. They cannot silently mutate a captured frame,
+// omit/duplicate a forward, or hide an underlying pipe error.
+func forwardLifecycleFrame(raw []byte, observe func([]byte, func() error) error, write func([]byte) error) error {
+	if observe == nil {
+		return write(raw)
+	}
+	calls := 0
+	var writeErr error
+	forward := func() error {
+		calls++
+		if calls != 1 {
+			writeErr = errors.New("repeated lifecycle forward")
+			return writeErr
+		}
+		writeErr = write(raw)
+		return writeErr
+	}
+	err := observe(append([]byte(nil), raw...), forward)
+	if err != nil {
+		return err
+	}
+	if calls != 1 || writeErr != nil {
+		return errors.New("incomplete lifecycle forward")
+	}
+	return nil
 }

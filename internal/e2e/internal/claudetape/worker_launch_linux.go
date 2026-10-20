@@ -92,7 +92,7 @@ func (a *FallbackLaunchAudit) ownDaemon(pid int) bool {
 }
 
 func (a *FallbackLaunchAudit) sample() {
-	if a.scenario != "session-resume" || a.image == nil {
+	if (a.scenario != "session-resume" && a.scenario != "composer-stop") || a.image == nil {
 		return
 	}
 	var daemon struct{ PID int }

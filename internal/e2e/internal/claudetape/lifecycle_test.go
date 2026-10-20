@@ -2,6 +2,7 @@ package claudetape
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -29,10 +30,12 @@ func (lifecycleProbeBinding) Files() (map[string]json.RawMessage, error) {
 }
 
 type lifecycleProbeJob struct {
-	Config       LifecycleBrokerConfig
-	Root         string
-	Provider     string
-	BrokerSocket string
+	Config              LifecycleBrokerConfig
+	Root                string
+	Provider            string
+	ContextCancel       bool
+	ContextCancelAtSeal bool
+	BrokerSocket        string
 }
 type lifecycleProbeReceipt struct {
 	Success          bool
@@ -126,6 +129,25 @@ func TestLifecycleProbeProcess(t *testing.T) {
 		}
 		j.Config.OnSeal = func(n int) error {
 			return probeWrite(filepath.Join(j.Root, "sealed.json"), lifecycleProbeReceipt{Success: true, Frames: n, OwnerPID: j.Config.OwnerPID})
+		}
+		if j.ContextCancel || j.ContextCancelAtSeal {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			j.Config.Context = ctx
+			if j.ContextCancelAtSeal {
+				j.Config.BeforeSeal = func(*Tape) error { cancel(); return nil }
+			}
+			observer := func(_ []byte, forward func() error) error {
+				time.AfterFunc(30*time.Millisecond, cancel)
+				return forward()
+			}
+			if !j.ContextCancelAtSeal {
+				if strings.Contains(j.Config.Scenario, "input-pressure") {
+					j.Config.ForwardInput = observer
+				} else {
+					j.Config.ForwardOutput = observer
+				}
+			}
 		}
 		n, e := RunLifecycleBroker(j.Config, lifecycleProbeBinding{})
 		r := lifecycleProbeReceipt{Success: e == nil, Frames: n, OwnerPID: j.Config.OwnerPID}
@@ -612,5 +634,83 @@ func TestLifecycleControlPublicationIsExclusiveAndClosed(t *testing.T) {
 	}
 	if err := ReadLifecycleControl(path, 16384, &got); err != nil || got != want {
 		t.Fatal("exclusive publication altered original", err)
+	}
+}
+
+func TestLifecycleContextInterruptsActualBlockedWriters(t *testing.T) {
+	for _, side := range []string{"input-pressure", "output-pressure", "cancel-at-seal"} {
+		t.Run(side, func(t *testing.T) {
+			root := t.TempDir()
+			c := LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "capture", Scenario: "lifecycle-" + side, Path: filepath.Join(root, "tape.json"), Claim: filepath.Join(root, "claim"), Finish: filepath.Join(root, "finish"), Producer: Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}}, End: "kill", Kill: filepath.Join(root, "kill.json")}
+			if side == "cancel-at-seal" {
+				c.End = "seal"
+			}
+			path := filepath.Join(root, "job.json")
+			if probeWrite(path, lifecycleProbeJob{Config: c, Root: root, ContextCancel: side != "cancel-at-seal", ContextCancelAtSeal: side == "cancel-at-seal"}) != nil {
+				t.Fatal("job")
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestLifecycleProbeProcess$")
+			cmd.Env = append(os.Environ(), "PYRY_LIFECYCLE_PROBE=exec", "PYRY_LIFECYCLE_PROBE_JOB="+path)
+			input, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			output, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer output.Close()
+			if cmd.Start() != nil {
+				t.Fatal("start")
+			}
+			waited := false
+			defer func() {
+				if !waited {
+					cmd.Process.Kill()
+					cmd.Wait()
+				}
+			}()
+			request := `{"type":"user","message":{"content":"request"}}` + "\n"
+			if side == "input-pressure" {
+				request = `{"type":"user","message":{"content":"` + strings.Repeat("x", 1<<20) + `"}}` + "\n"
+			}
+			sent := make(chan struct{})
+			go func() { io.WriteString(input, request); close(sent) }()
+			if side == "cancel-at-seal" {
+				if line, err := bufio.NewReader(output).ReadString('\n'); err != nil || !strings.Contains(line, "native reply") {
+					t.Fatal("source reply", err)
+				}
+				if os.WriteFile(c.Finish, nil, 0600) != nil {
+					t.Fatal("finish")
+				}
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case err := <-done:
+				waited = true
+				if err == nil {
+					t.Fatal("cancelled actual writer succeeded")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("context cancellation waited for default10s write deadline")
+			}
+			input.Close()
+			<-sent
+			var receipt lifecycleProbeReceipt
+			waitLifecycleProbe(t, filepath.Join(root, "receipt.json"), &receipt)
+			if side == "cancel-at-seal" {
+				if _, err := os.Lstat(filepath.Join(root, "sealed.json")); !os.IsNotExist(err) {
+					t.Fatal("cancelled prefix advertised success")
+				}
+			}
+			if receipt.Success || receipt.OwnerPID != cmd.Process.Pid {
+				t.Fatal("cancelled prefix accepted")
+			}
+			if _, err := os.Lstat(c.Path); !os.IsNotExist(err) {
+				t.Fatal("cancelled prefix published")
+			}
+		})
 	}
 }

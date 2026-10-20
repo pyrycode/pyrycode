@@ -1046,8 +1046,88 @@ Only the exact declared original paths in the two typed source fields can bridge
 worker HOME aliases to main HOME aliases; a different path, prefix, suffix or cwd
 alias fails. Full native main-source validation precedes that comparison.
 
+Composer Stop can cancel a finite fallback launch before its helper registers
+a job. The synchronized Linux `TestFallbackCancelledLaunchBoundary/composer-stop`
+demonstrates one independently owned launch and one completed cancellation Wait
+with zero registered workers. Without the independent audit, that inventory
+rejects at `total-wait-cardinality`. This establishes the accounting boundary;
+the historical gate failure's exact cause remains unproved because its original
+counts were lost. Passing ordinary focused replays observed zero launches,
+registrations and Waits. The [retained evidence manifest](../../internal/e2e/internal/claudetape/testdata/worker_inventory_3677.json)
+binds the failing and passing controls, replay reports, revisions and hashes.
+
+On Linux, `runRecordedLifecycleSuite` supplies its outer-owned
+`FallbackLaunchAudit` to `ReadLifecycleWorkers` for Composer Stop as well as
+session-resume. A jobless cancellation requires independently observed current
+helper identity and kernel ancestry through the daemon to the actual outer-owned
+root, observed absent registration, exactly one completed production SIGKILL Wait
+with group cancellation and exit observed, and process/group death. Unobserved
+launches and unreadable or partial registration remain unknown. Unknown,
+duplicate, foreign and unmatched evidence still fails; a Wait alone cannot
+authorize a launch, native exchange or receipt.
+
+Each registered worker exchange and independently proved cancelled launch joins
+exactly once to an actual production Wait. Cancelled launches consume the same
+two-attempt allowance but add no completed native worker exchanges. Reviewed
+fixture bytes and exchange cardinality, registered-worker source/peer checks,
+literal I/O/EOF, original foreground-stop/background-survival assertions and
+bounded cleanup remain required.
+
+Use an external private `PYRY_CLAUDE_TAPE_EVIDENCE` directory to retain
+`composer-stop-launch-audit.json` beyond disposable-home cleanup.
+`FallbackLaunchAudit.Save` joins the sampler before publishing at most 16384 bytes
+of current identities, registration states, actual Wait observations and source
+hashes. Known-state flags distinguish unknown observations from empty inventories;
+the diagnostic contains no raw protocol, argv, environment or credentials and
+confers no completion authority. Offline replay evidence establishes no new
+live-provider behavior; the original physical assertions remain live obligations.
+
 For fresh comparison, the exact stop-control `request.task_id` alone is bound to
 its validated native task/tool join in a disposable comparison copy. Native task
 IDs may vary between captures. Saved replay still requires its literal captured
 selector; user/tool text, native frames, persisted tapes and other selectors are
 never changed by this comparison binding.
+
+## Native MCP file-handoff boundary
+
+The `mcp-sidechannels` batch runs the original `TestInteractiveStreamSendFile`
+through a real isolated daemon. Its exact permission modal, `allow_once` answer,
+completed turn and single stored attachment with the original bytes remain the
+assertions. A successful native candidate still requires source/fixture review,
+offline replay, fresh request comparison and the full batch gate before final
+acceptance and merge.
+
+Only this profile uses a separately built `e2e_mcp_recording` daemon. Its command
+entry transfers the SDK's actual stdio descriptors through a private authenticated
+Unix connection. Current kernel peer, parent, executable checksum, cwd, argv and
+HOME/session identities authorize each connection. Directed pipes and connected
+Unix stream socketpairs are supported; regular files, network/datagram sockets,
+unconnected sockets and duplicate descriptors are refused. The outer broker owns
+and waits for real current-binary `mcp-approve` and `mcp-files` servers. Native SDK
+proxy exit status is not invented. Ordinary daemon builds use the inert hook.
+
+The recording contains complete literal MCP requests, responses and stderr,
+joined to successfully forwarded native stdin/stdout counters. Exactly one
+approval and one send-file call must join the complete native tool ID/input,
+allow verdict, tool result and attachment ID. Native stdout and MCP use separate
+transports, so approval can arrive before the final input fragment is forwarded.
+The exact recorded barrier must already contain the source-owned tool start and
+an input prefix; its captured continuation must reconstruct the complete input
+and match the main message,
+tool and input identities. Native initialization must confirm `default` mode.
+Unknown fields stay literal. Fresh request comparison binds only the joined
+approval argument tool ID and the observed `claudecode/toolUseId` metadata leaves.
+Progress tokens and other request bytes stay exact.
+
+Replay executes real MCP handlers against the current daemon. The real file
+handoff mints a new attachment ID; only declared response/result text scalars can
+bind it after the actual private attachment directory, filename and bytes pass
+validation. No recorded response, verdict or stored file substitutes for that
+work. Scalar binding preserves surrounding JSON bytes, including saved native
+indentation; MCP wire frames still require a single complete line.
+
+Prefix and terminal audits pin source bytes, bindings, current owned processes
+and full stderr. Final success requires actual input/output/stderr EOF and server
+Wait0. Failed observations remain private and unpromotable. Native discovery,
+SDK spawning and environment, native process groups/reaping, and future provider
+protocol behavior remain live-test responsibilities.

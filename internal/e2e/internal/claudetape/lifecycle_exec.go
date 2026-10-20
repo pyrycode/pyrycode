@@ -17,15 +17,22 @@ import (
 // 3/4/5, provider stdin/stdout/stderr at 6/7/8, and a ready writer at fd 9.
 // The caller supplies a closed, source-bound broker invocation and environment.
 func ExecLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []string, capture bool) error {
-	return execLifecycleChild(brokerArgs, brokerEnv, provider, args, capture, "", "")
+	return execLifecycleChild(brokerArgs, brokerEnv, provider, args, capture, "", "", nil)
 }
 
 // ExecLifecycleChildViaBroker delegates the pipe capability to the outer test
 // parent, so production's native descendant reaper cannot kill the recorder.
 func ExecLifecycleChildViaBroker(socket, job, provider string, args []string, capture bool) error {
-	return execLifecycleChild(nil, nil, provider, args, capture, socket, job)
+	return execLifecycleChild(nil, nil, provider, args, capture, socket, job, nil)
 }
-func execLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []string, capture bool, socket, job string) error {
+
+// ExecLifecycleChildViaBrokerReady extends only the private startup pipe. The
+// setup callback must validate the complete current-source capability before
+// returning; capture still execs the provider at its original owned PID.
+func ExecLifecycleChildViaBrokerReady(socket, job, provider string, args []string, capture bool, setup func(io.Reader) error) error {
+	return execLifecycleChild(nil, nil, provider, args, capture, socket, job, setup)
+}
+func execLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []string, capture bool, socket, job string, setup func(io.Reader) error) error {
 	fail := errors.New("lifecycle exec setup failed")
 	if capture {
 		info, err := os.Stat(provider)
@@ -110,11 +117,11 @@ func execLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []
 	_ = outR.Close()
 	_ = errR.Close()
 	_ = readyW.Close()
-	ready := make(chan bool, 1)
-	go func() { var b [1]byte; n, e := readyR.Read(b[:]); ready <- n == 1 && e == nil && b[0] == 1 }()
+	ready := make(chan error, 1)
+	go func() { ready <- receiveLifecycleReady(readyR, setup) }()
 	select {
-	case ok := <-ready:
-		if !ok {
+	case err := <-ready:
+		if err != nil {
 			return fail
 		}
 	case <-time.After(10 * time.Second):
@@ -174,4 +181,18 @@ func execLifecycleChild(brokerArgs, brokerEnv []string, provider string, args []
 	case <-time.After(10 * time.Second):
 		return fail
 	}
+}
+
+func receiveLifecycleReady(reader *os.File, setup func(io.Reader) error) error {
+	if reader.SetReadDeadline(time.Now().Add(10*time.Second)) != nil {
+		return errors.New("lifecycle readiness deadline unavailable")
+	}
+	var marker [1]byte
+	if _, err := io.ReadFull(reader, marker[:]); err != nil || marker[0] != 1 {
+		return errors.New("lifecycle readiness failed")
+	}
+	if setup != nil {
+		return setup(reader)
+	}
+	return nil
 }

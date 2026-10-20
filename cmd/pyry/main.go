@@ -113,9 +113,13 @@ func runArgs(args []string) error {
 			return runUpdate(args[2:])
 		case "agent-run":
 			return runAgentRun(os.Stdout, args[2:])
-		case "mcp-approve":
-			return runMCPApprove(args[2:])
-		case "mcp-files":
+		case "mcp-approve", "mcp-files":
+			if handled, err := mcpRecordingIntercept(args[1:]); handled {
+				return err
+			}
+			if args[1] == "mcp-approve" {
+				return runMCPApprove(args[2:])
+			}
 			return runMCPFiles(args[2:])
 		case "memory":
 			return runMemory(args[2:])

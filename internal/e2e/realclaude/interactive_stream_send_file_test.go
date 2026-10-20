@@ -103,7 +103,7 @@ func TestInteractiveStreamSendFile(t *testing.T) {
 
 	// A per-run nonce keeps the filename (and so the trigger) distinct across runs,
 	// defeating any accidental caching without asserting on an echo.
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 	filename := fmt.Sprintf("handover-%d.txt", nonce)
 	if err := os.WriteFile(filepath.Join(h.workdir, filename), []byte(sendFileFixtureBody), 0o600); err != nil {
 		t.Fatalf("pre-create the fixture in the conversation's recorded workspace: %v", err)
