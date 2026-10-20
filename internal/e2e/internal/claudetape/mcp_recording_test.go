@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -165,6 +167,42 @@ func TestMCPTerminalProofCannotInventMissingOrForeignProcessFacts(t *testing.T) 
 		}
 		if (validateMCPServerProofs(terminal) == nil) != (mutation == "valid") {
 			t.Fatal("actual terminal fact boundary mismatch", mutation)
+		}
+	}
+}
+
+func TestMCPInvocationDiagnosticIsBoundedPrivateAndUnpromotable(t *testing.T) {
+	for _, mutation := range []string{"valid", "unknown-stage", "missing-owner", "capability", "nested-capability", "oversize"} {
+		record := MCPInvocationFailure{Kind: "failed-unpromotable-mcp-invocation-v1", Stage: "cwd", Mode: "capture", Scenario: "mcp-send-file", Revision: strings.Repeat("a", 40), SourceBinarySHA256: strings.Repeat("b", 64), PID: 12001, ParentPID: 12002, Args: []string{"--session-id", "77777777-7777-4777-8777-777777777777"}, Cwd: "/controlled/current/source", HomeMatches: true}
+		switch mutation {
+		case "unknown-stage":
+			record.Stage = "unbounded untrusted message"
+		case "missing-owner":
+			record.PID = 0
+		case "capability":
+			record.Args = append(record.Args, e2emcp.TokenEnv)
+		case "nested-capability":
+			record.Args = append(record.Args, `{"unknown":"\u0050YRY_E2E_MCP_TOKEN"}`)
+		case "oversize":
+			record.Args = append(record.Args, strings.Repeat("x", 17000))
+		}
+		home := t.TempDir()
+		if os.Chmod(home, 0700) != nil {
+			t.Fatal("private diagnostic")
+		}
+		path := filepath.Join(home, "diagnostic.json")
+		e := PublishMCPInvocationFailure(path, record)
+		if (e == nil) != (mutation == "valid") {
+			t.Fatal("diagnostic boundary mismatch", mutation, e)
+		}
+		if mutation == "valid" {
+			if PublishMCPInvocationFailure(path, record) == nil {
+				t.Fatal("existing diagnostic overwritten")
+			}
+			st, e := os.Stat(path)
+			if e != nil || st.Mode().Perm() != 0600 {
+				t.Fatal("diagnostic was not private")
+			}
 		}
 	}
 }
