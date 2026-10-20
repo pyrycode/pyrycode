@@ -215,6 +215,21 @@ func (p *PhysicalReplayProtocol) BeforeOutput(raw []byte) error {
 				}
 				status = patch.Status
 			}
+			if status == "killed" {
+				// Claude 2.1.280 publishes this task_updated patch after the
+				// observed stop. The original root requires stopped/omission;
+				// killed is not allowed to satisfy that terminal assertion.
+				if p.family != "stop-hold" || !operation.stopped || operation.completed {
+					return p.reject()
+				}
+				if operation.owned != nil {
+					actual, err := operation.owned.WaitContext(p.ctx, 100*time.Millisecond)
+					if err != nil || actual != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
+						return p.reject()
+					}
+				}
+				continue
+			}
 			if status == "running" {
 				if !operation.running() || operation.stopped || operation.completed || operation.terminalSeen {
 					return p.reject()

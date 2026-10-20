@@ -377,3 +377,54 @@ func TestPhysicalProgressCannotSupplyTerminalOrOutliveActualStop(t *testing.T) {
 		t.Fatal("native progress claimed a running operation after actual Wait9")
 	}
 }
+
+func TestPhysicalNativeKilledPatchRequiresActualStopAndCannotReplaceOriginalTerminal(t *testing.T) {
+	for _, order := range []string{"before-stop", "without-original-terminal", "before-omission", "after-omission"} {
+		t.Run(order, func(t *testing.T) {
+			p, _, release := physicalProtocolStopRig(t)
+			defer release()
+			physicalProtocolJSON(t, p, physicalProtocolStart("hold-tool", "held-task"))
+			physicalProtocolJSON(t, p, physicalProtocolRoster("held-task"))
+			update := map[string]any{"type": "system", "subtype": "task_updated", "task_id": "held-task", "patch": map[string]any{"status": "killed", "end_time": 1792470670153}}
+			raw, _ := json.Marshal(update)
+			if order == "before-stop" {
+				if p.BeforeOutput(raw) == nil {
+					t.Fatal("killed patch substituted for actual current stop")
+				}
+				return
+			}
+			if p.BeforeInput([]byte(`{"type":"control_request","request_id":"stop","request":{"subtype":"stop_task","task_id":"held-task"}}`)) != nil {
+				t.Fatal("current stop")
+			}
+			if order == "after-omission" {
+				physicalProtocolJSON(t, p, physicalProtocolRoster(""))
+			}
+			physicalProtocolJSON(t, p, update)
+			if order == "without-original-terminal" {
+				if p.operations[0].terminalSeen {
+					t.Fatal("killed patch satisfied original stopped/omission assertion")
+				}
+				if _, err := p.Finish(); err == nil {
+					t.Fatal("killed patch replaced original terminal proof")
+				}
+				return
+			}
+			if order == "before-omission" {
+				physicalProtocolJSON(t, p, physicalProtocolRoster(""))
+			}
+			facts, err := p.Finish()
+			if err != nil {
+				t.Fatal("observed killed patch after actual stop invalidated original completion", err)
+			}
+			terminals := 0
+			for _, fact := range facts {
+				if fact.Kind == "native-roster-omission-after-actual-wait" {
+					terminals++
+				}
+			}
+			if terminals != 1 {
+				t.Fatal("killed patch invented or duplicated original terminal proof")
+			}
+		})
+	}
+}
