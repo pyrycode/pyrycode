@@ -70,7 +70,7 @@ func TestInteractiveConversationLifecycle(t *testing.T) {
 	// A per-run nonce seeds the rename label and the liveness message text so
 	// reruns differ — enough to defeat any accidental caching — without asserting
 	// on the nonce's echo.
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	// create — the handler mints + binds + persists the dedicated session before
 	// replying, so convID is bound by the time the helper returns (helper asserts
@@ -146,6 +146,7 @@ func TestInteractiveConversationLifecycle(t *testing.T) {
 	// holds the row. This drain must outlast the in-flight liveness turn's streamed
 	// tail before conversation_deleted is reached, so it reuses perTurnReplyBudget;
 	// the reply itself is instant.
+	lifecycleRecordingBeforeDelete(t, h.home, convID)
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:      7,
 		Type:    protocol.TypeDeleteConversation,

@@ -88,6 +88,9 @@ func (t *Tape) Validate() error {
 			if err != nil || action.Sequence != uint64(actions) {
 				return errors.New("invalid or nonsequential client checkpoint")
 			}
+			if t.Scenario == "conversation-lifecycle-created-1" && (action.Action != "lifecycle_delete" || action.ConversationID != "${LIFECYCLE_CONVERSATION}") {
+				return errors.New("wrong lifecycle deletion checkpoint")
+			}
 			if t.Scenario == "ordinary-queue-placement" && action.Action != "queue_admitted" {
 				return errors.New("wrong checkpoint action for queue profile")
 			}

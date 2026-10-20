@@ -5,9 +5,9 @@ client. Only the supervised Claude executable is replaced. Production parsing,
 supervision, routing, permission handling, turn emission and delivery still run.
 The test-only wrapper and recorder are not imported by the shipped daemon.
 
-Fifty-nine scenarios run the same assertions in live capture and offline replay:
-
-The manifest associates 52 original live roots with these recordings.
+Each manifest scenario runs the same assertions in live capture and offline replay.
+Use `python3 scripts/daemon-recordings.py inventory` for current scenario counts and
+original live-root associations.
 The legacy `question-answer` and four bypass-question recordings retain their
 original assertions and fixtures without owning current live roots. Five new
 witness profiles share the stronger proof introduced by PR #3622: a fresh
@@ -665,3 +665,50 @@ across that cleanup. Candidate publication requires exactly one run/pass for the
 outer root and both subtests, no skipped/failed event, matching source checksums
 and successful post-cleanup audits. Unknown or duplicate children fail closed.
 `--batch runner-recovery` groups this root with the two direct-runner profiles.
+
+
+## Conversation deletion and owned process lifetime
+
+`conversation-lifecycle` runs the original create, rename, archive, unarchive,
+liveness, delete reply and on-disk removal assertions. The bootstrap and actually
+created conversation keep independent roles. Session IDs bind to the persisted
+conversation before launch; the original bootstrap UUID is checked before typed
+normalization. The complete supplied files, modes, argv and strict stdin remain
+part of the outgoing contract.
+
+Capture execs the real Claude executable at the daemon-owned PID. A separate
+broker owns the recording pipes as a child of the outer test process, in its own
+process group. A private Unix socket transfers exactly seven distinct pipe ends
+with fixed read/write directions and EOF-framed job identity. Kernel peer PID and
+UID, the closed current role/job/source, and the broker's actual parent must all
+match before readiness. This keeps the observer outside the provider descendant
+tree that production legitimately reaps before signalling Claude. Replay runs an owned stand-in and
+never executes a provider. Before the unchanged original delete envelope, the
+client hook asks the broker to acknowledge a typed `lifecycle_delete` checkpoint.
+The checkpoint orders replay with the original client deletion. Every subsequent
+provider frame and daemon request through the final prefix seal remains recorded
+and strictly matched, including turn-tail and context-usage traffic.
+
+Conversation deletion removes the registry row and releases conversation live
+state; it does not evict the pool session. Both owned providers must remain alive
+after the original reply and disk assertions. Their prefixes then seal without
+closing their pipes. Actual stdout/stderr EOF is required only during the
+unchanged original daemon cleanup, bounded by a 30-second absolute deadline.
+No provider exit code or signal is inferred for the metadata deletion. Captured
+ownership/action PIDs remain in private launch audit files. Native protocol PID
+metadata remains literal, opaque replay data and is never used as a process or
+signal target.
+
+Each pipe write has both a ten-second bound and the remaining absolute lifecycle
+or seal deadline. Original stdin EOF is forwarded, and failure cleanup addresses
+only the private jobs belonging to this test. Changed tapes, roles, launch
+arguments, owned action/acknowledgment, failed terminal receipts,
+public controls, duplicate launches and extra artifacts fail the final audit.
+The outer parent closes the FD listener and joins its actual broker processes
+after the complete original root and cleanup, then performs the immutable final
+audit before publishing any candidate. A timeout kills only actual exec children
+owned by that parent. It never signals a provider using a fixture PID. Controls
+run the production descendant reaper against an actual detached owned witness,
+then signal the provider while holding its stdin open, proving that the external
+broker survives both native capture and offline replay teardown. Stderr bytes belong to the saved prefix; their separate diagnostic
+stream order is not an asserted deletion property.
