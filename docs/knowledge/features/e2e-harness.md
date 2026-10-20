@@ -428,8 +428,8 @@ the receipt prefix and final tape, and final ownership, source and I/O audits
 remain required. See [timing receipt propagation](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts)
 and the [measured Linux diagnosis](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
 
-Session-resume and Composer Stop launch ownership must reach the actual
-outer-owned invocation.
+On Linux and macOS, session-resume and Composer Stop launch ownership must reach
+the actual outer-owned invocation.
 Checking a helper against a daemon PID supplied by a control file accepted an
 unrelated daemon's otherwise qualifying helper even with a real SIGKILL/Wait.
 `StartFallbackLaunchAudit` binds the command immediately after Start;
@@ -437,12 +437,23 @@ unrelated daemon's otherwise qualifying helper even with a real SIGKILL/Wait.
 ancestry to the outer process before observing children. PID, start identity,
 parent and group matter together: an unknown chain or changed identity cannot
 authorize a cancelled launch. `TestFallbackCancelledLaunchOwnership` synchronizes
-owned and unrelated process trees before real cancellation, so rejection
-exercises the full ownership boundary.
+owned and unrelated process trees before real cancellation; macOS uses
+`TestDarwinLaunchOwnership` for the same boundary.
+
+The macOS sampler uses bounded libproc queries through cgo plus kernel sysctls.
+It checks the actual executable path and mapped vnode, closed helper/worker argv
+and private cwd vnode, then rechecks worker and ancestry identities. Unreadable,
+dying or missed observations remain unknown; changed retained identities invalidate
+the audit. Without cgo, native queries remain unknown and cannot authorize a
+cancellation. `proc_listchildpids` takes buffer bytes but returns a PID count;
+treating that result as bytes silently discards launches despite passing static
+checks. `TestDarwinCancelledLaunch` holds a real helper before registration until
+the normal sampler observes it, so a broken adapter cannot pass through direct
+post-sampler observations alone.
 
 Production can complete a cancellation Wait before the helper registers a job.
-`ReadLifecycleWorkers` accepts that Linux boundary for session-resume and
-Composer Stop only with the independent current-launch audit, observed absent
+`ReadLifecycleWorkers` accepts that boundary on Linux and macOS for session-resume
+and Composer Stop only with the independent current-launch audit, observed absent
 registration, a completed production SIGKILL Wait with group cancellation, and
 process/group death. Every Wait joins once;
 cancelled launches consume the two-attempt allowance but add no native exchange.
@@ -450,10 +461,22 @@ cancelled launches consume the two-attempt allowance but add no native exchange.
 registration, then cancels and reaps it; one launch and one Wait with zero
 registered workers must pass only with the independent audit. Wait-only, unknown,
 duplicate, foreign and unmatched evidence still fails. Exact reviewed exchange
-cardinality and complete native I/O/EOF remain required; see the
+cardinality, registered-worker source/peer checks and complete literal native
+I/O/EOF remain required. The `live-group` control in `TestDarwinLaunchOwnership`
+reaps the worker while retaining another owned group member: rejecting only a
+live worker would leave the group-death check unproved. See the
 [recording contract](../../testing/daemon-recordings.md#idle-eviction-and-literal-native-resume-inputs),
 [Composer Stop boundary](../../testing/daemon-recordings.md#physical-background-task-boundary)
 and [post-stop evidence retention](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts).
+
+Failure cleanup must reach the actual owning daemon before its sole worker Wait.
+A reported worker PID can be reused after reaping even while the outer command
+remains alive. `testStartLaunchOwner` closes its control pipe so
+`testRunLaunchDaemon` cancels its owned worker group before reaping; it never
+signals a reported PID.
+`TestDarwinLaunchCleanup` expires evidence reads before cancellation and after
+reaping, requiring bounded cleanup of an owned surviving group member while an
+unrelated live group remains untouched.
 
 A `total-wait-cardinality` rejection identifies a failed inventory join, but
 cannot establish cancellation before registration once the original home and

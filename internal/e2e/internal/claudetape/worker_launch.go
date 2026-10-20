@@ -20,6 +20,7 @@ type FallbackLaunchAudit struct {
 	image                  os.FileInfo
 	stop, done             chan struct{}
 	once                   sync.Once
+	mu                     sync.Mutex
 	launches               map[int]workerLaunch
 	invalid                bool
 }
@@ -47,7 +48,9 @@ func StartFallbackLaunchAudit(home, scenario, binary, revision, sourceSHA string
 		tick := time.NewTicker(time.Millisecond)
 		defer tick.Stop()
 		for {
+			a.mu.Lock()
 			a.sample()
+			a.mu.Unlock()
 			select {
 			case <-a.stop:
 				return
