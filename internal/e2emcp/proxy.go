@@ -196,7 +196,7 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	}
 	var extra [1]byte
 	n, e = c.Read(extra[:])
-	if n != 0 || e != io.EOF || !uniqueJSON(payload) {
+	if n != 0 || e != io.EOF || !closedFields(payload, "Version", "Token", "Args", "Env", "Cwd") {
 		return proxyLaunch{}, files, protocolError()
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -247,4 +247,23 @@ func encodeProxyLaunch(token string, args, env []string) ([]byte, error) {
 		return nil, protocolError()
 	}
 	return payload, nil
+}
+
+// encoding/json matches struct fields case-insensitively. Private capabilities
+// and launch headers accept only their one exact spelling, so differently cased
+// aliases cannot overwrite a field after recursive duplicate-key checking.
+func closedFields(raw []byte, names ...string) bool {
+	if !uniqueJSON(raw) {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != len(names) {
+		return false
+	}
+	for _, name := range names {
+		if _, ok := fields[name]; !ok {
+			return false
+		}
+	}
+	return true
 }

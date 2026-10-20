@@ -208,3 +208,14 @@ func TestCoordinatorPrefixCannotSubstituteForTerminalEOFAndWait(t *testing.T) {
 		})
 	}
 }
+
+func TestCoordinatorRejectsTerminalBeforePrefix(t *testing.T) {
+	c := newTestCoordinator(t)
+	forwardHandshake(t, c)
+	if c.CloseRPC("current-epoch/files", true, true, nil) != nil {
+		t.Fatal("terminal close")
+	}
+	if _, err := c.Checkpoint(); err == nil {
+		t.Fatal("already terminal session treated as alive prefix")
+	}
+}

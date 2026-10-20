@@ -95,11 +95,15 @@ type LifecycleBrokerConfig struct {
 	BrokerParentPID  int
 	Deadline         time.Time
 	End, Kill, Abort string
-	OnSeal           func(int) error           `json:"-"`
-	OnInput          func([]byte) error        `json:"-"`
-	BeforeOutput     func([]byte) error        `json:"-"`
-	BeforeSeal       func(*Tape) error         `json:"-"`
-	OnFailure        func(*LifecycleTape, int) `json:"-"`
+	Ready            func(io.Writer) error            `json:"-"`
+	ForwardInput     func([]byte, func() error) error `json:"-"`
+	ForwardOutput    func([]byte, func() error) error `json:"-"`
+	ReplayOutput     func([]byte) ([]byte, error)     `json:"-"`
+	OnSeal           func(int) error                  `json:"-"`
+	OnInput          func([]byte) error               `json:"-"`
+	BeforeOutput     func([]byte) error               `json:"-"`
+	BeforeSeal       func(*Tape) error                `json:"-"`
+	OnFailure        func(*LifecycleTape, int)        `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -116,6 +120,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if c.BrokerParentPID != 0 {
 		parent = c.BrokerParentPID
 	}
+	if c.Mode == "capture" && c.ReplayOutput != nil {
+		return 0, fail
+	}
 	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session" && c.End != "idle-evict") {
 		return 0, fail
 	}
@@ -130,7 +137,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	// Register inherited pipe writers with the runtime poller before wrapping
 	// them. NewFile only offers deadlines when the descriptor is nonblocking.
-	for _, fd := range []int{4, 5, 6} {
+	for _, fd := range []int{4, 5, 6, 9} {
 		if syscall.SetNonblock(fd, true) != nil {
 			return 0, fail
 		}
@@ -212,6 +219,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if _, err = originals[6].Write([]byte{1}); err != nil {
 		return 0, fail
 	}
+	if c.Ready != nil {
+		if err := c.Ready(originals[6]); err != nil {
+			return 0, fail
+		}
+	}
 	_ = originals[6].Close()
 	frames, total := 0, 0
 	sealed := false
@@ -258,7 +270,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return err
 				}
 			}
-			return writeBounded(originals[1], append(restored, '\n'), extra)
+			if c.ReplayOutput != nil {
+				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
+				if err != nil {
+					return err
+				}
+			}
+			return forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
 		}
 		if tape.Timeline != nil {
 			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
@@ -329,7 +347,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			frames++
 			// Consume through the stand-in's pipe as well: closure and the owned PID
 			// have real process semantics even though provider responses are replayed.
-			if e = write(originals[3], append(raw, '\n')); e != nil {
+			inputForward := func() error { return write(originals[3], append(raw, '\n')) }
+			e = forwardLifecycleFrame(raw, c.ForwardInput, func([]byte) error { return inputForward() })
+			if e != nil {
 				return fail
 			}
 			recordTimelineInput(normalized)
@@ -363,9 +383,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return err
 			}
 		}
-		if err := write(target, append(raw, '\n')); err != nil {
+		callback := c.ForwardOutput
+		if direction == "stdin" {
+			callback = c.ForwardInput
+		}
+		if err := forwardLifecycleFrame(raw, callback, func(actual []byte) error { return write(target, append(actual, '\n')) }); err != nil {
 			return err
 		}
+
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
 			if tape.Timeline.Kind == lifecycleInputTimelineKind || tape.Timeline.Kind == lifecycleFrameTimelineKind {
@@ -615,4 +640,32 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		time.Sleep(5 * time.Millisecond)
 	}
 	return frames, errors.New("lifecycle broker deadline exceeded")
+}
+
+// Trusted synchronous observers receive a copy and must invoke the supplied
+// actual write exactly once. They cannot silently mutate a captured frame,
+// omit/duplicate a forward, or hide an underlying pipe error.
+func forwardLifecycleFrame(raw []byte, observe func([]byte, func() error) error, write func([]byte) error) error {
+	if observe == nil {
+		return write(raw)
+	}
+	calls := 0
+	var writeErr error
+	forward := func() error {
+		calls++
+		if calls != 1 {
+			writeErr = errors.New("repeated lifecycle forward")
+			return writeErr
+		}
+		writeErr = write(raw)
+		return writeErr
+	}
+	err := observe(append([]byte(nil), raw...), forward)
+	if err != nil {
+		return err
+	}
+	if calls != 1 || writeErr != nil {
+		return errors.New("incomplete lifecycle forward")
+	}
+	return nil
 }

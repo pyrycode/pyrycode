@@ -188,7 +188,7 @@ func (c *Coordinator) Checkpoint() ([]RPCEvent, error) {
 		return nil, c.reject()
 	}
 	for _, session := range c.sessions {
-		if session.failed || !session.initialized || !session.initializedNotification || len(session.pending) != 0 {
+		if session.closed || session.failed || !session.initialized || !session.initializedNotification || len(session.pending) != 0 {
 			return nil, c.reject()
 		}
 	}
