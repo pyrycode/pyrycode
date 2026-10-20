@@ -83,8 +83,26 @@ func TestLifecycleBrokerServerRejectsForeignPartialDuplicateTransfers(t *testing
 			c := connect()
 			defer c.Close()
 			if kind == "stalled-transfer" {
+				// Dial can complete before Accept registers the peer. Join must exercise
+				// a stalled handler rather than close an as-yet unaccepted connection.
+				deadline := time.Now().Add(time.Second)
+				for {
+					s.mu.Lock()
+					accepted := len(s.conns) == 1
+					s.mu.Unlock()
+					if accepted {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("stalled peer was not accepted")
+					}
+					time.Sleep(time.Millisecond)
+				}
 				if e = s.Join(20 * time.Millisecond); e == nil {
 					t.Fatal("stalled peer accepted")
+				}
+				if calls.Load() != 0 {
+					t.Fatal("stalled transfer reached launch callback", calls.Load())
 				}
 				return
 			}
