@@ -890,6 +890,14 @@ SIGKILL Wait for each, while the original root passed and the old outer inventor
 failed at `total-wait-cardinality`. See the
 [revision-bound Linux evidence](../../internal/e2e/testdata/3667-cancelled-worker-evidence.json).
 
+Native observation supports both Linux and macOS for session-resume and Composer
+Stop. On macOS, bounded libproc queries through cgo and kernel sysctls observe
+current children, process lifetimes, executable path and mapped executable vnode,
+closed helper/worker argv and private cwd vnode. Worker and ancestry identities
+are rechecked across observation. Unavailable queries, including builds without
+cgo, cannot authorize cancellation accounting; unreadable, missed or dying
+identities remain unknown and changed retained identities invalidate the audit.
+
 `StartFallbackLaunchAudit` begins immediately after the outer-owned command
 starts. It binds that actual command to the current outer process, then retains
 and rechecks the complete current kernel ancestry from the daemon through that
@@ -900,7 +908,8 @@ use the current helper executable and exact closed invocation/print argv, and
 have the private empty temporary cwd. The audit also binds home, scenario, source
 revision and binary hash. Missed observations remain unknown. Unknown
 registration or previously observed registration cannot become absent merely
-because a job is missing later.
+because a job is missing later. Control-file, fixture, job and Wait PIDs supply
+no ownership authority.
 
 After original daemon cleanup, `ReadLifecycleWorkers` joins every registered
 exchange and independently proved cancelled launch to exactly one actual
@@ -913,6 +922,17 @@ zero reviewed workers, a helper reaching this branch stays silent without
 starting a broker or publishing a job; it must receive actual production
 cancellation or fail after its bounded 45-second hold. Replay still requires
 exactly the reviewed native exchanges, including an exactly empty inventory.
+
+`TestDarwinCancelledLaunch` holds a real owned helper before registration until
+the normal sampler observes it, then cancels and reaps it. Both scenarios join
+one launch and one actual completed SIGKILL group-cancellation Wait with zero
+registered workers and zero exchanges; the inventory without the audit rejects.
+The [native macOS evidence](../../internal/e2e/internal/claudetape/testdata/3703-macos-evidence.md)
+retains failed-before and passed-after controls and the original session-resume
+replay. This controlled proof does not attribute the historical macOS failures;
+the passing original replay observed zero launches, registrations and Waits.
+Historical failures remain failed, and offline replay establishes no new
+live-provider behavior.
 
 The sampler sends no signals and joins before inventory or diagnostic reads.
 Failed original roots still retain production Wait observations after daemon
@@ -1122,15 +1142,31 @@ counts were lost. Passing ordinary focused replays observed zero launches,
 registrations and Waits. The [retained evidence manifest](../../internal/e2e/internal/claudetape/testdata/worker_inventory_3677.json)
 binds the failing and passing controls, replay reports, revisions and hashes.
 
-On Linux, `runRecordedLifecycleSuite` supplies its outer-owned
+On macOS, `TestDarwinCancelledLaunch/composer-stop` proves the same join by holding
+the real owned helper before registration until the normal sampler observes it,
+then obtaining an actual completed SIGKILL group-cancellation Wait. The
+[native macOS evidence](../../internal/e2e/internal/claudetape/testdata/3703-macos-evidence.md)
+retains the failed stub regression and corrected proof. Neither controlled test
+establishes the scheduling cause of historical failures; those failures remain
+failed evidence.
+
+On Linux and macOS, `runRecordedLifecycleSuite` supplies its outer-owned
 `FallbackLaunchAudit` to `ReadLifecycleWorkers` for Composer Stop as well as
 session-resume. A jobless cancellation requires independently observed current
 helper identity and kernel ancestry through the daemon to the actual outer-owned
 root, observed absent registration, exactly one completed production SIGKILL Wait
-with group cancellation and exit observed, and process/group death. Unobserved
-launches and unreadable or partial registration remain unknown. Unknown,
+with group cancellation and exit observed, and process/group death. The macOS
+boundary uses libproc through cgo and kernel sysctls, checking lifetimes, group
+identities, actual executable path and mapped vnode, exact closed arguments and
+private cwd vnode, with worker and ancestry identity rechecks. Without cgo or
+readable native queries, observation remains unknown and cannot authorize a
+cancellation. Unobserved or dying launches and unreadable or partial registration
+remain unknown; changed retained identities invalidate the audit. Previously
+observed registration cannot become absent after a job disappears. Unknown,
 duplicate, foreign and unmatched evidence still fails; a Wait alone cannot
-authorize a launch, native exchange or receipt.
+authorize a launch, native exchange or receipt. Control-file, fixture and job
+PIDs likewise grant no ownership authority. The sampler neither signals nor
+delays production and joins before inventory reads.
 
 Each registered worker exchange and independently proved cancelled launch joins
 exactly once to an actual production Wait. Cancelled launches consume the same
@@ -1138,6 +1174,14 @@ two-attempt allowance but add no completed native worker exchanges. Reviewed
 fixture bytes and exchange cardinality, registered-worker source/peer checks,
 literal I/O/EOF, original foreground-stop/background-survival assertions and
 bounded cleanup remain required.
+
+Native rejection controls include a reaped worker with a surviving owned group
+member, so process death alone cannot satisfy group death. The macOS test owner's
+failure cleanup closes its control pipe to request cancellation from the daemon
+before the daemon's sole worker Wait. A reported worker PID is never a cleanup
+signal target: it may already have been reused after reaping. Decoder-timeout
+controls require bounded owned-tree cleanup before cancellation and after reaping
+while preserving an unrelated live group.
 
 Use an external private `PYRY_CLAUDE_TAPE_EVIDENCE` directory to retain
 `composer-stop-launch-audit.json` beyond disposable-home cleanup.
