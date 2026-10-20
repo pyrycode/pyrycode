@@ -66,7 +66,14 @@ func lifecycleHandoffText(tape *Tape) (string, error) {
 				armed = true
 			}
 		case "stdout":
-			raw := append(append([]byte(nil), frame.Data...), '\n')
+			// Fixture carriers are pretty-printed. Reconstitute one complete
+			// native JSON object per line for the production NDJSON parser;
+			// structural presentation whitespace is not a provider event boundary.
+			var compact bytes.Buffer
+			if json.Compact(&compact, frame.Data) != nil {
+				return "", fail
+			}
+			raw := append(compact.Bytes(), '\n')
 			if _, err := parser.Write(raw); err != nil {
 				return "", fail
 			}
