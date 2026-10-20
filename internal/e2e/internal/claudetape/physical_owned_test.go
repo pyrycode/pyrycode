@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -37,18 +38,21 @@ func physicalControlFIFO(t *testing.T, home, name string) (<-chan struct{}, func
 		opened <- file
 		close(arrived)
 	}()
+	var once sync.Once
 	return arrived, func() {
-		select {
-		case file := <-opened:
-			if file == nil {
-				t.Fatal("real FIFO reader missing")
+		once.Do(func() {
+			select {
+			case file := <-opened:
+				if file == nil {
+					t.Fatal("real FIFO reader missing")
+				}
+				if file.Close() != nil {
+					t.Fatal("release actual writer")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("no actual FIFO arrival")
 			}
-			if file.Close() != nil {
-				t.Fatal("release actual writer")
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("no actual FIFO arrival")
-		}
+		})
 	}
 }
 func physicalControlInput(command string, background bool) json.RawMessage {

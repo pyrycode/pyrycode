@@ -2,6 +2,7 @@ package claudetape
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -285,7 +286,15 @@ func (o *OwnedPhysicalOperation) Running() bool {
 	}
 }
 func (o *OwnedPhysicalOperation) Wait(budget time.Duration) (FallbackWorkerStatus, error) {
+	return o.WaitContext(context.Background(), budget)
+}
+func (o *OwnedPhysicalOperation) WaitContext(ctx context.Context, budget time.Duration) (FallbackWorkerStatus, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return FallbackWorkerStatus{}, errors.New("physical operation wait aborted")
+	}
 	select {
+	case <-ctx.Done():
+		return FallbackWorkerStatus{}, errors.New("physical operation wait aborted")
 	case <-o.done:
 		if o.cmd.ProcessState == nil {
 			return FallbackWorkerStatus{}, errors.New("missing actual physical Wait")
@@ -300,13 +309,19 @@ func (o *OwnedPhysicalOperation) Wait(budget time.Duration) (FallbackWorkerStatu
 	}
 }
 func (o *OwnedPhysicalOperation) Stop() (FallbackWorkerStatus, error) {
+	return o.StopContext(context.Background())
+}
+func (o *OwnedPhysicalOperation) StopContext(ctx context.Context) (FallbackWorkerStatus, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return FallbackWorkerStatus{}, errors.New("physical operation stop aborted")
+	}
 	if !o.Running() {
 		return FallbackWorkerStatus{}, errors.New("physical operation was not held at stop")
 	}
 	if err := o.signalGroup(); err != nil {
 		return FallbackWorkerStatus{}, err
 	}
-	status, err := o.Wait(3 * time.Second)
+	status, err := o.WaitContext(ctx, 3*time.Second)
 	if err != nil || status != (FallbackWorkerStatus{ExitCode: -1, Signal: 9}) {
 		return status, errors.New("physical stop lacks actual SIGKILL Wait")
 	}
