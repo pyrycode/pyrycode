@@ -42,6 +42,7 @@
     "status": "FAILED; retained by reference, not converted by subsequent passes"
   },
   "historical_same_tree_rerun": {
+    "revision": "Same-tree rerun reported by PR 3680; exact rerun revision not independently retained",
     "reported_by": "https://github.com/pyrycode/pyrycode/pull/3680",
     "counts": [1, 1, 0, 0],
     "path": "/tmp/builder-3668/physical-named-rerun.jsonl",
@@ -82,7 +83,25 @@
     "revision": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7",
     "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape/...",
     "path": "/tmp/builder-3686/package-green.jsonl",
-    "status": "pending managed admission"
+    "status": "cancelled before execution after over seven minutes queued",
+    "exit": 143,
+    "counts": [0, 0, 0, 0]
+  },
+  "physical_selector_refusal": {
+    "selection": "^Test(Physical|OwnedPhysical)",
+    "path": "/tmp/builder-3686/physical-green.stderr",
+    "exit": 1,
+    "counts": [0, 0, 0, 0],
+    "reason": "Managed scope policy rejected unbounded name pattern; replaced with explicit test names, not treated as a test failure or permission denial"
+  },
+  "repair_physical_controls": {
+    "revision": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7; later commits contain evidence only",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^(TestPhysicalForegroundWitnessWaitsForPublication|TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease|TestOwnedPhysicalComposerStopPreservesRealBackgroundUntilRelease|TestOwnedPhysicalForegroundWitnessRejectsReleaseAndForeignReads|TestOwnedPhysicalOperationExecutesOriginalHoldAndActuallyStops|TestOwnedPhysicalGroupRemainsPinnedAfterOperationWait|TestPhysicalProtocolStopRequiresActualWaitAndNativeTerminal|TestPhysicalProtocolStopTerminalAllowsClosedFinish|TestPhysicalProtocolRejectsUnownedOrPrematureEvidence|TestPhysicalProtocolRejectsChildPartialAndForeignToolBeforeExecution)$' ./internal/e2e/internal/claudetape/...",
+    "path": "/tmp/builder-3686/physical-exact-green.jsonl",
+    "status": "BLOCKED: cancelled while still queued at builder wall-clock limit; repaired controls must run before builder completion",
+    "exit": 143,
+    "counts": [0, 0, 0, 0],
+    "admission_log": "/tmp/builder-3686/physical-exact-green.stderr"
   },
   "static_checks": {
     "revision": "5d0f9f573badb9aff2d6945d3573f1aab9caaad7",
