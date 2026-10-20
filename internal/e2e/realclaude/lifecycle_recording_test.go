@@ -269,8 +269,8 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 		}
 	}
 	var role claudetape.LifecycleRoleBinding
-	if c.Process.Scenario == "clear-wrapup-skipped" {
-		role, e = lifecycleRecordingSkippedResetRole(c, session)
+	if _, _, _, reset := claudetape.LifecycleResetSeeds(c.Process.Scenario); reset {
+		role, e = lifecycleRecordingResetRole(c, session)
 		if e != nil {
 			fail()
 		}

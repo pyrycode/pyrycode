@@ -113,7 +113,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,14 +186,8 @@ const clearResetWindowBudget = 150 * time.Second
 func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	runParallel(t)
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
+	var err error
 
 	// Isolated workdir under the authenticated HOME. Load-bearing twice: it
 	// guarantees the fresh-daemon state (empty claude sessions dir) AND sidesteps
@@ -252,12 +245,13 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	t.Cleanup(func() { finishDaemonRecording(t) })
 
 	// A per-run nonce so reruns differ, defeating any cross-run caching that could
 	// produce a false green. The token is contiguous uppercase hex — no internal
 	// separators for claude to reformat — which is TestInteractiveStreamMultiTurnContinuity's
 	// discipline for the same job.
-	nonce := time.Now().UnixNano()
+	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 	token := fmt.Sprintf("PYRY%X", nonce)
 	var reqID uint64 = 2
 	plantReqID := reqID
@@ -302,6 +296,7 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// case-sensitively, and SendMessage's intercept sits below Route, so the id
 	// crossing into the reset is this registry key with its live binding.
 	w := newResetWindow()
+	lifecycleRecordingBeforeReset(t, home)
 	sealSendMessage(t, phone, initSend, clearReqID, clearConvID, "m-clear", "/clear")
 
 	// --- AC 1: the four frames of the daemon-run reset -------------------------

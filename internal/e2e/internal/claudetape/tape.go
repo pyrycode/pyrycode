@@ -88,7 +88,7 @@ func (t *Tape) Validate() error {
 			if err != nil || action.Sequence != uint64(actions) {
 				return errors.New("invalid or nonsequential client checkpoint")
 			}
-			if (t.Scenario == "session-rotation-bootstrap" || t.Scenario == "clear-wrapup-skipped-bound") && (action.Action != "lifecycle_rotate" || action.ConversationID != "${LIFECYCLE_CONVERSATION}") {
+			if (t.Scenario == "session-rotation-bootstrap" || t.Scenario == "clear-wrapup-skipped-bound" || t.Scenario == "clear-reset-bound") && (action.Action != "lifecycle_rotate" || action.ConversationID != "${LIFECYCLE_CONVERSATION}") {
 				return errors.New("rotation checkpoint changed")
 			}
 			if t.Scenario == "conversation-lifecycle-created-1" && (action.Action != "lifecycle_delete" || action.ConversationID != "${LIFECYCLE_CONVERSATION}") {

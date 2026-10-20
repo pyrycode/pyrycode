@@ -753,7 +753,31 @@ the current persisted binding; the successor also requires the actual predecesso
 PID to be gone and its external broker to have finished. A typed rotation
 checkpoint precedes the unchanged `/clear` send. The production one-millisecond
 wrap-up bound, reset-edge assertions, transition counts, eight-second quiet
-window, seeded-note byte comparison and successor prompt checks still run. No
+window and seeded-note byte comparison still run. The recording boundary also
+checks the complete literal successor prompt. No
 note or file is synthesized for this root. Bootstrap and successor remain alive
 until the original daemon cleanup; the bound predecessor journals all traffic
 through its actual output EOF.
+
+`clear-reset` runs the original successful `/clear` root with the same three
+owned roles and distinct original seed IDs. The original planted build tag uses
+the existing deterministic recording nonce hook. All original precondition,
+reset-edge, fresh-ID attribution and successor recall assertions remain intact.
+Both capture and replay deliver the complete literal appended prompt and check
+its mode. The recorded fixture retains every native wrap-up output byte and the
+complete successor input file.
+
+Fresh capture comparison handles this one output-to-input dependency explicitly.
+The actual production stream parser derives the successful wrap-up text from the
+first user turn after the typed predecessor rotation checkpoint. Only its text
+chunks before the successful terminal event may contribute; missing, failed,
+ambiguous, multiple-user or oversized notes fail closed. The successor's full
+captured prompt must contain exactly one complete production-fenced copy of that
+same note. Suite decoding validates this causal edge. Comparison then operates
+on a copy, binding only that exact fenced note to its fixed predecessor role.
+Every surrounding prompt byte, file mode, argv, original user request and control
+request stays strict. Stored fixtures are never rewritten by the comparator,
+and replay continues checking complete literal prompt files. Different model
+notes can therefore compare only when each is the precise predecessor output
+that actually reached its own successor. A foreign note, omitted note, duplicate
+fence, changed prompt header or changed mode still fails.

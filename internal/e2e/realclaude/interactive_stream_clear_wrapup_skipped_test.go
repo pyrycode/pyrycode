@@ -245,7 +245,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// and the intercept sits below Route, so the id crossing into the reset is this
 	// registry key with its live binding.
 	w := newResetWindow()
-	lifecycleRecordingBeforeSkippedReset(t, home)
+	lifecycleRecordingBeforeReset(t, home)
 	sealSendMessage(t, phone, initSend, clearReqID, skipConvID, "m-clear", "/clear")
 
 	// --- AC 2: the four frames, with `skipped` on the phase change -------------
