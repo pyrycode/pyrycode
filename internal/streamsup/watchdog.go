@@ -239,8 +239,8 @@ type WatchdogConfig struct {
 	// fire time and carries its value on the emitted signal — it does NOT gate
 	// whether the stall is emitted (both a genuine wedge and an approval-wait
 	// emit; the distinction lives in the argument). Nil → treated as always-false
-	// (no permission pending — the genuine-wedge path). The hook's producer (the
-	// approval flow) is out of scope for this slice (#1079/#1080).
+	// (no known permission pending). The production factory scopes this report to
+	// the producing conversation; the diagnostic does not establish a stall cause.
 	PendingPermission func() bool
 
 	// OnStall is the stall signal, called on the rising edge of a stall episode
@@ -291,7 +291,7 @@ type Watchdog struct {
 }
 
 // NewWatchdog constructs a Watchdog. Compose Writer() into Config.Stdout, then
-// call Start(ctx) once and Wait() at teardown.
+// call Start(ctx) and Wait() at teardown. A subsequent Start may follow Wait.
 func NewWatchdog(cfg WatchdogConfig) *Watchdog {
 	if cfg.Idle == 0 {
 		cfg.Idle = idleStall
@@ -310,8 +310,7 @@ func NewWatchdog(cfg WatchdogConfig) *Watchdog {
 }
 
 // Writer returns the stallTracker for Config.Stdout composition. The caller fans
-// the child's stdout to both the #1088 Parser and this writer with
-// io.MultiWriter (deferred to the wiring slice).
+// the child's stdout to both the Parser and this writer with io.MultiWriter.
 func (w *Watchdog) Writer() io.Writer { return w.tracker }
 
 // UserTurnSent tells the watchdog that a user turn's bytes reached the child's
@@ -353,14 +352,14 @@ func (w *Watchdog) UserTurnSent() { w.tracker.turnSent() }
 // The watchdog itself survives the respawn: one watchdog per runner, not one per
 // child, because Config.Stdout is fixed when the Runner is built and the supervise
 // loop never re-wires it, so a per-child watchdog could not reach the new child's
-// stdout. That also keeps exactly one poll goroutine and one Start/Wait pair for
-// the runner's life, which is the contract Start documents.
+// stdout. Each active Run owns one Start/Wait pair, including after reactivation.
 //
 // Same locking properties as UserTurnSent: leaf mutex only, safe from any
 // goroutine.
 func (w *Watchdog) ChildExited() { w.tracker.childExited() }
 
-// Start launches the single poll goroutine. Call exactly once. The goroutine
+// Start launches the single poll goroutine. Before calling again, cancel the
+// previous context and join it with Wait. The goroutine
 // ticks at watchdogTickFor(Idle); on each tick it snapshots the tracker and, on
 // the rising edge of a stall (edge-triggered — latched once per episode, re-arms
 // when activity or an awaiting flip clears the condition), evaluates the
@@ -369,9 +368,11 @@ func (w *Watchdog) ChildExited() { w.tracker.childExited() }
 // cancelled, which is what lets it tolerate an unbounded pending-permission
 // window. On ctx.Done it returns and closes done; Wait joins.
 func (w *Watchdog) Start(ctx context.Context) {
+	w.done = make(chan struct{})
+	done := w.done
 	tick := watchdogTickFor(w.cfg.Idle)
 	go func() {
-		defer close(w.done)
+		defer close(done)
 		t := time.NewTicker(tick)
 		defer t.Stop()
 		fired := false // edge-trigger latch: one emit per contiguous stall episode
