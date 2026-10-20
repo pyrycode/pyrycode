@@ -9,24 +9,34 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 const RunnerMetadataDirectory = ".pyry-runner-recording"
 
 func runnerPrivateRead(path string, limit int) ([]byte, error) {
+	return runnerPrivateReadWithOpen(path, limit, os.OpenFile)
+}
+
+func runnerPrivateReadWithOpen(path string, limit int, openFile func(string, int, os.FileMode) (*os.File, error)) ([]byte, error) {
 	fail := errors.New("runner artifact changed")
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > int64(limit) {
+	if err != nil || !info.Mode().IsRegular() || info.Mode() != 0600 || info.Size() > int64(limit) {
 		return nil, fail
 	}
-	f, err := os.Open(path)
+	// Reject replaced symlinks and avoid waiting for a replaced FIFO's writer.
+	f, err := openFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fail
 	}
 	opened, statErr := f.Stat()
+	if statErr != nil || !opened.Mode().IsRegular() || opened.Mode() != 0600 || opened.Size() > int64(limit) || !os.SameFile(info, opened) {
+		_ = f.Close() // The artifact is already rejected; retain the generic error.
+		return nil, fail
+	}
 	raw, readErr := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	closeErr := f.Close()
-	if statErr != nil || !os.SameFile(info, opened) || readErr != nil || closeErr != nil || len(raw) > limit {
+	if readErr != nil || closeErr != nil || len(raw) > limit {
 		return nil, fail
 	}
 	return raw, nil
