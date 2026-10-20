@@ -110,7 +110,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if LifecycleAction(end) != "" {
 			suffixes = append(suffixes, ".action", ".action.ready")
 		}
-		if scenario == "session-rotation" {
+		if len(LifecycleSnapshotRoles(scenario)) > 0 {
 			f, e := os.Open(prefix + ".json")
 			if e != nil {
 				return "", nil, fail
@@ -158,7 +158,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if c.Mode == "capture" && (!reflect.DeepEqual(c.Producer, tape.Tape.Producer) || c.Producer.BinarySHA256 != sourceSHA) {
 			return "", nil, fail
 		}
-		b, e := NewDaemonBinding(job.Args, home, job.WorkDir, job.Daemon, job.Socket)
+		b, e := NewLifecycleDaemonBinding(job.Args, home, job.WorkDir, job.Daemon, job.Socket, scenario, role)
 		if e != nil || b.session != session || !reflect.DeepEqual(b.Args(), tape.Tape.Args) {
 			return "", nil, fail
 		}
@@ -196,7 +196,7 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 				return "", nil, fail
 			}
 		}
-		if scenario == "session-rotation" {
+		if len(LifecycleSnapshotRoles(scenario)) > 0 {
 			for i := 1; i <= lifecycleUserInputs(tape.Tape); i++ {
 				var delivery LifecycleDelivery
 				if !decode(values[fmt.Sprintf(".user-%06d", i)], &delivery) || delivery.Version != 1 || delivery.Kind != "user-input-forwarded" || delivery.OwnerPID != c.OwnerPID || delivery.BrokerPID != brokerPID || delivery.Sequence != i {
@@ -275,7 +275,7 @@ func ValidateLifecycleLaunch(j LifecycleJob, jobPath string, peer, parent int, b
 		return fail
 	}
 	session, conv := role.SessionID, role.ConversationID
-	b, err := NewDaemonBinding(j.Args, base.Home, base.WorkDir, j.Daemon, j.Socket)
+	b, err := NewLifecycleDaemonBinding(j.Args, base.Home, base.WorkDir, j.Daemon, j.Socket, base.Scenario, j.Role)
 	if err != nil || b.session != session || j.SessionID != session || j.ConversationID != conv {
 		return fail
 	}

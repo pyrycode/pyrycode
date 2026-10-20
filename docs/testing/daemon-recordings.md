@@ -781,3 +781,35 @@ and replay continues checking complete literal prompt files. Different model
 notes can therefore compare only when each is the precise predecessor output
 that actually reached its own successor. A foreign note, omitted note, duplicate
 fence, changed prompt header or changed mode still fails.
+
+## Idle eviction and literal native resume inputs
+
+`session-resume` proposes the original five-second idle-eviction root. It keeps
+the original counted daemon WARN gate, unchanged idle timer and planted-token
+recall assertions. The bootstrap and resumed role share the original session
+UUID but have distinct kernel-owned process claims. Their argv forms stay
+explicitly different: `--session-id` first, `--resume` second. Unknown launches,
+repeated claims, a fresh successor or a foreign persisted binding fail closed.
+
+After the plant turn completes, a typed idle checkpoint authorizes only the
+current original provider's impending eviction. After the original WARN gate,
+the recording hook joins actual owned output EOF and requires the predecessor
+PID to be gone. Capture then takes the complete stable private native JSONL.
+Replay exclusively installs those reviewed raw bytes after the same strict user
+input and actual eviction, before the unchanged resume send. The production
+by-ID existence probe still runs and must select resume. Native parent folders
+are created through anchored no-follow descriptors; no ancestor symlink is
+traversed. No original deadline is extended and no file is restored before its
+causal barrier.
+
+The resumed broker checks the entire physical JSONL and its mode against that
+owned predecessor snapshot immediately before readiness. Its complete literal
+file input remains in the fixture and is checked again on replay. Suite decoding
+requires this input to equal its own predecessor snapshot. Fresh comparison may
+bind only that one complete source file to the closed predecessor reference;
+all other file bytes, modes, argv and ordered requests stay strict. Snapshot
+stage identity, current producer/source, user delivery, original terminal receipt
+and exact private inventories are pinned across unchanged daemon cleanup. Later
+native appends may extend the saved prefix but cannot rewrite it. Current Claude
+writing, actual reload and semantic recall remain obligations of the retained
+original live root.

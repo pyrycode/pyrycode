@@ -15,6 +15,7 @@ func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
 		"conversation-lifecycle": {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
 		"session-rotation":       {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
+		"session-resume":         {"TestInteractiveStreamResumeAfterEviction", []string{"bootstrap", "resumed"}},
 		"clear-wrapup-skipped":   {"TestInteractiveStreamClearWrapUpSkipped", []string{"bootstrap", "bound", "rotated"}},
 		"clear-reset":            {"TestInteractiveStreamClearRunsDaemonReset", []string{"bootstrap", "bound", "rotated"}},
 	}
@@ -22,6 +23,8 @@ func LifecycleProfiles() map[string]DaemonSuiteProfile {
 
 const LifecycleRotationSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 const LifecycleRotationConversation = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+const LifecycleResumeSession = "11770000-0000-4000-8000-000000000001"
+const LifecycleResumeConversation = "11770000-0000-4000-8000-000000000002"
 const LifecycleSkipBootstrap = "24860000-0000-4000-8000-000000000001"
 const LifecycleSkipSession = "24860000-0000-4000-8000-000000000002"
 const LifecycleSkipConversation = "24860000-0000-4000-8000-000000000003"
@@ -45,11 +48,20 @@ func LifecycleBootstrapFor(scenario string) string {
 		return LifecycleBootstrapSession
 	case "session-rotation":
 		return LifecycleRotationSession
+	case "session-resume":
+		return LifecycleResumeSession
 	}
 	return ""
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "session-resume":
+		switch role {
+		case "bootstrap":
+			return "idle-evict"
+		case "resumed":
+			return "seal"
+		}
 	case "clear-wrapup-skipped", "clear-reset":
 		switch role {
 		case "bootstrap", "rotated":
@@ -81,6 +93,8 @@ func LifecycleAction(end string) string {
 		return "lifecycle_delete"
 	case "rotate-session":
 		return "lifecycle_rotate"
+	case "idle-evict":
+		return "lifecycle_idle_eviction"
 	}
 	return ""
 }
@@ -98,6 +112,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 		if scenario == "session-rotation" {
 			conv = LifecycleRotationConversation
 		}
+		if scenario == "session-resume" {
+			conv = LifecycleResumeConversation
+		}
 		return LifecycleRoleBinding{Role: role, SessionID: bootstrap, ConversationID: conv, WorkDir: filepath.Join(home, "work")}, nil
 	}
 	var b LifecycleRoleBinding
@@ -109,10 +126,13 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 }
 
 func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBinding) bool {
+	if scenario == "session-resume" && (role != "resumed" || b.SessionID != LifecycleResumeSession || b.ConversationID != LifecycleResumeConversation) {
+		return false
+	}
 	if _, initial, conversation, ok := LifecycleResetSeeds(scenario); ok && (b.ConversationID != conversation || role == "bound" && b.SessionID != initial || role == "rotated" && b.SessionID == initial) {
 		return false
 	}
-	return LifecycleEnd(scenario, role) != "" && role != "bootstrap" && b.Role == role && poolUUID.MatchString(b.SessionID) && b.SessionID != LifecycleBootstrapFor(scenario) && poolUUID.MatchString(b.ConversationID) && b.WorkDir == filepath.Join(home, "work") && (scenario != "session-rotation" || b.ConversationID == LifecycleRotationConversation)
+	return LifecycleEnd(scenario, role) != "" && role != "bootstrap" && b.Role == role && poolUUID.MatchString(b.SessionID) && (b.SessionID != LifecycleBootstrapFor(scenario) || scenario == "session-resume" && role == "resumed" && b.SessionID == LifecycleResumeSession) && poolUUID.MatchString(b.ConversationID) && b.WorkDir == filepath.Join(home, "work") && (scenario != "session-rotation" || b.ConversationID == LifecycleRotationConversation)
 }
 
 type LifecycleSuite struct {
@@ -138,11 +158,12 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 			return fail
 		}
 	}
-	if s.Scenario == "session-rotation" {
-		if len(s.Snapshots) != 2 {
+	snapshotRoles := LifecycleSnapshotRoles(s.Scenario)
+	if len(snapshotRoles) > 0 {
+		if len(s.Snapshots) != len(snapshotRoles) {
 			return fail
 		}
-		for _, role := range profile.Roles {
+		for _, role := range snapshotRoles {
 			snapshot, ok := s.Snapshots[role]
 			if !ok {
 				return fail
@@ -182,6 +203,14 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 	}
 	if s.Scenario == "clear-reset" {
 		if _, err := lifecycleHandoffContract(s.Roles["rotated"].Tape, s.Roles["bound"].Tape); err != nil {
+			return err
+		}
+	}
+	if s.Scenario == "session-resume" {
+		if _, exists := s.Roles["bootstrap"].Tape.Files["$resume-input"]; exists {
+			return fail
+		}
+		if err := validateLifecycleResumeInput(s.Roles["resumed"].Tape, s.Snapshots["bootstrap"]); err != nil {
 			return err
 		}
 	}
@@ -242,6 +271,17 @@ func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
 	}
 	for _, role := range expected {
 		left, right := a.Roles[role].Tape, b.Roles[role].Tape
+		if a.Scenario == "session-resume" && role == "resumed" {
+			var err error
+			left, err = lifecycleResumeContract(left, a.Snapshots["bootstrap"])
+			if err != nil {
+				return err
+			}
+			right, err = lifecycleResumeContract(right, b.Snapshots["bootstrap"])
+			if err != nil {
+				return err
+			}
+		}
 		if a.Scenario == "clear-reset" && role == "rotated" {
 			var err error
 			left, err = lifecycleHandoffContract(left, a.Roles["bound"].Tape)

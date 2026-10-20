@@ -23,7 +23,7 @@ type LifecycleTape struct {
 }
 
 func (t *LifecycleTape) Validate() error {
-	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation" && t.End != "rotate-session") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
+	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation" && t.End != "rotate-session" && t.End != "idle-evict") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
 		return errors.New("invalid lifecycle tape")
 	}
 	raw, err := json.Marshal(t.Tape)
@@ -109,7 +109,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if c.BrokerParentPID != 0 {
 		parent = c.BrokerParentPID
 	}
-	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session") {
+	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session" && c.End != "idle-evict") {
 		return 0, fail
 	}
 	defer func() {
@@ -472,7 +472,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if c.End == "eof" && inputEOF && outputEOF && stderrEOF {
 			return finish()
 		}
-		if (c.End == "kill" || c.End == "rotate-session") && outputEOF && stderrEOF {
+		if (c.End == "kill" || c.End == "rotate-session" || c.End == "idle-evict") && outputEOF && stderrEOF {
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
 			}

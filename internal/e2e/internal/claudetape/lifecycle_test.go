@@ -155,7 +155,7 @@ func waitLifecycleProbe(t *testing.T, path string, target any) {
 func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 	producer := Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	saved := map[string]*LifecycleTape{}
-	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-seal-reap", "replay-seal-reap", "capture-rotate-reap", "replay-rotate-reap", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
+	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-seal-reap", "replay-seal-reap", "capture-rotate-reap", "replay-rotate-reap", "capture-idle-reap", "replay-idle-reap", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, 0700); err != nil {
@@ -173,6 +173,10 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			if strings.Contains(variant, "-rotate") {
 				c.End = "rotate-session"
 				c.Scenario = "session-rotation-bootstrap"
+			}
+			if strings.Contains(variant, "-idle") {
+				c.End = "idle-evict"
+				c.Scenario = "session-resume-bootstrap"
 			}
 			if variant == "abort" {
 				c.Abort = filepath.Join(root, "abort")

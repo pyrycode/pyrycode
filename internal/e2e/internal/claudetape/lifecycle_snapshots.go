@@ -32,6 +32,16 @@ func lifecycleUserInputs(t *Tape) int {
 	}
 	return n
 }
+func LifecycleSnapshotRoles(scenario string) []string {
+	switch scenario {
+	case "session-rotation":
+		return []string{"bootstrap", "rotated"}
+	case "session-resume":
+		return []string{"bootstrap"}
+	}
+	return nil
+}
+
 func LifecycleNativePath(home, session string) string {
 	return tuidriver.SessionJSONLPath(home, filepath.Join(home, "work"), session)
 }
@@ -69,7 +79,8 @@ func (s SessionSnapshot) Save(path, home string) error {
 func ReadLifecycleSnapshots(home, scenario, revision, sourceSHA string) (map[string]SessionSnapshot, map[string]string, error) {
 	fail := errors.New("invalid causal native snapshot inventory")
 	snapshots, hashes := map[string]SessionSnapshot{}, map[string]string{}
-	if scenario != "session-rotation" {
+	snapshotRoles := LifecycleSnapshotRoles(scenario)
+	if len(snapshotRoles) == 0 {
 		return snapshots, hashes, nil
 	}
 	profile := LifecycleProfiles()[scenario]
@@ -79,11 +90,11 @@ func ReadLifecycleSnapshots(home, scenario, revision, sourceSHA string) (map[str
 		return nil, nil, fail
 	}
 	entries, e := os.ReadDir(dir)
-	if e != nil || len(entries) != 2*len(profile.Roles) {
+	if e != nil || len(entries) != 2*len(snapshotRoles) {
 		return nil, nil, fail
 	}
 	expected := map[string]bool{}
-	for _, role := range profile.Roles {
+	for _, role := range snapshotRoles {
 		binding, e := ReadLifecycleRole(home, scenario, role)
 		if e != nil {
 			return nil, nil, fail
@@ -117,7 +128,15 @@ func ReadLifecycleSnapshots(home, scenario, revision, sourceSHA string) (map[str
 			return nil, nil, fail
 		}
 		sum := sha256.Sum256(values[".json"])
-		if stage.Version != 1 || stage.Role != role || stage.Kind != "native-jsonl-after-user" || stage.OwnerPID != delivery.OwnerPID || stage.BrokerPID != broker || stage.UserSequence != 1 || stage.Revision != revision || stage.SourceBinarySHA256 != sourceSHA || stage.SnapshotSHA256 != hex.EncodeToString(sum[:]) {
+		expectedKind := "native-jsonl-after-user"
+		if scenario == "session-resume" {
+			expectedKind = "native-jsonl-after-owned-eviction"
+			var terminal LifecycleReceipt
+			if ReadLifecycleControl(prefix+".receipt", 16384, &terminal) != nil || !terminal.Success || terminal.OwnerPID != job.Config.OwnerPID || terminal.BrokerPID != broker {
+				return nil, nil, fail
+			}
+		}
+		if stage.Version != 1 || stage.Role != role || stage.Kind != expectedKind || stage.OwnerPID != delivery.OwnerPID || stage.BrokerPID != broker || stage.UserSequence != 1 || stage.Revision != revision || stage.SourceBinarySHA256 != sourceSHA || stage.SnapshotSHA256 != hex.EncodeToString(sum[:]) {
 			return nil, nil, fail
 		}
 		want, e := s.Bytes(binding.SessionID, home)
@@ -146,6 +165,9 @@ func ReadLifecycleSnapshots(home, scenario, revision, sourceSHA string) (map[str
 	}
 	var mode string
 	for _, role := range profile.Roles {
+		if _, err := ReadLifecycleRole(home, scenario, role); err != nil {
+			return nil, nil, fail
+		}
 		var job LifecycleJob
 		if ReadLifecycleControl(filepath.Join(home, "recording-children", role+".job"), MaxBytes, &job) != nil {
 			return nil, nil, fail
@@ -155,7 +177,10 @@ func ReadLifecycleSnapshots(home, scenario, revision, sourceSHA string) (map[str
 		}
 		mode = job.Config.Mode
 	}
-	if mode == "capture" && len(inputEntries) != 0 || mode == "replay" && len(inputEntries) != len(profile.Roles) {
+	if mode != "capture" && mode != "replay" {
+		return nil, nil, fail
+	}
+	if mode == "capture" && len(inputEntries) != 0 || mode == "replay" && len(inputEntries) != len(snapshotRoles) {
 		return nil, nil, fail
 	}
 	for _, entry := range inputEntries {

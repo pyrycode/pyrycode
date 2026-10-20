@@ -1169,6 +1169,23 @@
       "retained_live": [
         "Current Claude startup, wrap-up note production, recall and process termination remain live. Replay runs the original daemon reset, successful handoff edges, fresh UUID attribution, per-session prompt precondition and successor recall assertions. Complete literal prompt files remain in fixtures and are checked during replay. Fresh comparison binds only the exact fenced note independently derived through the production parser from that capture's predecessor wrap-up output; all other prompt bytes, modes, argv and ordered requests stay strict."
       ]
+    },
+    {
+      "name": "session-resume",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStreamResumeAfterEviction"
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamResumeAfterEviction": "74cffc0424998af6b13a6ab1e7e180041911d903fb89be162652b0a39e66117f"
+      },
+      "retained_live": [
+        "Current Claude transcript writing, physical reload, recall and native process termination remain live. Replay preserves the original five-second idle timer, counted daemon WARN gate and token recall assertions. It restores the complete native predecessor JSONL only after matching original input and actual owned eviction EOF, before the unchanged resume send and real production existence probe. The exact native file is checked before provider readiness; fresh comparison binds only that complete file input to its own captured predecessor output."
+      ]
     }
   ],
   "batches": {
@@ -1323,6 +1340,9 @@
     ],
     "clear-reset": [
       "clear-reset"
+    ],
+    "session-resume": [
+      "session-resume"
     ]
   },
   "reviews": {
@@ -1375,11 +1395,6 @@
       "disposition": "needs_harness",
       "reason": "Effort update followed by SIGKILL and a confirmed different child PID precedes permission denial. Existing denial driver can be reused only after lifecycle/respawn/source-argument support is added.",
       "contract_sha256": "1ae0e87f34491a37cd56f70a1142adfcfaf81d6bc09d4119810eb3b7b150d271"
-    },
-    "TestInteractiveStreamResumeAfterEviction": {
-      "disposition": "needs_harness",
-      "reason": "Idle eviction followed by --resume and token recall requires eviction/child exit, relaunch and transcript input support. Preserve original idle timing and current Claude semantic recall as live obligations.",
-      "contract_sha256": "74cffc0424998af6b13a6ab1e7e180041911d903fb89be162652b0a39e66117f"
     },
     "TestInteractiveStreamRunningTurn": {
       "disposition": "live_only",

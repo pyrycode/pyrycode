@@ -140,7 +140,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 	}
-	if name == "session-rotation" {
+	if len(claudetape.LifecycleSnapshotRoles(name)) > 0 {
 		for _, dir := range []string{"recording-snapshots", "recording-snapshot-inputs"} {
 			if os.Mkdir(filepath.Join(home, dir), 0700) != nil {
 				t.Fatal("cannot prepare native transcript inventory")
@@ -156,7 +156,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, role := range profile.Roles {
+			for _, role := range claudetape.LifecycleSnapshotRoles(name) {
 				if suite.Snapshots[role].Save(filepath.Join(home, "recording-snapshot-inputs", role+".json"), home) != nil {
 					t.Fatal("cannot stage reviewed native transcript")
 				}
