@@ -996,7 +996,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	ctrl.SetFileAttacher(fileAttacher(convReg, func(id sessions.SessionID) error {
 		_, err := pool.Lookup(id)
 		return err
-	}, resolveInstanceDirPath(*name), announceAttachment, logger))
+	}, resolveInstanceDirPath(*name), attachmentOfferRecorder(conversationHistory, pool.HarnessFor), announceAttachment, logger))
 	// Install the channel.new creator (#2155) in the same window, over the SAME
 	// registry, path and pool every other conversation-keyed seam above resolves
 	// against. The mint closure is the narrowing sessionMinter.Create performs
