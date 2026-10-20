@@ -26,6 +26,7 @@ type ServerProof struct {
 }
 
 type ProxyServer struct {
+	logs                *ServerLogs
 	binding             LaunchBinding
 	coordinator         *Coordinator
 	validateStderr      func([]byte) error
@@ -72,7 +73,7 @@ func NewProxyServer(ctx context.Context, b LaunchBinding, c *Coordinator, valida
 		return nil, protocolError()
 	}
 	owned, cancel := context.WithCancel(ctx)
-	s := &ProxyServer{binding: b, coordinator: c, validateStderr: validateStderr, listener: listener, root: root, token: token, ctx: owned, cancel: cancel, claimed: map[string]bool{}, conns: map[*net.UnixConn]bool{}}
+	s := &ProxyServer{logs: newServerLogs([]string{"mcp-files", "mcp-approve"}), binding: b, coordinator: c, validateStderr: validateStderr, listener: listener, root: root, token: token, ctx: owned, cancel: cancel, claimed: map[string]bool{}, conns: map[*net.UnixConn]bool{}}
 	s.accepting.Add(1)
 	go func() {
 		defer s.accepting.Done()
@@ -90,7 +91,8 @@ func NewProxyServer(ctx context.Context, b LaunchBinding, c *Coordinator, valida
 	}()
 	return s, nil
 }
-func (s *ProxyServer) Capability() (socket, token string) { return s.listener.Addr().String(), s.token }
+func (s *ProxyServer) StderrSnapshot() (map[string]string, error) { return s.logs.Snapshot() }
+func (s *ProxyServer) Capability() (socket, token string)         { return s.listener.Addr().String(), s.token }
 func (s *ProxyServer) bad() {
 	// A forwarding callback may hold the coordinator mutex while blocked in an
 	// actual pipe write. Cancel/close owned I/O before waiting on that mutex.
@@ -137,7 +139,7 @@ func (s *ProxyServer) handle(conn *net.UnixConn) {
 		s.bad()
 		return
 	}
-	proof, err := runOwnedServer(s.ctx, s.binding, kind, env, files, s.coordinator, s.validateStderr)
+	proof, err := runOwnedServer(s.ctx, s.binding, kind, env, files, s.coordinator, s.validateStderr, s.logs)
 	proof.NativeProxyPID = launch.peerPID
 	if err != nil {
 		s.bad()
@@ -188,9 +190,9 @@ func (s *ProxyServer) Join(budget time.Duration) ([]ServerProof, error) {
 	return append([]ServerProof(nil), s.proofs...), nil
 }
 
-func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []string, files [3]*os.File, c *Coordinator, validateStderr func([]byte) error) (ServerProof, error) {
+func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []string, files [3]*os.File, c *Coordinator, validateStderr func([]byte) error, logs ...*ServerLogs) (ServerProof, error) {
 	proof := ServerProof{Kind: kind, NativeOwnerPID: b.NativeOwnerPID, ExitCode: -1}
-	if ctx == nil || ctx.Err() != nil || b.validate() != nil {
+	if ctx == nil || ctx.Err() != nil || b.validate() != nil || len(logs) > 1 || len(logs) == 1 && logs[0] == nil {
 		return proof, protocolError()
 	}
 	if _, err := b.serverArgs([]string{kind, "-pyry-socket", b.Socket}); err != nil {
@@ -270,7 +272,11 @@ func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []str
 	go pump("output", outR, ServerToClient, files[1])
 	go func() {
 		var body bytes.Buffer
-		err := copyStderr(&body, files[2], errR)
+		var observe func([]byte) error
+		if len(logs) == 1 {
+			observe = func(raw []byte) error { return logs[0].append(kind, raw) }
+		}
+		err := copyStderr(&body, files[2], errR, observe)
 		if err == nil {
 			err = validateStderr(body.Bytes())
 		}
@@ -358,7 +364,7 @@ func forwardLines(reader io.Reader, forward func([]byte) error) (count int, eof 
 		pending = nil
 	}
 }
-func copyStderr(retained *bytes.Buffer, destination io.Writer, source io.Reader) error {
+func copyStderr(retained *bytes.Buffer, destination io.Writer, source io.Reader, observe func([]byte) error) error {
 	var block [4096]byte
 	for {
 		n, err := source.Read(block[:])
@@ -368,6 +374,9 @@ func copyStderr(retained *bytes.Buffer, destination io.Writer, source io.Reader)
 			}
 			retained.Write(block[:n])
 			if writeAll(destination, block[:n]) != nil {
+				return protocolError()
+			}
+			if observe != nil && observe(append([]byte(nil), block[:n]...)) != nil {
 				return protocolError()
 			}
 		}

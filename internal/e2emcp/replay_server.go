@@ -14,6 +14,7 @@ import (
 // The caller must validate the complete primary/RPC causal join and declare
 // the exact current source configuration before constructing these processes.
 type ReplayServers struct {
+	logs              *ServerLogs
 	ctx               context.Context
 	cancel            context.CancelFunc
 	coordinator       *Coordinator
@@ -64,7 +65,7 @@ func StartReplayServers(ctx context.Context, b LaunchBinding, c *Coordinator, de
 		return nil, protocolError()
 	}
 	owned, cancel := context.WithCancel(ctx)
-	s := &ReplayServers{ctx: owned, cancel: cancel, coordinator: c, done: make(chan struct{})}
+	s := &ReplayServers{logs: newServerLogs(declaredKinds), ctx: owned, cancel: cancel, coordinator: c, done: make(chan struct{})}
 	// Allocate all pipes and registrations before starting any child. A rejected
 	// declaration cannot leave an unjoined partially started set of processes.
 	type client struct {
@@ -146,7 +147,7 @@ func StartReplayServers(ctx context.Context, b LaunchBinding, c *Coordinator, de
 		}()
 		go func() {
 			defer wg.Done()
-			proof, e := runOwnedServer(owned, b, client.kind, actualEnv, client.pipes, c, func(raw []byte) error { return validateStderr(client.kind, raw) })
+			proof, e := runOwnedServer(owned, b, client.kind, actualEnv, client.pipes, c, func(raw []byte) error { return validateStderr(client.kind, raw) }, s.logs)
 			// Only this owner has Wait'ed the actual server. NativeProxyPID remains 0.
 			client.pipes[1].Close()
 			client.pipes[2].Close()
@@ -220,3 +221,5 @@ func (s *ReplayServers) Abort() {
 	s.coordinator.Abort()
 	<-s.done
 }
+
+func (s *ReplayServers) StderrSnapshot() (map[string]string, error) { return s.logs.Snapshot() }

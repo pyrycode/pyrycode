@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"reflect"
 
 	"github.com/pyrycode/pyrycode/internal/e2emcp"
@@ -124,30 +123,39 @@ func ValidateMCPDaemonInput(b *DaemonBinding) error {
 			return mcpError()
 		}
 	}
+	raw, e := readMCPCurrentConfig(b.filePaths["--mcp-config"])
+	if e != nil {
+		return e
+	}
+	root, e := mcpRawObject(raw)
+	if e != nil || len(root) != 1 {
+		return mcpError()
+	}
+	servers, e := mcpRawObject(root["mcpServers"])
+	if e != nil || len(servers) != 2 {
+		return mcpError()
+	}
+	for name, kind := range map[string]string{"pyry_approve": "mcp-approve", "pyry_files": "mcp-files"} {
+		server, e := mcpRawObject(servers[name])
+		if e != nil || len(server) != 2 || mcpString(server["command"]) != b.daemon {
+			return mcpError()
+		}
+		var args []string
+		if json.Unmarshal(server["args"], &args) != nil || !reflect.DeepEqual(args, []string{kind, "-pyry-socket", b.socket}) {
+			return mcpError()
+		}
+	}
 	files, e := b.Files()
 	if e != nil {
 		return mcpError()
 	}
-	var input struct {
-		Content struct {
-			Servers map[string]struct {
-				Command string   `json:"command"`
-				Args    []string `json:"args"`
-			} `json:"mcpServers"`
-		} `json:"content"`
-		Mode uint32 `json:"mode"`
+	var wrapped struct {
+		Content json.RawMessage `json:"content"`
+		Mode    uint32          `json:"mode"`
 	}
-	raw := files["--mcp-config"]
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if !uniqueSuiteKeys(raw) || d.Decode(&input) != nil || d.Decode(new(any)) != io.EOF || input.Mode != 0600 || len(input.Content.Servers) != 2 {
+	normalized, e := b.normalizePaths(raw, false)
+	if e != nil || json.Unmarshal(files["--mcp-config"], &wrapped) != nil || wrapped.Mode != 0600 || !bytes.Equal(physicalCanonicalJSON(normalized), physicalCanonicalJSON(wrapped.Content)) {
 		return mcpError()
-	}
-	for name, kind := range map[string]string{"pyry_approve": "mcp-approve", "pyry_files": "mcp-files"} {
-		server, ok := input.Content.Servers[name]
-		if !ok || server.Command != "${CHILD_DAEMON}" || !reflect.DeepEqual(server.Args, []string{kind, "-pyry-socket", "${CHILD_SOCKET}"}) {
-			return mcpError()
-		}
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package claudetape
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -71,7 +72,7 @@ func TestMCPPrimaryJoinRejectsImpossibleAndForeignAnchors(t *testing.T) {
 	}
 }
 func TestMCPCurrentInputMustDeclareExactProductionServersAndEnforcement(t *testing.T) {
-	for _, mutation := range []string{"valid", "no-files", "foreign-server", "wrong-command", "wrong-socket", "server-env", "bypass", "no-strict", "duplicate-strict", "wrong-permission-tool", "wrong-mode", "no-config", "public-config"} {
+	for _, mutation := range []string{"valid", "no-files", "foreign-server", "wrong-command", "wrong-socket", "server-env", "bypass", "no-strict", "duplicate-strict", "wrong-permission-tool", "wrong-mode", "no-config", "public-config", "root-case-alias", "command-case-alias", "args-case-alias", "raw-duplicate"} {
 		t.Run(mutation, func(t *testing.T) {
 			home := t.TempDir()
 			daemon, socket := filepath.Join(home, "pyry"), filepath.Join(home, "socket")
@@ -92,6 +93,16 @@ func TestMCPCurrentInputMustDeclareExactProductionServersAndEnforcement(t *testi
 				servers["pyry_files"].(map[string]any)["env"] = map[string]string{"PYRY_SESSION_ID": "foreign"}
 			}
 			raw, _ := json.Marshal(map[string]any{"mcpServers": servers})
+			switch mutation {
+			case "root-case-alias":
+				raw = bytes.Replace(raw, []byte(`"mcpServers"`), []byte(`"MCPServers"`), 1)
+			case "command-case-alias":
+				raw = bytes.Replace(raw, []byte(`"command"`), []byte(`"Command"`), 1)
+			case "args-case-alias":
+				raw = bytes.Replace(raw, []byte(`"args"`), []byte(`"ARGS"`), 1)
+			case "raw-duplicate":
+				raw = bytes.Replace(raw, []byte(`"mcpServers":{`), []byte(`"mcpServers":{},"mcpServers":{`), 1)
+			}
 			args := []string{"--session-id", LifecycleBootstrapSession, "--permission-mode", "default", "--permission-prompt-tool", "mcp__pyry_approve__approve", "--strict-mcp-config"}
 			for _, item := range []struct {
 				flag string

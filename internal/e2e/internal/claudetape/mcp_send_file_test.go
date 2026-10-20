@@ -90,6 +90,9 @@ func TestMCPSendFileSourceRejectsForeignBusinessJoinsAndLogs(t *testing.T) {
 }
 func seedMCPUnitEffect(t *testing.T, home, conv, id string) {
 	t.Helper()
+	if os.Chmod(home, 0700) != nil {
+		t.Fatal("private unit HOME")
+	}
 	for _, dir := range []string{filepath.Join(home, "work"), filepath.Join(home, ".pyry", "test", "conversations", conv, "attachments", id)} {
 		if os.MkdirAll(dir, 0700) != nil {
 			t.Fatal("unit setup")

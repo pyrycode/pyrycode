@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io"
 	"reflect"
 	"regexp"
 	"strings"
@@ -326,27 +325,40 @@ func ValidateMCPSendFileEffect(home, conversation, id string) error {
 	if !poolUUID.MatchString(conversation) || !poolUUID.MatchString(id) {
 		return mcpError()
 	}
-	source := filepath.Join(home, "work", MCPSendFileName)
-	st, e := os.Lstat(source)
-	if e != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 || st.Size() != int64(len(MCPSendFileBody)) {
+	tree, e := openMCPFileTree(home)
+	if e != nil {
+		return e
+	}
+	defer tree.Close()
+	work, e := tree.dir("work")
+	if e != nil {
+		return e
+	}
+	source, e := tree.read(work, MCPSendFileName, len(MCPSendFileBody))
+	if e != nil || string(source) != MCPSendFileBody {
 		return mcpError()
 	}
-	raw, e := os.ReadFile(source)
-	if e != nil || string(raw) != MCPSendFileBody {
+	root, e := tree.dir(".pyry", "test", "conversations", conversation, "attachments")
+	if e != nil {
+		return e
+	}
+	entries, e := root.ReadDir(2)
+	if e != nil && e != io.EOF || len(entries) != 1 || entries[0].Name() != id || !entries[0].IsDir() {
 		return mcpError()
 	}
-	root := filepath.Join(home, ".pyry", "test", "conversations", conversation, "attachments")
-	entries, e := os.ReadDir(root)
-	if e != nil || len(entries) != 1 || entries[0].Name() != id || !entries[0].IsDir() || entries[0].Type()&os.ModeSymlink != 0 {
+	dir, e := tree.open(root, id, true)
+	if e != nil {
+		return e
+	}
+	entries, e = dir.ReadDir(2)
+	if e != nil && e != io.EOF || len(entries) != 1 || entries[0].Name() != MCPSendFileName || !entries[0].Type().IsRegular() {
 		return mcpError()
 	}
-	dir := filepath.Join(root, id)
-	entries, e = os.ReadDir(dir)
-	if e != nil || len(entries) != 1 || entries[0].Name() != MCPSendFileName || !entries[0].Type().IsRegular() {
+	copied, e := tree.read(dir, MCPSendFileName, len(MCPSendFileBody))
+	if e != nil || string(copied) != MCPSendFileBody {
 		return mcpError()
 	}
-	raw, e = os.ReadFile(filepath.Join(dir, MCPSendFileName))
-	if e != nil || string(raw) != MCPSendFileBody {
+	if tree.check() != nil {
 		return mcpError()
 	}
 	return nil

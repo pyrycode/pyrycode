@@ -111,6 +111,21 @@ func TestReplayServersRequireActualResponsesPrefixEOFAndWait(t *testing.T) {
 				}
 				return
 			}
+			logDeadline := time.Now().Add(time.Second)
+			var prefixStderr map[string]string
+			for {
+				prefixStderr, e = s.StderrSnapshot()
+				if e != nil {
+					t.Fatal(e)
+				}
+				if prefixStderr["mcp-files"] == "controlled helper stderr\n" {
+					break
+				}
+				if time.Now().After(logDeadline) {
+					t.Fatal("actual stderr prefix missing")
+				}
+				time.Sleep(time.Millisecond)
+			}
 			prefix, e := c.Checkpoint()
 			if e != nil || len(prefix) != len(events) {
 				t.Fatal("live actual prefix", e)
@@ -132,6 +147,11 @@ func TestReplayServersRequireActualResponsesPrefixEOFAndWait(t *testing.T) {
 				t.Fatal("actual process not joined", e)
 			}
 			p := proofs[0]
+			terminalStderr, e := s.StderrSnapshot()
+			if e != nil || terminalStderr["mcp-files"] != prefixStderr["mcp-files"] || terminalStderr["mcp-files"] != p.Stderr {
+				t.Fatal("actual terminal stderr changed pinned prefix")
+			}
+
 			if p.NativeProxyPID != 0 || p.NativeOwnerPID != b.NativeOwnerPID || p.ServerPID <= 1 || p.ServerPID == b.NativeOwnerPID || p.ExitCode != 0 || !p.InputEOF || !p.OutputEOF || !p.StderrEOF || p.InputFrames != 3 || p.OutputFrames != 2 {
 				t.Fatal("actual process facts", p)
 			}
