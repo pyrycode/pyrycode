@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,24 @@ func promptSuiteControl() *LifecycleSuite {
 			}
 		}
 		s.Roles[role] = &tape
+	}
+	s.Settlement = RequiredConversationSettlement(s.Scenario)
+	for _, role := range []string{"bare", "prompted"} {
+		tape := s.Roles[role]
+		tape.Tape.Frames = fallbackExchangeControl().Frames
+		for i := range tape.Tape.Frames {
+			tape.Tape.Frames[i].Data = json.RawMessage(strings.ReplaceAll(string(tape.Tape.Frames[i].Data), "Please ask me one question.", role+" asks one question."))
+		}
+		tape.Timeline.OutputAfterNS = nil
+		for _, frame := range tape.Tape.Frames {
+			if frame.Direction == "stdout" {
+				tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, 0)
+			}
+		}
+		worker := fallbackWorkerControlTape()
+		worker.Args = conversationWorkerArgs()
+		worker.Input = strings.ReplaceAll(worker.Input, "Please ask me one question.", role+" asks one question.")
+		s.Workers = append(s.Workers, LifecycleWorker{SourceRole: role, UserSequence: 1, Tape: worker})
 	}
 	return s
 }
@@ -114,6 +133,13 @@ func testThreeRoleArtifactAudit(t *testing.T, suite *LifecycleSuite, active bool
 		}
 		receipt := LifecycleReceipt{Success: true, Frames: len(suite.Roles[role].Tape.Frames), OwnerPID: 1001 + i, BrokerPID: 2001 + i}
 		write(prefix+".prefix", receipt)
+		if _, _, required := conversationCompletionScenario(suite.Scenario + "-" + role); required {
+			source, err := completedConversationExchange(suite.Roles[role].Tape)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(prefix+".completed", ConversationCompletion{1, role, suite.Producer.Revision, 1001 + i, 2001 + i, len(suite.Roles[role].Tape.Frames), exchangeDigest(source)})
+		}
 	}
 	before, tapes, err := AuditLifecycleArtifacts(home, suite.Scenario, suite.Producer.Revision, suite.Producer.BinarySHA256, suite.DaemonSHA256, 0, false)
 	if err != nil || len(tapes) != 3 {
@@ -141,6 +167,9 @@ func TestPromptArtifactAuditJoinsAllThreeRoles(t *testing.T) {
 func TestLifecycleActiveSwitchJoinsIndependentCreatedRoles(t *testing.T) {
 	s := promptSuiteControl()
 	s.Scenario = "conversation-active-switch"
+	s.Settlement = RequiredConversationSettlement(s.Scenario)
+	s.Workers[0].SourceRole = "created-1"
+	s.Workers[1].SourceRole = "created-2"
 	s.Roles["created-1"] = s.Roles["bare"]
 	s.Roles["created-2"] = s.Roles["prompted"]
 	delete(s.Roles, "bare")

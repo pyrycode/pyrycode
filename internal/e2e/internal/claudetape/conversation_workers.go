@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-const ConversationWorkerPolicy = "native_conversation_workers"
+const ConversationWorkerPolicy = "settled_conversation_workers"
 
 // This is a source-declared complete argv, independently checked against the
 // current production declaration by an AST drift guard. It applies even when
@@ -33,7 +33,7 @@ type LifecycleComparison struct {
 
 func conversationWorkerFacts(s *LifecycleSuite) ([]ConversationWorkerFact, error) {
 	fail := errors.New("unreviewed conversation worker lifecycle")
-	if s == nil || !ConversationWorkerScenario(s.Scenario) || ValidateLifecycleWorkers(s.Scenario, s.Roles, s.Workers) != nil {
+	if s == nil || !ConversationWorkerScenario(s.Scenario) || len(s.Workers) != 2 || !reflect.DeepEqual(s.Settlement, RequiredConversationSettlement(s.Scenario)) || ValidateLifecycleWorkers(s.Scenario, s.Roles, s.Workers) != nil {
 		return nil, fail
 	}
 	roles := map[string]bool{"prompted": true, "bare": true}
@@ -45,7 +45,10 @@ func conversationWorkerFacts(s *LifecycleSuite) ([]ConversationWorkerFact, error
 	// exact inside each capture/replay ledger and is never rewritten there.
 	for _, role := range []string{"bare", "prompted", "created-1", "created-2"} {
 		for _, w := range s.Workers {
-			if !roles[w.SourceRole] || w.UserSequence != 1 || !reflect.DeepEqual(w.Tape.Args, conversationWorkerArgs()) || (w.Tape.Status != (FallbackWorkerStatus{ExitCode: 0}) && w.Tape.Status != (FallbackWorkerStatus{ExitCode: -1, Signal: 9})) {
+			if !roles[w.SourceRole] || w.UserSequence != 1 || !reflect.DeepEqual(w.Tape.Args, conversationWorkerArgs()) || (w.Tape.Status != (FallbackWorkerStatus{ExitCode: 0}) || w.ProductionWait != nil) {
+				return nil, fail
+			}
+			if _, err := completedConversationExchange(s.Roles[w.SourceRole].Tape); err != nil {
 				return nil, fail
 			}
 			if w.SourceRole == role {
@@ -58,8 +61,9 @@ func conversationWorkerFacts(s *LifecycleSuite) ([]ConversationWorkerFact, error
 
 // CompareLifecycleSuite preserves complete main-provider argv/files/ordered
 // inputs. Only these two routing/prompt oracles permit independently proved
-// background worker observations to differ across fresh native runs. They do
-// not claim worker lifecycle equivalence. Saved and fresh replay stay exact.
+// background worker attempt ordering to differ across fresh native runs. Both
+// require exactly two successful native/production completions. Saved and fresh
+// replay keep their actual ordered worker ledger exact.
 func CompareLifecycleSuite(a, b *LifecycleSuite, expected []string, policy string) (LifecycleComparison, error) {
 	report := LifecycleComparison{}
 	if policy == "strict_ordered" {
