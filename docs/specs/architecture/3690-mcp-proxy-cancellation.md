@@ -75,3 +75,7 @@ Pending documentation stage: in `docs/knowledge/features/development-verificatio
 - Threat model: offline test oracle only; no new product access surface or live-provider acceptance claim. No deferred security finding.
 
 Reviewer: builder self-review, 2026-10-20.
+
+## Revisions
+
+- 2026-10-20: require the owned context live immediately before Join and observe cancellation no earlier than its 25 ms budget. This rejects a spontaneous child failure masquerading as budget-driven cancellation. A testdata script prepares repeatable old-oracle, disabled-cancellation and phase-observer overlays without changing runtime code.

@@ -280,14 +280,21 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 				}
 				waited = true
 			}
+			if !invalid && s.ctx.Err() != nil {
+				t.Fatal("owned run cancelled before Join budget", s.ctx.Err())
+			}
+			const joinBudget = 25 * time.Millisecond
 			started := time.Now()
-			_, err = s.Join(25 * time.Millisecond)
+			_, err = s.Join(joinBudget)
 			joined = true
 			joinElapsed := time.Since(started)
 			if err == nil || ctx.Err() != nil || s.ctx.Err() == nil {
 				t.Fatalf("Join did not cancel independently: error=%v owned=%v parent=%v", err, s.ctx.Err(), ctx.Err())
 			}
 			<-ownedCancelled
+			if !invalid && cancelledAt.Before(started.Add(joinBudget)) {
+				t.Fatal("owned cancellation preceded Join budget expiry")
+			}
 			// handle removes its connection only after runOwnedServer has received
 			// every pump result and the actual server's exec.Cmd.Wait result.
 			s.mu.Lock()
