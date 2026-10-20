@@ -73,7 +73,7 @@
     },
     {
       "purpose": "Intermediate total-deadline experiment; withdrawn after large complete query failed",
-      "command": "python3 scripts/test-admission.py -- go test -timeout=6m -race -count=1 -json -run '<same explicit affected selection as final>' ./cmd/pyry",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=6m -race -count=1 -json -run '^(TestCompactReadWaitsForOpenSession|TestDaemonThreadCompactInstallation|TestDaemonThreadCompactNegotiation|TestDaemonThreadCompactWire|TestDaemonThreadCompactBoundary|TestDaemonThreadCompactBoundaryDelayedRefusal|TestDaemonThreadCompactRecovery|TestDaemonThreadCompactSwitch|TestDaemonThreadCompactLiveChannels|TestDaemonThreadCompactRetirement|TestDaemonThreadCompactProgress|TestDaemonThreadCompactConversationIsolation)$' ./cmd/pyry",
       "log": "/tmp/manual-flaky-affected.jsonl",
       "log_sha256": "bb2f9a27e50747e9819367c17b97451e09015a5673135a754291c83c7b116d87",
       "counts": {
