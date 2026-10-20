@@ -1,5 +1,5 @@
 {
-  "kind": "diagnosis-only-not-a-reliability-repair",
+  "kind": "controlled-preparation-boundary-repair-historical-substage-unknown",
   "ticket": 3677,
   "os": "linux",
   "toolchain": "go1.26.9 linux/amd64; CGO_ENABLED=1",
@@ -168,5 +168,31 @@
     "composer_cancellation_control_events": [13, 13, 0, 0],
     "composer_ownership_control_events": [7, 7, 0, 0]
   },
-  "pending": ["managed wider diagnostic assessment", "demonstrated causal repair", "synchronized failing-before/passing-after regression", "dispatcher complete-suite acceptance", "documentation-stage handoff"]
+  "preparation_repair": {
+    "failed_revision": "7e61485b1911eb4f2da63f9256417334ecbc68ca",
+    "passed_implementation_revision": "ec76f60371677af24539354a21ddaccf8aecd935",
+    "contract": "Restore immutable bytes before the unchanged absolute wait; physical observation and final write remain at delivery. safeCLIJSON retains duplicate-key rejection without a redundant outer scan.",
+    "controlled_proof": "Exact reviewed output 68, due 34330542 ns. A channel gate charges 120 ms for actual restoration. Old ordering fails forwarding at due plus 120 ms; new ordering forwards at 120 ms. Preparation overrun, late input, scheduler stall, observer delay, write backpressure and preparation errors reject.",
+    "historical_attribution": "Original log/receipt/diagnostic/audit hashes reverified. Historical substage split, scheduling contribution and job-publish causal order remain unknown. The controlled proof does not attribute the historical 232879911 ns miss.",
+    "sequence": ["fallback-suggestion", "composer-stop"],
+    "conditions": "Linux Go 1.26.9 amd64 CGO=1. Fresh process and per-root home. Existing shared build cache retained without purge; page-cache/cold state unknown. CPU quota 6 cores. Observed loadavg 6.88/7.61/7.61 before baseline, 3.90/6.17/7.02 before repaired replay; per-output host contention unknown. Repaired replay waited 65 s for admission behind the affected-package run; vet/build finished before replay.",
+    "regression_command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^TestComposerOutputPreparationSchedule$' ./internal/e2e/internal/claudetape",
+    "before_command": "PYRY_CLAUDE_TAPE_MODE=replay PYRY_CLAUDE_TAPE_SCENARIOS='[\"fallback-suggestion\",\"composer-stop\"]' PYRY_CLAUDE_TAPE_EVIDENCE=/tmp/builder-3677-repair/before python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e",
+    "after_command": "PYRY_CLAUDE_TAPE_MODE=replay PYRY_CLAUDE_TAPE_SCENARIOS='[\"fallback-suggestion\",\"composer-stop\"]' PYRY_CLAUDE_TAPE_EVIDENCE=/tmp/builder-3677-repair/after python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e",
+    "package_command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape",
+    "regression_before": {"report": "/tmp/builder-3677-repair/regression-before.jsonl", "sha256": "1f81943f17016beb9c217098c85667a0a11fef9cf9c18585313a383304f6b763", "counts": [9,0,9,0]},
+    "package_after": {"report": "/tmp/builder-3677-repair/controls.jsonl", "sha256": "21e6da5f0da2922e220fb780b3b11e0ec114e7e2a413791f8025e9111114cf0d", "counts": [1052,1052,0,0], "leaves": [948,948,0,0], "scheduling": [9,9,0,0], "privacy": [7,7,0,0], "composer_cancellation": [13,13,0,0], "composer_ownership": [7,7,0,0]},
+    "sequence_before": {"revision": "36e3a91c7a6e3be1b6855c323ba3ee279aca18aa", "report": "/tmp/builder-3677-repair/before.jsonl", "sha256": "e8e70cfb25b99e58d3de6210e0304e8801d3bdd365dd6bac283a023333206e7d", "counts": [3,3,0,0], "original_roots": [2,2,0,0], "helper_sha256": "0114895e92b3ca8482aa3b1e979d63c2aa1317ea1ffff8720b3261cd31989137"},
+    "sequence_after": {"report": "/tmp/builder-3677-repair/after.jsonl", "sha256": "2bc98c5d8dae9543bc646b852a3295cbae669c4aabc0fcb65e0f0d54e44fe058", "counts": [3,3,0,0], "original_roots": [2,2,0,0], "composer_root": [1,1,0,0], "helper_sha256": "05ab890ae53d0779aacf4efb94dd6493932b4d26e2d3146eb1a8bd069a6f761d", "final_worker_and_artifact_audits": "passed"},
+    "daemon_sha256": "d56410f5f135f098d8bdeb757ed43f9289ef1928846546276584d2f296651660",
+    "fixture_sha256": {"composer-stop": "c50f5c8f38b8134ec94eed0beda7d14fb1dbefa805787c91dedee31d73217a25", "fallback-suggestion": "8bc3e9262351318be45792302cb10feaf22e305b1f8f1605efed32198eb2008d"},
+    "composer_root_report": {"path": "/tmp/builder-3677-repair/after/composer-stop-replay.jsonl", "sha256": "03989f39368cfd582cea55fc442064e882fa8f50e8c5715b7fe80fa9bb4fe044"},
+    "composer_source_inventory": {"path": "/tmp/builder-3677-repair/after/composer-stop-broker/source-and-inventory.json", "sha256": "b6739e0db9048fb48c5131e0675d877fc18dacbe539a2364f8b6e78e685d7b86"},
+    "composer_receipt": {"path": "/tmp/builder-3677-repair/after/composer-stop-broker/recording-children-bootstrap.receipt", "sha256": "caee9ffaf37a718e71e5491ca2628c832b65d28f9d26957dfd706a27f75ed094"},
+    "composer_audit": {"path": "/tmp/builder-3677-repair/after/composer-stop-launch-audit.json", "sha256": "9a732b9858cd6f1bc9e716541533319387d41259a1fc72d665d2df136a55761c", "invalid": false, "waits_known": true, "registrations_known": true, "launches_registrations_waits": [0,0,0]},
+    "composer_diagnostic": {"path": "/tmp/builder-3677-repair/after/composer-stop-broker/bootstrap.diagnostic.json", "sha256": "3429374fc0bb7d7be5983bd4fdd4309efab95434c0c86a0663634f87bf20815e", "bytes": 4936, "output68": [68,3,34330542,355000,5366559,29308653,0,54597,64299949,34852000], "sample_slots": "ordinal,anchor,due,entry,restoration,observation,projection,write,completion,process_cpu; durations ns; entry/completion relative to anchor"},
+    "static_checks": {"passed": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3677-repair/pyry ./cmd/pyry"], "logs": ["/tmp/builder-3677-repair/vet.log", "/tmp/builder-3677-repair/e2e-vet.log", "/tmp/builder-3677-repair/realclaude-vet.log", "/tmp/builder-3677-repair/build.log"], "each_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    "previous_investigation": "3ad252474069132d5cba62de808ce884e92c15b8752361ee9ab8689e1f87d6f2 executed zero diagnostics; not a running dependency. Adjacent sequence now executed locally through ordinary admission."
+  },
+  "pending": ["independent verifier review", "dispatcher complete-suite acceptance", "documentation-stage handoff"]
 }

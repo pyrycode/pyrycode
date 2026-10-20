@@ -245,3 +245,17 @@ unknown). This includes other broker goroutines and is diagnostic context, not
 precise per-stage CPU or scheduling attribution. Six privacy/parent controls
 ensure safeCLIJSON still rejects ambiguous and escaped/nested carriers before
 physical parsing. Complete-suite acceptance remains dispatcher work.
+
+### 2026-10-20 — repair verification
+
+Implementation `ec76f603` passed 1052/1052 package events (948 leaves), including
+9 scheduling, 7 privacy, 13 Composer cancellation and 7 ownership events, no
+failures/skips. The adjacent sequence passed 3/3 outer events and 2/2 original
+roots with final audits; Composer's audit knows zero launches/registrations/Waits.
+Vet, both tagged consumer vets and binary build passed on Linux. The manifest
+retains exact commands, hashes, counts and reports. The ordering question is
+resolved by controlled failure/pass; historical substage attribution remains
+unknown because the original receipt predates substage diagnostics. Documentation
+must record restoration before waiting, unchanged physical delivery/deadline
+checks and this attribution limit. Independent review and full acceptance remain
+pending; macOS is outside this ticket's verification scope.
