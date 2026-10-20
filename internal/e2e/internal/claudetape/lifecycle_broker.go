@@ -106,6 +106,7 @@ type LifecycleBrokerConfig struct {
 	BeforeOutput     func([]byte) error               `json:"-"`
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
+	OnDiagnostic     func(LifecycleDiagnostic)        `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -118,6 +119,18 @@ type LifecycleKill struct {
 // SIGKILL authorization. A seal-ended role must still be alive at its seal.
 func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count int, resultErr error) {
 	startup := time.Now()
+	diagnostic := LifecycleDiagnostic{Stage: "setup"}
+	defer func() {
+		diagnostic.Frames = count
+		diagnostic.ErrorClass = lifecycleErrorClass(resultErr)
+		diagnostic.Completed = resultErr == nil
+		if diagnostic.Completed {
+			diagnostic.Stage = "complete"
+		}
+		if c.OnDiagnostic != nil {
+			c.OnDiagnostic(diagnostic)
+		}
+	}()
 	fail := errors.New("lifecycle broker failed")
 	if c.Context != nil && c.Context.Err() != nil {
 		return 0, fail
@@ -286,6 +299,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
+		diagnostic.Stage = "deliver-output"
 		emit := func(extra time.Time) error {
 			restored, err := binding.Frame(raw, true)
 			if err != nil {
@@ -340,6 +354,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		frames++
+		diagnostic.OutputsDelivered++
 		work := time.Now()
 		err := observeCompletion("stdout", raw)
 		outputCompletionNS = time.Since(work).Nanoseconds()
@@ -354,6 +369,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
+	defer func() {
+		diagnostic.PendingInput, diagnostic.PendingOutput = len(pendingInput), len(pendingOutput)
+		diagnostic.InputEOF, diagnostic.OutputEOF, diagnostic.StderrEOF = inputEOF, outputEOF, stderrEOF
+		diagnostic.Sealed, diagnostic.ActionAccepted = sealed, actionAccepted
+		if player != nil {
+			diagnostic.PlayerNext, diagnostic.PlayerFrames = player.next, len(player.tape.Frames)
+		}
+	}()
 	accept := func(direction string, raw []byte) error {
 		if direction == "stdout" && observeAction != nil {
 			if err := observeAction(); err != nil {
@@ -369,6 +392,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			return write(target, append(raw, '\n'))
 		}
+		if direction == "stdin" {
+			diagnostic.InputKind = lifecycleInputKind(raw)
+			diagnostic.Stage = "bind-input"
+		}
 		normalized, e := binding.Frame(raw, false)
 		if e != nil {
 			return e
@@ -377,15 +404,17 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if direction != "stdin" {
 				return fail
 			}
+			diagnostic.Stage = "match-input"
 			released, e := player.Input(normalized)
 			if e != nil {
 				return e
 			}
+			diagnostic.InputsMatched++
 			frames++
-			// Consume through the stand-in's pipe as well: closure and the owned PID
-			// have real process semantics even though provider responses are replayed.
-			inputForward := func() error { return write(originals[3], append(raw, '\n')) }
-			e = forwardLifecycleFrame(raw, c.ForwardInput, func([]byte) error { return inputForward() })
+			// Matched tape responses are independent of the stand-in's stdin.
+			// Its owned lifetime and both output EOFs still gate completion.
+			// Input observers commit the matched replay input without a pipe write.
+			e = forwardLifecycleFrame(raw, c.ForwardInput, func([]byte) error { return nil })
 			if e != nil {
 				return fail
 			}
@@ -424,6 +453,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return err
 			}
 		}
+		diagnostic.Stage = "deliver-output"
+		if direction == "stdin" {
+			diagnostic.Stage = "forward-provider-input"
+		}
 		callback := c.ForwardOutput
 		if direction == "stdin" {
 			callback = c.ForwardInput
@@ -431,7 +464,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := forwardLifecycleFrame(raw, callback, func(actual []byte) error { return write(target, append(actual, '\n')) }); err != nil {
 			return err
 		}
-
+		if direction == "stdin" {
+			diagnostic.ProviderInputsForwarded++
+		} else {
+			diagnostic.OutputsDelivered++
+		}
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
 			if tape.Timeline.Kind == lifecycleInputTimelineKind || tape.Timeline.Kind == lifecycleFrameTimelineKind {
@@ -465,6 +502,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		for {
 			if expired() {
 				return errors.New("lifecycle forwarding deadline exceeded")
+			}
+			switch direction {
+			case "stdin":
+				diagnostic.InputSampled = true
+			case "stderr":
+				diagnostic.StderrSampled = true
+			default:
+				diagnostic.OutputSampled = true
 			}
 			n, e := syscall.Read(fd, buf[:])
 			if n > 0 {
@@ -578,9 +623,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
+		diagnostic.ActionAcknowledged = true
 		return nil
 	}
 	finish := func() (int, error) {
+		diagnostic.Stage = "finish-action"
 		if c.Context != nil && c.Context.Err() != nil {
 			return frames, errors.New("cancelled lifecycle cannot seal")
 		}
@@ -588,6 +635,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return frames, errors.New("missing original delete checkpoint")
 		}
 		if len(pendingInput) != 0 || len(pendingOutput) != 0 {
+			diagnostic.Stage = "finish-partial-frame"
 			return frames, fail
 		}
 		if player != nil {
@@ -595,26 +643,32 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, fail
 			}
 			if player.Complete() != nil {
+				diagnostic.Stage = "finish-player"
 				return frames, fail
 			}
 			if e := write(originals[2], []byte(tape.Stderr)); e != nil {
-				return frames, fail
+				diagnostic.Stage = "finish-stderr"
+				return frames, e
 			}
 			if c.BeforeSeal != nil {
+				diagnostic.Stage = "terminal-check"
 				if err := c.BeforeSeal(tape.Tape); err != nil {
 					return frames, err
 				}
 			}
+			diagnostic.TerminalChecked = true
 			if c.Context != nil && c.Context.Err() != nil {
 				return frames, errors.New("cancelled lifecycle cannot finish")
 			}
 			return frames, nil
 		}
 		if c.BeforeSeal != nil {
+			diagnostic.Stage = "terminal-check"
 			if err := c.BeforeSeal(tape.Tape); err != nil {
 				return frames, err
 			}
 		}
+		diagnostic.TerminalChecked = true
 		if c.Context != nil && c.Context.Err() != nil {
 			return frames, errors.New("cancelled lifecycle cannot publish")
 		}
@@ -629,12 +683,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, errors.New("lifecycle owner aborted recording")
 			}
 		}
+		diagnostic.Stage = "read-input"
 		if err := read(inputFD, &pendingInput, &inputEOF, "stdin"); err != nil {
 			return frames, err
 		}
+		diagnostic.Stage = "observe-action"
 		if err := observeAction(); err != nil {
 			return frames, err
 		}
+		diagnostic.Stage = "read-output"
 		if player != nil {
 			// A replay stand-in must not produce its own output.
 			if err := read(outFD, &pendingOutput, &outputEOF, "unexpected"); err != nil {
@@ -644,10 +701,12 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return frames, err
 		}
 		var unused []byte
+		diagnostic.Stage = "read-stderr"
 		if err := read(errFD, &unused, &stderrEOF, "stderr"); err != nil {
 			return frames, err
 		}
 		if sealed {
+			diagnostic.Stage = "sealed-eof"
 			// The owner may keep its stdin writer open until Wait has drained
 			// stdout/stderr. Waiting for that input EOF here creates a shutdown
 			// cycle; complete provider output EOF releases the original drains.
@@ -664,12 +723,20 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return finish()
 		}
 		if (c.End == "kill" || c.End == "rotate-session" || c.End == "idle-evict") && outputEOF && stderrEOF {
+			diagnostic.Stage = "authorize-end"
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
+			}
+			// The daemon can write its final recorded query after provider exit.
+			// An open input stream is not evidence of incomplete replay yet.
+			if player != nil && player.next < len(player.tape.Frames) && !inputEOF {
+				time.Sleep(5 * time.Millisecond)
+				continue
 			}
 			return finish()
 		}
 		if _, e := os.Lstat(c.Finish); e == nil {
+			diagnostic.Stage = "seal"
 			if !LifecycleSeals(c.End) || outputEOF || stderrEOF || inputEOF {
 				return frames, errors.New("provider not live at prefix seal")
 			}

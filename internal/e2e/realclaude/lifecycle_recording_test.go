@@ -462,6 +462,11 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
 	}
+	job.Config.OnDiagnostic = func(d claudetape.LifecycleDiagnostic) {
+		if json.NewEncoder(os.Stdout).Encode(d) != nil {
+			os.Exit(2)
+		}
+	}
 	var mcp *claudetape.MCPRecordingSession
 	if claudetape.MCPScenario(c.Process.Scenario) {
 		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
