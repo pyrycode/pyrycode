@@ -312,11 +312,12 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	writeOutput := func(raw []byte) error {
 		diagnostic.Stage = "deliver-output"
 		var outputWork [4]int64
+		outputOrdinal := timelineOutput
 		defer func() {
 			for i, elapsed := range outputWork {
 				if elapsed > diagnostic.OutputWorkMaxNS[i] {
 					diagnostic.OutputWorkMaxNS[i] = elapsed
-					diagnostic.OutputWorkMaxOrdinal[i] = timelineOutput
+					diagnostic.OutputWorkMaxOrdinal[i] = outputOrdinal
 				}
 			}
 		}()
