@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,7 @@ type FallbackWorkerJob struct {
 	Producer                                                         Producer
 }
 type FallbackWorkerReceipt struct {
+	TapeSHA256                                        string
 	Version, OwnerPID, GroupPID, NativePID, BrokerPID int
 	Success                                           bool
 	Frames                                            int
@@ -68,7 +70,7 @@ func fallbackWorkerArgs(args []string) error {
 			continue
 		}
 		if flag == "--system-prompt" {
-			if i+1 >= len(args) || args[i+1] == "" || len(args[i+1]) > 16384 || Safe([]byte(args[i+1])) != nil {
+			if i+1 >= len(args) || args[i+1] == "" || !utf8.ValidString(args[i+1]) || len(args[i+1]) > 16384 || Safe([]byte(args[i+1])) != nil {
 				return fail
 			}
 			i++
@@ -181,9 +183,15 @@ func workerText(text, home, cwd string, restore bool) string {
 // fd3/4/5 are original worker stdin/stdout/stderr, fd9 the status writer. The
 // other two pipe capabilities stay distinct and are closed unused.
 func RunFallbackWorkerBroker(job FallbackWorkerJob, mode string) error {
+	return runFallbackWorkerBroker(job, mode, 45*time.Second)
+}
+func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Duration) error {
 	fail := errors.New("finite fallback broker failed")
 	if job.Version != 1 || job.OwnerPID <= 1 || job.GroupPID != job.OwnerPID || job.BrokerParentPID != os.Getppid() || (mode != "capture" && mode != "replay") || fallbackWorkerArgs(job.Args) != nil {
 		return fail
+	}
+	for fd := 3; fd <= 9; fd++ {
+		syscall.CloseOnExec(fd)
 	}
 	for _, fd := range []int{6, 8} {
 		_ = syscall.Close(fd)
@@ -292,7 +300,7 @@ func RunFallbackWorkerBroker(job FallbackWorkerJob, mode string) error {
 		if fallbackWorkerDirectory(job.WorkDir) != nil {
 			return fail
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, job.Claude, job.Args...)
 		cmd.Dir = job.WorkDir
@@ -363,6 +371,12 @@ func RunFallbackWorkerBroker(job FallbackWorkerJob, mode string) error {
 		if e != nil {
 			return fail
 		}
+		deadline, ok := ctx.Deadline()
+		stdoutFile, stdoutOK := stdout.(*os.File)
+		stderrFile, stderrOK := stderr.(*os.File)
+		if !ok || !stdoutOK || !stderrOK || stdoutFile.SetReadDeadline(deadline) != nil || stderrFile.SetReadDeadline(deadline) != nil {
+			return fail
+		}
 		if cmd.Start() != nil {
 			return fail
 		}
@@ -413,8 +427,18 @@ func RunFallbackWorkerBroker(job FallbackWorkerJob, mode string) error {
 			return fail
 		}
 	}
-	receipt := FallbackWorkerReceipt{Version: 1, OwnerPID: job.OwnerPID, GroupPID: job.GroupPID, NativePID: nativePID, BrokerPID: os.Getpid(), Success: true, Frames: len(frames), Status: status}
+	tapeRaw, err := runnerPrivateRead(job.Path, MaxBytes)
+	if err != nil {
+		return fail
+	}
+	tapeHash := sha256.Sum256(tapeRaw)
+	receipt := FallbackWorkerReceipt{TapeSHA256: hex.EncodeToString(tapeHash[:]), Version: 1, OwnerPID: job.OwnerPID, GroupPID: job.GroupPID, NativePID: nativePID, BrokerPID: os.Getpid(), Success: true, Frames: len(frames), Status: status}
 	if PublishLifecycleControl(strings.TrimSuffix(job.Path, ".json")+".receipt", receipt) != nil {
+		return fail
+	}
+	// This separate broker stdout is an outer-owned audit pipe, never native
+	// provider stdout (fd4). Native code cannot forge this completion proof.
+	if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
 		return fail
 	}
 	_ = output.Close()
@@ -649,6 +673,15 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 		if ReadLifecycleControl(strings.TrimSuffix(jobPath, ".job")+".receipt", 16384, &receipt) != nil || receipt.Version != 1 || !receipt.Success || receipt.OwnerPID != job.OwnerPID || receipt.GroupPID != job.GroupPID || receipt.BrokerPID <= 1 || receipt.BrokerPID == job.OwnerPID || receipt.Status != tape.Status || receipt.Frames != len(tape.Frames) || mode == "capture" && (receipt.NativePID <= 1 || receipt.NativePID == receipt.OwnerPID || receipt.NativePID == receipt.BrokerPID) || mode == "replay" && receipt.NativePID != 0 {
 			return nil, fail
 		}
+		raw, err := runnerPrivateRead(job.Path, MaxBytes)
+		if err != nil {
+			return nil, fail
+		}
+		sum := sha256.Sum256(raw)
+		if receipt.TapeSHA256 != hex.EncodeToString(sum[:]) {
+			return nil, fail
+		}
+
 		matches := 0
 		for _, observation := range observations {
 			if observation.OwnerPID == job.OwnerPID {
@@ -735,6 +768,35 @@ func fallbackWorkerDirectory(path string) error {
 	}
 	entries, err := dir.ReadDir(1)
 	if err != io.EOF || len(entries) != 0 {
+		return fail
+	}
+	return nil
+}
+
+// ValidateFallbackWorkerCompletion binds the private receipt and tape bytes to
+// the actual broker's separate stdout capability retained by the outer parent.
+// The expected PID is from that parent's exec.Cmd, never a fixture or job claim.
+func ValidateFallbackWorkerCompletion(raw []byte, brokerPID int, path string) error {
+	fail := errors.New("finite worker completion proof changed")
+	if len(raw) > 16384 || brokerPID <= 1 || !uniqueSuiteKeys(raw) {
+		return fail
+	}
+	var receipt FallbackWorkerReceipt
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if d.Decode(&receipt) != nil || d.Decode(new(any)) != io.EOF || receipt.Version != 1 || !receipt.Success || receipt.BrokerPID != brokerPID {
+		return fail
+	}
+	stored, err := runnerPrivateRead(strings.TrimSuffix(path, ".job")+".receipt", 16384)
+	if err != nil || !bytes.Equal(bytes.TrimSpace(raw), stored) {
+		return fail
+	}
+	tape, err := runnerPrivateRead(strings.TrimSuffix(path, ".job")+".json", MaxBytes)
+	if err != nil {
+		return fail
+	}
+	sum := sha256.Sum256(tape)
+	if receipt.TapeSHA256 != hex.EncodeToString(sum[:]) {
 		return fail
 	}
 	return nil

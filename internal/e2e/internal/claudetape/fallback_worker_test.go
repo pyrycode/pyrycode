@@ -2,6 +2,8 @@ package claudetape
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,7 +29,7 @@ func TestFallbackWorkerClosedCarrier(t *testing.T) {
 	if _, err := DecodeFallbackWorker(bytes.NewReader(raw)); err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"public-cwd", "nonempty-cwd", "stdin-open", "stdout-open", "stderr-open", "unknown-arg", "duplicate-arg", "tools", "hook", "missing-prompt", "wrong-status", "unknown-signal", "bad-stdout", "credential-stderr", "duplicate-input", "extra-input"} {
+	for _, kind := range []string{"public-cwd", "nonempty-cwd", "stdin-open", "stdout-open", "stderr-open", "unknown-arg", "duplicate-arg", "tools", "hook", "missing-prompt", "invalid-utf8-prompt", "wrong-status", "unknown-signal", "bad-stdout", "credential-stderr", "duplicate-input", "extra-input"} {
 		t.Run(kind, func(t *testing.T) {
 			var tape FallbackWorkerTape
 			_ = json.Unmarshal(raw, &tape)
@@ -58,6 +60,8 @@ func TestFallbackWorkerClosedCarrier(t *testing.T) {
 						tape.Args[i+1] = `{"disableAllHooks":false}`
 					}
 				}
+			case "invalid-utf8-prompt":
+				tape.Args[len(tape.Args)-1] = string([]byte{0xff})
 			case "missing-prompt":
 				tape.Args = tape.Args[:len(tape.Args)-2]
 			case "wrong-status":
@@ -80,7 +84,7 @@ func TestFallbackWorkerClosedCarrier(t *testing.T) {
 	}
 }
 func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
-	for _, kind := range []string{"capture-zero", "capture-seven", "capture-kill", "replay-zero", "replay-kill"} {
+	for _, kind := range []string{"capture-zero", "capture-seven", "capture-kill", "capture-retained-pipe", "replay-zero", "replay-kill"} {
 		t.Run(kind, func(t *testing.T) {
 			home, err := os.MkdirTemp("/tmp", "fw-")
 			if err != nil {
@@ -120,12 +124,17 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 				t.Fatal("stage")
 			}
 			sourceSHA := strings.Repeat("c", 64)
+			var brokerCmd *exec.Cmd
+			var brokerProof bytes.Buffer
 			server, err := NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), []string{path}, func(path string, peer int) (*exec.Cmd, error) {
 				var job FallbackWorkerJob
 				if ReadLifecycleControl(path, 16384, &job) != nil || ValidateFallbackWorkerLaunch(job, path, peer, os.Getpid(), base, sourceSHA) != nil {
 					return nil, os.ErrInvalid
 				}
 				cmd := exec.Command(exe, "-test.run=^TestFallbackWorkerOSHelper$", "--", "broker", path, mode)
+				cmd.Env = append(os.Environ(), "PYRY_FINITE_WORKER_KIND="+kind)
+				cmd.Stdout = &brokerProof
+				brokerCmd = cmd
 				return cmd, nil
 			})
 			if err != nil {
@@ -158,9 +167,11 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 			cmd.Stdout = outW
 			var diagnostic bytes.Buffer
 			cmd.Stderr = &diagnostic
+			started := time.Now()
 			if cmd.Start() != nil {
 				t.Fatal("wrapper")
 			}
+			defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // only this current test-owned group
 			outW.Close()
 			output := make(chan []byte, 1)
 			ready := make(chan struct{})
@@ -206,8 +217,21 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 				_ = cmd.Process.Kill()
 				t.Fatal("worker join timed out")
 			}
-			if err := server.Join(5 * time.Second); err != nil {
-				t.Fatalf("broker join: %v stderr=%s", err, diagnostic.String())
+			joined := server.Join(5 * time.Second)
+			if kind == "capture-retained-pipe" {
+				if waitErr == nil || joined == nil || time.Since(started) > 8*time.Second {
+					t.Fatal("trickling inherited pipe was not bounded")
+				}
+				if _, err := os.Lstat(tapePath); !os.IsNotExist(err) {
+					t.Fatal("incomplete native EOF published a tape")
+				}
+				return
+			}
+			if joined != nil {
+				t.Fatalf("broker join: %v stderr=%s", joined, diagnostic.String())
+			}
+			if brokerCmd == nil || ValidateFallbackWorkerCompletion(brokerProof.Bytes(), brokerCmd.Process.Pid, path) != nil {
+				t.Fatal("completion not bound to actual outer-owned broker")
 			}
 			data := <-output
 			if len(data) == 0 {
@@ -265,6 +289,16 @@ func TestFallbackWorkerOSHelper(t *testing.T) {
 		}
 		fmt.Println(`{"type":"result","subtype":"success","is_error":false,"result":"Yes, please add the test."}`)
 		kind := os.Getenv("PYRY_FINITE_WORKER_KIND")
+		if kind == "capture-retained-pipe" {
+			exe, _ := os.Executable()
+			child := exec.Command(exe, "-test.run=^TestFallbackWorkerOSHelper$", "--", "hold")
+			child.Stdout = os.Stdout
+			child.Stderr = os.Stderr
+			if child.Start() != nil {
+				os.Exit(3)
+			}
+			os.Exit(0)
+		}
 		if strings.HasSuffix(kind, "kill") {
 			for {
 				time.Sleep(time.Second)
@@ -294,12 +328,24 @@ func TestFallbackWorkerOSHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		os.Exit(status.ExitCode)
+	case "hold":
+		for i := 0; i < 100; i++ {
+			fmt.Println(`{"type":"progress"}`)
+			time.Sleep(20 * time.Millisecond)
+		}
+		os.Exit(0)
 	case "broker":
 		var job FallbackWorkerJob
 		if ReadLifecycleControl(os.Args[at+1], 16384, &job) != nil {
 			os.Exit(2)
 		}
-		if err := RunFallbackWorkerBroker(job, os.Args[at+2]); err != nil {
+		var err error
+		if os.Getenv("PYRY_FINITE_WORKER_KIND") == "capture-retained-pipe" {
+			err = runFallbackWorkerBroker(job, os.Args[at+2], 250*time.Millisecond)
+		} else {
+			err = RunFallbackWorkerBroker(job, os.Args[at+2])
+		}
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "worker broker rejected")
 			os.Exit(2)
 		}
@@ -310,7 +356,7 @@ func TestFallbackWorkerOSHelper(t *testing.T) {
 }
 
 func TestFallbackWorkerInventoryRejectsForeignEvidence(t *testing.T) {
-	for _, kind := range []string{"valid", "missing-job", "missing-receipt", "extra-file", "foreign-source", "foreign-owner", "foreign-daemon", "wrong-wait", "unknown-wait", "unjoined-cancel", "changed-input", "wrong-native", "duplicate-attempt"} {
+	for _, kind := range []string{"valid", "missing-job", "missing-receipt", "extra-file", "foreign-source", "foreign-owner", "foreign-daemon", "wrong-wait", "unknown-wait", "unjoined-cancel", "changed-input", "wrong-native", "mutate-output-after-receipt", "duplicate-attempt"} {
 		t.Run(kind, func(t *testing.T) {
 			home := t.TempDir()
 			if os.Chmod(home, 0700) != nil {
@@ -363,8 +409,17 @@ func TestFallbackWorkerInventoryRejectsForeignEvidence(t *testing.T) {
 			if tape.Save(job.Path) != nil {
 				t.Fatal("tape")
 			}
+			savedRaw, _ := os.ReadFile(job.Path)
+			sum := sha256.Sum256(savedRaw)
+			receipt.TapeSHA256 = hex.EncodeToString(sum[:])
 			if kind != "missing-receipt" && PublishLifecycleControl(strings.TrimSuffix(path, ".job")+".receipt", receipt) != nil {
 				t.Fatal("receipt")
+			}
+			if kind == "mutate-output-after-receipt" {
+				changed := bytes.ReplaceAll(savedRaw, []byte("Yes, please add the test."), []byte("Changed late native text."))
+				if bytes.Equal(changed, savedRaw) || os.WriteFile(job.Path, changed, 0600) != nil {
+					t.Fatal("mutation")
+				}
 			}
 			if kind == "extra-file" {
 				if os.WriteFile(filepath.Join(dir, "unexpected"), nil, 0600) != nil {
@@ -387,5 +442,47 @@ func TestFallbackWorkerInventoryRejectsForeignEvidence(t *testing.T) {
 				t.Fatal("foreign worker evidence accepted")
 			}
 		})
+	}
+}
+
+func TestFallbackWorkerCompletionRejectsCleanupRewrite(t *testing.T) {
+	home := t.TempDir()
+	if os.Chmod(home, 0700) != nil {
+		t.Fatal("private")
+	}
+	path := filepath.Join(home, "000001.job")
+	tapePath := strings.TrimSuffix(path, ".job") + ".json"
+	tape := fallbackWorkerControlTape()
+	if tape.Save(tapePath) != nil {
+		t.Fatal("tape")
+	}
+	raw, _ := os.ReadFile(tapePath)
+	sum := sha256.Sum256(raw)
+	receipt := FallbackWorkerReceipt{Version: 1, BrokerPID: os.Getpid(), OwnerPID: 2, GroupPID: 2, NativePID: 3, Success: true, Frames: len(tape.Frames), Status: tape.Status, TapeSHA256: hex.EncodeToString(sum[:])}
+	if PublishLifecycleControl(strings.TrimSuffix(path, ".job")+".receipt", receipt) != nil {
+		t.Fatal("receipt")
+	}
+	proof, _ := json.Marshal(receipt)
+	if ValidateFallbackWorkerCompletion(proof, os.Getpid(), path) != nil {
+		t.Fatal("valid outer capability")
+	}
+	if ValidateFallbackWorkerCompletion(proof, os.Getpid()+1, path) == nil {
+		t.Fatal("foreign broker PID accepted")
+	}
+	changed := bytes.ReplaceAll(raw, []byte("Yes, please add the test."), []byte("Changed safe prose."))
+	if bytes.Equal(raw, changed) || os.WriteFile(tapePath, changed, 0600) != nil {
+		t.Fatal("mutation")
+	}
+	if ValidateFallbackWorkerCompletion(proof, os.Getpid(), path) == nil {
+		t.Fatal("late tape rewrite accepted")
+	}
+	sum = sha256.Sum256(changed)
+	receipt.TapeSHA256 = hex.EncodeToString(sum[:])
+	forged, _ := json.Marshal(receipt)
+	if os.WriteFile(strings.TrimSuffix(path, ".job")+".receipt", forged, 0600) != nil {
+		t.Fatal("forgery")
+	}
+	if ValidateFallbackWorkerCompletion(proof, os.Getpid(), path) == nil {
+		t.Fatal("forged disk receipt overrode outer-owned broker proof")
 	}
 }

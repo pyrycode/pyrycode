@@ -843,3 +843,13 @@ Fresh comparison validates both complete source edges first and permits only the
 assistant output to differ; source role, user sequence, user text, argv and status
 remain strict. Workers in other lifecycle profiles remain unsupported until their
 own original invocation, timing and ownership paths have been reviewed.
+
+The finite broker bounds stdout and stderr reads with an absolute deadline before
+joining readers; a child that retains and trickles into an inherited pipe cannot
+postpone EOF forever. Invalid UTF-8 argv fail before serialization. Its complete
+tape digest travels in a separate outer-owned broker stdout capability as well
+as the private receipt. Final acceptance checks that capability against the
+actual broker `exec.Cmd` PID, the on-disk receipt and exact tape bytes. Rewriting
+safe prose after receipt, even with a forged disk digest, cannot replace output
+observed from the native process. Inherited transport descriptors are marked
+close-on-exec before the broker starts native Claude.

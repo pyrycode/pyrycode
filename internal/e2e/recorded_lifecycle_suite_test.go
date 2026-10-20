@@ -258,6 +258,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	})
 	var workerServer *claudetape.LifecycleBrokerServer
 	workerLaunchHashes := map[string][32]byte{}
+	workerProofs := map[string]*recordedWorkerCompletion{}
 	var workerLaunchMu sync.Mutex
 	if workerLimit > 0 {
 		jobs := []string{}
@@ -283,6 +284,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				cmd.Env = recordedPoolOfflineEnv()
 			}
 			cmd.Env = append(cmd.Env, "PYRY_LIFECYCLE_RECORDING_CONFIG="+configPath)
+			proof := &recordedWorkerCompletion{cmd: cmd}
+			cmd.Stdout = proof
+			workerLaunchMu.Lock()
+			workerProofs[path] = proof
+			workerLaunchMu.Unlock()
 			return cmd, nil
 		})
 		if err != nil {
@@ -449,6 +455,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if len(workerLaunchHashes) != len(workers) {
 		t.Fatal("finite worker attempts do not match kernel-owned launches")
 	}
+	for path, proof := range workerProofs {
+		if proof.overflow || proof.cmd.Process == nil || claudetape.ValidateFallbackWorkerCompletion(proof.raw, proof.cmd.Process.Pid, path) != nil {
+			t.Fatal("finite worker completion differs from actual owned broker")
+		}
+	}
 	for path, want := range workerLaunchHashes {
 		raw, err := os.ReadFile(path)
 		if err != nil || sha256.Sum256(raw) != want {
@@ -481,4 +492,20 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 
 	t.Logf("mode=%s scenario=%s original_daemon_roots=1 child_roles=%d", mode, name, len(profile.Roles))
+}
+
+type recordedWorkerCompletion struct {
+	cmd      *exec.Cmd
+	raw      []byte
+	overflow bool
+}
+
+func (p *recordedWorkerCompletion) Write(raw []byte) (int, error) {
+	n := len(raw)
+	if n > 16384-len(p.raw) {
+		p.overflow = true
+	} else {
+		p.raw = append(p.raw, raw...)
+	}
+	return n, nil
 }

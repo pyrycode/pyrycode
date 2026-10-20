@@ -163,5 +163,9 @@ func ValidateFallbackInput(raw []byte, source FallbackExchange) error {
 	if d.Decode(&actual) != nil || d.Decode(new(any)) != io.EOF || actual != source {
 		return fail
 	}
+	canonical, err := json.Marshal(map[string]string{"user": source.User, "assistant": source.Assistant})
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return fail
+	}
 	return nil
 }

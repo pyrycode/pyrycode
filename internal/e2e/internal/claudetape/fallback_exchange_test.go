@@ -37,11 +37,11 @@ func TestFallbackExchangeUsesFinalMainMessage(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("derivation mutated native tape")
 	}
-	input, _ := json.Marshal(exchanges[1])
+	input, _ := json.Marshal(map[string]string{"user": exchanges[1].User, "assistant": exchanges[1].Assistant})
 	if err := ValidateFallbackInput(input, exchanges[1]); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{`{"user":"different","assistant":"Would you like a Go test?"}`, `{"user":"Please ask me one question.","assistant":"earlier prose"}`, `{"user":"Please ask me one question.","assistant":"Would you like a Go test?","extra":true}`, `{"user":"hidden","user":"Please ask me one question.","assistant":"Would you like a Go test?"}`, string(input) + `{}`} {
+	for _, raw := range []string{`{"user":"Please ask me one question.","assistant":"Would you like a Go test?"}`, `{"user":"different","assistant":"Would you like a Go test?"}`, `{"user":"Please ask me one question.","assistant":"earlier prose"}`, `{"user":"Please ask me one question.","assistant":"Would you like a Go test?","extra":true}`, `{"user":"hidden","user":"Please ask me one question.","assistant":"Would you like a Go test?"}`, string(input) + `{}`} {
 		if ValidateFallbackInput([]byte(raw), exchanges[1]) == nil {
 			t.Fatal("foreign or ambiguous worker input accepted")
 		}
