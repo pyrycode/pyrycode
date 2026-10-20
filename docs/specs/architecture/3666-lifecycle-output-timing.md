@@ -142,3 +142,19 @@ Security pass remains PASS: result header inspection is only a cheap admission
 guard; full source validation still decides whether publication is authorized.
 No frame data is added to diagnostics. Resolve the open timing question above
 with this measured cause and verify the unchanged originals after repair.
+
+### 2026-10-20 — verification and retained evidence
+
+The open timing question is resolved by the measured repeated-prefix derivation.
+The controlled failing tree is preserved at `b668be39`; it failed at output 7 in
+both modes. Repair `08f448c5daf09cadcefa1a7753b90375624233db` passed all 794
+affected-package test events (724 leaves) and both unchanged original roots:
+2 executed, 2 passed, 0 failed, 0 skipped. Outer replay events were 3/3/0/0.
+All tests used Linux, race detection and disabled caching. Module vet, tagged
+vet for both touched test packages and the binary build passed.
+
+`internal/e2e/internal/claudetape/testdata/lifecycle_timing_3666.json` retains
+the numeric failures, executable/source identities, fixture hashes, exact commands,
+counts, conditions and hashed external evidence paths. The evidence file changes
+no executable behaviour. Historical failures remain failed. Full-module and
+complete acceptance gates remain pending with the verifier/dispatcher.

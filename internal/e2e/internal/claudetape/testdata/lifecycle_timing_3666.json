@@ -1,0 +1,266 @@
+{
+  "ticket": 3666,
+  "platform": "linux-amd64",
+  "mode": "offline recorded replay; no live provider",
+  "identities": {
+    "failing": {
+      "revision": "ad4c8b1fe0671a6f33d07d9e36807c2e14ff5a78",
+      "helperSHA256": "6cfaf5883976399af6169f7f4b658e307bdd2cd3763cad5b75590db3a7d76954",
+      "daemonSHA256": "810bfeb3883b957c8da2940d02d149dfcf924fff2700da1507a5f8fe657f8a8b"
+    },
+    "passing": {
+      "revision": "08f448c5daf09cadcefa1a7753b90375624233db",
+      "helperSHA256": "ad8a26dcfee240ffc7b99227185ee0abef93e3f83d675d6c6e86662a0c990931",
+      "daemonSHA256": "810bfeb3883b957c8da2940d02d149dfcf924fff2700da1507a5f8fe657f8a8b"
+    }
+  },
+  "controlledFailureSource": {
+    "head": "acb15aeed0d0d7ddb30c245e20c2d82538ef8b33",
+    "note": "HEAD plus regression and behaviour-preserving derivation seam, committed immediately after the failed run as b668be39",
+    "preservedRevision": "b668be3957f1b480c4397c21f95cb8c5889e9a4b"
+  },
+  "commands": {
+    "baselinePrompt": "PYRY_CLAUDE_TAPE_EVIDENCE=/tmp/builder-3666/baseline-events python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude/conversation-system-prompt$' ./internal/e2e",
+    "baselineSwitch": "PYRY_CLAUDE_TAPE_MODE=replay PYRY_CLAUDE_TAPE_EVIDENCE=/tmp/builder-3666/baseline-events python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude/conversation-active-switch$' ./internal/e2e",
+    "controlledFailure": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^TestConversationCompletionPreservesOutputSchedule$' ./internal/e2e/internal/claudetape",
+    "affectedPackage": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape",
+    "passingOriginals": "PYRY_CLAUDE_TAPE_MODE=replay PYRY_CLAUDE_TAPE_SCENARIOS='[\"conversation-system-prompt\",\"conversation-active-switch\"]' PYRY_CLAUDE_TAPE_EVIDENCE=/tmp/builder-3666/passing-events python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e"
+  },
+  "conditions": {
+    "baselineSequence": "Each baseline used a fresh Go test process and helper build; its named failing scenario ran before the accidentally prefix-selected TestRecordedClaudeFirstTurnWaitsForStartup, which passed. No earlier replay scenario ran in either process.",
+    "candidateSequence": [
+      "conversation-system-prompt",
+      "conversation-active-switch"
+    ],
+    "coldState": "Fresh isolated homes and helper/daemon test processes; Go build caches warmed by earlier compilation/vet. OS page-cache state unknown.",
+    "contention": "Baseline prompt waited 465s for admission; candidate originals waited 115s. Other host load at execution was not measured. Historical cold state, preceding suite sequence and contention remain unknown."
+  },
+  "diagnostics": [
+    {
+      "scenario": "conversation-system-prompt",
+      "role": "bare",
+      "Stage": "before-wait",
+      "Output": 21,
+      "Anchor": 1,
+      "DueNS": 1774441916,
+      "CurrentNS": 1881498086,
+      "LatenessNS": 107056170,
+      "StartupNS": 64466886,
+      "ReadyNS": 2657748965,
+      "CompletionNS": 134051,
+      "WitnessNS": 0,
+      "PriorOutputCompletionNS": 30770180
+    },
+    {
+      "scenario": "conversation-system-prompt",
+      "role": "prompted",
+      "Stage": "before-wait",
+      "Output": 20,
+      "Anchor": 1,
+      "DueNS": 3492629250,
+      "CurrentNS": 3599550241,
+      "LatenessNS": 106920991,
+      "StartupNS": 71019153,
+      "ReadyNS": 4338621453,
+      "CompletionNS": 22074950,
+      "WitnessNS": 0,
+      "PriorOutputCompletionNS": 29644976
+    },
+    {
+      "scenario": "conversation-active-switch",
+      "role": "created-1",
+      "Stage": "before-wait",
+      "Output": 21,
+      "Anchor": 1,
+      "DueNS": 3020784375,
+      "CurrentNS": 3130645034,
+      "LatenessNS": 109860659,
+      "StartupNS": 66128190,
+      "ReadyNS": 3905553599,
+      "CompletionNS": 93652,
+      "WitnessNS": 0,
+      "PriorOutputCompletionNS": 32317623
+    },
+    {
+      "scenario": "conversation-active-switch",
+      "role": "created-2",
+      "Stage": "before-wait",
+      "Output": 18,
+      "Anchor": 1,
+      "DueNS": 2380780209,
+      "CurrentNS": 2501782763,
+      "LatenessNS": 121002554,
+      "StartupNS": 65275557,
+      "ReadyNS": 3263693833,
+      "CompletionNS": 25558827,
+      "WitnessNS": 0,
+      "PriorOutputCompletionNS": 43451305
+    }
+  ],
+  "cause": "Repeated full-prefix completion validation/parsing took 29-43ms immediately before missed outputs and accumulated across roughly 20ms captured gaps. Controlled 35ms derivation at 20ms cadence failed at output 7 in both modes. Deriving only at stdout result preserves actual complete-source validation and the unchanged absolute schedule.",
+  "reports": {
+    "baseline-prompt-executed.jsonl": {
+      "path": "/tmp/builder-3666/baseline-prompt-executed.jsonl",
+      "sha256": "778ad5c4712c53a4ea348bf985faaa69b9c548c58a09b5e3f24c8f080f694f45",
+      "testEvents": {
+        "executed": 3,
+        "passed": 1,
+        "failed": 2,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 2,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 0
+      }
+    },
+    "baseline-switch-executed.jsonl": {
+      "path": "/tmp/builder-3666/baseline-switch-executed.jsonl",
+      "sha256": "5a43075ea0f64444a26e713953365a729b85391b7a066b58baa292b913f67998",
+      "testEvents": {
+        "executed": 3,
+        "passed": 1,
+        "failed": 2,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 2,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 0
+      }
+    },
+    "schedule-regression-red.jsonl": {
+      "path": "/tmp/builder-3666/schedule-regression-red.jsonl",
+      "sha256": "a4f0a4db9c49ea6589957da264824bd4fa0752698c7e64d86e91959e41d81833",
+      "testEvents": {
+        "executed": 3,
+        "passed": 0,
+        "failed": 3,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 2,
+        "passed": 0,
+        "failed": 2,
+        "skipped": 0
+      }
+    },
+    "timing-controls-green.jsonl": {
+      "path": "/tmp/builder-3666/timing-controls-green.jsonl",
+      "sha256": "67e3023b2cee194488c9b1a1459368eaec9564fba83d2e4e7626c4ee1f3d2055",
+      "testEvents": {
+        "executed": 794,
+        "passed": 794,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 724,
+        "passed": 724,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "originals-green.jsonl": {
+      "path": "/tmp/builder-3666/originals-green.jsonl",
+      "sha256": "6342944340bd392fc2d70fe0876e21c82d05c99d7206a4d545bc87c9942eeb7c",
+      "testEvents": {
+        "executed": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "originalRootReports": {
+    "baseline-events/conversation-system-prompt": {
+      "path": "/tmp/builder-3666/baseline-events/conversation-system-prompt-replay.jsonl",
+      "sha256": "e79cb8f6bff9eb45605eb1ce839054aacc9b3ba2b28680cb226384997e56fee8",
+      "testEvents": {
+        "executed": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      }
+    },
+    "baseline-events/conversation-active-switch": {
+      "path": "/tmp/builder-3666/baseline-events/conversation-active-switch-replay.jsonl",
+      "sha256": "2f657686d4cae53a6ce283074c2c6df284565a921de7700d3ebac8cddfedfee9",
+      "testEvents": {
+        "executed": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 1,
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0
+      }
+    },
+    "passing-events/conversation-system-prompt": {
+      "path": "/tmp/builder-3666/passing-events/conversation-system-prompt-replay.jsonl",
+      "sha256": "d883359025275f6224e5c721b5a0fb4171e475d6b371119786b1a8697927cffd",
+      "testEvents": {
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "passing-events/conversation-active-switch": {
+      "path": "/tmp/builder-3666/passing-events/conversation-active-switch-replay.jsonl",
+      "sha256": "e1dc52d63af2989b60ae474683e8c2516010a21494e4fe31d83c787b66d01e8a",
+      "testEvents": {
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leafTests": {
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "unchangedFixtureSHA256": {
+    "internal/e2e/testdata/claude-tapes/conversation-system-prompt.json": "4c3e799086fa84758a7bbd51705a580f01ec343af087f7dfe7d0e07918d87b4e",
+    "internal/e2e/testdata/claude-tapes/conversation-active-switch.json": "53cc33f28eb2c209ea1c2b59a9378a0c8139088411bcbf27813572224b5b7b9e"
+  },
+  "historicalFailures": {
+    "candidate": "e596971abb101d44d770dea33b4d29d61300e85e",
+    "base": "03eda6c1b9586c4389b11b0cf86d97a954d97ec0",
+    "evidence": "/work/Projects/pyrycode-mobile-agents/logs/evidence/3660/manual-20261020/recorded-baseline-attribution.json",
+    "status": "Historical failed results remain failed; no new unchanged-base execution in this run."
+  },
+  "staticChecks": {
+    "go vet ./...": "passed",
+    "go vet -tags=e2e_realclaude ./internal/e2e/realclaude": "passed",
+    "go vet -tags=e2e ./internal/e2e": "passed",
+    "go build -o /tmp/builder-3666/pyry ./cmd/pyry": "passed"
+  },
+  "pending": "Dispatcher/verifier full-module and acceptance gates. Other operating systems are outside this Linux ticket verification scope."
+}
