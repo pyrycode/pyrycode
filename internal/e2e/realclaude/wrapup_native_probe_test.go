@@ -5,10 +5,8 @@ package realclaude
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -86,20 +84,30 @@ func captureSkippedWrapUp(t *testing.T) bool {
 	t.Logf("native wrap-up capture evidence: %s", dir)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
+	source, err := wrapUpCaptureCommand(ctx, "git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatal("cannot locate native capture source")
+	}
+	revision, err := wrapUpCaptureCommand(ctx, "git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal("cannot identify native capture source")
+	}
+	clone := filepath.Join(dir, "source")
+	if prepareWrapUpCaptureSource(ctx, strings.TrimSpace(string(source)), clone, strings.TrimSpace(string(revision))) != nil {
+		t.Fatal("cannot pin native capture source")
+	}
+	driverDir := filepath.Join(clone, "internal", "e2e")
 	binary := filepath.Join(dir, "driver.test")
-	compile := exec.CommandContext(ctx, "go", "test", "-c", "-tags=e2e", "-o", binary, ".")
-	compile.Dir = ".."
+	compile := wrapUpCaptureCommand(ctx, "go", "test", "-c", "-tags=e2e", "-o", binary, ".")
+	compile.Dir = driverDir
 	if err := compile.Run(); err != nil {
 		t.Fatal("cannot compile native capture driver")
 	}
-	cmd := exec.CommandContext(ctx, "go", "tool", "test2json", "-t", binary, "-test.v", "-test.count=1", "-test.run=^TestRecordedClaude$/^clear-wrapup-skipped$", "-test.timeout=23m")
-	cmd.Dir = ".."
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 2 * time.Second
+	cmd := wrapUpCaptureCommand(ctx, "go", "tool", "test2json", "-t", binary, "-test.v", "-test.count=1", "-test.run=^TestRecordedClaude$/^clear-wrapup-skipped$", "-test.timeout=23m")
+	cmd.Dir = driverDir
 	for _, kv := range os.Environ() {
 		key, _, _ := strings.Cut(kv, "=")
-		if key == "PYRY_CLAUDE_TAPE_MODE" || key == "PYRY_CLAUDE_TAPE_DIR" || key == "PYRY_CLAUDE_TAPE_EVIDENCE" || key == "PYRY_CLAUDE_TAPE_SCENARIOS" {
+		if key == "PYRY_CLAUDE_TAPE_MODE" || key == "PYRY_CLAUDE_TAPE_DIR" || key == "PYRY_CLAUDE_TAPE_EVIDENCE" || key == "PYRY_CLAUDE_TAPE_SCENARIOS" || key == "PYRY_E2E_BIN" {
 			continue
 		}
 		cmd.Env = append(cmd.Env, kv)
@@ -109,35 +117,25 @@ func captureSkippedWrapUp(t *testing.T) bool {
 	if err != nil {
 		t.Fatal("cannot observe native driver counts")
 	}
+	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
 		t.Fatal("cannot start native capture driver")
 	}
-	counts := struct{ Executed, Passed, Failed, Skipped int }{}
+	counts := wrapUpCaptureDriverEvidence{Failure: "none"}
 	scan := bufio.NewScanner(stream)
 	scan.Buffer(make([]byte, 4096), claudetape.MaxBytes)
 	for scan.Scan() {
-		var event struct{ Action, Test string }
-		if json.Unmarshal(scan.Bytes(), &event) != nil {
-			continue
-		}
-		if event.Test == "TestRecordedClaude/clear-wrapup-skipped" {
-			switch event.Action {
-			case "run":
-				counts.Executed++
-			case "pass":
-				counts.Passed++
-			case "fail":
-				counts.Failed++
-			case "skip":
-				counts.Skipped++
-			}
-		}
+		counts.observe(scan.Bytes())
+	}
+	if scan.Err() != nil {
+		_ = cmd.Cancel() // Stop a child whose output can no longer be drained.
+		counts.Failure = "stream"
 	}
 	err = cmd.Wait()
 	if claudetape.PublishLifecycleControl(filepath.Join(dir, "driver-counts.json"), counts) != nil {
 		t.Fatal("cannot retain native driver counts")
 	}
-	if err != nil || scan.Err() != nil || counts.Executed != 1 || counts.Passed != 1 || counts.Failed != 0 || counts.Skipped != 0 {
+	if err != nil || scan.Err() != nil || !counts.valid() {
 		t.Fatal("native wrap-up capture failed; durable evidence contains no accepted capture")
 	}
 	path := filepath.Join(dir, "clear-wrapup-skipped-bound-native.json")
