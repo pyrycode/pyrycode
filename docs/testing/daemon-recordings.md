@@ -753,7 +753,8 @@ the current persisted binding; the successor also requires the actual predecesso
 PID to be gone and its external broker to have finished. A typed rotation
 checkpoint precedes the unchanged `/clear` send. The production one-millisecond
 wrap-up bound, reset-edge assertions, transition counts, eight-second quiet
-window, seeded-note byte comparison and successor prompt checks still run. No
+window and seeded-note byte comparison still run. The recording boundary also
+checks the complete literal successor prompt. No
 note or file is synthesized for this root. Bootstrap and successor remain alive
 until the original daemon cleanup; the bound predecessor journals all traffic
 through its actual output EOF.

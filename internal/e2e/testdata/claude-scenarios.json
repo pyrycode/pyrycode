@@ -1150,7 +1150,7 @@
         "TestInteractiveStreamClearWrapUpSkipped": "0775ff9c30b74dfad75eb61becb720fc340532e99e8378eb82c85c27997a2ff8"
       },
       "retained_live": [
-        "Current Claude startup, response, native rotation and process termination remain live. Replay runs the original one-millisecond wrap-up deadline, skipped reset edges, exact transition counts, quiet window, untouched seeded note and successor prompt assertions. The real daemon still performs the deadline, reset and signal operations."
+        "Current Claude startup, response, native rotation and process termination remain live. Replay runs the original one-millisecond wrap-up deadline, skipped reset edges, exact transition counts, quiet window and untouched seeded-note assertions. The recording boundary checks the complete successor prompt; the real daemon still performs the deadline, reset and signal operations."
       ]
     }
   ],
