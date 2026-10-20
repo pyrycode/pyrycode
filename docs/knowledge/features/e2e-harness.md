@@ -404,6 +404,17 @@ retiming a fixture would erase the timing assertion.
 `waitLifecycleOutput` checks the absolute due time before and after waiting;
 `forwardLifecycleOutput` checks again after forwarding. All three retain the
 100 ms allowance, and the actual pipe write deadline is capped at due + 100 ms.
+`forwardPreparedLifecycleOutput` restores immutable bytes with `DaemonBinding.Frame`
+before waiting. Waiting first wastes the captured gap and puts preparation
+inside the forwarding allowance. Physical `BeforeOutput` observation, replay
+projection and actual forwarding stay at delivery; moving physical observation
+early would change the schedule. `safeCLIJSON` retains duplicate-key and privacy
+validation before physical parsing without a redundant outer duplicate-key scan.
+`TestComposerOutputPreparationSchedule` gates real restoration of the reviewed
+Composer response and charges 120 ms against its 34.33 ms offset: wait-first
+misses due + 100 ms, while prepare-first fits. No observer or write runs early
+or after preparation failure; preparation overrun still rejects. See the
+[controlled proof and historical attribution limit](../../testing/daemon-recordings.md#physical-background-task-boundary).
 Late input, scheduler overshoot and final-write backpressure must still fail.
 `TestLifecycleTimelineUsesAbsoluteDueTimes`,
 `TestLifecycleTimelineRejectsLateFinalForward`,
@@ -486,6 +497,13 @@ registration states, registered owners and actual Wait flags/statuses distinguis
 unknown from absent without copying worker content. A passing replay with zero
 launches cannot explain an earlier mismatch. Synchronized controls prove the
 accounting boundary; offline replay establishes no new live-provider behavior.
+
+Recover the original failure stage before selecting a repair. A forwarding miss
+before inventory cannot be diagnosed as a failed worker join. `LifecycleDiagnostic`
+retains four output-stage maxima with ordinals and at most 64 numeric timing
+samples, including process CPU elapsed (`-1` means unknown). CPU includes other
+broker goroutines; neither it nor passing replays can attribute an older miss
+without substage evidence. Diagnostics confer no completion authority.
 
 ## Failure-Injection Verification
 

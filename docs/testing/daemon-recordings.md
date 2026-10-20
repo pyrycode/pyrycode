@@ -1137,10 +1137,47 @@ a job. The synchronized Linux `TestFallbackCancelledLaunchBoundary/composer-stop
 demonstrates one independently owned launch and one completed cancellation Wait
 with zero registered workers. Without the independent audit, that inventory
 rejects at `total-wait-cardinality`. This establishes the accounting boundary;
-the historical gate failure's exact cause remains unproved because its original
-counts were lost. Passing ordinary focused replays observed zero launches,
+the original 2026-10-20T07:59:47.077Z gate sighting rejected inventory at
+`total-wait-cardinality`, but its launch/registration/Wait counts remain unknown.
+Earlier passing ordinary focused replays observed zero launches,
 registrations and Waits. The [retained evidence manifest](../../internal/e2e/internal/claudetape/testdata/worker_inventory_3677.json)
 binds the failing and passing controls, replay reports, revisions and hashes.
+
+The recurrence recorded at 2026-10-20T15:25:13.409Z is a different stage.
+The recovered original log and matching bootstrap receipt at `4b1e799a` show
+forwarding drift at output 68, anchor 3: due 34330542 ns, observed 267210453 ns,
+lateness 232879911 ns. The original root failed before inventory. Its retained
+audit independently records one current owned launch, absent registration,
+one completed SIGKILL cancellation Wait and zero registered workers. Historical
+process/group death, timing-substage and scheduler contributions, and causal
+order relative to the `job-publish` observation remain unknown. The same-tree
+comparison passed with one owned jobless cancellation; that pass cannot explain
+the failure or turn it into an inventory rejection. Both historical failures
+remain failed evidence in the [recurrence manifest](../../internal/e2e/internal/claudetape/testdata/composer_recurrence_3677.json).
+
+For timed replay, `RunLifecycleBroker` now restores immutable bytes once with
+`DaemonBinding.Frame` before the absolute output wait, using
+`forwardPreparedLifecycleOutput`. Waiting until due before restoration wasted
+the captured gap and charged all preparation against the forwarding allowance.
+`BeforeOutput` physical validation, replay projection and actual forwarding
+remain at delivery. The input anchor, absolute offset, 100 ms allowance and
+final pipe-write deadline are unchanged; capture is unchanged. `safeCLIJSON`
+still rejects duplicate keys and unsafe carriers before physical parsing, so
+`BeforeOutput` needs no second duplicate-key scan.
+
+`TestComposerOutputPreparationSchedule` gates real restoration of the exact
+reviewed output 68 and charges 120 ms on a deterministic clock. With the old
+wait-first ordering it misses due + 100 ms; preparation before waiting fits
+that same deadline. Preparation overrun/errors, late input, scheduler overshoot,
+physical-observer delay and write backpressure still reject, and no physical
+observer or write runs early. This controlled failure/pass establishes the
+preparation-order defect, without attributing the historical 232879911 ns miss.
+The recurrence manifest retains failing/passing revisions, exact commands,
+scenario order, report paths/digests and helper/daemon/fixture hashes. Linux
+race-enabled checks passed 1052/1052 package events, including 9/9 scheduling
+events; the adjacent fallback-suggestion → composer-stop replay passed 2/2
+original roots and final worker/artifact audits without skips. macOS is outside
+this ticket's verification scope.
 
 On macOS, `TestDarwinCancelledLaunch/composer-stop` proves the same join by holding
 the real owned helper before registration until the normal sampler observes it,
@@ -1191,6 +1228,14 @@ hashes. Known-state flags distinguish unknown observations from empty inventorie
 the diagnostic contains no raw protocol, argv, environment or credentials and
 confers no completion authority. Offline replay evidence establishes no new
 live-provider behavior; the original physical assertions remain live obligations.
+
+Broker `LifecycleDiagnostic` separately retains four numeric stage maxima and
+their output ordinals, plus a ring of at most 64 output timing samples. Slots
+are output ordinal, anchor, due, entry, restoration, observation, replay
+projection, write, completion and process CPU elapsed; times are nanoseconds,
+with entry/completion relative to the selected anchor. CPU includes other broker
+goroutines and uses `-1` for unknown. These bounded, content-free diagnostics
+cannot grant completion authority or reconstruct missing historical substages.
 
 For fresh comparison, the exact stop-control `request.task_id` alone is bound to
 its validated native task/tool join in a disposable comparison copy. Native task
