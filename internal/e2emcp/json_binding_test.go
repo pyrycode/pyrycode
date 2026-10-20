@@ -2,6 +2,7 @@ package e2emcp
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 )
 
@@ -46,5 +47,31 @@ func TestJSONStringBindingDoesNotRepairInvalidReplacementBytes(t *testing.T) {
 	raw := []byte(`{"text":"current"}`)
 	if got, err := BindJSONString(raw, []string{"text"}, "current", string([]byte{0xff})); err == nil || got != nil {
 		t.Fatal("invalid replacement bytes repaired")
+	}
+}
+
+func TestJSONStringBindingPreservesPersistedIndentationWithoutRelaxingRPCFraming(t *testing.T) {
+	source := []byte(`{"jsonrpc":"2.0","id":0,"result":{"content":[{"text":"current","unknown":"literal <>&"}]}}`)
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, source, "", "  ") != nil {
+		t.Fatal("indent controlled source")
+	}
+	raw := pretty.Bytes()
+	got, err := BindJSONString(raw, []string{"result", "content", "0", "text"}, "current", "replacement")
+	want := bytes.Replace(raw, []byte(`"current"`), []byte(`"replacement"`), 1)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatal("persisted whitespace changed or refused", err)
+	}
+	if _, err := ParseRPC(raw); err == nil {
+		t.Fatal("multiline RPC wire accepted")
+	}
+	single := []byte("{\n \"text\":\"current\"\n}")
+	if _, err := BindJSONString(single, []string{"text"}, "current", "replacement"); err != nil {
+		t.Fatal("valid multiline scalar", err)
+	}
+	for _, bad := range [][]byte{append(append([]byte{}, single...), []byte(` {"extra":true}`)...), []byte("{\n \"text\":\"current\",\n \"text\":\"foreign\"\n}")} {
+		if _, err := BindJSONString(bad, []string{"text"}, "current", "replacement"); err == nil {
+			t.Fatal("ambiguous document accepted")
+		}
 	}
 }

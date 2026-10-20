@@ -13,7 +13,7 @@ import (
 // the profile must separately authorize the exact typed path and both values.
 // Array steps use canonical zero-based decimal indices; object steps use keys.
 func BindJSONString(raw []byte, path []string, want, replacement string) ([]byte, error) {
-	if !utf8.ValidString(want) || !utf8.ValidString(replacement) || !uniqueJSON(raw) || len(path) == 0 || len(path) > 16 {
+	if !utf8.ValidString(want) || !utf8.ValidString(replacement) || !uniqueJSONDocument(raw, false) || len(path) == 0 || len(path) > 16 {
 		return nil, protocolError()
 	}
 	for _, step := range path {
@@ -22,7 +22,7 @@ func BindJSONString(raw []byte, path []string, want, replacement string) ([]byte
 		}
 	}
 	result, err := bindJSONAt(raw, path, want, replacement)
-	if err != nil || !uniqueJSON(result) {
+	if err != nil || !uniqueJSONDocument(result, false) {
 		return nil, protocolError()
 	}
 	return result, nil

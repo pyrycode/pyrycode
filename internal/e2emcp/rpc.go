@@ -39,8 +39,12 @@ func protocolError() error { return errors.New("MCP protocol boundary failed") }
 
 // uniqueJSON rejects duplicate keys at every depth, invalid UTF-8 and extra
 // documents before any field may select an operation or satisfy a correlation.
-func uniqueJSON(raw []byte) bool {
-	if len(raw) == 0 || len(raw) > MaxFrameBytes || !utf8.Valid(raw) || bytes.ContainsAny(raw, "\r\n") {
+func uniqueJSON(raw []byte) bool { return uniqueJSONDocument(raw, true) }
+
+// Persisted native JSON can be indented. RPC callers separately require one
+// literal line; both forms reject duplicate keys, trailing documents and bounds.
+func uniqueJSONDocument(raw []byte, singleLine bool) bool {
+	if len(raw) == 0 || len(raw) > MaxFrameBytes || !utf8.Valid(raw) || singleLine && bytes.ContainsAny(raw, "\r\n") {
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))

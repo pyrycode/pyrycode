@@ -133,6 +133,17 @@ func TestMCPPrivateProofBindsWholeSourceAndCurrentEffect(t *testing.T) {
 			case "actual-log":
 				current.Actual.Stderr["mcp-files"] += "foreign\n"
 			}
+			// Exercise the actual private artifact serialization boundary too.
+			encodedTape, err := json.MarshalIndent(tape, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistedTape, err := Decode(bytes.NewReader(encodedTape))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tape = persistedTape
+
 			e := ValidateMCPRecordingProof(current, job, tape, x, proof.Revision, proof.SourceBinarySHA256, proof.DaemonSHA256, proof.BrokerPID)
 			if (e == nil) != (mutation == "valid") {
 				t.Fatal("private proof audit mismatch", e)
