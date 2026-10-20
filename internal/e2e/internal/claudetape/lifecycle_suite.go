@@ -158,6 +158,7 @@ func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBindi
 }
 
 type LifecycleSuite struct {
+	Settlement   *ConversationSettlement    `json:"settlement,omitempty"`
 	Version      int                        `json:"version"`
 	Scenario     string                     `json:"scenario"`
 	Producer     Producer                   `json:"producer"`
@@ -170,6 +171,9 @@ type LifecycleSuite struct {
 func (s *LifecycleSuite) Validate(expected []string) error {
 	fail := errors.New("invalid lifecycle suite")
 	if s == nil {
+		return fail
+	}
+	if !reflect.DeepEqual(s.Settlement, RequiredConversationSettlement(s.Scenario)) {
 		return fail
 	}
 	profile, ok := LifecycleProfiles()[s.Scenario]
@@ -274,6 +278,11 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 	for _, worker := range s.Workers {
 		if worker.Tape == nil || !reflect.DeepEqual(worker.Tape.Producer, s.Producer) {
 			return fail
+		}
+	}
+	if ConversationWorkerScenario(s.Scenario) {
+		if _, err := conversationWorkerFacts(s); err != nil {
+			return err
 		}
 	}
 	if err := ValidateLifecycleWorkers(s.Scenario, s.Roles, s.Workers); err != nil {

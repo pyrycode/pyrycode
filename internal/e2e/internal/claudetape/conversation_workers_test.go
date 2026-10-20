@@ -73,19 +73,7 @@ func TestConversationWorkerCanonicalProductionArgv(t *testing.T) {
 }
 
 func conversationWorkerPolicyControl() *LifecycleSuite {
-	s := promptSuiteControl()
-	role := s.Roles["prompted"]
-	role.Tape.Frames = fallbackExchangeControl().Frames
-	role.Timeline.OutputAfterNS = nil
-	for _, f := range role.Tape.Frames {
-		if f.Direction == "stdout" {
-			role.Timeline.OutputAfterNS = append(role.Timeline.OutputAfterNS, 0)
-		}
-	}
-	tape := fallbackWorkerControlTape()
-	tape.Args = conversationWorkerArgs()
-	s.Workers = []LifecycleWorker{{SourceRole: "prompted", UserSequence: 1, Tape: tape}}
-	return s
+	return promptSuiteControl()
 }
 func cloneConversationControl(s *LifecycleSuite) *LifecycleSuite {
 	raw, _ := json.Marshal(s)
@@ -96,27 +84,16 @@ func cloneConversationControl(s *LifecycleSuite) *LifecycleSuite {
 func TestConversationWorkerPolicyReportsIndependentLifecycles(t *testing.T) {
 	a := conversationWorkerPolicyControl()
 	b := cloneConversationControl(a)
-	b.Workers = nil
+	b.Workers[0], b.Workers[1] = b.Workers[1], b.Workers[0]
 	expected := LifecycleProfiles()[a.Scenario].Roles
 	report, err := CompareLifecycleSuite(a, b, expected, ConversationWorkerPolicy)
-	if err != nil || report.BaselineWorkers == nil || report.FreshWorkers == nil || len(*report.BaselineWorkers) != 1 || len(*report.FreshWorkers) != 0 {
-		t.Fatal("missing attempts were not reported explicitly", err)
+	if err != nil || report.BaselineWorkers == nil || report.FreshWorkers == nil || len(*report.FreshWorkers) != 2 || !reflect.DeepEqual(report.BaselineWorkers, report.FreshWorkers) {
+		t.Fatal("settled source facts changed", err)
 	}
 	if SameLifecycleSuiteContract(a, b, expected) == nil {
-		t.Fatal("strict per-tape lifecycle comparison weakened")
+		t.Fatal("strict ordered replay ledger weakened")
 	}
-	b = cloneConversationControl(a)
-	b.Workers[0].Tape.Status = FallbackWorkerStatus{ExitCode: -1, Signal: 9}
-	report, err = CompareLifecycleSuite(a, b, expected, ConversationWorkerPolicy)
-	if err != nil || (*report.FreshWorkers)[0].NativeStatus.Signal != 9 {
-		t.Fatal("actual native cancellation concealed", err)
-	}
-	b = cloneConversationControl(a)
-	b.Workers[0].ProductionWait = &FallbackProductionWait{Status: FallbackWorkerStatus{ExitCode: -1, Signal: 9}, GroupCancel: true}
-	report, err = CompareLifecycleSuite(a, b, expected, ConversationWorkerPolicy)
-	if err != nil || (*report.FreshWorkers)[0].ProductionWait == nil {
-		t.Fatal("actual production cancellation concealed", err)
-	}
+
 	for _, scenario := range []string{"fallback-suggestion", "session-resume", "conversation-lifecycle"} {
 		x := cloneConversationControl(a)
 		x.Scenario = scenario
@@ -128,11 +105,25 @@ func TestConversationWorkerPolicyReportsIndependentLifecycles(t *testing.T) {
 func TestConversationWorkerPolicyRejectsUnmatchedForeignEvidence(t *testing.T) {
 	a := conversationWorkerPolicyControl()
 	zero := cloneConversationControl(a)
-	zero.Workers = nil
-	for _, kind := range []string{"prompt", "argv", "source", "sequence", "duplicate", "third", "failed", "signal", "open-eof", "cancel-unproved", "incomplete-source", "changed-user", "changed-main-prompt"} {
+
+	for _, kind := range []string{"prompt", "argv", "source", "sequence", "duplicate", "third", "failed", "signal", "open-eof", "cancel-unproved", "incomplete-source", "changed-user", "changed-main-prompt", "absent", "partial", "native-cancel", "wrapper-cancel", "missing-settlement", "wrong-settlement", "native-suggestion"} {
 		t.Run(kind, func(t *testing.T) {
 			x := cloneConversationControl(a)
 			switch kind {
+			case "absent":
+				x.Workers = nil
+			case "partial":
+				x.Workers = x.Workers[:1]
+			case "native-cancel":
+				x.Workers[0].Tape.Status = FallbackWorkerStatus{ExitCode: -1, Signal: 9}
+			case "wrapper-cancel":
+				x.Workers[0].ProductionWait = &FallbackProductionWait{Status: FallbackWorkerStatus{ExitCode: -1, Signal: 9}, GroupCancel: true}
+			case "missing-settlement":
+				x.Settlement = nil
+			case "wrong-settlement":
+				x.Settlement.Sources = []string{"bare/1", "prompted/2"}
+			case "native-suggestion":
+				x.Roles["bare"].Tape.Frames = append(x.Roles["bare"].Tape.Frames, Frame{Direction: "stdout", Data: json.RawMessage(`{"type":"prompt_suggestion","suggestion":"A competing native suggestion"}`)})
 			case "prompt":
 				x.Workers[0].Tape.Args[len(x.Workers[0].Tape.Args)-1] = "unmatched changed system prompt"
 			case "argv":

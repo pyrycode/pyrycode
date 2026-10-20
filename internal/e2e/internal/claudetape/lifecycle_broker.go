@@ -188,6 +188,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return 0, fail
 		}
 	}
+	observeCompletion := NewConversationCompletionObserver(c, tape.Tape)
 	timelineOrigin := time.Now()
 	timelineOrigins := []time.Time{timelineOrigin}
 	recordTimelineInput := func(raw []byte) {
@@ -266,7 +267,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		frames++
-		return nil
+		return observeCompletion("stdout", raw)
 	}
 	if player != nil {
 		for _, raw := range player.Prefix() {
@@ -310,6 +311,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if e = write(originals[3], append(raw, '\n')); e != nil {
 				return fail
 			}
+			if e := observeCompletion("stdin", normalized); e != nil {
+				return e
+			}
 			recordTimelineInput(normalized)
 			if c.OnInput != nil {
 				if e := c.OnInput(normalized); e != nil {
@@ -334,6 +338,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			target = originals[3]
 		}
 		if err := write(target, append(raw, '\n')); err != nil {
+			return err
+		}
+		if err := observeCompletion(direction, normalized); err != nil {
 			return err
 		}
 		if direction == "stdout" && tape.Timeline != nil {

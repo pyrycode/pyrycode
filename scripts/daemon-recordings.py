@@ -99,27 +99,24 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
                 required |= {'baseline_coding_iterations', 'fresh_coding_iterations'}
                 if any(type(row.get(k)) is not int or not 1 <= row[k] <= 6 for k in required - {'scenario', 'policy'}):
                     return False
-            if policy == 'native_conversation_workers':
+            if policy == 'settled_conversation_workers':
                 required |= {'baseline_workers', 'fresh_workers'}
                 roles = {'prompted', 'bare'} if name == 'conversation-system-prompt' else {'created-1', 'created-2'} if name == 'conversation-active-switch' else set()
                 def worker_facts(values):
-                    if not roles or not isinstance(values, list) or len(values) > 2:
+                    if not roles or not isinstance(values, list) or len(values) != 2:
                         return False
                     seen = set()
                     for fact in values:
-                        if not isinstance(fact, dict) or set(fact) not in ({'source_role', 'user_sequence', 'native_status'}, {'source_role', 'user_sequence', 'native_status', 'production_wait'}):
+                        if not isinstance(fact, dict) or set(fact) != {'source_role', 'user_sequence', 'native_status'}:
                             return False
                         role = fact['source_role']
                         if not isinstance(role, str) or role not in roles or role in seen or type(fact['user_sequence']) is not int or fact['user_sequence'] != 1:
                             return False
                         seen.add(role)
                         status = fact['native_status']
-                        if not isinstance(status, dict) or set(status) != {'ExitCode', 'Signal'} or any(type(x) is not int for x in status.values()) or status not in ({'ExitCode': 0, 'Signal': 0}, {'ExitCode': -1, 'Signal': 9}):
+                        if not isinstance(status, dict) or set(status) != {'ExitCode', 'Signal'} or any(type(x) is not int for x in status.values()) or status != {'ExitCode': 0, 'Signal': 0}:
                             return False
-                        if 'production_wait' in fact:
-                            wait = fact['production_wait']
-                            if status != {'ExitCode': 0, 'Signal': 0} or not isinstance(wait, dict) or wait != {'status': {'ExitCode': -1, 'Signal': 9}, 'group_cancel': True} or type(wait.get('group_cancel')) is not bool or any(type(x) is not int for x in wait['status'].values()):
-                                return False
+
                     return True
                 if not all(worker_facts(row.get(key)) for key in ('baseline_workers', 'fresh_workers')):
                     return False

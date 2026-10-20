@@ -215,6 +215,7 @@ func finishLifecycleRecording(t *testing.T) {
 	if !ok || t.Failed() {
 		return
 	}
+	settleLifecycleRecording(t, c)
 	profile := claudetape.LifecycleProfiles()[c.Process.Scenario]
 	for _, role := range profile.Roles {
 		prefix := filepath.Join(c.Process.Home, "recording-children", role)

@@ -881,14 +881,15 @@ live runs keep their fresh marker. Both original reply assertions and both
 per-session prompt-file assertions remain in the original test body. Every
 complete literal appended prompt file, mode, argv and ordered input stays strict.
 
-Each role retains its successful stdout forwarding schedule so replay does not
-compress the native two-conversation exchange and silently remove a suggestion
-worker from its original window. This profile permits at most one finite worker
-per completed source turn, up to two total. Every actual attempt must join its
-own source exchange, actual owned process group, complete native output/EOF and
-original production Wait status. Zero observed workers is a literal count, not an
-optional worker policy. Current Claude instruction following and physical prompt
-composition remain retained live obligations.
+Each role retains its successful stdout forwarding schedule. After the complete
+original oracle, recording adds a declared `completed-native-workers-v1`
+settlement boundary: both owned first turns and exactly one real finite worker
+per source must finish successfully before sealing. A single 45-second bound
+covers the entire phase. The real fallback timer and launch path stay unchanged.
+No worker, native suggestion winner, failed/cancelled worker, partial IO or
+missing actual production Wait can count as settled. Ordinary live cleanup stays
+immediate; its cancellation timing remains a live obligation. Current Claude
+instruction following and physical prompt composition remain retained live proof.
 
 
 `conversation-active-switch` uses the same closed three-role transport for the
@@ -937,20 +938,28 @@ Strict fresh policies retain exact native status, optional production Wait,
 worker counts and source identity; the two conversation profiles declare their
 separate fresh policy below. Failed diagnostics never become fixtures.
 
-The two conversation profiles use the named fresh-comparison policy
-`native_conversation_workers`. Complete main-provider argv, input files and
-ordered requests remain exact. Every observed finite worker independently needs
-its full source-declared production argv (including the system prompt), one
-completed owned source turn, complete native IO and actual terminal proof. The
-only source keys are prompted/1 and bare/1, or created-1/1 and created-2/1, with
-one attempt per key and at most two. Native exits other than 0 or actual SIGKILL
-remain unsupported. Fresh comparison reports both complete worker inventories,
-including native and separate production statuses; it does not assert worker
-lifecycle equivalence or attribute a missing worker to a particular timer.
-Saved and fresh replays each still require their own exact observed inventory.
-The fallback-suggestion and session-resume profiles keep strict fresh worker
-comparison. A source AST guard pins the complete production fallback argv even
-when a worker has no counterpart in the other capture.
+The two conversation profiles require explicit fixture settlement metadata and
+use the named fresh-comparison policy `settled_conversation_workers`. Old
+cancellation-prefix fixtures for these unmerged profiles cannot satisfy that
+boundary. Complete main-provider argv, input files and ordered requests remain
+exact. Both captures require the complete source-declared production argv, exactly
+the two allowed first-turn source keys, native exit0 and actual wrapper Wait0,
+complete native IO/EOF, and no separate cancelled production status. A source AST
+guard pins the full production argv including its system prompt. The fresh report
+uses canonical source-key ordering; replay keeps its actual attempt ordering and
+complete literal worker input/output exact. Fallback-suggestion and session-resume
+retain their strict fresh comparison policies.
+
+Each main broker publishes one immutable completed-source digest only after its
+successful native result is actually forwarded. The final tape must reproduce
+that completed prefix and exact exchange. The real daemon's locked lifecycle logs
+supply the independent worker Wait observations before sealing. Prefix and final
+audits pin completion bytes and check the receipt against actual outer-owned
+broker processes, launch claims and the sealed native source. The final finite
+worker audit still checks literal IO, source attribution, independent broker
+completion proofs and every original production Wait after daemon cleanup.
+The original active-switch first A delta still triggers the B send before this
+additional recording settlement begins.
 
 New captures for those conversation profiles and fallback-suggestion record
 `user-forwarded-stdout-v2` timing. Each output carries the ordinal of its actual
