@@ -904,7 +904,7 @@ groups this root with per-conversation system-prompt isolation for one full gate
 
 ## Fallback suggestion observer ownership
 
-`fallback-suggestion` proposes the original fallback set/clear root, including
+`fallback-suggestion` captures the original fallback set/clear root, including
 its unchanged Python source observer. Recording selects the reviewed recorder as
 that observer's underlying CLI; it keeps the observer installed on the real
 daemon path rather than bypassing its stream counters or print child. Native
