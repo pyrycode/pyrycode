@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
+	"github.com/pyrycode/pyrycode/internal/e2emcp"
 )
 
 type lifecycleRecordingConfig struct {
@@ -348,7 +349,22 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	if daemonRecordingWrite(prefix+".job", job) != nil {
 		fail()
 	}
-	if claudetape.ExecLifecycleChildViaBroker(filepath.Join(c.Process.Home, "broker.sock"), prefix+".job", process.Claude, args, process.Mode == "capture") != nil {
+	var setup func(io.Reader) error
+	if claudetape.MCPScenario(c.Process.Scenario) {
+		setup = func(r io.Reader) error {
+			capability, err := e2emcp.ReadCapability(r)
+			if err != nil || capability.Mode != process.Mode {
+				return os.ErrInvalid
+			}
+			if process.Mode == "capture" {
+				if os.Setenv(e2emcp.SocketEnv, capability.Socket) != nil || os.Setenv(e2emcp.TokenEnv, capability.Token) != nil {
+					return os.ErrInvalid
+				}
+			}
+			return nil
+		}
+	}
+	if claudetape.ExecLifecycleChildViaBrokerReady(filepath.Join(c.Process.Home, "broker.sock"), prefix+".job", process.Claude, args, process.Mode == "capture", setup) != nil {
 		fail()
 	}
 	os.Exit(0)
@@ -422,7 +438,29 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
 	}
+	var mcp *claudetape.MCPRecordingSession
+	if claudetape.MCPScenario(c.Process.Scenario) {
+		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
+		if err != nil {
+			os.Exit(2)
+		}
+		mcp, err = claudetape.NewMCPRecordingSession(job.Config, binding, b, c.SourceBinarySHA256, c.DaemonSHA256, os.Getpid())
+		if err != nil {
+			os.Exit(2)
+		}
+		if mcp.Configure(&job.Config) != nil {
+			_ = mcp.Close(false)
+			os.Exit(2)
+		}
+		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) { _ = mcp.RetainFailure(tape, frames) }
+	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
+	if mcp != nil {
+		if err := mcp.Close(e == nil); err != nil && e == nil {
+			e = err
+		}
+	}
+
 	if physical != nil {
 		if err := physical.Close(); err != nil && e == nil {
 			e = err

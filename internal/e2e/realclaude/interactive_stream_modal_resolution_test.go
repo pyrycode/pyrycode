@@ -56,7 +56,6 @@ import (
 	"context"
 	"encoding/base64"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -257,14 +256,7 @@ func startObservedPermissionHarness(t *testing.T, model string, stdioPermissionP
 func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string, stdioPermissionPrompt bool, configure func(string) string, operatorBypass bool, prepareHome ...func(string)) (*perConvHarness, string, func()) {
 	t.Helper()
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
 
 	// Isolated workdir under the authenticated HOME: guarantees the fresh-daemon
 	// state (empty claude sessions dir) and is the cwd the bound conversation and
@@ -321,6 +313,7 @@ func startObservedPermissionHarnessWithOperatorBypass(t *testing.T, model string
 	}
 	d := spawnPermissionDaemon(t, home, workdir, claudeBin, relayURL, model, operatorBypass)
 	t.Cleanup(func() { d.stop(t) })
+	t.Cleanup(func() { finishDaemonRecording(t) })
 
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)

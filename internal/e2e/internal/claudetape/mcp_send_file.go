@@ -81,7 +81,7 @@ func mcpAttachmentText(id string) string { return mcpAttachmentPrefix + id + ")"
 // tool_result; unknown fields and unrelated model prose stay literal.
 func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 	facts := MCPSendFileFacts{NativeBindings: map[int][][]string{}}
-	if ValidateMCPPrimaryJoin(x, tape) != nil {
+	if ValidateMCPPrimaryJoin(x, tape) != nil || ValidateMCPTapeInput(tape) != nil {
 		return facts, mcpError()
 	}
 	type request struct {

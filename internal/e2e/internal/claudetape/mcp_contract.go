@@ -20,7 +20,7 @@ type MCPExchange struct {
 
 func mcpError() error { return errors.New("MCP source exchange or current binding changed") }
 func validateMCPFrame(_ e2emcp.Direction, raw []byte) error {
-	if Safe(raw) != nil {
+	if mcpPrivateSafe(raw) != nil {
 		return mcpError()
 	}
 	_, e := e2emcp.ParseRPC(raw)
@@ -85,7 +85,7 @@ func ValidateMCPPrimaryJoin(x *MCPExchange, tape *Tape) error {
 			return mcpError()
 		}
 		stderr, ok := x.Stderr[kind]
-		if !ok || len(stderr) == 0 || len(stderr) > MaxBytes || Safe([]byte(stderr)) != nil {
+		if !ok || len(stderr) == 0 || len(stderr) > MaxBytes || mcpPrivateSafe([]byte(stderr)) != nil {
 			return mcpError()
 		}
 	}
@@ -100,50 +100,15 @@ func ValidateMCPDaemonInput(b *DaemonBinding) error {
 	if b == nil {
 		return mcpError()
 	}
-	seen := map[string]int{}
-	for i := 0; i < len(b.args); i++ {
-		a := b.args[i]
-		seen[a]++
-		switch a {
-		case "--dangerously-skip-permissions":
-			return mcpError()
-		case "--permission-mode", "--permission-prompt-tool", "--mcp-config":
-			if i+1 >= len(b.args) {
-				return mcpError()
-			}
-			want := map[string]string{"--permission-mode": "default", "--permission-prompt-tool": "mcp__pyry_approve__approve", "--mcp-config": "${CHILD_FILE:--mcp-config}"}[a]
-			if b.args[i+1] != want {
-				return mcpError()
-			}
-			i++
-		}
-	}
-	for _, a := range []string{"--permission-mode", "--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
-		if seen[a] != 1 {
-			return mcpError()
-		}
+	if validateMCPFlags(b.Args()) != nil {
+		return mcpError()
 	}
 	raw, e := readMCPCurrentConfig(b.filePaths["--mcp-config"])
 	if e != nil {
 		return e
 	}
-	root, e := mcpRawObject(raw)
-	if e != nil || len(root) != 1 {
+	if validateMCPDocument(raw, b.daemon, b.socket) != nil {
 		return mcpError()
-	}
-	servers, e := mcpRawObject(root["mcpServers"])
-	if e != nil || len(servers) != 2 {
-		return mcpError()
-	}
-	for name, kind := range map[string]string{"pyry_approve": "mcp-approve", "pyry_files": "mcp-files"} {
-		server, e := mcpRawObject(servers[name])
-		if e != nil || len(server) != 2 || mcpString(server["command"]) != b.daemon {
-			return mcpError()
-		}
-		var args []string
-		if json.Unmarshal(server["args"], &args) != nil || !reflect.DeepEqual(args, []string{kind, "-pyry-socket", b.socket}) {
-			return mcpError()
-		}
 	}
 	files, e := b.Files()
 	if e != nil {
@@ -158,4 +123,67 @@ func ValidateMCPDaemonInput(b *DaemonBinding) error {
 		return mcpError()
 	}
 	return nil
+}
+
+func validateMCPFlags(args []string) error {
+	seen := map[string]int{}
+	valued := map[string]bool{"--session-id": true, "--resume": true, "--input-format": true, "--output-format": true, "--model": true, "--effort": true, "--permission-mode": true, "--permission-prompt-tool": true, "--settings": true, "--append-system-prompt-file": true, "--mcp-config": true}
+	toggles := map[string]bool{"--verbose": true, "--include-partial-messages": true, "--forward-subagent-text": true, "--replay-user-messages": true, "--prompt-suggestions": true, "--strict-mcp-config": true}
+	for i := 0; i < len(args); i++ {
+		flag := args[i]
+		seen[flag]++
+		if flag == "--dangerously-skip-permissions" || (!valued[flag] && !toggles[flag]) {
+			return mcpError()
+		}
+		if valued[flag] {
+			if i+1 >= len(args) || args[i+1] == "" {
+				return mcpError()
+			}
+			if want, ok := map[string]string{"--permission-mode": "default", "--permission-prompt-tool": "mcp__pyry_approve__approve", "--mcp-config": "${CHILD_FILE:--mcp-config}"}[flag]; ok && args[i+1] != want {
+				return mcpError()
+			}
+			i++
+		}
+	}
+	for _, flag := range []string{"--permission-mode", "--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+		if seen[flag] != 1 {
+			return mcpError()
+		}
+	}
+	return nil
+}
+func validateMCPDocument(raw []byte, daemon, socket string) error {
+	root, e := mcpRawObject(raw)
+	if e != nil || len(root) != 1 {
+		return mcpError()
+	}
+	servers, e := mcpRawObject(root["mcpServers"])
+	if e != nil || len(servers) != 2 {
+		return mcpError()
+	}
+	for name, kind := range map[string]string{"pyry_approve": "mcp-approve", "pyry_files": "mcp-files"} {
+		server, e := mcpRawObject(servers[name])
+		if e != nil || len(server) != 2 || mcpString(server["command"]) != daemon {
+			return mcpError()
+		}
+		var args []string
+		if json.Unmarshal(server["args"], &args) != nil || !reflect.DeepEqual(args, []string{kind, "-pyry-socket", socket}) {
+			return mcpError()
+		}
+	}
+	return nil
+}
+func ValidateMCPTapeInput(tape *Tape) error {
+	if tape == nil || validateMCPFlags(tape.Args) != nil {
+		return mcpError()
+	}
+	wrapped, e := mcpRawObject(tape.Files["--mcp-config"])
+	if e != nil || len(wrapped) != 2 {
+		return mcpError()
+	}
+	var mode uint32
+	if json.Unmarshal(wrapped["mode"], &mode) != nil || mode != 0600 {
+		return mcpError()
+	}
+	return validateMCPDocument(wrapped["content"], "${CHILD_DAEMON}", "${CHILD_SOCKET}")
 }

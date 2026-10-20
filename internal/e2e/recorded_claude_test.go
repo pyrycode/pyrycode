@@ -31,6 +31,12 @@ const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
 func TestRecordedClaude(t *testing.T) {
 	selected := selectedRecordedScenarios(t)
 	for _, name := range selected {
+		if claudetape.MCPScenario(name) {
+			buildRecordedMCPDaemon(t)
+			break
+		}
+	}
+	for _, name := range selected {
 		if _, ok := recordedPoolProfiles[name]; ok || claudetape.DaemonSuiteProfiles()[name].Root != "" || claudetape.CLIProfiles()[name] != "" || claudetape.RunnerProfiles()[name].Root != "" || name == claudetape.RecoveryScenario || claudetape.LifecycleProfiles()[name].Root != "" {
 			buildRecordedPoolBinary(t)
 			break

@@ -16,6 +16,8 @@ import (
 // they are never saved as provider recordings or counted as scenario coverage.
 func mcpSendFileControl() (*MCPExchange, *Tape) {
 	tape := lifecycleSuiteControl().Roles["bootstrap"].Tape
+	tape.Args = append(tape.Args, "--permission-mode", "default", "--permission-prompt-tool", "mcp__pyry_approve__approve", "--strict-mcp-config", "--mcp-config", "${CHILD_FILE:--mcp-config}")
+	tape.Files["--mcp-config"] = json.RawMessage(`{"content":{"mcpServers":{"pyry_approve":{"command":"${CHILD_DAEMON}","args":["mcp-approve","-pyry-socket","${CHILD_SOCKET}"]},"pyry_files":{"command":"${CHILD_DAEMON}","args":["mcp-files","-pyry-socket","${CHILD_SOCKET}"]}}},"mode":384}`)
 	id, tool := "12345678-1234-4123-8123-123456789012", "toolu_CONTROLLED1"
 	text := mcpAttachmentText(id)
 	nativeResult, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": tool, "content": []any{map[string]any{"type": "text", "text": text}}, "is_error": false}}}, "tool_use_result": []any{map[string]any{"type": "text", "text": text}}, "unknown": map[string]any{"preserved": "<>&literal"}})

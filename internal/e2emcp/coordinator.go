@@ -231,3 +231,13 @@ func (c *Coordinator) Checkpoint() ([]RPCEvent, error) {
 	c.notify()
 	return append([]RPCEvent(nil), c.events...), nil
 }
+
+// DiagnosticSnapshot returns only already successful complete forwards. It
+// makes no completeness, EOF or acceptance claim and is usable after failure.
+// The owner must separately label any retained carrier unpromotable and run
+// its ordinary privacy checks before publication.
+func (c *Coordinator) DiagnosticSnapshot() []RPCEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]RPCEvent(nil), c.events...)
+}

@@ -101,7 +101,12 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal("unknown daemon suite mode")
 	}
 
-	daemon := ensurePyryBuilt(t)
+	daemon := ""
+	if claudetape.MCPScenario(name) {
+		daemon = buildRecordedMCPDaemon(t)
+	} else {
+		daemon = ensurePyryBuilt(t)
+	}
 	daemonBytes, err := os.ReadFile(daemon)
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +121,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		for _, v := range info.Settings {
 			settings[v.Key] = v.Value
 		}
-		if settings["vcs.revision"] != revision || settings["vcs.modified"] != "false" {
+		if settings["vcs.revision"] != revision || settings["vcs.modified"] != "false" || claudetape.MCPScenario(name) && settings["-tags"] != "e2e_mcp_recording" {
 			t.Fatal("daemon does not match capture source")
 		}
 	}
@@ -135,6 +140,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		_ = f.Close()
 		if err != nil {
 			t.Fatal(err)
+		}
+		if claudetape.MCPScenario(name) {
+			if claudetape.PublishMCPExchange(filepath.Join(children, "bootstrap.mcp-input"), suite.MCP["bootstrap"], suite.Roles["bootstrap"].Tape) != nil {
+				t.Fatal("cannot stage full reviewed MCP exchange")
+			}
 		}
 		for _, role := range profile.Roles {
 			if suite.Roles[role].Save(filepath.Join(children, role+".json")) != nil {
@@ -403,6 +413,15 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				}
 			}
 		}
+		if mode == "capture" && claudetape.MCPScenario(name) {
+			_ = server.Join(15 * time.Second)
+			var failed claudetape.MCPFailedObservation
+			if claudetape.ReadLifecycleControl(filepath.Join(children, "bootstrap.failed-native"), claudetape.MaxBytes, &failed) == nil && failed.Scenario == name+"-bootstrap" && failed.Revision == revision && failed.SourceBinarySHA256 == sourceSHA {
+				if claudetape.PublishMCPFailedObservation(filepath.Join(evidenceDir, name+"-failed-unpromotable-native.json"), failed) == nil {
+					t.Log("incomplete native/MCP observation retained privately; supplies no fixture coverage")
+				}
+			}
+		}
 		t.Fatalf("original daemon assertions failed: mode=%s root=%s runs=%d passed=%d; private evidence=%s", mode, profile.Root, runs, passed, evidence.Name())
 	}
 	var receipt struct {
@@ -463,6 +482,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if cmd.Process != nil {
 			brokerPIDs[role] = cmd.Process.Pid
 		}
+	}
+	if err := claudetape.ValidateMCPBrokerOwnership(home, name, brokerPIDs); err != nil {
+		t.Fatal(err)
 	}
 	if err := claudetape.ValidatePhysicalBrokerOwnership(home, name, brokerPIDs); err != nil {
 		t.Fatal(err)
@@ -542,7 +564,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		suite := &claudetape.LifecycleSuite{Physical: physical, Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
+		mcp, e := claudetape.ReadMCPScenarioExchange(home, name)
+		if e != nil {
+			t.Fatal(e)
+		}
+		suite := &claudetape.LifecycleSuite{MCP: mcp, Physical: physical, Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
 		if err := suite.Save(process.Path, profile.Roles); err != nil {
 			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}
