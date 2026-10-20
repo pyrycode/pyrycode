@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
+	"github.com/pyrycode/pyrycode/internal/e2emcp"
 )
 
 type lifecycleRecordingConfig struct {
@@ -268,11 +269,19 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	if e != nil {
 		os.Exit(2)
 	}
+	var args []string
+	stage := "endpoint"
 	fail := func() {
-		_ = os.WriteFile(filepath.Join(c.Process.Home, "recording-unexpected"), []byte("unowned lifecycle invocation"), 0600)
+		if claudetape.MCPScenario(c.Process.Scenario) {
+			cwd, _ := os.Getwd()
+			diagnostic := claudetape.MCPInvocationFailure{Kind: "failed-unpromotable-mcp-invocation-v1", Stage: stage, Mode: c.Process.Mode, Scenario: c.Process.Scenario, Revision: c.Process.Producer.Revision, SourceBinarySHA256: c.SourceBinarySHA256, PID: os.Getpid(), ParentPID: os.Getppid(), Args: append([]string(nil), args...), Cwd: cwd, HomeMatches: os.Getenv("HOME") == c.Process.Home}
+			if evidence := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE"); filepath.IsAbs(evidence) {
+				_ = claudetape.PublishMCPInvocationFailure(filepath.Join(evidence, c.Process.Scenario+"-invocation-failed.json"), diagnostic)
+			}
+		}
+		_ = os.WriteFile(filepath.Join(c.Process.Home, "recording-unexpected"), []byte("unowned lifecycle invocation stage="+stage), 0600)
 		os.Exit(2)
 	}
-	var args []string
 	for i, a := range os.Args {
 		if a == "--" {
 			args = os.Args[i+1:]
@@ -290,6 +299,7 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	if lifecycleRecordingFiniteWorker(c, args) {
 		return
 	}
+	stage = "session-flags"
 	session := ""
 	for i, a := range args {
 		if (a == "--session-id" || a == "--resume") && i+1 < len(args) {
@@ -299,6 +309,7 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 			session = args[i+1]
 		}
 	}
+	stage = "role-binding"
 	var role claudetape.LifecycleRoleBinding
 	if c.Process.Scenario == "conversation-system-prompt" || c.Process.Scenario == "conversation-active-switch" {
 		role, e = lifecycleRecordingMappedRole(c, session)
@@ -326,15 +337,22 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 			fail()
 		}
 		if session != role.SessionID {
+			stage = "unmapped-session"
 			role, e = claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, "created-1")
 			if e != nil || role.SessionID != session {
 				fail()
 			}
 		}
 	}
-	if session == "" || os.Getenv("HOME") != c.Process.Home {
+	if session == "" {
+		stage = "empty-session"
 		fail()
 	}
+	if os.Getenv("HOME") != c.Process.Home {
+		stage = "home"
+		fail()
+	}
+	stage = "cwd"
 	cwd, e := os.Getwd()
 	if e != nil || cwd != role.WorkDir {
 		fail()
@@ -346,10 +364,27 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 	process.Claim = prefix + ".claim"
 	process.WorkDir = role.WorkDir
 	job := claudetape.LifecycleJob{Config: claudetape.LifecycleBrokerConfig{PoolProcessConfig: process, OwnerPID: os.Getpid(), BrokerParentPID: c.BrokerParentPID, End: claudetape.LifecycleEnd(c.Process.Scenario, role.Role), Kill: prefix + ".action", Abort: prefix + ".abort"}, Args: args, Role: role.Role, ConversationID: role.ConversationID, SessionID: role.SessionID, WorkDir: role.WorkDir, Daemon: endpoint.Daemon, Socket: endpoint.Socket, SourceBinarySHA256: c.SourceBinarySHA256}
+	stage = "job-publish"
 	if daemonRecordingWrite(prefix+".job", job) != nil {
 		fail()
 	}
-	if claudetape.ExecLifecycleChildViaBroker(filepath.Join(c.Process.Home, "broker.sock"), prefix+".job", process.Claude, args, process.Mode == "capture") != nil {
+	var setup func(io.Reader) error
+	if claudetape.MCPScenario(c.Process.Scenario) {
+		setup = func(r io.Reader) error {
+			capability, err := e2emcp.ReadCapability(r)
+			if err != nil || capability.Mode != process.Mode {
+				return os.ErrInvalid
+			}
+			if process.Mode == "capture" {
+				if os.Setenv(e2emcp.SocketEnv, capability.Socket) != nil || os.Setenv(e2emcp.TokenEnv, capability.Token) != nil {
+					return os.ErrInvalid
+				}
+			}
+			return nil
+		}
+	}
+	stage = "ready"
+	if claudetape.ExecLifecycleChildViaBrokerReady(filepath.Join(c.Process.Home, "broker.sock"), prefix+".job", process.Claude, args, process.Mode == "capture", setup) != nil {
 		fail()
 	}
 	os.Exit(0)
@@ -430,6 +465,22 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 	if c.Process.Mode == "capture" && c.Process.Scenario == "clear-wrapup-skipped" && job.Role == "bound" {
 		job.Config.Observation = claudetape.NewWrapUpObservation(poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256)
 	}
+	var mcp *claudetape.MCPRecordingSession
+	if claudetape.MCPScenario(c.Process.Scenario) {
+		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
+		if err != nil {
+			os.Exit(2)
+		}
+		mcp, err = claudetape.NewMCPRecordingSession(job.Config, binding, b, c.SourceBinarySHA256, c.DaemonSHA256, os.Getpid())
+		if err != nil {
+			os.Exit(2)
+		}
+		if mcp.Configure(&job.Config) != nil {
+			_ = mcp.Close(false)
+			os.Exit(2)
+		}
+		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) { _ = mcp.RetainFailure(tape, frames) }
+	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
 	if observation := job.Config.Observation; observation != nil {
 		observation.Add("complete", nil, e)
@@ -437,6 +488,12 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			e = err
 		}
 	}
+	if mcp != nil {
+		if err := mcp.Close(e == nil); err != nil && e == nil {
+			e = err
+		}
+	}
+
 	if physical != nil {
 		if err := physical.Close(); err != nil && e == nil {
 			e = err

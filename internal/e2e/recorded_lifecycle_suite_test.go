@@ -101,7 +101,12 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal("unknown daemon suite mode")
 	}
 
-	daemon := ensurePyryBuilt(t)
+	daemon := ""
+	if claudetape.MCPScenario(name) {
+		daemon = buildRecordedMCPDaemon(t)
+	} else {
+		daemon = ensurePyryBuilt(t)
+	}
 	daemonBytes, err := os.ReadFile(daemon)
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +122,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		for _, v := range info.Settings {
 			settings[v.Key] = v.Value
 		}
-		if settings["vcs.revision"] != revision || settings["vcs.modified"] != "false" {
+		if settings["vcs.revision"] != revision || settings["vcs.modified"] != "false" || claudetape.MCPScenario(name) && settings["-tags"] != "e2e_mcp_recording" {
 			t.Fatal("daemon does not match capture source")
 		}
 	}
@@ -136,6 +141,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		_ = f.Close()
 		if err != nil {
 			t.Fatal(err)
+		}
+		if claudetape.MCPScenario(name) {
+			if claudetape.PublishMCPExchange(filepath.Join(children, "bootstrap.mcp-input"), suite.MCP["bootstrap"], suite.Roles["bootstrap"].Tape) != nil {
+				t.Fatal("cannot stage full reviewed MCP exchange")
+			}
 		}
 		for _, role := range profile.Roles {
 			if suite.Roles[role].Save(filepath.Join(children, role+".json")) != nil {
@@ -317,6 +327,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		})
 	}
+	var launchAudit *claudetape.FallbackLaunchAudit
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "tool", "test2json", "-t", "-p", "daemon-recording", binary, "-test.v", "-test.run=^"+regexp.QuoteMeta(profile.Root)+"$", "-test.timeout=20m")
@@ -336,12 +347,23 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal("cannot run original daemon assertions")
 	}
+	if name == "session-resume" {
+		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary, revision, sourceSHA, os.Getpid(), cmd.Process.Pid)
+		defer launchAudit.Stop()
+	}
 	evidenceDir := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE")
 	if evidenceDir == "" {
 		evidenceDir = home
 	}
 	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
 		t.Fatal(err)
+	}
+	if launchAudit != nil {
+		defer func() {
+			if err := launchAudit.Save(filepath.Join(evidenceDir, name+"-launch-audit.json")); err != nil {
+				t.Errorf("cannot retain launch audit: %v", err)
+			}
+		}()
 	}
 	evidence, err := os.OpenFile(filepath.Join(evidenceDir, name+"-"+mode+".jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -409,6 +431,15 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				}
 			}
 		}
+		if mode == "capture" && claudetape.MCPScenario(name) {
+			_ = server.Join(15 * time.Second)
+			var failed claudetape.MCPFailedObservation
+			if claudetape.ReadLifecycleControl(filepath.Join(children, "bootstrap.failed-native"), claudetape.MaxBytes, &failed) == nil && failed.Scenario == name+"-bootstrap" && failed.Revision == revision && failed.SourceBinarySHA256 == sourceSHA {
+				if claudetape.PublishMCPFailedObservation(filepath.Join(evidenceDir, name+"-failed-unpromotable-native.json"), failed) == nil {
+					t.Log("incomplete native/MCP observation retained privately; supplies no fixture coverage")
+				}
+			}
+		}
 		t.Fatalf("original daemon assertions failed: mode=%s root=%s runs=%d passed=%d; private evidence=%s", mode, profile.Root, runs, passed, evidence.Name())
 	}
 	var receipt struct {
@@ -470,6 +501,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			brokerPIDs[role] = cmd.Process.Pid
 		}
 	}
+	if err := claudetape.ValidateMCPBrokerOwnership(home, name, brokerPIDs); err != nil {
+		t.Fatal(err)
+	}
 	if err := claudetape.ValidatePhysicalBrokerOwnership(home, name, brokerPIDs); err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +537,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			t.Fatal(err)
 		}
 	}
-	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes)
+	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes, launchAudit)
 	if err != nil {
 		destination := filepath.Join(evidenceDir, name+"-invalid-worker-diagnostic.json")
 		if diagnosticErr := claudetape.SaveLifecycleWorkerDiagnostic(home, name, destination, tapes); diagnosticErr == nil {
@@ -548,7 +582,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		suite := &claudetape.LifecycleSuite{Physical: physical, Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
+		mcp, e := claudetape.ReadMCPScenarioExchange(home, name)
+		if e != nil {
+			t.Fatal(e)
+		}
+		suite := &claudetape.LifecycleSuite{MCP: mcp, Physical: physical, Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
 		if err := suite.Save(process.Path, profile.Roles); err != nil {
 			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}
