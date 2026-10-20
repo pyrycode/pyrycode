@@ -13,7 +13,8 @@ type LifecycleDiagnostic struct {
 	Stage, ErrorClass                                             string
 	Frames, PlayerNext, PlayerFrames, PendingInput, PendingOutput int
 	InputEOF, OutputEOF, StderrEOF, Sealed, ActionAccepted        bool
-	IOObserved, ActionAcknowledged, TerminalChecked, Completed    bool
+	ActionAcknowledged, TerminalChecked, Completed                bool
+	InputSampled, OutputSampled, StderrSampled                    bool
 	InputsMatched, OutputsDelivered, ProviderInputsForwarded      int
 }
 

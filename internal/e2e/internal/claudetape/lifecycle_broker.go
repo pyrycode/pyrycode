@@ -390,6 +390,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return err
 			}
 		}
+		diagnostic.Stage = "deliver-output"
+		if direction == "stdin" {
+			diagnostic.Stage = "forward-provider-input"
+		}
 		if err := write(target, append(raw, '\n')); err != nil {
 			return err
 		}
@@ -429,6 +433,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		for {
 			if expired() {
 				return errors.New("lifecycle forwarding deadline exceeded")
+			}
+			switch direction {
+			case "stdin":
+				diagnostic.InputSampled = true
+			case "stderr":
+				diagnostic.StderrSampled = true
+			default:
+				diagnostic.OutputSampled = true
 			}
 			n, e := syscall.Read(fd, buf[:])
 			if n > 0 {
@@ -591,7 +603,6 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 		}
 		diagnostic.Stage = "read-input"
-		diagnostic.IOObserved = true
 		if err := read(inputFD, &pendingInput, &inputEOF, "stdin"); err != nil {
 			return frames, err
 		}

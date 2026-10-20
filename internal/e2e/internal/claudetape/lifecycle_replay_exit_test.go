@@ -183,6 +183,14 @@ func TestLifecycleReplayAfterProviderExit(t *testing.T) {
 			if valid && receipt.Frames != 4 {
 				t.Fatal("incomplete replay")
 			}
+			var diagnostic LifecycleDiagnostic
+			waitLifecycleProbe(t, filepath.Join(root, "diagnostic.json"), &diagnostic)
+			if diagnostic.Completed != valid || !diagnostic.InputSampled {
+				t.Fatal("diagnostic completion differs from actual result")
+			}
+			if valid && (!diagnostic.OutputEOF || !diagnostic.StderrEOF || !diagnostic.OutputSampled || !diagnostic.StderrSampled || !diagnostic.ActionAcknowledged || !diagnostic.TerminalChecked || diagnostic.InputsMatched != 1 || diagnostic.OutputsDelivered != 2) {
+				t.Fatal("diagnostic lost independent progress or completion evidence")
+			}
 			_ = errR.Close()
 		})
 	}
