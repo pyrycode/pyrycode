@@ -54,6 +54,79 @@ records both conversation passes and the separately tracked inherited
 `clear-wrapup-skipped` failure. Other operating systems are outside this Linux
 ticket's verification scope.
 
+### MCP proxy cancellation diagnosis
+
+Elapsed `ProxyServer.Join` time alone does not establish parent-context expiry.
+`Coordinator.ForwardRPC` calls its validator before `RPCSession.Observe` parses
+the envelope again and before the forwarding write, all under the coordinator
+mutex. A validation notification therefore cannot establish blocked output.
+`ProxyServer.bad` must cancel owned I/O before `Coordinator.Abort` takes that
+same mutex; distinguish validation work, descriptor shutdown and child Wait.
+
+`TestMCPProxyActualSCMTransferCancellationAndBindings` exercises actual
+SCM_RIGHTS transfer with both pipes and Unix-socket stdio. Its backpressure
+leaves read the first byte of a two-MiB response, require the forwarding mutex
+still held, and leave the remainder unread through Join. The owned context must
+be live immediately before Join and cancellation must be observed no earlier
+than its 25 ms budget. Join must return an error with the independent parent
+still live and no active handlers. `runOwnedServer` collects all three pump
+results and its actual child `exec.Cmd.Wait` before the handler is removed.
+After Join, require partial output EOF, actual native proxy Wait with failure,
+a still-live parent and rejection by `Coordinator.Finish`. Early completion or
+parent cancellation cannot substitute for these observations.
+
+The [retained Linux race evidence](../../specs/architecture/3690-mcp-proxy-cancellation.md#builder-evidence)
+at Go source `641c1edf` used Go 1.26.9, GOMAXPROCS 8, 12 CPUs, default
+parallelism, serial leaves and unset GOFLAGS/GORACE. Across 24 ordinary
+backpressure observations, measured phases were:
+
+| Phase | Observed duration |
+| --- | --- |
+| Validation notification to first forwarding byte | 0.513–0.566 s |
+| Join start to owned cancellation observation | 25.27–25.84 ms |
+| Join start to return, parent live and handlers joined | 27.74–31.56 ms |
+| Post-Join output EOF / subsequent native proxy Wait | At most 0.462 / 0.057 ms |
+
+Partial EOF retained 69,632 bytes for pipes and 219,264 for sockets, below the
+payload size. A separate phase overlay observed every pump returning within
+0.143 ms of cancellation-watcher entry into descriptor closure and actual owned
+server Wait within 3.257 ms. The 15-second watchdog exceeds six times the longest
+successful selected leaf (2.47 seconds), independently of the one-minute parent
+deadline. It is a fixture deadlock bound, not a product latency guarantee.
+Firing fails the test, cancels the parent, closes test-owned stdio and kills only
+the actual proxy command. Cleanup joins controlled work, the cancellation
+observer and any fired watchdog callback; fixture PIDs and foreign process
+groups never become signal targets.
+
+Both validation-delay leaves inject 1.2 seconds before forwarding. Restoring the
+old notification readiness and one-second elapsed predicate failed at Join
+1.729/1.724 seconds while both parents remained live; the repaired proof passed.
+Disabling owned cancellation failed each ordinary transport at the watchdog and
+released/joined controlled work. The affected package passed 145/145 events
+(135 leaves); each ordinary backpressure leaf passed ten uncached repetitions,
+with zero skips. Full named runs retained preceding complete-duplex and quiet
+pipe/socket cases plus launch-binding and descriptor rejection. Exact commands,
+hashes, controls and failed attempts remain in the
+[evidence record](../../../internal/e2emcp/testdata/3690-cancellation-evidence.json),
+independently checked in the [verifier review](https://github.com/pyrycode/pyrycode/pull/3702#issuecomment-6294131124).
+
+These controls prove the old oracle defect, not a historical scheduler cause.
+Ordinary focused runs did not reproduce the historical Linux failure; no runtime
+cancellation defect was demonstrated. The original candidate and same-tree
+comparison each failed both leaves (1 executed / 0 passed / 1 failed / 0 skipped
+per leaf), while unchanged base passed each once. Their 21 local build inputs
+and manifests were unchanged; that candidate/base difference remains unexplained.
+Historical parent state, phase timing, cold state and host/race settings are
+unavailable; the retrieved bundle preserves the original log tail and full-log
+pointer/hash. Normal race-helper exit delay is measurable separately (0.010
+versus 1.212 seconds with GORACE exit delays 0/1200 ms), but those zero-test
+helper processes establish neither a test pass nor historical attribution.
+All historical failures remain failed. The queued wider investigation supplies
+no execution or acceptance evidence and this proof completes none of #3668's
+unfinished gates. The same-binary helper proves offline ownership/I/O only;
+it supplies no live-provider acceptance. macOS is outside this Linux ticket's
+verification scope.
+
 ### Diagnosing dormant relay restart readiness
 
 Process collection, relay deregistration, replacement registration and phone

@@ -237,6 +237,17 @@ file or symlink and fail during setup before exercising the predicate.
 `TestWorkspaceFileReader_SecretNames` uses distinct `-lower-case` and
 `-upper-case` directories while preserving the actual leaf spellings under test.
 
+A generic refusal does not prove that a rejected file was never read.
+`TestRunnerPrivateReadReplacement` substitutes the leaf after the real `Lstat`
+through the per-call `runnerPrivateReadWithOpen` seam. A duplicated descriptor
+shares the opened file's offset, so checking that it remains zero detects reads
+hidden by the eventual rejection; separately assert that the rejected descriptor
+is closed. Retain the original inode and replace its name with a symlink back to
+it: identity checks alone would accept that link, so require open itself to fail
+with `ELOOP`. Run potentially blocking replacements in deadline-bounded child
+processes that are killed and waited on, with parent-owned temporary files.
+See the [private artifact contract](e2e-harness.md#recorded-lifecycle-timing-and-settlement).
+
 No-follow filesystem tests need a canonical fixture root before deriving paths
 and exact-root references. `t.TempDir()` can inherit a symlinked `TMPDIR`; then an
 ancestor rejection prevents valid-state checks from reaching the operation and
