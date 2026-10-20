@@ -74,7 +74,7 @@ func TestCoordinatorPreservesSuccessfulForwardBarriersAndWire(t *testing.T) {
 		if i >= 3 {
 			want = 2
 		}
-		if v.Sequence != i+1 || v.UserOrdinal != 1 || v.NativeStdoutCount != want {
+		if v.Sequence != i+1 || v.UserOrdinal != 1 || v.NativeInputCount != want || v.NativeStdoutCount != want {
 			t.Fatal("incorrect successful-forward barrier")
 		}
 	}
@@ -95,7 +95,7 @@ func TestCoordinatorPreservesSuccessfulForwardBarriersAndWire(t *testing.T) {
 	}
 }
 func TestCoordinatorRejectsFailedOrUnclosedActualForwards(t *testing.T) {
-	for _, mutation := range []string{"unknown-connection", "duplicate-connection", "privacy", "write-error", "partial-write", "partial-eof", "wait-error", "missing-close", "post-close", "native-input-failure", "native-output-failure"} {
+	for _, mutation := range []string{"unknown-connection", "duplicate-connection", "privacy", "write-error", "partial-write", "partial-eof", "wait-error", "missing-close", "post-close", "native-input-failure", "native-control-failure", "native-output-failure"} {
 		t.Run(mutation, func(t *testing.T) {
 			c := newTestCoordinator(t)
 			forwardHandshake(t, c)
@@ -126,6 +126,12 @@ func TestCoordinatorRejectsFailedOrUnclosedActualForwards(t *testing.T) {
 				err = c.ForwardRPC("current-epoch/files", ClientToServer, request, func([]byte) error { t.Fatal("closed connection forwarded"); return nil })
 			case "native-input-failure":
 				err = c.NativeInput(true, func() error { return io.ErrClosedPipe })
+			case "native-control-failure":
+				before := c.input
+				err = c.NativeInput(false, func() error { return io.ErrClosedPipe })
+				if c.input != before {
+					t.Fatal("failed control advanced causal count")
+				}
 			case "native-output-failure":
 				err = c.NativeOutput(func() error { return io.ErrClosedPipe })
 			}

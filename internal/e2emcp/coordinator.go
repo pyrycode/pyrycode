@@ -14,6 +14,7 @@ type RPCEvent struct {
 	Connection        string
 	Direction         Direction
 	Raw               string
+	NativeInputCount  int
 	UserOrdinal       int
 	NativeStdoutCount int
 }
@@ -24,13 +25,13 @@ type RPCEvent struct {
 // Validation is supplied by the owner, including privacy and exact profile
 // bindings. This primitive does not authorize processes or perform tool work.
 type Coordinator struct {
-	mu             sync.Mutex
-	failed, closed bool
-	user, stdout   int
-	bytes          int
-	events         []RPCEvent
-	sessions       map[string]*RPCSession
-	validate       func(Direction, []byte) error
+	mu                  sync.Mutex
+	failed, closed      bool
+	input, user, stdout int
+	bytes               int
+	events              []RPCEvent
+	sessions            map[string]*RPCSession
+	validate            func(Direction, []byte) error
 }
 
 func NewCoordinator(validate func(Direction, []byte) error) (*Coordinator, error) {
@@ -56,8 +57,8 @@ func (c *Coordinator) reject() error {
 	return errors.New("MCP coordinated forwarding failed")
 }
 
-// NativeInput advances the user ordinal only after a full current input was
-// forwarded. Controls pass user=false. The caller validates its original frame.
+// NativeInput advances the all-input count after every full current forward,
+// including controls. User frames separately advance the user ordinal. The caller validates its original frame.
 func (c *Coordinator) NativeInput(user bool, forward func() error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -67,6 +68,7 @@ func (c *Coordinator) NativeInput(user bool, forward func() error) error {
 	if err := forward(); err != nil {
 		return c.reject()
 	}
+	c.input++
 	if user {
 		c.user++
 	}
@@ -106,7 +108,7 @@ func (c *Coordinator) ForwardRPC(connection string, direction Direction, wire []
 	}
 	c.bytes += len(owned)
 	c.sessions[connection] = trial
-	c.events = append(c.events, RPCEvent{Sequence: len(c.events) + 1, Connection: connection, Direction: direction, Raw: string(owned), UserOrdinal: c.user, NativeStdoutCount: c.stdout})
+	c.events = append(c.events, RPCEvent{Sequence: len(c.events) + 1, Connection: connection, Direction: direction, Raw: string(owned), NativeInputCount: c.input, UserOrdinal: c.user, NativeStdoutCount: c.stdout})
 	return nil
 }
 
