@@ -44,9 +44,6 @@ func lifecycleRecordingWorkerDaemon(t *testing.T, home string, pid int, stderr *
 	// Registered inside spawn, before the original caller registers daemon.stop.
 	// LIFO cleanup therefore observes actual production Waits after that stop.
 	t.Cleanup(func() {
-		if t.Failed() {
-			return
-		}
 		observations, err := lifecycleWorkerObservations(stderr)
 		if err != nil {
 			t.Fatal(err)
@@ -96,6 +93,12 @@ func lifecycleRecordingFiniteWorker(c lifecycleRecordingConfig, args []string) b
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
+		fail()
+	}
+	if c.Process.Mode == "replay" && c.Process.Scenario == "session-resume" && len(c.WorkerWaits) == 0 {
+		// No reviewed native exchange exists. Keep this owned launch silent until
+		// production cancels it; only the outer launch/Wait audit can certify it.
+		<-time.After(45 * time.Second)
 		fail()
 	}
 	jobPath := ""

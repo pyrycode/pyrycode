@@ -7,7 +7,7 @@ import (
 )
 
 func TestScanUsesGoSyntaxAndBuildConstraints(t *testing.T) {
-	dir := t.TempDir()
+	_, dir := inventoryTestTree(t)
 	sources := map[string]string{
 		"live_test.go":    "//go:build e2e_realclaude\n\npackage example\nimport (\"testing\";\"os/exec\")\n// func TestNotADeclaration(t *testing.T) {}\nfunc TestActual(\n t *testing.T,\n){ helper(t) }\nfunc helper(t *testing.T){ exec.LookPath(\"claude\") }\n",
 		"offline_test.go": "//go:build !e2e_realclaude\n\npackage example\nimport \"testing\"\nfunc TestOffline(t *testing.T){}\n",
@@ -61,8 +61,7 @@ func TestScanUsesGoSyntaxAndBuildConstraints(t *testing.T) {
 }
 
 func TestImportedAssertionsInvalidateReview(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "realclaude")
+	root, dir := inventoryTestTree(t)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +75,7 @@ func TestImportedAssertionsInvalidateReview(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := rows[0].ContextSHA256
-			shared := filepath.Join(root, "internal", pkg)
+			shared := filepath.Join(root, "internal", "e2e", "internal", pkg)
 			if err := os.MkdirAll(shared, 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -103,5 +102,41 @@ func TestImportedAssertionsInvalidateReview(t *testing.T) {
 				t.Fatal("imported assertion edit did not invalidate review")
 			}
 		})
+	}
+}
+
+func inventoryTestTree(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "internal", "e2e", "realclaude")
+	if os.MkdirAll(dir, 0700) != nil {
+		t.Fatal("fixture source directory")
+	}
+	for _, relative := range []string{"internal/e2emcp/boundary.go", "internal/acp/jsonrpc.go", "cmd/pyry/mcp_recording_stub.go", "cmd/pyry/main.go", "cmd/pyry/jsonrpc_stdio.go"} {
+		path := filepath.Join(root, relative)
+		if os.MkdirAll(filepath.Dir(path), 0700) != nil || os.WriteFile(path, []byte("package fixture\n"), 0600) != nil {
+			t.Fatal("boundary fixture")
+		}
+	}
+	return root, dir
+}
+func TestMCPTransportHookAndHandlersInvalidateReview(t *testing.T) {
+	root, dir := inventoryTestTree(t)
+	if os.WriteFile(filepath.Join(dir, "live_test.go"), []byte("package fixture\nfunc TestActual(){}\n"), 0600) != nil {
+		t.Fatal("live fixture")
+	}
+	for _, relative := range []string{"internal/e2emcp/boundary.go", "internal/acp/jsonrpc.go", "cmd/pyry/mcp_recording_stub.go", "cmd/pyry/main.go", "cmd/pyry/jsonrpc_stdio.go", "cmd/pyry/mcp_files.go"} {
+		rows, e := scan(dir)
+		if e != nil {
+			t.Fatal(e)
+		}
+		before := rows[0].ContextSHA256
+		if os.WriteFile(filepath.Join(root, relative), []byte("package fixture\nfunc ChangedBoundary(){panic(1)}\n"), 0600) != nil {
+			t.Fatal("actual boundary edit")
+		}
+		rows, e = scan(dir)
+		if e != nil || rows[0].ContextSHA256 == before {
+			t.Fatal("MCP source edit failed to invalidate review", relative, e)
+		}
 	}
 }

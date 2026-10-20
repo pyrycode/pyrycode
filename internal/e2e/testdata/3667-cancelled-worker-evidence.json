@@ -1,0 +1,116 @@
+{
+  "kind": "private-launch-accounting-investigation-not-native-fixture",
+  "os": "linux/amd64",
+  "toolchain": "go1.26.9",
+  "evidence_root": "/tmp/builder-3667/",
+  "counts_order": ["executed", "passed", "failed", "skipped"],
+  "ownership_rework": {
+    "finding": 1,
+    "os": "Linux 7.0.0-28-generic linux/amd64",
+    "toolchain": "go1.26.9",
+    "plan_revision": "98514e03740f1b13e58fdf7bfc5422bd042dcc64",
+    "evidence_root": "/tmp/builder-3667/ownership-rework/",
+    "regression_red": {
+      "source_tree_equivalent_revision": "03c6f98f6f28344423c9fd93950312d5debe99cf",
+      "note": "Run started before the regression commit; same test source, unrepaired inventory.",
+      "selection": "^TestFallbackCancelledLaunchOwnership$",
+      "counts": [3, 1, 2, 0],
+      "leaf_tests": 2,
+      "failure": "unrelated-daemon helper with actual cancellation/Wait accepted",
+      "path": "red.jsonl",
+      "sha256": "2e90341da52900a193fa60868ef62d01e597cb9f6f65b71f4b0fbf345bb54d37"
+    },
+    "repaired_revision": "849125968bcc398f84810eca71aafaac286e1b8c",
+    "controls": {
+      "selection": "^(TestFallbackCancelledLaunchOwnership|TestFallbackCancelledLaunchBoundary|TestFallbackWorkerClosedCarrier|TestFallbackWorkerNativeProcessBoundary|TestFallbackWorkerInventoryRejectsForeignEvidence|TestFallbackWorkerCompletionRejectsCleanupRewrite|TestFallbackProductionWaitRejectsUnsupportedShapes|TestFallbackReplayWaitBindsSavedIndex)$",
+      "counts": [84, 84, 0, 0],
+      "leaf_tests": 79,
+      "path": "final-controls.jsonl",
+      "sha256": "b49066ba394f5b94f566fbf3dfcff9c3cc5b33112b47d4f2c21339721fb21154"
+    },
+    "original_replay": {
+      "selection": "^TestRecordedClaude$; PYRY_CLAUDE_TAPE_SCENARIOS=[\"session-resume\"]; -race -tags=e2e -count=1",
+      "counts": [2, 2, 0, 0],
+      "original_daemon_root_counts": [1, 1, 0, 0],
+      "native_exchanges": 0,
+      "path": "replay.jsonl",
+      "sha256": "1a82b3e676043fbf12920f23ec86ad2cd14f9324b3b69c3bd2836a41c9479036",
+      "original_events_path": "replay/session-resume-replay.jsonl",
+      "original_events_sha256": "0769597549e98827eaffc7312b638c899e80948074edb2fdc3e44be0d07f6fdc",
+      "audit_path": "replay/session-resume-launch-audit.json",
+      "audit_sha256": "e5b486ca3a6a8cdf8332b5fdca5bfb8fb4ebc8d148e65482003765c599959a3e",
+      "helper_sha256": "ce98af5578c33c23ec347b9a87994c308fb9cb9b2e0c4290c5edf2e26eeac267",
+      "ownership_chain_pids": [131918, 131898, 131891, 131867, 131629],
+      "cancelled_helper_pids": [131989, 132088],
+      "registration": "absent for both launches; each has one actual completed group-cancellation SIGKILL Wait"
+    },
+    "static_checks": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3667/ownership-rework/pyry ./cmd/pyry"],
+    "earlier_full_gate": {
+      "revision": "9ed3b03a737957112c81eac336e3669f4fa7f083",
+      "verifier_run": "9e7bb653a48aca769eb674cec067a771db87ae5704cb7e686fc424ad3b9ac562",
+      "bundle_digest": "4eaeaff1a13588ad7aeaf8df78d51ea4df7021ed2ee231c421ad4dda34b53190",
+      "retained_bundle": "/tmp/builder-3667/rework-inherited/9e7bb653a48aca769eb674cec067a771db87ae5704cb7e686fc424ad3b9ac562/",
+      "original_unit_counts": [30367, 30338, 2, 27],
+      "original_integration_counts": [1900, 1893, 5, 2],
+      "status": "Original failures remain failed; verifier accepted inherited comparisons tracked in #3674 and the named relay flaky rerun. Focused proof does not replace the full-gate evidence."
+    }
+  },
+  "replay_command": "PYRY_CLAUDE_TAPE_SCENARIOS='[\"session-resume\"]' PYRY_CLAUDE_TAPE_EVIDENCE=<private-external-directory> python3 scripts/test-admission.py -- go test -timeout=30m -race -tags=e2e -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e",
+  "regression_red": {
+    "source_tree_equivalent_commit": "e6b6c8c8e04f380cbe4561e0e5fe4b9ac7e8c42e",
+    "note": "Executed before the diagnostics commit; inventory accounting was unchanged.",
+    "selection": "^TestFallbackCancelledLaunchBoundary$",
+    "counts": [1, 0, 1, 0],
+    "path": "regression-red-run.jsonl",
+    "failure": "finite worker inventory stage=total-wait-cardinality"
+  },
+  "original_inventory_red": {
+    "revision": "17aefe757d321ed698ca9c9852232ec609f1af67",
+    "outer_counts": [2, 0, 2, 0],
+    "original_daemon_root_counts": [1, 1, 0, 0],
+    "registered_attempts": 0,
+    "launches": [{"pid":56648,"daemon":56518,"kernel_start":"748245343","registration":"absent"},{"pid":56718,"daemon":56518,"kernel_start":"748246498","registration":"absent"}],
+    "waits": [{"pid":56648,"group_cancel":true,"wait_completed":true,"exit_observed":true,"exit_code":-1,"signal":9},{"pid":56718,"group_cancel":true,"wait_completed":true,"exit_observed":true,"exit_code":-1,"signal":9}],
+    "path": "observed-wait-red/test.jsonl",
+    "sha256": "4923776d739f7bc1399cb668ad2cb828ef923a43b6deb17bdbb0dea453a96149",
+    "audit_path": "observed-wait-red/session-resume-launch-audit.json",
+    "audit_sha256": "085b80959e867b9eab6e4c738d492860db226cda4f7f34dd4f3ee9bdd8406fed",
+    "diagnostic_path": "observed-wait-red/session-resume-invalid-worker-diagnostic.json",
+    "diagnostic_sha256": "277eec33806ec988ac397800a9de4a730d16f04e92777fc1e2a40578655b6697"
+  },
+  "repaired_replay": {
+    "revision": "65382c1d357024e891a25e27dbe20813b96ee130",
+    "helper_sha256": "4cd3b759ccaa196e64d3b48c9afbc5453f0c39ea8ee0140cb1e91d306b09f5b9",
+    "outer_counts": [2, 2, 0, 0],
+    "original_daemon_root_counts": [1, 1, 0, 0],
+    "native_exchanges": 0,
+    "launches": [{"pid":62345,"daemon":62243,"kernel_start":"748272022","registration":"absent"},{"pid":62383,"daemon":62243,"kernel_start":"748273249","registration":"absent"}],
+    "waits": [{"pid":62345,"group_cancel":true,"wait_completed":true,"exit_observed":true,"exit_code":-1,"signal":9},{"pid":62383,"group_cancel":true,"wait_completed":true,"exit_observed":true,"exit_code":-1,"signal":9}],
+    "path": "repaired-repeat/test.jsonl",
+    "sha256": "083c824756741dfd748b1d2f0b6a79ca11efa9379c0509e902e1a7059a11a164",
+    "original_events_path": "repaired-repeat/session-resume-replay.jsonl",
+    "original_events_sha256": "7a811aba048115b1f79100fb7102460fcf40defa27252e4754b268f52402c898",
+    "audit_path": "repaired-repeat/session-resume-launch-audit.json",
+    "audit_sha256": "7e8b334f03ddfd3e1efb5890e34fcf8b8790d8ed1cc1cd3617ce5741dc6fb933"
+  },
+  "controls": {
+    "source_tree": "0d8c1f5eb8d1574c86f193c84e0cf87b2333e33c",
+    "note": "Started before commit 65382c1d; tested the same implementation tree.",
+    "selection": "^(TestFallbackCancelledLaunchBoundary|TestFallbackWorkerClosedCarrier|TestFallbackWorkerNativeProcessBoundary|TestFallbackWorkerInventoryRejectsForeignEvidence|TestFallbackWorkerCompletionRejectsCleanupRewrite|TestFallbackProductionWaitRejectsUnsupportedShapes|TestFallbackReplayWaitBindsSavedIndex)$",
+    "counts": [77, 77, 0, 0],
+    "leaf_tests": 73,
+    "path": "controls-run.jsonl",
+    "sha256": "9d438aebc818ebfc8c8e7f7869a80fd236c32116a147538b397988947622f845"
+  },
+  "other_failed_runs_preserved": [
+    {"path":"baseline/","source":"539e3756e7c19435f09d7973f30f4d991c7604f3; plan added during run","outer_counts":[3,1,2,0],"reason":"original prefix provider not alive"},
+    {"path":"baseline-repeat/","source":"b3729493 plus then-uncommitted observer files","outer_counts":[3,1,2,0],"reason":"original lifecycle artifact inventory"},
+    {"path":"observed-red/","source":"e6b6c8c8e04f380cbe4561e0e5fe4b9ac7e8c42e","outer_counts":[3,1,2,0],"reason":"fast helper rejected empty reviewed worker inventory; evidence directory permissions also invalid"},
+    {"path":"inventory-red/","source":"dacf7a501a1b8b21ba1a64082cb883f5eb46456a","outer_counts":[2,0,2,0],"reason":"original child artifact inventory"},
+    {"path":"repaired/","source":"65382c1d357024e891a25e27dbe20813b96ee130","outer_counts":[2,0,2,0],"reason":"original prefix provider not alive; same-source retry above passed"}
+  ],
+  "follow_up": "https://github.com/pyrycode/pyrycode/issues/3668",
+  "zero_execution_attempts": ["regression-red.jsonl: test pipe type compile error, corrected before the executed red regression", "baseline-focused/test.jsonl: managed selector refusal", "controls.jsonl: managed wildcard selector refusal; replaced with explicit test names"],
+  "static_checks": ["go vet ./...", "go vet -tags=e2e ./internal/e2e", "go vet -tags=e2e_realclaude ./internal/e2e/realclaude", "go build -o /tmp/builder-3667/pyry ./cmd/pyry"],
+  "pending": "Dispatcher full normal verification; documentation handoff. macOS is outside this Linux ticket's verification scope. Earlier failed captures remain failed."
+}

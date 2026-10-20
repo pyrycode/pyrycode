@@ -92,6 +92,36 @@ func scan(dir string) ([]function, error) {
 			context.Write(raw)
 		}
 	}
+	// MCP replay invokes current command handlers through a test-only hook. Its
+	// transport, hook/router and actual production MCP handlers are also oracle
+	// dependencies: changing any of them must invalidate boundary fingerprints.
+	extra := []struct{ label, pattern string }{
+		{"internal/e2emcp", filepath.Join(dir, "..", "..", "e2emcp", "*.go")},
+		{"internal/acp", filepath.Join(dir, "..", "..", "acp", "*.go")},
+		{"cmd/pyry", filepath.Join(dir, "..", "..", "..", "cmd", "pyry", "mcp*.go")},
+		{"cmd/pyry", filepath.Join(dir, "..", "..", "..", "cmd", "pyry", "main.go")},
+		{"cmd/pyry", filepath.Join(dir, "..", "..", "..", "cmd", "pyry", "jsonrpc_stdio.go")},
+	}
+	for _, source := range extra {
+		paths, err := filepath.Glob(source.pattern)
+		if err != nil {
+			return nil, err
+		}
+		if len(paths) == 0 {
+			return nil, fmt.Errorf("missing boundary dependency %s", source.label)
+		}
+		for _, path := range paths {
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			context.WriteString(filepath.Join(source.label, filepath.Base(path)))
+			context.Write(raw)
+		}
+	}
 	contextSum := sha256.Sum256([]byte(context.String()))
 	contextDigest := hex.EncodeToString(contextSum[:])
 	var out []function

@@ -385,6 +385,28 @@ the receipt prefix and final tape, and final ownership, source and I/O audits
 remain required. See [timing receipt propagation](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts)
 and the [measured Linux diagnosis](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
 
+Session-resume launch ownership must reach the actual outer-owned invocation.
+Checking a helper against a daemon PID supplied by a control file accepted an
+unrelated daemon's otherwise qualifying helper even with a real SIGKILL/Wait.
+`StartFallbackLaunchAudit` binds the command immediately after Start;
+`FallbackLaunchAudit.ownDaemon` retains and rechecks the complete current kernel
+ancestry to the outer process before observing children. PID, start identity,
+parent and group matter together: an unknown chain or changed identity cannot
+authorize a cancelled launch. `TestFallbackCancelledLaunchOwnership` synchronizes
+owned and unrelated process trees before real cancellation, so rejection
+exercises the full ownership boundary.
+
+Production can complete a cancellation Wait before the helper registers a job.
+`ReadLifecycleWorkers` accepts that Linux boundary only with the
+independent current-launch audit, observed absent registration, actual completed
+group-cancellation SIGKILL Wait, and process/group death. Every Wait joins once;
+cancelled launches consume the two-attempt allowance but add no native exchange.
+`TestFallbackCancelledLaunchBoundary` keeps Wait-only, unknown, duplicate and
+foreign evidence failing. Exact reviewed exchange cardinality and complete
+native I/O/EOF remain required; see the
+[recording contract](../../testing/daemon-recordings.md#idle-eviction-and-literal-native-resume-inputs)
+and [post-stop evidence retention](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts).
+
 ## Failure-Injection Verification
 
 `TestHarness_NoLeakOnFatal` verifies the load-bearing safety property: a

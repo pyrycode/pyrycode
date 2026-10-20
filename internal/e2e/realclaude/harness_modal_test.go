@@ -210,6 +210,7 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, mod
 	if operatorBypass {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	daemonRecordingRegisterSocket(t, home, bin, socket)
 	cmd := exec.Command(bin, args...)
 	// HOME is set explicitly rather than inherited, so the harness also runs under
 	// t.Parallel, where nothing pins it process-wide; the credential is inherited.
