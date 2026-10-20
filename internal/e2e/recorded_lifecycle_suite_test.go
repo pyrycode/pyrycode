@@ -358,7 +358,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	evidenceDir := os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE")
 	if evidenceDir == "" {
-		evidenceDir = home
+		evidenceDir = filepath.Dir(retained)
 	}
 	if err := os.MkdirAll(evidenceDir, 0700); err != nil {
 		t.Fatal(err)
