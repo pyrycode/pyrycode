@@ -478,6 +478,11 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			}
 		}
 	}
+	job.Config.OnDiagnostic = func(d claudetape.LifecycleDiagnostic) {
+		if json.NewEncoder(os.Stdout).Encode(d) != nil {
+			os.Exit(2)
+		}
+	}
 	var mcp *claudetape.MCPRecordingSession
 	if claudetape.MCPScenario(c.Process.Scenario) {
 		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
@@ -493,18 +498,6 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) { _ = mcp.RetainFailure(tape, frames) }
-	}
-	if c.Process.Scenario == "clear-reset" && os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE") != "" {
-		job.Config.OnProgress = func(progress claudetape.LifecycleProgress) {
-			path := filepath.Join(os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE"), "clear-reset-"+job.Role+"-terminal.json")
-			if daemonRecordingWrite(path, struct {
-				OwnerPID, BrokerPID int
-				OwnerPresent        bool
-				Progress            claudetape.LifecycleProgress
-			}{job.Config.OwnerPID, os.Getpid(), syscall.Kill(job.Config.OwnerPID, 0) == nil, progress}) != nil {
-				os.Exit(2)
-			}
-		}
 	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
 	if mcp != nil {

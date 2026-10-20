@@ -28,6 +28,32 @@ output can be tied to the executed binaries. Preserve that output outside the
 temporary home. See [absolute timing and settlement](e2e-harness.md#recorded-lifecycle-timing-and-settlement)
 and [retained failure/pass evidence](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
 
+`LifecycleDiagnostic` separately reports terminal broker progress on success and
+failure. `TestLifecycleTapeBrokerProcess` writes it to stdout, retained by the
+outer suite as `<scenario>-broker/<role>.diagnostic.json` outside disposable HOME.
+Static stage, input-kind and error-class values accompany numeric progress and
+boolean observations: matched inputs, actual provider-input forwards, delivered
+outputs, player position, pending bytes, action acceptance/acknowledgement,
+sampled EOFs, terminal checks and final completion. An exhausted player can have
+zero delivered responses, so these counters must be read separately. Sampling
+flags distinguish unknown EOF observations from observed states. Forced broker
+termination can leave the terminal record absent or incomplete; never infer
+completion from that absence. No protocol content, argv, environment, credentials
+or arbitrary error text belongs in this diagnostic, and it confers no completion
+authority.
+
+`retainLifecycleWitnesses` runs after broker abort/join cleanup and before HOME
+removal. It copies only fixed existing role/job/action/acknowledgement and
+completion controls through bounded private readers into exclusive 0600 files
+under a 0700 evidence directory. `source-and-inventory.json` records the revision,
+helper/daemon and fixture hashes, and present/missing witness paths. Use a fresh
+external `PYRY_CLAUDE_TAPE_EVIDENCE` directory; without one the suite logs an
+independent temporary evidence directory that survives HOME cleanup. These
+copies and diagnostics do not expand the authoritative artifact inventory or
+replace successful receipts and the outer audit. `TestRetainLifecycleWitnesses`
+checks survival of the action witness and missing-path inventory while excluding
+native transcript content.
+
 Worker Wait evidence must survive an original-root failure too.
 `lifecycleRecordingWorkerDaemon` registers its observation cleanup before the
 caller registers daemon stop, so LIFO cleanup reads completed production Waits
