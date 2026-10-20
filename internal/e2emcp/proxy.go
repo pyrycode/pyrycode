@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -24,6 +25,7 @@ type proxyLaunch struct {
 	Version   int
 	Token     string
 	Args, Env []string
+	Cwd       string
 }
 
 // ProxyCommand is invoked only by a test-tag command-entry hook. It transfers
@@ -33,9 +35,12 @@ func ProxyCommand(socket, token string, args, env []string, stdio [3]*os.File) e
 	if !filepath.IsAbs(socket) || len(socket) > 100 || !validToken(token) {
 		return protocolError()
 	}
-	payload, err := json.Marshal(proxyLaunch{Version: 1, Token: token, Args: args, Env: env})
-	if err != nil || len(payload) > maxLaunchBytes {
+	if !utf8.ValidString(socket) {
 		return protocolError()
+	}
+	payload, err := encodeProxyLaunch(token, args, env)
+	if err != nil {
+		return err
 	}
 	c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {
@@ -129,8 +134,16 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	}
 	// Close all received descriptors even when the sender supplied an extra one.
 	owned := make([]*os.File, 0, len(received))
+	var modes []int
 	for _, fd := range received {
 		syscall.CloseOnExec(fd)
+		mode, x := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+		if x != nil {
+			syscall.Close(fd)
+			parseErr = protocolError()
+			continue
+		}
+		modes = append(modes, mode)
 		if unix.SetNonblock(fd, true) != nil {
 			syscall.Close(fd)
 			parseErr = protocolError()
@@ -160,12 +173,12 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 				return proxyLaunch{}, files, protocolError()
 			}
 		}
-		mode, x := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
+		mode := modes[i]
 		want := unix.O_WRONLY
 		if i == 0 {
 			want = unix.O_RDONLY
 		}
-		if x != nil || mode&unix.O_ACCMODE != want {
+		if mode&unix.O_ACCMODE != want {
 			return proxyLaunch{}, files, protocolError()
 		}
 	}
@@ -195,6 +208,9 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	if e != nil || parent != b.NativeOwnerPID || exe != b.Binary || b.validate() != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
+	if launch.Cwd != b.WorkDir {
+		return proxyLaunch{}, files, protocolError()
+	}
 	if _, e = b.serverArgs(launch.Args); e != nil {
 		return proxyLaunch{}, files, protocolError()
 	}
@@ -207,4 +223,28 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	launch.peerPID = pid
 	accepted = true
 	return launch, files, nil
+}
+
+// The authenticated current-source sender observes cwd itself. It accepts no
+// caller-supplied cwd that could repair a foreign native launch. Validate Unix
+// strings before encoding/json can replace invalid UTF-8 with U+FFFD.
+func encodeProxyLaunch(token string, args, env []string) ([]byte, error) {
+	cwd, err := os.Getwd()
+	if err != nil || !utf8.ValidString(cwd) {
+		return nil, protocolError()
+	}
+	total := 0
+	for _, values := range [][]string{args, env} {
+		for _, value := range values {
+			total += len(value)
+			if !utf8.ValidString(value) || total > maxLaunchBytes {
+				return nil, protocolError()
+			}
+		}
+	}
+	payload, err := json.Marshal(proxyLaunch{Version: 1, Token: token, Args: args, Env: env, Cwd: cwd})
+	if err != nil || len(payload) > maxLaunchBytes {
+		return nil, protocolError()
+	}
+	return payload, nil
 }

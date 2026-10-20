@@ -91,7 +91,19 @@ func NewProxyServer(ctx context.Context, b LaunchBinding, c *Coordinator, valida
 	return s, nil
 }
 func (s *ProxyServer) Capability() (socket, token string) { return s.listener.Addr().String(), s.token }
-func (s *ProxyServer) bad()                               { s.mu.Lock(); s.failed = true; s.mu.Unlock(); s.coordinator.Abort() }
+func (s *ProxyServer) bad() {
+	// A forwarding callback may hold the coordinator mutex while blocked in an
+	// actual pipe write. Cancel/close owned I/O before waiting on that mutex.
+	s.cancel()
+	s.listener.Close()
+	s.mu.Lock()
+	s.failed = true
+	for conn := range s.conns {
+		conn.Close()
+	}
+	s.mu.Unlock()
+	s.coordinator.Abort()
+}
 func (s *ProxyServer) handle(conn *net.UnixConn) {
 	defer s.handling.Done()
 	defer func() { conn.Close(); s.mu.Lock(); delete(s.conns, conn); s.mu.Unlock() }()
@@ -259,7 +271,13 @@ func runOwnedServer(ctx context.Context, b LaunchBinding, kind string, env []str
 		}
 		done <- result{kind: "stderr", eof: err == nil, stderr: body.String(), err: err}
 	}()
-	go func() { done <- result{kind: "wait", err: cmd.Wait()} }()
+	go func() {
+		err := cmd.Wait()
+		// A server that exits with native stdin still open did not observe genuine
+		// input EOF. Interrupt that remaining read, so the missing EOF fails promptly.
+		files[0].Close()
+		done <- result{kind: "wait", err: err}
+	}()
 	failed := false
 	for i := 0; i < 4; i++ {
 		v := <-done

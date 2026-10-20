@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,7 +18,20 @@ import (
 // never used by a native scenario or counted as real MCP implementation proof.
 func TestMain(m *testing.M) {
 	if os.Getenv("PYRY_E2EMCP_UNIT_HELPER") == "1" {
-		if len(os.Args) != 4 || os.Args[1] != "mcp-files" || os.Args[2] != "-pyry-socket" {
+		if len(os.Args) != 4 || os.Args[2] != "-pyry-socket" {
+			os.Exit(2)
+		}
+		if os.Getenv("PYRY_E2EMCP_UNIT_PROXY") == "1" && os.Getenv(SocketEnv) != "" {
+			files := [3]*os.File{os.Stdin, os.Stdout, os.Stderr}
+			if os.Getenv("PYRY_E2EMCP_UNIT_BAD_RIGHTS") == "1" {
+				files[0] = os.Stdout
+			}
+			if ProxyCommand(os.Getenv(SocketEnv), os.Getenv(TokenEnv), os.Args[1:], os.Environ(), files) != nil {
+				os.Exit(6)
+			}
+			os.Exit(0)
+		}
+		if os.Args[1] != "mcp-files" {
 			os.Exit(2)
 		}
 		if os.Getenv("PYRY_E2EMCP_UNIT_EARLY_EXIT") == "1" {
@@ -35,7 +49,11 @@ func TestMain(m *testing.M) {
 				continue
 			}
 			response := append([]byte(`{"jsonrpc":"2.0","id":`), f.ID...)
-			response = append(response, []byte(`,"result":{}}`)...)
+			if bytes.Contains(f.Params, []byte(`"unitBackpressure":true`)) {
+				response = append(response, []byte(`,"result":{"text":"`+strings.Repeat("x", 2<<20)+`"}}`)...)
+			} else {
+				response = append(response, []byte(`,"result":{}}`)...)
+			}
 			if WriteLine(os.Stdout, response) != nil {
 				os.Exit(4)
 			}
@@ -171,5 +189,41 @@ func TestRPCEventStringDoesNotHideOrAlterDecodedRaw(t *testing.T) {
 	}
 	if _, err := ParseRPC([]byte(decoded.Raw)); err != nil {
 		t.Fatal("decoded raw unvalidated", err)
+	}
+}
+
+func TestOwnedMCPServerRejectsEarlyExitWithoutNativeInputEOF(t *testing.T) {
+	b := actualUnitBinding(t)
+	c, err := NewCoordinator(func(_ Direction, raw []byte) error { _, err := ParseRPC(raw); return err })
+	if err != nil || c.Register("mcp-files") != nil {
+		t.Fatal("coordinator")
+	}
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outR.Close()
+	defer outW.Close()
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errR.Close()
+	defer errW.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	proof, err := runOwnedServer(ctx, b, "mcp-files", []string{"HOME=" + b.Home, "PYRY_SESSION_ID=" + b.SessionID, "PYRY_E2EMCP_UNIT_HELPER=1", "PYRY_E2EMCP_UNIT_EARLY_EXIT=1"}, [3]*os.File{inR, outW, errW}, c, func([]byte) error { return nil })
+	if err == nil || proof.InputEOF || proof.ExitCode != 0 || ctx.Err() != nil || time.Since(started) > 2*time.Second {
+		t.Fatal("early actual exit accepted or waited for long parent timeout")
+	}
+	if _, err := c.Finish(); err == nil {
+		t.Fatal("missing genuine input EOF sealed")
 	}
 }

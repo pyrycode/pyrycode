@@ -12,7 +12,10 @@ import (
 
 func testLaunch(t *testing.T) LaunchBinding {
 	t.Helper()
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if os.Chmod(home, 0700) != nil || os.Mkdir(filepath.Join(home, "work"), 0700) != nil {
 		t.Fatal("private home")
 	}
