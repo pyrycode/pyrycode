@@ -140,6 +140,29 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 	}
+	if name == "session-rotation" {
+		for _, dir := range []string{"recording-snapshots", "recording-snapshot-inputs"} {
+			if os.Mkdir(filepath.Join(home, dir), 0700) != nil {
+				t.Fatal("cannot prepare native transcript inventory")
+			}
+		}
+		if mode == "replay" {
+			f, err := os.Open(process.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			suite, err := claudetape.DecodeLifecycleSuite(f, profile.Roles)
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, role := range profile.Roles {
+				if suite.Snapshots[role].Save(filepath.Join(home, "recording-snapshot-inputs", role+".json"), home) != nil {
+					t.Fatal("cannot stage reviewed native transcript")
+				}
+			}
+		}
+	}
 	configPath := filepath.Join(home, "daemon-recording.json")
 	wrapper := filepath.Join(home, "recording-bin", "claude")
 	quote := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "'\"'\"'") + "'" }
@@ -347,9 +370,13 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatalf("lifecycle role evidence changed during original cleanup: audit=%v digest_matches=%t", err, digest == receipt.ArtifactSHA256)
 	}
 	if mode == "capture" {
-		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes}
-		if suite.Save(process.Path, profile.Roles) != nil {
-			t.Fatal("cannot publish complete original lifecycle capture")
+		snapshots, _, err := claudetape.ReadLifecycleSnapshots(home, name, revision, sourceSHA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots}
+		if err := suite.Save(process.Path, profile.Roles); err != nil {
+			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}
 	}
 

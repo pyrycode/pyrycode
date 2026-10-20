@@ -712,3 +712,72 @@ run the production descendant reaper against an actual detached owned witness,
 then signal the provider while holding its stdin open, proving that the external
 broker survives both native capture and offline replay teardown. Stderr bytes belong to the saved prefix; their separate diagnostic
 stream order is not an asserted deletion property.
+
+## Session rotation and native transcript snapshots
+
+`session-rotation` runs the original new-session root, including its repeated
+control sends, persisted fresh identity, settled registry, transition attribution,
+second user-send acknowledgement and coexistence of the two physical JSONL files.
+A typed `lifecycle_rotate` checkpoint orders the unchanged first rotation send.
+The bootstrap journal stays strict through subsequent wrap-up and control traffic
+until its actual output EOF. The successor may register only against the current
+persisted conversation, after the actual predecessor PID is gone and its owned
+broker has published a successful terminal receipt. The successor uses the
+original fresh-session argv; resume or extra unknown launches fail the closed
+role audit. Its prefix seals alive before unchanged daemon cleanup.
+
+The transcript assertions use complete point-in-time native JSONL snapshots.
+Capture reads a stable private file through descriptor-anchored, no-symlink HOME
+traversal. It retains raw JSONL bytes, record order, whitespace, Unicode escaping,
+numeric formatting and mode. Only top-level session identity tokens and declared
+HOME path tokens bind. Nested IDs, message prose and unrelated bytes stay literal.
+Duplicate keys, secrets, ambiguous reserved markers, incomplete records, foreign
+identities, public files and expansion beyond eight MiB fail closed.
+
+Replay stages the reviewed snapshot carrier privately. It installs each native
+file exclusively only after the strict matching original user request has reached
+that role's provider boundary. The original physical-file assertions then run.
+A private stage binds the exact snapshot digest to the current owner, broker,
+source binary, revision and user sequence. Both sides of daemon cleanup validate
+the full private snapshot inventory and require the native file still to contain
+the complete saved prefix. Later native appends are allowed; rewriting the saved
+prefix is not. Fixtures contain captured native outputs, so fresh captures compare
+all outgoing requests while independently validating their own transcript witness.
+Current provider transcript creation, rotation interpretation and signal behavior
+remain covered by the retained original live root.
+
+`clear-wrapup-skipped` adds the original bounded `/clear` root. Its bootstrap,
+actually revived bound conversation and fresh successor have three closed roles.
+The original seeded UUIDs stay distinct. Both conversation launches must match
+the current persisted binding; the successor also requires the actual predecessor
+PID to be gone and its external broker to have finished. A typed rotation
+checkpoint precedes the unchanged `/clear` send. The production one-millisecond
+wrap-up bound, reset-edge assertions, transition counts, eight-second quiet
+window and seeded-note byte comparison still run. The recording boundary also
+checks the complete literal successor prompt. No
+note or file is synthesized for this root. Bootstrap and successor remain alive
+until the original daemon cleanup; the bound predecessor journals all traffic
+through its actual output EOF.
+
+`clear-reset` runs the original successful `/clear` root with the same three
+owned roles and distinct original seed IDs. The original planted build tag uses
+the existing deterministic recording nonce hook. All original precondition,
+reset-edge, fresh-ID attribution and successor recall assertions remain intact.
+Both capture and replay deliver the complete literal appended prompt and check
+its mode. The recorded fixture retains every native wrap-up output byte and the
+complete successor input file.
+
+Fresh capture comparison handles this one output-to-input dependency explicitly.
+The actual production stream parser derives the successful wrap-up text from the
+first user turn after the typed predecessor rotation checkpoint. Only its text
+chunks before the successful terminal event may contribute; missing, failed,
+ambiguous, multiple-user or oversized notes fail closed. The successor's full
+captured prompt must contain exactly one complete production-fenced copy of that
+same note. Suite decoding validates this causal edge. Comparison then operates
+on a copy, binding only that exact fenced note to its fixed predecessor role.
+Every surrounding prompt byte, file mode, argv, original user request and control
+request stays strict. Stored fixtures are never rewritten by the comparator,
+and replay continues checking complete literal prompt files. Different model
+notes can therefore compare only when each is the precise predecessor output
+that actually reached its own successor. A foreign note, omitted note, duplicate
+fence, changed prompt header or changed mode still fails.

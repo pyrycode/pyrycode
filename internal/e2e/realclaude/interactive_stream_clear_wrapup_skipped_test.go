@@ -163,14 +163,8 @@ const skipWindowQuiet = 8 * time.Second
 func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	runParallel(t)
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
+	var err error
 
 	// Isolated workdir under the authenticated HOME: guarantees the fresh-daemon state
 	// and sidesteps the shared-session-folder collision (#828) by construction.
@@ -227,6 +221,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	t.Cleanup(func() { finishDaemonRecording(t) })
 
 	var reqID uint64 = 2
 	plantReqID := reqID
@@ -250,6 +245,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// and the intercept sits below Route, so the id crossing into the reset is this
 	// registry key with its live binding.
 	w := newResetWindow()
+	lifecycleRecordingBeforeReset(t, home)
 	sealSendMessage(t, phone, initSend, clearReqID, skipConvID, "m-clear", "/clear")
 
 	// --- AC 2: the four frames, with `skipped` on the phase change -------------
@@ -429,6 +425,7 @@ func spawnBootstrapDaemonWithWrapUpBound(t *testing.T, home, workdir, claudeBin,
 	t.Helper()
 	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
 	socket := shortSocketPath(t)
+	daemonRecordingRegisterSocket(t, home, bin, socket)
 	stderr := &lockedBuffer{}
 
 	args := []string{

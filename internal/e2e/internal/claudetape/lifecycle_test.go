@@ -155,7 +155,7 @@ func waitLifecycleProbe(t *testing.T, path string, target any) {
 func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 	producer := Producer{Revision: strings.Repeat("a", 40), BinarySHA256: strings.Repeat("b", 64), ClaudeVersion: "test-owned", CapturedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	saved := map[string]*LifecycleTape{}
-	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-seal-reap", "replay-seal-reap", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
+	for _, variant := range []string{"capture", "replay", "capture-eof", "replay-eof", "capture-seal", "replay-seal", "capture-seal-kill", "replay-seal-kill", "capture-seal-reap", "replay-seal-reap", "capture-rotate-reap", "replay-rotate-reap", "capture-delete", "replay-delete", "capture-delete-partial", "replay-delete-partial", "delete-without-checkpoint", "unauthorized-kill", "foreign-pid", "partial-input", "changed-input", "abort"} {
 		t.Run(variant, func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, 0700); err != nil {
@@ -169,6 +169,10 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			if strings.Contains(variant, "-delete") || variant == "delete-without-checkpoint" {
 				c.End = "delete-conversation"
 				c.Scenario = "conversation-lifecycle-created-1"
+			}
+			if strings.Contains(variant, "-rotate") {
+				c.End = "rotate-session"
+				c.Scenario = "session-rotation-bootstrap"
 			}
 			if variant == "abort" {
 				c.Abort = filepath.Join(root, "abort")
@@ -190,7 +194,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			jobPath := filepath.Join(root, "job.json")
 			job := lifecycleProbeJob{Config: c, Root: root}
 			var server *LifecycleBrokerServer
-			if strings.HasSuffix(variant, "-seal-reap") {
+			if strings.HasSuffix(variant, "-reap") {
 				job.Config.BrokerParentPID = os.Getpid()
 				c.BrokerParentPID = os.Getpid()
 				// macOS limits Unix socket paths to104bytes; TempDir names may be long.
@@ -269,14 +273,14 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("provider was not exec at daemon-owned PID")
 				}
 			}
-			if (c.End == "kill" || c.End == "delete-conversation") && variant != "unauthorized-kill" && variant != "abort" && variant != "delete-without-checkpoint" {
+			if (c.End == "kill" || LifecycleAction(c.End) != "") && variant != "unauthorized-kill" && variant != "abort" && variant != "delete-without-checkpoint" {
 				pid := cmd.Process.Pid
 				if variant == "foreign-pid" {
 					pid++
 				}
 				action := LifecycleKill{PID: pid, Signal: func() string {
-					if c.End == "delete-conversation" {
-						return "delete-conversation"
+					if LifecycleAction(c.End) != "" {
+						return c.End
 					}
 					return "SIGKILL"
 				}()}
@@ -330,14 +334,14 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal(e)
 				}
 			}
-			if c.End == "delete-conversation" && variant != "delete-without-checkpoint" {
+			if LifecycleAction(c.End) != "" && variant != "delete-without-checkpoint" {
 				var ack LifecycleKill
 				waitLifecycleProbe(t, c.Kill+".ready", &ack)
-				if ack.PID != cmd.Process.Pid || ack.Signal != "delete-conversation" {
+				if ack.PID != cmd.Process.Pid || ack.Signal != c.End {
 					t.Fatal("foreign original action ack")
 				}
 			}
-			if c.End == "delete-conversation" && variant != "delete-without-checkpoint" {
+			if LifecycleAction(c.End) != "" && variant != "delete-without-checkpoint" {
 				// A metadata deletion leaves the native child alive. Its later
 				// output and requests stay inside the strict journal until seal.
 				if cmd.Process.Signal(syscall.Signal(0)) != nil {
@@ -371,7 +375,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("broker ended before original cleanup")
 				}
 			}
-			if strings.HasSuffix(variant, "-seal-reap") {
+			if strings.HasSuffix(variant, "-reap") {
 				if mode == "capture" {
 					var sentinelPID int
 					waitLifecycleProbe(t, filepath.Join(root, "sentinel-pid.json"), &sentinelPID)
@@ -411,7 +415,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			}
 			e = cmd.Wait()
 			_ = in.Close()
-			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil && !strings.HasSuffix(variant, "-seal-kill") && !strings.HasSuffix(variant, "-seal-reap") {
+			if (c.End == "seal" || c.End == "eof" || (c.End == "delete-conversation" && variant != "delete-without-checkpoint")) && e != nil && !strings.HasSuffix(variant, "-seal-kill") && !strings.HasSuffix(variant, "-reap") {
 				t.Fatal("original stdin EOF did not shut down owned process", e)
 			}
 			if c.End == "kill" && variant != "changed-input" {
@@ -420,7 +424,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 					t.Fatal("original kill did not terminate ownedPID")
 				}
 			}
-			if strings.HasSuffix(variant, "-seal-reap") {
+			if strings.HasSuffix(variant, "-reap") {
 				status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
 				if e == nil || !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 					t.Fatal("original owner signal boundary changed")
@@ -437,7 +441,7 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 			}
 			if want {
 				wantFrames := 2
-				if c.End == "delete-conversation" {
+				if LifecycleAction(c.End) != "" {
 					wantFrames = 5
 				}
 				if r.Frames != wantFrames {

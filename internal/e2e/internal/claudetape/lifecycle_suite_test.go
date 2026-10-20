@@ -267,3 +267,55 @@ func TestLifecycleLaunchRequiresKernelPeerAndClosedCurrentJob(t *testing.T) {
 		})
 	}
 }
+
+func TestSkippedResetRolesPreserveDistinctBootstrapAndBoundIdentity(t *testing.T) {
+	home := t.TempDir()
+	valid := LifecycleRoleBinding{Role: "bound", SessionID: LifecycleSkipSession, ConversationID: LifecycleSkipConversation, WorkDir: filepath.Join(home, "work")}
+	if !validLifecycleRoleBinding(home, "clear-wrapup-skipped", "bound", valid) {
+		t.Fatal("fixed original bound identity rejected")
+	}
+	for _, kind := range []string{"wrong-session", "wrong-conversation", "bootstrap-reuse", "successor-reuse", "foreign-workdir"} {
+		t.Run(kind, func(t *testing.T) {
+			b := valid
+			role := "bound"
+			switch kind {
+			case "wrong-session":
+				b.SessionID = "11111111-1111-4111-8111-111111111111"
+			case "wrong-conversation":
+				b.ConversationID = "11111111-1111-4111-8111-111111111111"
+			case "bootstrap-reuse":
+				b.SessionID = LifecycleSkipBootstrap
+			case "successor-reuse":
+				b.Role = "rotated"
+				role = "rotated"
+			case "foreign-workdir":
+				b.WorkDir = home
+			}
+			if validLifecycleRoleBinding(home, "clear-wrapup-skipped", role, b) {
+				t.Fatal("rebound original reset identity accepted")
+			}
+		})
+	}
+	original := lifecycleSuiteControl()
+	suite := &LifecycleSuite{Version: 1, Scenario: "clear-wrapup-skipped", Producer: original.Producer, DaemonSHA256: original.DaemonSHA256, Roles: map[string]*LifecycleTape{}}
+	for _, role := range LifecycleProfiles()[suite.Scenario].Roles {
+		raw, _ := json.Marshal(original.Roles["bootstrap"])
+		var tape LifecycleTape
+		_ = json.Unmarshal(raw, &tape)
+		tape.End = LifecycleEnd(suite.Scenario, role)
+		tape.Tape.Scenario = suite.Scenario + "-" + role
+		if role == "bound" {
+			tape.Tape.Version = 2
+			tape.Tape.Frames = append(tape.Tape.Frames, Frame{Direction: ClientCheckpointDirection, Data: json.RawMessage(`{"type":"client_checkpoint","sequence":1,"action":"lifecycle_rotate","conversation_id":"${LIFECYCLE_CONVERSATION}"}`)})
+		}
+		suite.Roles[role] = &tape
+	}
+	roles := LifecycleProfiles()[suite.Scenario].Roles
+	if err := suite.Validate(roles); err != nil {
+		t.Fatal("valid complete three-role reset", err)
+	}
+	delete(suite.Roles, "rotated")
+	if err := suite.Validate(roles); err == nil {
+		t.Fatal("reset without actual successor accepted")
+	}
+}

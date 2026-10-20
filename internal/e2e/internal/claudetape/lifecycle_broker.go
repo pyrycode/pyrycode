@@ -23,7 +23,7 @@ type LifecycleTape struct {
 }
 
 func (t *LifecycleTape) Validate() error {
-	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
+	if t == nil || t.Version != 1 || t.Tape == nil || (t.End != "kill" && t.End != "seal" && t.End != "eof" && t.End != "delete-conversation" && t.End != "rotate-session") || len(t.Stderr) > MaxBytes || Safe([]byte(t.Stderr)) != nil {
 		return errors.New("invalid lifecycle tape")
 	}
 	raw, err := json.Marshal(t.Tape)
@@ -91,7 +91,8 @@ type LifecycleBrokerConfig struct {
 	BrokerParentPID  int
 	Deadline         time.Time
 	End, Kill, Abort string
-	OnSeal           func(int) error `json:"-"`
+	OnSeal           func(int) error    `json:"-"`
+	OnInput          func([]byte) error `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -108,7 +109,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if c.BrokerParentPID != 0 {
 		parent = c.BrokerParentPID
 	}
-	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation") {
+	if c.OwnerPID <= 1 || parent <= 1 || os.Getppid() != parent || (c.Mode != "capture" && c.Mode != "replay") || (c.End != "kill" && c.End != "seal" && c.End != "eof" && c.End != "delete-conversation" && c.End != "rotate-session") {
 		return 0, fail
 	}
 	defer func() {
@@ -143,7 +144,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	var player *Player
 	if c.Mode == "capture" {
 		version := 1
-		if c.End == "delete-conversation" {
+		if LifecycleAction(c.End) != "" {
 			version = 2
 		}
 		tape = &LifecycleTape{Version: 1, Tape: &Tape{Version: version, Scenario: c.Scenario, Producer: c.Producer, Args: binding.Args(), Files: files}, End: c.End}
@@ -259,6 +260,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if e = write(originals[3], append(raw, '\n')); e != nil {
 				return fail
 			}
+			if c.OnInput != nil {
+				if e := c.OnInput(normalized); e != nil {
+					return e
+				}
+			}
 			for _, v := range released {
 				if e = writeOutput(v); e != nil {
 					return e
@@ -276,7 +282,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if direction == "stdin" {
 			target = originals[3]
 		}
-		return write(target, append(raw, '\n'))
+		if err := write(target, append(raw, '\n')); err != nil {
+			return err
+		}
+		if direction == "stdin" && c.OnInput != nil {
+			return c.OnInput(normalized)
+		}
+		return nil
 	}
 	read := func(fd int, pending *[]byte, eof *bool, direction string) error {
 		if *eof {
@@ -354,15 +366,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		d := json.NewDecoder(bytes.NewReader(raw))
 		d.DisallowUnknownFields()
 		return uniqueSuiteKeys(raw) && d.Decode(&k) == nil && d.Decode(new(any)) == io.EOF && k.PID == c.OwnerPID && k.Signal == func() string {
-			if c.End == "delete-conversation" {
-				return "delete-conversation"
+			if LifecycleAction(c.End) != "" {
+				return c.End
 			}
 			return "SIGKILL"
 		}()
 	}
 
 	observeAction = func() error {
-		if c.End != "delete-conversation" || actionAccepted {
+		if LifecycleAction(c.End) == "" || actionAccepted {
 			return nil
 		}
 		if _, err := os.Lstat(c.Kill); os.IsNotExist(err) {
@@ -377,7 +389,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if player != nil && (player.next >= len(player.tape.Frames) || player.tape.Frames[player.next].Direction != ClientCheckpointDirection) {
 			return nil
 		}
-		checkpoint, _ := json.Marshal(ClientCheckpoint{Type: ClientCheckpointDirection, Sequence: 1, Action: "lifecycle_delete", ConversationID: "${LIFECYCLE_CONVERSATION}"})
+		checkpoint, _ := json.Marshal(ClientCheckpoint{Type: ClientCheckpointDirection, Sequence: 1, Action: LifecycleAction(c.End), ConversationID: "${LIFECYCLE_CONVERSATION}"})
 		if player != nil {
 			released, err := player.Action(checkpoint)
 			if err != nil {
@@ -397,13 +409,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 		frames++
 		actionAccepted = true
-		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: "delete-conversation"}); err != nil {
+		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
 		return nil
 	}
 	finish := func() (int, error) {
-		if c.End == "delete-conversation" && !actionAccepted {
+		if LifecycleAction(c.End) != "" && !actionAccepted {
 			return frames, errors.New("missing original delete checkpoint")
 		}
 		if len(pendingInput) != 0 || len(pendingOutput) != 0 {
@@ -460,14 +472,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if c.End == "eof" && inputEOF && outputEOF && stderrEOF {
 			return finish()
 		}
-		if c.End == "kill" && outputEOF && stderrEOF {
+		if (c.End == "kill" || c.End == "rotate-session") && outputEOF && stderrEOF {
 			if !authorizedKill() {
 				return frames, errors.New("provider ended without original owned kill")
 			}
 			return finish()
 		}
 		if _, e := os.Lstat(c.Finish); e == nil {
-			if (c.End != "seal" && c.End != "delete-conversation") || outputEOF || stderrEOF || inputEOF {
+			if !LifecycleSeals(c.End) || outputEOF || stderrEOF || inputEOF {
 				return frames, errors.New("provider not live at prefix seal")
 			}
 			if c.OnSeal == nil {
@@ -484,7 +496,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			sealDeadline = time.Now().Add(30 * time.Second)
 			continue
 		}
-		if (outputEOF || stderrEOF || inputEOF) && (c.End == "seal" || c.End == "delete-conversation") {
+		if (outputEOF || stderrEOF || inputEOF) && LifecycleSeals(c.End) {
 			return frames, errors.New("provider ended before prefix seal")
 		}
 		time.Sleep(5 * time.Millisecond)

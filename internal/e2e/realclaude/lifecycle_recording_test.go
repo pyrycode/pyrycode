@@ -191,23 +191,38 @@ func finishLifecycleRecording(t *testing.T) {
 	}
 	profile := claudetape.LifecycleProfiles()[c.Process.Scenario]
 	for _, role := range profile.Roles {
-		job, err := readLifecycleJob(filepath.Join(c.Process.Home, "recording-children", role+".job"))
-		if err != nil || job.Config.OwnerPID <= 1 || syscall.Kill(job.Config.OwnerPID, 0) != nil {
-			t.Fatal("owned provider was not alive at original prefix seal")
+		prefix := filepath.Join(c.Process.Home, "recording-children", role)
+		job, err := readLifecycleJob(prefix + ".job")
+		if err != nil || job.Config.OwnerPID <= 1 {
+			t.Fatal("missing lifecycle producer")
+		}
+		if claudetape.LifecycleSeals(job.Config.End) {
+			if syscall.Kill(job.Config.OwnerPID, 0) != nil {
+				t.Fatal("owned provider was not alive at original prefix seal")
+			}
+		} else {
+			_ = waitLifecycleReceipt(t, prefix+".receipt")
+			if syscall.Kill(job.Config.OwnerPID, 0) != syscall.ESRCH {
+				t.Fatal("original rotation left its predecessor running")
+			}
+			if claudetape.PublishLifecycleControl(prefix+".stopped", claudetape.LifecycleStopObservation{PID: job.Config.OwnerPID, Kind: "not-running"}) != nil {
+				t.Fatal("rotation stop witness repeated")
+			}
 		}
 	}
-
 	if daemonRecordingWrite(c.Process.Finish, struct{}{}) != nil {
 		t.Fatal("lifecycle prefix seal repeated")
 	}
 	for _, role := range profile.Roles {
-		_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", role+".prefix"))
+		if claudetape.LifecycleSeals(claudetape.LifecycleEnd(c.Process.Scenario, role)) {
+			_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", role+".prefix"))
+		}
 	}
 	digest, _, e := claudetape.AuditLifecycleArtifacts(c.Process.Home, c.Process.Scenario, poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256, c.BrokerParentPID, false)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if daemonRecordingWrite(c.Receipt, daemonRecordingReceipt{Success: true, Frames: 2, ArtifactSHA256: digest}) != nil {
+	if daemonRecordingWrite(c.Receipt, daemonRecordingReceipt{Success: true, Frames: len(profile.Roles), ArtifactSHA256: digest}) != nil {
 		t.Fatal("lifecycle root receipt repeated")
 	}
 }
@@ -253,10 +268,27 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 			session = args[i+1]
 		}
 	}
-	role := daemonRecordingRole{Role: "bootstrap", SessionID: claudetape.LifecycleBootstrapSession, WorkDir: c.Process.WorkDir}
-	if session != claudetape.LifecycleBootstrapSession {
-		if daemonRecordingRead(filepath.Join(c.Process.Home, "recording-roles", "created-1.json"), &role) != nil || role.Role != "created-1" || role.SessionID != session {
+	var role claudetape.LifecycleRoleBinding
+	if _, _, _, reset := claudetape.LifecycleResetSeeds(c.Process.Scenario); reset {
+		role, e = lifecycleRecordingResetRole(c, session)
+		if e != nil {
 			fail()
+		}
+	} else if c.Process.Scenario == "session-rotation" {
+		role, e = lifecycleRecordingRotationRole(c, session)
+		if e != nil {
+			fail()
+		}
+	} else {
+		role, e = claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, "bootstrap")
+		if e != nil {
+			fail()
+		}
+		if session != role.SessionID {
+			role, e = claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, "created-1")
+			if e != nil || role.SessionID != session {
+				fail()
+			}
 		}
 	}
 	if session == "" || os.Getenv("HOME") != c.Process.Home {
@@ -316,6 +348,7 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		return r
 	}
 	job.Config.OnSeal = func(n int) error { return daemonRecordingWrite(prefix+".prefix", receipt(n, nil)) }
+	job.Config.OnInput = lifecycleRecordingInputWitness(job, c.Process.Home, c.Process.Scenario)
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
 	if daemonRecordingWrite(prefix+".receipt", receipt(n, e)) != nil {
 		os.Exit(2)
