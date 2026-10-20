@@ -814,13 +814,56 @@ native appends may extend the saved prefix but cannot rewrite it. Current Claude
 writing, actual reload and semantic recall remain obligations of the retained
 original live root.
 
-The idle-resume profile also permits up to two finite suggestion workers, one
-per completed original turn. The first native resume attempt exposed an unowned
+The idle-resume profile permits at most two finite suggestion-worker attempts,
+one per completed original turn; proved cancelled launches consume this same
+allowance. The first native resume attempt exposed an unowned
 invocation during its unchanged five-second idle window. That attempt failed the
 strict cleanup inventory and produced no accepted fixture; its stream receipts
 alone do not count as coverage. The generic failure marker does not prove the
 invocation's argv or count. The production two-second suggestion timeout is the
 source-supported path that the new finite-worker boundary must observe directly.
+
+The demonstrated Linux cancellation boundary lies between production launch and
+helper job registration. Helper startup and source-binary hashing precede
+exclusive job publication: production can cancel and complete its real Wait
+without any registered job or native exchange. The retained diagnostic observed
+two such launches, absent registration and one completed group-cancellation
+SIGKILL Wait for each, while the original root passed and the old outer inventory
+failed at `total-wait-cardinality`. See the
+[revision-bound Linux evidence](../../internal/e2e/testdata/3667-cancelled-worker-evidence.json).
+
+`StartFallbackLaunchAudit` begins immediately after the outer-owned command
+starts. It binds that actual command to the current outer process, then retains
+and rechecks the complete current kernel ancestry from the daemon through that
+command to the outer process, including PID, start identity, parent and process
+group. A file-supplied daemon PID only selects a candidate; it cannot authorize
+one. Each observed helper must be that daemon's direct child, lead its own group,
+use the current helper executable and exact closed invocation/print argv, and
+have the private empty temporary cwd. The audit also binds home, scenario, source
+revision and binary hash. Missed observations remain unknown. Unknown
+registration or previously observed registration cannot become absent merely
+because a job is missing later.
+
+After original daemon cleanup, `ReadLifecycleWorkers` joins every registered
+exchange and independently proved cancelled launch to exactly one actual
+production Wait. A jobless cancelled launch requires observed absent
+registration, completed Wait and exit observations, real group cancellation with
+SIGKILL, and both process and group death. Unknown, duplicate, foreign or unjoined
+evidence fails; a Wait alone supplies no launch authority. Such a launch creates
+no job, tape, native receipt or reviewed exchange. For session-resume replay with
+zero reviewed workers, a helper reaching this branch stays silent without
+starting a broker or publishing a job; it must receive actual production
+cancellation or fail after its bounded 45-second hold. Replay still requires
+exactly the reviewed native exchanges, including an exactly empty inventory.
+
+The sampler sends no signals and joins before inventory or diagnostic reads.
+Failed original roots still retain production Wait observations after daemon
+stop. Set `PYRY_CLAUDE_TAPE_EVIDENCE` to a private directory outside disposable
+test homes to retain the bounded, content-free `session-resume-launch-audit.json`
+alongside failure diagnostics. This accounting preserves original assertions,
+timers and bounded cleanup; registered workers retain all source/peer identity,
+literal I/O/EOF and receipt checks below. Other platforms retain strict existing
+accounting without the Linux launch observations.
 
 Finite workers use a separate kernel-authenticated pipe broker owned by the
 outer test parent. That broker starts and waits the actual native child in the
