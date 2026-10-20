@@ -148,3 +148,63 @@ func TestCoordinatorRejectsFailedOrUnclosedActualForwards(t *testing.T) {
 type shortWriter struct{}
 
 func (shortWriter) Write(raw []byte) (int, error) { return len(raw) - 1, nil }
+
+func TestCoordinatorPrefixCannotSubstituteForTerminalEOFAndWait(t *testing.T) {
+	c := newTestCoordinator(t)
+	forwardHandshake(t, c)
+	prefix, err := c.Checkpoint()
+	if err != nil || len(prefix) != 3 {
+		t.Fatal("pending-empty prefix", err)
+	}
+	if c.sessions["current-epoch/files"].closed {
+		t.Fatal("prefix fabricated process closure")
+	}
+	if c.CloseRPC("current-epoch/files", true, true, nil) != nil {
+		t.Fatal("actual post-prefix close")
+	}
+	terminal, err := c.Finish()
+	if err != nil || len(terminal) != len(prefix) {
+		t.Fatal("terminal", err)
+	}
+	for i := range prefix {
+		if prefix[i] != terminal[i] {
+			t.Fatal("terminal changed sealed protocol prefix")
+		}
+	}
+	for _, mutation := range []string{"pending", "new-frame", "new-process", "native-input", "native-output", "missing-actual-close", "duplicate-checkpoint"} {
+		t.Run(mutation, func(t *testing.T) {
+			c := newTestCoordinator(t)
+			forwardHandshake(t, c)
+			if mutation == "pending" {
+				if c.ForwardRPC("current-epoch/files", ClientToServer, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), func([]byte) error { return nil }) != nil {
+					t.Fatal("pending request")
+				}
+				if _, err := c.Checkpoint(); err == nil {
+					t.Fatal("pending prefix accepted")
+				}
+				return
+			}
+			if _, err := c.Checkpoint(); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch mutation {
+			case "new-frame":
+				err = c.ForwardRPC("current-epoch/files", ClientToServer, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), func([]byte) error { t.Fatal("post-prefix frame forwarded"); return nil })
+			case "new-process":
+				err = c.Register("foreign")
+			case "native-input":
+				err = c.NativeInput(false, func() error { t.Fatal("post-prefix input forwarded"); return nil })
+			case "native-output":
+				err = c.NativeOutput(func() error { t.Fatal("post-prefix output forwarded"); return nil })
+			case "missing-actual-close":
+				_, err = c.Finish()
+			case "duplicate-checkpoint":
+				_, err = c.Checkpoint()
+			}
+			if err == nil {
+				t.Fatal("prefix lifecycle violation accepted")
+			}
+		})
+	}
+}

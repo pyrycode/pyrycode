@@ -25,13 +25,13 @@ type RPCEvent struct {
 // Validation is supplied by the owner, including privacy and exact profile
 // bindings. This primitive does not authorize processes or perform tool work.
 type Coordinator struct {
-	mu                  sync.Mutex
-	failed, closed      bool
-	input, user, stdout int
-	bytes               int
-	events              []RPCEvent
-	sessions            map[string]*RPCSession
-	validate            func(Direction, []byte) error
+	mu                           sync.Mutex
+	failed, closed, checkpointed bool
+	input, user, stdout          int
+	bytes                        int
+	events                       []RPCEvent
+	sessions                     map[string]*RPCSession
+	validate                     func(Direction, []byte) error
 }
 
 func NewCoordinator(validate func(Direction, []byte) error) (*Coordinator, error) {
@@ -46,7 +46,7 @@ func NewCoordinator(validate func(Direction, []byte) error) (*Coordinator, error
 func (c *Coordinator) Register(connection string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || c.closed || connection == "" || len(connection) > 128 || c.sessions[connection] != nil || len(c.sessions) >= 8 {
+	if c.failed || c.closed || c.checkpointed || connection == "" || len(connection) > 128 || c.sessions[connection] != nil || len(c.sessions) >= 8 {
 		return c.reject()
 	}
 	c.sessions[connection] = NewRPCSession()
@@ -62,7 +62,7 @@ func (c *Coordinator) reject() error {
 func (c *Coordinator) NativeInput(user bool, forward func() error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || c.closed || forward == nil {
+	if c.failed || c.closed || c.checkpointed || forward == nil {
 		return c.reject()
 	}
 	if err := forward(); err != nil {
@@ -77,7 +77,7 @@ func (c *Coordinator) NativeInput(user bool, forward func() error) error {
 func (c *Coordinator) NativeOutput(forward func() error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.failed || c.closed || forward == nil {
+	if c.failed || c.closed || c.checkpointed || forward == nil {
 		return c.reject()
 	}
 	if err := forward(); err != nil {
@@ -95,7 +95,7 @@ func (c *Coordinator) ForwardRPC(connection string, direction Direction, wire []
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	session := c.sessions[connection]
-	if c.failed || c.closed || session == nil || forward == nil || len(c.events) >= MaxRPCFrames || len(wire) > MaxFrameBytes-c.bytes || c.validate(direction, wire) != nil {
+	if c.failed || c.closed || c.checkpointed || session == nil || forward == nil || len(c.events) >= MaxRPCFrames || len(wire) > MaxFrameBytes-c.bytes || c.validate(direction, wire) != nil {
 		return c.reject()
 	}
 	trial := cloneSession(session)
@@ -177,3 +177,21 @@ func WriteLine(w io.Writer, raw []byte) error {
 
 // Abort prevents a failed runtime transfer or child from leaving sealable evidence.
 func (c *Coordinator) Abort() { c.mu.Lock(); defer c.mu.Unlock(); c.failed = true }
+
+// Checkpoint freezes a pending-empty protocol prefix while the native owner is
+// still alive. It proves no process termination. CloseRPC and Finish must later
+// join actual EOF/Wait, and runtime must compare both complete event digests.
+func (c *Coordinator) Checkpoint() ([]RPCEvent, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failed || c.closed || c.checkpointed || len(c.sessions) == 0 {
+		return nil, c.reject()
+	}
+	for _, session := range c.sessions {
+		if session.failed || !session.initialized || !session.initializedNotification || len(session.pending) != 0 {
+			return nil, c.reject()
+		}
+	}
+	c.checkpointed = true
+	return append([]RPCEvent(nil), c.events...), nil
+}
