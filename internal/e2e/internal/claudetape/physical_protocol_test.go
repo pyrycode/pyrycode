@@ -146,6 +146,10 @@ func TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease(t 
 	physicalProtocolJSON(t, p, physicalProtocolRoster("background-task"))
 	physicalProtocolJSON(t, p, physicalProtocolStart("background-tool", "background-task"))
 	physicalProtocolJSON(t, p, map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "The controlled background task started."})
+	beforeContext := len(p.facts)
+	if p.BeforeInput([]byte(`{"type":"control_request","request_id":"native-context-after-setup","request":{"subtype":"get_context_usage"}}`)) != nil || len(p.facts) != beforeContext || len(p.controlIDs) != 0 || !p.operations[0].owned.Running() || !p.setupCompleted {
+		t.Fatal("automatic context request changed physical proof")
+	}
 	physicalProtocolArm(t, p, "composer-foreground")
 	foreground := physicalQuote(filepath.Join(home, "work", "foreground-started"))
 	released := physicalQuote(filepath.Join(home, "work", "foreground-released"))
@@ -173,7 +177,7 @@ func TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease(t 
 	}
 }
 func TestPhysicalProtocolRejectsUnownedOrPrematureEvidence(t *testing.T) {
-	for _, kind := range []string{"foreign-task", "terminal-before-stop", "omission-before-stop", "duplicate-tool", "child-tool", "malformed-parent", "duplicate-task", "changed-tool-join", "extra-control-selector", "abort", "post-close"} {
+	for _, kind := range []string{"foreign-task", "terminal-before-stop", "omission-before-stop", "duplicate-tool", "child-tool", "malformed-parent", "duplicate-task", "changed-tool-join", "extra-control-selector", "context-usage-selector", "abort", "post-close"} {
 		t.Run(kind, func(t *testing.T) {
 			p, _, release := physicalProtocolStopRig(t)
 			defer release()
@@ -210,6 +214,8 @@ func TestPhysicalProtocolRejectsUnownedOrPrematureEvidence(t *testing.T) {
 				err = p.BeforeOutput(raw)
 			case "extra-control-selector":
 				err = p.BeforeInput([]byte(`{"type":"control_request","request_id":"stop","request":{"subtype":"stop_task","task_id":"held-task","pid":1}}`))
+			case "context-usage-selector":
+				err = p.BeforeInput([]byte(`{"type":"control_request","request_id":"context","request":{"subtype":"get_context_usage","task_id":"held-task"}}`))
 			case "abort":
 				ctx, cancel := context.WithCancel(context.Background())
 				p.ctx = ctx

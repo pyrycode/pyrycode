@@ -376,6 +376,16 @@ func (p *PhysicalReplayProtocol) BeforeInput(raw []byte) error {
 	if header.Type != "control_request" {
 		return nil
 	}
+	if header.Request.Subtype == "get_context_usage" {
+		// Production requests this after each TurnEnd. Its exact non-actuating
+		// envelope must pass without changing operation ownership or status.
+		expected := map[string]any{"type": "control_request", "request_id": header.RequestID, "request": map[string]any{"subtype": "get_context_usage"}}
+		var actual map[string]any
+		if header.RequestID == "" || len(header.RequestID) > 256 || json.Unmarshal(raw, &actual) != nil || !reflect.DeepEqual(expected, actual) {
+			return p.reject()
+		}
+		return nil
+	}
 	if header.Request.Subtype != "stop_task" && header.Request.Subtype != "interrupt" {
 		if p.users > 0 {
 			return p.reject()
