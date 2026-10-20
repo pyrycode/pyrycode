@@ -1407,6 +1407,11 @@
     ],
     "fallback-suggestion": [
       "fallback-suggestion"
+    ],
+    "conversation-followups": [
+      "conversation-system-prompt",
+      "conversation-active-switch",
+      "fallback-suggestion"
     ]
   },
   "reviews": {
