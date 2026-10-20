@@ -348,6 +348,43 @@ only reasonable response in test code is to abort.
 | SIGKILL grace expires | `t.Logf` warning |
 | `os.Remove(socket)` post-kill | best-effort, ignore err |
 
+## Recorded lifecycle timing and settlement
+
+`TestRecordedClaude` runs the original scenario assertions through recorded
+transport. `RunLifecycleBroker` keeps real input pipes and owned processes in
+replay. Its readiness origin is established after startup validation; a causal
+user/input epoch is recorded after successful input forwarding, before completion
+observation and `OnInput` witness work. Subsequent outputs reuse their recorded
+anchor and absolute offset. Re-anchoring an existing phase, compressing gaps or
+retiming a fixture would erase the timing assertion.
+
+`waitLifecycleOutput` checks the absolute due time before and after waiting;
+`forwardLifecycleOutput` checks again after forwarding. All three retain the
+100 ms allowance, and the actual pipe write deadline is capped at due + 100 ms.
+Late input, scheduler overshoot and final-write backpressure must still fail.
+`TestLifecycleTimelineUsesAbsoluteDueTimes`,
+`TestLifecycleTimelineRejectsLateFinalForward`,
+`TestLifecycleInputTimelineBindsActualPrecedingUser` and
+`TestLifecycleInputTimelineDoesNotResetAnExistingUserPhase` cover these boundaries
+and stale/future anchors.
+
+For the two conversation scenarios, `NewConversationCompletionObserver` collects
+every successfully forwarded frame in capture and replay, but calls
+`completedConversationExchange` only at a stdout `result` before publication.
+The cheap result-header check only admits full validation: failed, malformed,
+incomplete or foreign sources cannot authorize a receipt. Revalidating the whole
+growing prefix between streaming frames can consume the captured gaps even when
+the absolute waits are correct. `TestConversationCompletionPreservesOutputSchedule`
+charges 35 ms per real derivation against a 20 ms cadence in both modes and
+independently validates the resulting receipt.
+
+Reply arrival alone does not establish terminal settlement.
+`CheckConversationSettlement` still requires the owned completion and worker
+evidence before sealing; `ValidateConversationCompletion` independently derives
+the receipt prefix and final tape, and final ownership, source and I/O audits
+remain required. See [timing receipt propagation](e2e-realclaude-test-infrastructure.md#recorded-lifecycle-failure-receipts)
+and the [measured Linux diagnosis](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
+
 ## Failure-Injection Verification
 
 `TestHarness_NoLeakOnFatal` verifies the load-bearing safety property: a
