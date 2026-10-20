@@ -75,6 +75,7 @@ type stallTracker struct {
 	buf       []byte
 	lastEvent time.Time
 	awaiting  bool
+	revision  uint64 // owed-state events advance this even when awaiting is unchanged
 }
 
 var _ io.Writer = (*stallTracker)(nil)
@@ -166,21 +167,23 @@ func (t *stallTracker) consumeLine(line []byte) {
 		// claude produced a turn; it now runs a tool or completes — the silence
 		// that follows is expected, so stop awaiting.
 		t.awaiting = false
+		t.revision++
 	case "user", "tool_result":
 		// a tool result came back; claude owes the next assistant turn.
 		t.awaiting = true
+		t.revision++
 	case "result":
 		// the turn is done.
 		t.awaiting = false
+		t.revision++
 	}
 	// "system" (init, notices), "rate_limit_event", and any other type: activity
 	// only. (No sawResult / kill trailer — this slice emits, never kills.)
 }
 
 // turnSent records that a user turn's bytes reached the child: claude owes an
-// assistant turn from this moment. The third writer of awaiting, alongside
-// consumeLine's arms; the contract for when a caller may invoke it lives on
-// Watchdog.UserTurnSent.
+// assistant turn from this moment. The caller must order this signal against
+// stdout; see Watchdog.UserTurnSent.
 //
 // Stamping lastEvent is load-bearing, not tidiness: an idle child emits nothing,
 // so lastEvent may be hours stale when the turn finally lands, and arming alone
@@ -190,11 +193,12 @@ func (t *stallTracker) turnSent() {
 	defer t.mu.Unlock()
 	t.awaiting = true
 	t.lastEvent = t.now()
+	t.revision++
 }
 
 // childExited voids whatever the departed child owed and restarts the idle
 // clock, so the tracker meets the respawned child in the state a freshly
-// constructed one has. The fourth writer of awaiting.
+// constructed one has.
 //
 // It deliberately does NOT drop the partial-line remainder. A dead child's
 // trailing partial concatenates with the new child's first line, but the result
@@ -209,6 +213,7 @@ func (t *stallTracker) childExited() {
 	defer t.mu.Unlock()
 	t.awaiting = false
 	t.lastEvent = t.now()
+	t.revision++
 }
 
 // snapshot returns the current awaiting flag and last-activity time.
@@ -313,35 +318,33 @@ func NewWatchdog(cfg WatchdogConfig) *Watchdog {
 // the child's stdout to both the Parser and this writer with io.MultiWriter.
 func (w *Watchdog) Writer() io.Writer { return w.tracker }
 
-// UserTurnSent tells the watchdog that a user turn's bytes reached the child's
-// stdin: claude owes an assistant turn, and the idle threshold counts from this
-// call rather than from the child's last output (which on an idle session is
-// arbitrarily stale).
-//
-// It means bytes actually DELIVERED, so call it only after a Runner.WriteUserTurn
-// that returned nil. That method's two refusals write zero bytes — ErrNoLiveChild
-// (no live child, or a BeginRotation gate) and turncommit.ErrDropped (gate deny) —
-// and a refused turn owes nothing, so arming on one reintroduces the same false
-// stall by another route. The method takes no argument and returns nothing
-// precisely so that decision stays at the one call site that can see the error
-// value.
-//
-// Control requests do NOT arm it. Runner.Interrupt and Runner.RevokeBypass write
-// `control_request` lines that claude acks in ~40ms (#1075/#1595) and that are not
-// user turns; no wedge has been observed on that path. The trigger is "a user turn
-// was delivered", not "a write happened".
-//
-// Call it on the writing goroutine after the write returns. Arming first and
-// unwinding on error would leave an armed tracker behind every error path — the
-// failure this signal removes. Arming after opens a nanosecond-width reorder in
-// which claude's first output could clear awaiting before this sets it; that is
-// bounded (microseconds after the write syscall, against claude's tens of
-// milliseconds to first output) and self-healing (the next `assistant` or `result`
-// line clears awaiting again), so it is named here rather than mechanised.
-//
-// Safe from any goroutine: it takes only the tracker's leaf mutex, never logs and
-// never calls out, so a caller may hold its own locks across it.
+// UserTurnSent arms owed silence after successful user delivery, restarting the
+// idle clock. Callers must order this signal before any response on stdout;
+// concurrent delivery and stdout require TrackUserTurn instead. Failed/refused
+// writes and control requests must not call it. It takes only the tracker mutex.
 func (w *Watchdog) UserTurnSent() { w.tracker.turnSent() }
+
+// TrackUserTurn runs a user delivery and arms only on success. Owed-state events
+// observed during delivery remain authoritative, including assistant/tool silence
+// and completed results. Activity-only stdout does not prevent arming. The caller
+// serializes deliveries and child exit; no tracker lock spans write or stdin I/O.
+func (w *Watchdog) TrackUserTurn(write func() error) error {
+	t := w.tracker
+	t.mu.Lock()
+	revision := t.revision
+	t.mu.Unlock()
+	if err := write(); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.revision == revision {
+		t.awaiting = true
+		t.lastEvent = t.now()
+		t.revision++
+	}
+	return nil
+}
 
 // ChildExited tells the watchdog that the child it was watching is gone: whatever
 // that child owed is void, so a turn abandoned by a crash mid-turn cannot make the

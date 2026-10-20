@@ -25,11 +25,7 @@ type streamRunnerWatchdog struct {
 func (w *streamRunnerWatchdog) write(write func() error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := write(); err != nil {
-		return err
-	}
-	w.detector.UserTurnSent()
-	return nil
+	return w.detector.TrackUserTurn(write)
 }
 
 func (w *streamRunnerWatchdog) childExited() {

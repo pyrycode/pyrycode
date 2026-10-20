@@ -336,6 +336,61 @@ func TestStreamWatchdog_WriteExitOrdering(t *testing.T) {
 	f.stall("watch-a")
 }
 
+func TestStreamWatchdog_ResponseBeforeArming(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		frame   string
+		busy    bool
+	}{
+		{"tool", protocol.TypeAssistantDelta, true},
+		{"reply", protocol.TypeTurnEnd, false},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			f := newStreamWatchdogFixture(t, streamApprovalConfig{})
+			f.start()
+			before := f.r.State()
+			release, finished := make(chan struct{}), make(chan error, 1)
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(func() {
+				unblock()
+				select {
+				case <-finished:
+				case <-time.After(5 * time.Second):
+					t.Error("delivery did not join")
+				}
+			})
+			go func() {
+				defer close(finished)
+				finished <- f.r.watchdog.write(func() error {
+					err := f.r.r.WriteUserTurn(t.Context(), testConvID, []byte(tc.command))
+					<-release // hold successful delivery before watchdog arming
+					return err
+				})
+			}()
+			// The factory feeds the tracker before the parser; publication proves
+			// stdout has already changed owed state while delivery is held.
+			f.frame(tc.frame)
+			unblock()
+			select {
+			case err := <-finished:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("delivery did not return")
+			}
+			f.quiet()
+			after := f.r.State()
+			if after.ChildPID != before.ChildPID || after.RestartCount != before.RestartCount || f.busy.Busy(testConvID) != tc.busy {
+				t.Fatalf("response changed child/busy: before=%+v after=%+v", before, after)
+			}
+			f.send("silent")
+			f.stall("watch-a") // preserving progress must not disable later arming
+		})
+	}
+}
+
 func TestStreamWatchdog_ApprovalScope(t *testing.T) {
 	for _, own := range []bool{false, true} {
 		t.Run(fmt.Sprintf("own=%t", own), func(t *testing.T) {

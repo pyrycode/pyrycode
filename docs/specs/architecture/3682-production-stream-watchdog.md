@@ -106,6 +106,6 @@ write/exit, failed/refused-write, lifecycle and approval race tests remain requi
 
 Security re-review: PASS. The revised transaction introduces no I/O, subprocess,
 credential, cryptographic, logging or trust-boundary change. Its revision counter
-shares the tracker leaf mutex; no lock spans the callback and no goroutine is added.
+shares the tracker leaf mutex; no tracker lock spans the callback and no goroutine is added.
 The adapter exit ordering remains necessary to prevent predecessor delivery from
 arming an idle replacement. Documentation handoff above remains pending.
