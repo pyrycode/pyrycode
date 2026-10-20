@@ -79,3 +79,30 @@ Reviewer: builder self-review, 2026-10-20.
 ## Revisions
 
 - 2026-10-20: require the owned context live immediately before Join and observe cancellation no earlier than its 25 ms budget. This rejects a spontaneous child failure masquerading as budget-driven cancellation. A testdata script prepares repeatable old-oracle, disabled-cancellation and phase-observer overlays without changing runtime code.
+
+## Builder evidence
+
+Native Linux/amd64, Go 1.26.9, runtime GOMAXPROCS 8 and 12 CPUs; GOFLAGS/GORACE unset, default parallelism, serial named leaves. All executions used `-race` and uncached `-count=1` or `-count=10`. Build caches were warm; each leaf allocated fresh bindings, homes and children. Incidental fleet load was not controlled (load snapshots 5.36/3.91/3.16 and 2.85/3.98/3.56). Admission waits are retained separately from test execution, including the final pipe run's 594-second queue wait.
+
+Go source revision: `641c1edf7b2e21e5ceda2f75a5fff05371f8bde9`; corrected diagnostic script: `90596be8`. Subsequent evidence-only commits leave these Go inputs unchanged. [Retained results](../../../internal/e2emcp/testdata/3690-cancellation-evidence.json) contain exact commands, source/input/overlay hashes, counts, each selected leaf's measurements, failed attempts and historical bundle provenance. [Diagnostic preparation](../../../internal/e2emcp/testdata/3690-diagnostics.py) produces the three overlays in a supplied scratch directory; execute them through the recorded admission commands. The initial old-oracle overlay failed compilation with zero tests; the corrected replay below executed all named leaves.
+
+| Native check | Executed / passed / failed / skipped events | Leaf result |
+| --- | --- | --- |
+| Affected package | 145 / 145 / 0 / 0 | 135 / 135 / 0 / 0 |
+| Full named test within that package | 15 / 15 / 0 / 0 | 14 / 14 / 0 / 0 |
+| Ten ordinary backpressure repetitions, each transport separately | 20 / 20 / 0 / 0 each | 10 / 10 / 0 / 0 each |
+| Corrected old-oracle replay, expected failure | 15 / 12 / 3 / 0 | 14 / 12 / 2 / 0; both delayed leaves fail |
+| Cancellation-disabled control, each transport separately, expected failure | 2 / 0 / 2 / 0 each | 1 / 0 / 1 / 0 each |
+| Owned-phase diagnostic, full named test | 15 / 15 / 0 / 0 | 14 / 14 / 0 / 0 |
+
+The full named runs preserve preceding `complete-duplex`, `complete-sockets`, `quiet-input` and `quiet-sockets` leaves. Parent events account for the extra failures in control totals. `go vet ./...` passed at the final Go source; `go build -o /tmp/builder-3690/pyry ./cmd/pyry` passed with identical production inputs.
+
+Across 24 ordinary backpressure observations (package, repetitions and phase run), validation notification preceded the first byte by 0.513–0.566 seconds, owned cancellation was observed after 25.27–25.84 ms, and Join returned after 27.74–31.56 ms with a live parent and no handlers. Partial EOF retained 69,632 bytes for pipes and 219,264 for sockets, below the two-MiB payload. Post-Join EOF took at most 0.462 ms and subsequent native proxy Wait at most 0.057 ms. In the phase overlay, all pumps returned within 0.143 ms of cancellation-watcher entry into descriptor closure; actual owned server Wait returned within 3.257 ms. Source reading of `RPCSession.Observe` in `internal/e2emcp/rpc.go` confirmed the second envelope parse after the validator and before forwarding.
+
+The 1.2-second validation delay moved first forwarding to 1.740/1.741 seconds after notification; repaired Join still returned in 28.23/29.18 ms. Restoring the premature observer and one-second predicate failed at Join 1.729/1.724 seconds while both parents remained live. The earlier pre-implementation red run independently failed both controls at 1.727/1.756 seconds, also with live parents. These controlled experiments prove the oracle defect, not a historical scheduler cause. Both disabled-cancellation controls reached the 15-second watchdog, explicitly failed parent independence, and released/joined their controlled work.
+
+The longest successful selected leaf was 2.47 seconds. The 15-second owned-work watchdog provides over six times that observed envelope, bounds broken cancellation, and fails explicitly if used; the independent parent deadline is one minute. This is a fixture bound, not a product latency guarantee. A separate same-binary early-exit experiment measured actual Wait at 0.010/1.212 seconds with GORACE exit delay 0/1200 ms. Those two helper processes executed zero tests and supply no test pass; they isolate normal race-helper exit overhead, whereas cancelled owned Wait was observed directly in milliseconds.
+
+Open questions resolved: ordinary focused runs did not reproduce the historical failure. Validation-delay dependence is reproduced; no runtime cancellation defect was demonstrated, so runtime code remains unchanged. Historical parent state, phase timing, cold state, host contention and Go/race settings remain unavailable. The original full host log is unavailable here; its bundle retains the tail and full-log pointer/hash. The unexplained candidate/base difference and every historical failure remain preserved.
+
+Pending later stages: documentation handoff above, full-module/final dispatcher acceptance, and recovery assessment of concurrent race work in `internal/e2emcp` and `internal/e2e/internal/claudetape`. The investigation receipt is carried in the PR. This run executes no wider suite and completes none of #3668's unfinished gates. macOS is outside this Linux ticket's verification scope.
