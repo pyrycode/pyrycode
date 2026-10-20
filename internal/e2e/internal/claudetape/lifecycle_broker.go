@@ -111,6 +111,7 @@ type LifecycleKill struct {
 // seal only after actual provider stdout AND stderr EOF and exact original
 // SIGKILL authorization. A seal-ended role must still be alive at its seal.
 func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count int, resultErr error) {
+	startup := time.Now()
 	fail := errors.New("lifecycle broker failed")
 	parent := c.OwnerPID
 	if c.BrokerParentPID != 0 {
@@ -202,6 +203,8 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	}
 	observeCompletion := NewConversationCompletionObserver(c, tape.Tape)
 	timelineOrigin := time.Now()
+	startupNS := timelineOrigin.Sub(startup).Nanoseconds()
+	var completionNS, witnessNS, outputCompletionNS int64
 	timelineOrigins := []time.Time{timelineOrigin}
 	recordTimelineInput := func(raw []byte) {
 		if lifecycleFrameTimeline(c.Scenario) || lifecycleTimelineUser(raw) {
@@ -265,6 +268,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return fail
 			}
 			origin := timelineOrigin
+			anchor := 0
 			if tape.Timeline.Kind == lifecycleInputTimelineKind || tape.Timeline.Kind == lifecycleFrameTimelineKind {
 				anchors := tape.Timeline.OutputAfterUser
 				if tape.Timeline.Kind == lifecycleFrameTimelineKind {
@@ -273,7 +277,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				if timelineOutput >= len(anchors) {
 					return fail
 				}
-				anchor := anchors[timelineOutput]
+				anchor = anchors[timelineOutput]
 				if anchor < 0 || anchor >= len(timelineOrigins) {
 					return fail
 				}
@@ -281,6 +285,13 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			offset := tape.Timeline.OutputAfterNS[timelineOutput]
 			if err := forwardLifecycleOutput(origin, offset, time.Now, time.Sleep, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
+				var timing *LifecycleTimingError
+				if errors.As(err, &timing) {
+					timing.Output, timing.Anchor = timelineOutput, anchor
+					timing.StartupNS, timing.ReadyNS = startupNS, time.Since(timelineOrigin).Nanoseconds()
+					timing.CompletionNS, timing.WitnessNS = completionNS, witnessNS
+					timing.PriorOutputCompletionNS = outputCompletionNS
+				}
 				return err
 			}
 			timelineOutput++
@@ -288,12 +299,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		frames++
-		return observeCompletion("stdout", raw)
+		work := time.Now()
+		err := observeCompletion("stdout", raw)
+		outputCompletionNS = time.Since(work).Nanoseconds()
+		return err
 	}
 	if player != nil {
 		for _, raw := range player.Prefix() {
 			if err := writeOutput(raw); err != nil {
-				return frames, fail
+				return frames, err
 			}
 		}
 	}
@@ -333,13 +347,17 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return fail
 			}
 			recordTimelineInput(normalized)
+			work := time.Now()
 			if e := observeCompletion("stdin", normalized); e != nil {
 				return e
 			}
+			completionNS = time.Since(work).Nanoseconds()
+			work = time.Now()
 			if c.OnInput != nil {
 				if e := c.OnInput(normalized); e != nil {
 					return e
 				}
+				witnessNS = time.Since(work).Nanoseconds()
 			}
 			for _, v := range released {
 				if e = writeOutput(v); e != nil {
