@@ -175,7 +175,7 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 	}
 	facts.FileResponseSequence = fileResponse.Sequence
 	facts.ApprovalResponseSequence = approveResponse.Sequence
-	toolCount, resultCount, users, outputs := 0, 0, 0, 0
+	toolCount, resultCount, users, outputs, initialized := 0, 0, 0, 0, 0
 	for index, frame := range tape.Frames {
 		if frame.Direction == "stdin" {
 			if lifecycleTimelineUser(frame.Data) {
@@ -189,6 +189,13 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 			return facts, e
 		}
 		kind := mcpString(envelope["type"])
+		if kind == "system" && mcpString(envelope["subtype"]) == "init" {
+			if mcpString(envelope["permissionMode"]) != "default" {
+				return facts, mcpError()
+			}
+			initialized++
+		}
+
 		if kind != "assistant" && kind != "user" {
 			continue
 		}
@@ -207,7 +214,7 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 			}
 			blockKind := mcpString(block["type"])
 			if blockKind == "tool_use" && mcpString(block["name"]) == mcpSendFileTool {
-				if kind != "assistant" || mcpString(message["role"]) != "assistant" || mcpString(block["id"]) != facts.ToolID || !bytes.Equal(physicalCanonicalJSON(block["input"]), fileInput) || approveRequest.event.NativeStdoutCount < outputs || approveRequest.event.UserOrdinal != 1 {
+				if initialized != 1 || kind != "assistant" || mcpString(message["role"]) != "assistant" || mcpString(block["id"]) != facts.ToolID || !bytes.Equal(physicalCanonicalJSON(block["input"]), fileInput) || approveRequest.event.NativeStdoutCount < outputs || approveRequest.event.UserOrdinal != 1 {
 					return facts, mcpError()
 				}
 				if parent, present := envelope["parent_tool_use_id"]; present && !bytes.Equal(bytes.TrimSpace(parent), []byte("null")) && mcpString(parent) != "" {
@@ -245,7 +252,7 @@ func ValidateMCPSendFile(x *MCPExchange, tape *Tape) (MCPSendFileFacts, error) {
 			}
 		}
 	}
-	if toolCount != 1 || resultCount != 1 || users != 1 {
+	if toolCount != 1 || resultCount != 1 || users != 1 || initialized != 1 {
 		return facts, mcpError()
 	}
 	start, e := time.Parse(time.RFC3339Nano, tape.Producer.CapturedAt)

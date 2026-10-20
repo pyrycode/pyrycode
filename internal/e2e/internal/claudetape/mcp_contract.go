@@ -95,7 +95,7 @@ func ValidateMCPPrimaryJoin(x *MCPExchange, tape *Tape) error {
 // ValidateMCPDaemonInput checks the current source's entire declared command
 // document and enforcing flags before replay may start its own MCP clients.
 // Otherwise manually starting a server could hide a removed production flag,
-// wrong command/socket, skipped permissions, foreign server or altered config.
+// wrong command/socket, ineffective default mode, foreign server or altered config.
 func ValidateMCPDaemonInput(b *DaemonBinding) error {
 	if b == nil {
 		return mcpError()
@@ -132,7 +132,16 @@ func validateMCPFlags(args []string) error {
 	for i := 0; i < len(args); i++ {
 		flag := args[i]
 		seen[flag]++
-		if flag == "--dangerously-skip-permissions" || (!valued[flag] && !toggles[flag]) {
+		// The actual current daemon emits one legacy skip marker before its
+		// explicit default mode. Preserve that observed argv; a later marker,
+		// a duplicate or a missing enforcing default remains forbidden.
+		if flag == "--dangerously-skip-permissions" {
+			if seen[flag] != 1 || seen["--permission-mode"] != 0 {
+				return mcpError()
+			}
+			continue
+		}
+		if !valued[flag] && !toggles[flag] {
 			return mcpError()
 		}
 		if valued[flag] {

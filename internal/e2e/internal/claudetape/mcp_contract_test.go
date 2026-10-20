@@ -72,7 +72,7 @@ func TestMCPPrimaryJoinRejectsImpossibleAndForeignAnchors(t *testing.T) {
 	}
 }
 func TestMCPCurrentInputMustDeclareExactProductionServersAndEnforcement(t *testing.T) {
-	for _, mutation := range []string{"valid", "no-files", "foreign-server", "wrong-command", "wrong-socket", "server-env", "bypass", "no-strict", "duplicate-strict", "wrong-permission-tool", "wrong-mode", "no-config", "public-config", "root-case-alias", "command-case-alias", "args-case-alias", "raw-duplicate"} {
+	for _, mutation := range []string{"valid", "no-files", "foreign-server", "wrong-command", "wrong-socket", "server-env", "bypass", "no-strict", "duplicate-strict", "wrong-permission-tool", "wrong-mode", "no-config", "public-config", "root-case-alias", "command-case-alias", "args-case-alias", "raw-duplicate", "observed-legacy-before-default", "duplicate-legacy"} {
 		t.Run(mutation, func(t *testing.T) {
 			home := t.TempDir()
 			daemon, socket := filepath.Join(home, "pyry"), filepath.Join(home, "socket")
@@ -121,6 +121,10 @@ func TestMCPCurrentInputMustDeclareExactProductionServersAndEnforcement(t *testi
 			switch mutation {
 			case "bypass":
 				b.args = append(b.args, "--dangerously-skip-permissions")
+			case "observed-legacy-before-default":
+				b.args = append([]string{"--dangerously-skip-permissions"}, b.args...)
+			case "duplicate-legacy":
+				b.args = append([]string{"--dangerously-skip-permissions", "--dangerously-skip-permissions"}, b.args...)
 			case "no-strict":
 				b.args = append(b.args[:6], b.args[7:]...)
 			case "duplicate-strict":
@@ -136,7 +140,7 @@ func TestMCPCurrentInputMustDeclareExactProductionServersAndEnforcement(t *testi
 					t.Fatal("mode")
 				}
 			}
-			if (ValidateMCPDaemonInput(b) == nil) != (mutation == "valid") {
+			if (ValidateMCPDaemonInput(b) == nil) != (mutation == "valid" || mutation == "observed-legacy-before-default") {
 				t.Fatal("current production input boundary mismatch")
 			}
 		})

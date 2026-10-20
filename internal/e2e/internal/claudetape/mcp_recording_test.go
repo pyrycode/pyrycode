@@ -21,7 +21,7 @@ func TestMCPReplayNativeResultWaitsForActualResponseOrCancellation(t *testing.T)
 			t.Fatal(e)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		session := &MCPRecordingSession{ctx: ctx, cancel: cancel, config: LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "replay"}}, facts: facts, idReady: make(chan struct{}), outputIndexes: []int{2}}
+		session := &MCPRecordingSession{ctx: ctx, cancel: cancel, config: LifecycleBrokerConfig{PoolProcessConfig: PoolProcessConfig{Mode: "replay"}}, facts: facts, idReady: make(chan struct{}), outputIndexes: []int{3}}
 		config := LifecycleBrokerConfig{}
 		if session.Configure(&config) != nil {
 			t.Fatal("configure")
@@ -31,7 +31,7 @@ func TestMCPReplayNativeResultWaitsForActualResponseOrCancellation(t *testing.T)
 			err error
 		}
 		done := make(chan result, 1)
-		go func() { raw, e := config.ReplayOutput(tape.Frames[2].Data); done <- result{raw, e} }()
+		go func() { raw, e := config.ReplayOutput(tape.Frames[3].Data); done <- result{raw, e} }()
 		select {
 		case <-done:
 			t.Fatal("result escaped before actual attachment UUID")

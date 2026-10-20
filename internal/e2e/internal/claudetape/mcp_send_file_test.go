@@ -23,6 +23,7 @@ func mcpSendFileControl() (*MCPExchange, *Tape) {
 	nativeResult, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": tool, "content": []any{map[string]any{"type": "text", "text": text}}, "is_error": false}}}, "tool_use_result": []any{map[string]any{"type": "text", "text": text}}, "unknown": map[string]any{"preserved": "<>&literal"}})
 	tape.Frames = []Frame{
 		{"stdin", json.RawMessage(`{"type":"user","message":{"role":"user","content":"controlled input"}}`)},
+		{"stdout", json.RawMessage(`{"type":"system","subtype":"init","permissionMode":"default","unknown":"retained init metadata"}`)},
 		{"stdout", json.RawMessage(`{"type":"assistant","parent_tool_use_id":null,"message":{"role":"assistant","content":[{"type":"tool_use","id":"` + tool + `","name":"mcp__pyry_files__send_file","input":{"path":"` + MCPSendFileName + `"}}]}}`)},
 		{"stdout", nativeResult},
 		{"stdout", json.RawMessage(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}`)},
@@ -41,17 +42,17 @@ func mcpSendFileControl() (*MCPExchange, *Tape) {
 		appendEvent(kind, e2emcp.ServerToClient, `{"jsonrpc":"2.0","id":0,"result":{"unknown":true}}`, 0, 0, 0)
 		appendEvent(kind, e2emcp.ClientToServer, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, 0, 0, 0)
 	}
-	appendEvent("mcp-approve", e2emcp.ClientToServer, ` {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"approve","arguments":{"tool_name":"mcp__pyry_files__send_file","input":{"path":"`+MCPSendFileName+`"},"tool_use_id":"`+tool+`"},"unknown":"request <>&"}} `, 1, 1, 1)
+	appendEvent("mcp-approve", e2emcp.ClientToServer, ` {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"approve","arguments":{"tool_name":"mcp__pyry_files__send_file","input":{"path":"`+MCPSendFileName+`"},"tool_use_id":"`+tool+`"},"unknown":"request <>&"}} `, 1, 1, 2)
 	verdict := `{"behavior":"allow","updatedInput":{"path":"` + MCPSendFileName + `"}}`
 	result, _ := json.Marshal(map[string]any{"content": []any{map[string]any{"type": "text", "text": verdict}}, "isError": false})
-	appendEvent("mcp-approve", e2emcp.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":`+string(result)+`}`, 1, 1, 1)
-	appendEvent("mcp-files", e2emcp.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_file","arguments":{"path":"`+MCPSendFileName+`"}}}`, 1, 1, 1)
+	appendEvent("mcp-approve", e2emcp.ServerToClient, `{"jsonrpc":"2.0","id":1,"result":`+string(result)+`}`, 1, 1, 2)
+	appendEvent("mcp-files", e2emcp.ClientToServer, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_file","arguments":{"path":"`+MCPSendFileName+`"}}}`, 1, 1, 2)
 	encodedText, _ := json.Marshal(text)
-	appendEvent("mcp-files", e2emcp.ServerToClient, ` { "jsonrpc":"2.0", "id":1,"result":{"content":[{"type":"text","text":`+string(encodedText)+`}],"isError":false,"unknown":{"literal":"<>&\u0041"}} } `, 1, 1, 1)
+	appendEvent("mcp-files", e2emcp.ServerToClient, ` { "jsonrpc":"2.0", "id":1,"result":{"content":[{"type":"text","text":`+string(encodedText)+`}],"isError":false,"unknown":{"literal":"<>&\u0041"}} } `, 1, 1, 2)
 	return x, tape
 }
 func TestMCPSendFileSourceRejectsForeignBusinessJoinsAndLogs(t *testing.T) {
-	for _, mutation := range []string{"valid", "foreign-tool-id", "foreign-input", "wrong-native-tool", "child-native-tool", "native-early-result", "RPC-before-native-tool", "refused-result", "unknown-uuid-carrier", "foreign-stderr-id", "additional-log", "stale-timestamp", "missing-native-result"} {
+	for _, mutation := range []string{"valid", "foreign-tool-id", "foreign-input", "wrong-native-tool", "child-native-tool", "native-early-result", "RPC-before-native-tool", "refused-result", "unknown-uuid-carrier", "foreign-stderr-id", "additional-log", "stale-timestamp", "missing-native-result", "bypass-native-init", "missing-native-init"} {
 		t.Run(mutation, func(t *testing.T) {
 			x, tape := mcpSendFileControl()
 			replaceEvent := func(i int, old, new string) { x.Events[i].Raw = strings.Replace(x.Events[i].Raw, old, new, 1) }
@@ -61,11 +62,11 @@ func TestMCPSendFileSourceRejectsForeignBusinessJoinsAndLogs(t *testing.T) {
 			case "foreign-input":
 				replaceEvent(6, MCPSendFileName, "foreign.txt")
 			case "wrong-native-tool":
-				tape.Frames[1].Data = bytes.Replace(tape.Frames[1].Data, []byte(mcpSendFileTool), []byte("Bash"), 1)
+				tape.Frames[2].Data = bytes.Replace(tape.Frames[2].Data, []byte(mcpSendFileTool), []byte("Bash"), 1)
 			case "child-native-tool":
-				tape.Frames[1].Data = bytes.Replace(tape.Frames[1].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign-child"`), 1)
+				tape.Frames[2].Data = bytes.Replace(tape.Frames[2].Data, []byte(`"parent_tool_use_id":null`), []byte(`"parent_tool_use_id":"foreign-child"`), 1)
 			case "native-early-result":
-				x.Events[9].NativeStdoutCount = 2
+				x.Events[9].NativeStdoutCount = 3
 			case "RPC-before-native-tool":
 				for i := 6; i < len(x.Events); i++ {
 					x.Events[i].NativeStdoutCount = 0
@@ -73,7 +74,7 @@ func TestMCPSendFileSourceRejectsForeignBusinessJoinsAndLogs(t *testing.T) {
 			case "refused-result":
 				replaceEvent(9, "the file was handed", "the file was refused")
 			case "unknown-uuid-carrier":
-				tape.Frames[2].Data = bytes.Replace(tape.Frames[2].Data, []byte(`"\u003c\u003e\u0026literal"`), []byte(`"12345678-1234-4123-8123-123456789012"`), 1)
+				tape.Frames[3].Data = bytes.Replace(tape.Frames[3].Data, []byte(`"\u003c\u003e\u0026literal"`), []byte(`"12345678-1234-4123-8123-123456789012"`), 1)
 			case "foreign-stderr-id":
 				x.Stderr["mcp-files"] = strings.ReplaceAll(x.Stderr["mcp-files"], "12345678-1234-4123-8123-123456789012", "ffffffff-ffff-4fff-8fff-ffffffffffff")
 			case "additional-log":
@@ -81,7 +82,11 @@ func TestMCPSendFileSourceRejectsForeignBusinessJoinsAndLogs(t *testing.T) {
 			case "stale-timestamp":
 				x.Stderr["mcp-files"] = strings.ReplaceAll(x.Stderr["mcp-files"], "time=", "time=2000-01-01T00:00:00Z-")
 			case "missing-native-result":
-				tape.Frames = append(tape.Frames[:2], tape.Frames[3:]...)
+				tape.Frames = append(tape.Frames[:3], tape.Frames[4:]...)
+			case "bypass-native-init":
+				tape.Frames[1].Data = bytes.Replace(tape.Frames[1].Data, []byte(`"permissionMode":"default"`), []byte(`"permissionMode":"bypassPermissions"`), 1)
+			case "missing-native-init":
+				tape.Frames[1].Data = json.RawMessage(`{"type":"system","subtype":"unknown"}`)
 			}
 			_, e := ValidateMCPSendFile(x, tape)
 			if (e == nil) != (mutation == "valid") {
@@ -150,12 +155,12 @@ func TestMCPSendFileRequiresRealCurrentCopyAndPreservesUnrelatedJSONBytes(t *tes
 			if got != current || !bytes.Contains(actual, []byte(`"<>&\u0041"`)) || actual[0] != ' ' || actual[len(actual)-1] != ' ' {
 				t.Fatal("full literal RPC bytes changed")
 			}
-			transformed, e := ReplayMCPSendFileOutput(tape.Frames[2].Data, 2, facts, current)
+			transformed, e := ReplayMCPSendFileOutput(tape.Frames[3].Data, 3, facts, current)
 			if e != nil || bytes.Contains(transformed, []byte(facts.AttachmentID)) || !bytes.Contains(transformed, []byte(current)) || !bytes.Contains(transformed, []byte(`"unknown":{"preserved":"\u003c\u003e\u0026literal"}`)) {
 				t.Fatal("typed native binding changed unrelated fields", e)
 			}
-			unchanged, e := ReplayMCPSendFileOutput(tape.Frames[3].Data, 3, facts, current)
-			if e != nil || !bytes.Equal(unchanged, tape.Frames[3].Data) {
+			unchanged, e := ReplayMCPSendFileOutput(tape.Frames[4].Data, 4, facts, current)
+			if e != nil || !bytes.Equal(unchanged, tape.Frames[4].Data) {
 				t.Fatal("unrelated output changed")
 			}
 		})
