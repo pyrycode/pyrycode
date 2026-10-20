@@ -422,11 +422,6 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
 	}
-	job.Config.OnDiagnostic = func(d claudetape.LifecycleDiagnostic) {
-		if json.NewEncoder(os.Stdout).Encode(d) != nil {
-			os.Exit(2)
-		}
-	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
 	if physical != nil {
 		if err := physical.Close(); err != nil && e == nil {
