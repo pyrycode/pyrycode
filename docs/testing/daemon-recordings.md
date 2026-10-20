@@ -767,6 +767,28 @@ Both capture and replay deliver the complete literal appended prompt and check
 its mode. The recorded fixture retains every native wrap-up output byte and the
 complete successor input file.
 
+Replay delivers every recorded response released by a strictly matched final
+control request even after the owned predecessor has terminated. The stand-in
+preserves the real PID, pipe ownership and teardown boundary; matched replay
+input does not need to reach its stdin. Capture still forwards input through
+bounded pipe writes and fails on forwarding errors. A final query may arrive
+after both provider output EOFs: replay waits within the existing deadline while
+the original input remains open. Unexpected, partial or missing input still
+fails.
+
+Action acknowledgement and an exhausted player do not establish completion.
+Responses must be delivered, actual owned termination authorized and observed,
+and both provider stdout and stderr EOFs sampled independently. Pending-frame
+checks, terminal checks and receipts, broker join and the outer immutable
+artifact audit remain required. Content-free diagnostics report these separate
+observations but authorize none of them. The Linux controlled regression
+`TestLifecycleReplayAfterProviderExit` forces predecessor death before the final
+query and holds each output open independently; the original `clear-reset`
+replay consumes all 83 reviewed bound-role frames and completes its outer audit.
+This demonstrates offline replay across the lifetime boundary. It establishes no
+new live-provider behavior; current Claude response generation, transcript
+writing and signal behavior still require the retained original live root.
+
 Fresh capture comparison handles this one output-to-input dependency explicitly.
 The actual production stream parser derives the successful wrap-up text from the
 first user turn after the typed predecessor rotation checkpoint. Only its text

@@ -352,9 +352,31 @@ only reasonable response in test code is to abort.
 
 `TestRecordedClaude` runs the original scenario assertions through recorded
 transport. `RunLifecycleBroker` keeps real input pipes and owned processes in
-replay. Its readiness origin is established after startup validation; a causal
-user/input epoch is recorded after successful input forwarding, before completion
-observation and `OnInput` witness work. Subsequent outputs reuse their recorded
+replay. Strict `Player.Input` matching releases responses independently of the
+stand-in's stdin lifetime. Writing a matched final query into that pipe before
+delivering its responses can lose every released response to EPIPE after owned
+predecessor exit, even with an exhausted player. Capture retains bounded input
+forwarding and pipe-error rejection; replay still invokes its input observer
+through `forwardLifecycleFrame`'s exactly-once callback contract.
+
+Response delivery, action acknowledgement, player exhaustion and teardown are
+separate observations. Kill/rotation/eviction completion requires authorized
+owned termination, both provider output EOFs, complete strict input with no
+partial frames, terminal checks and receipts, and the outer artifact audit.
+Both EOFs can precede a final query, so an incomplete replay waits within the
+existing deadline while original input remains open. Input EOF with missing
+frames still fails. `TestLifecycleReplayAfterProviderExit` kills and reaps its
+owned child before the final query, checks every released response and holds
+stdout and stderr open separately to reject early completion. Its live-exhausted
+arm also proves that action acknowledgement and player exhaustion cannot replace
+real teardown; changed/partial/missing input, foreign/missing actions and failed
+terminal checks remain rejection controls. This is offline replay proof; see the
+[rotation contract](../../testing/daemon-recordings.md#session-rotation-and-native-transcript-snapshots).
+
+The readiness origin is established after startup validation; a causal
+user/input epoch is recorded after capture forwarding or strict replay matching
+and its input observer, before completion observation and `OnInput` witness work.
+Subsequent outputs reuse their recorded
 anchor and absolute offset. Re-anchoring an existing phase, compressing gaps or
 retiming a fixture would erase the timing assertion.
 
