@@ -133,3 +133,21 @@ Request a Composer Stop replay with its original preceding scenario sequence
 under gate contention, rather than executing a complete suite in this builder.
 The source/worker repair and focused rejection proofs remain builder work;
 wider diagnostic execution and complete-suite acceptance remain pending handoff.
+
+### 2026-10-20 — final focused verification
+
+The affected claudetape package passed at `1cf527fd`: 843/843 test events and
+766/766 leaf tests, zero failures/skips. Composer Stop cancellation and ownership
+controls passed 13/13 and 7/7 events. Its original replay root passed 1/1 and the
+outer replay passed 2/2 events at `3ed0f919`, without skips, including final audits.
+Only the new diagnostic test's directory modes changed afterward; linked helper,
+daemon and accounting/replay code are identical. Vet and build passed after that
+correction. The earlier five diagnostic-fixture failures remain in the evidence.
+
+`internal/e2e/internal/claudetape/testdata/worker_inventory_3677.json` retains
+revisions, actual identities, commands, counts, fixture/helper/daemon hashes and
+external report paths/digests. Historical attribution and complete-suite acceptance
+remain pending. Recovery assessment
+`ca41a6b00adfe418b300d03b365fcd8fc0f5a1c3e4044dc8ca98a8c5908f6848`
+targets corrected candidate `1cf527fd` and supersedes the initial request; it has
+executed zero diagnostics. Documentation remains with the documentation stage.
