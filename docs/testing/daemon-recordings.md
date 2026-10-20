@@ -910,7 +910,9 @@ that observer's underlying CLI; it keeps the observer installed on the real
 daemon path rather than bypassing its stream counters or print child. Native
 suggestions remain disabled by the original stream-only wrapper. The first
 completed exchange must have exactly one successful finite fallback worker;
-zero workers cannot stand in for this root's suggestion publication.
+zero workers cannot stand in for this root's suggestion publication. All top-level native
+`prompt_suggestion` output frames are rejected for this profile, including empty
+ones; a successful worker cannot excuse a competing native publication.
 
 For this closed profile the original observer owns the production worker PGID
 and directly parents the finite recording helper. The kernel-authenticated peer

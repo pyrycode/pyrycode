@@ -248,6 +248,19 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 		}
 	}
 	if s.Scenario == "fallback-suggestion" {
+		// This root disables native suggestions to prove fallback publication. A
+		// successful worker alone cannot attribute a competing native set revision.
+		for _, frame := range s.Roles["bootstrap"].Tape.Frames {
+			if frame.Direction != "stdout" {
+				continue
+			}
+			var header struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(frame.Data, &header) != nil || header.Type == "prompt_suggestion" {
+				return fail
+			}
+		}
 		first := 0
 		for _, worker := range s.Workers {
 			if worker.SourceRole == "bootstrap" && worker.UserSequence == 1 && worker.Tape != nil && worker.Tape.Status == (FallbackWorkerStatus{ExitCode: 0}) {
