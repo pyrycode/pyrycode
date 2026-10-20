@@ -141,17 +141,30 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 				suffixes = append(suffixes, fmt.Sprintf(".physical-user-%06d", i+1))
 			}
 		}
+		if MCPScenario(scenario) {
+			var preview LifecycleJob
+			if ReadLifecycleControl(prefix+".job", MaxBytes, &preview) != nil {
+				return "", nil, fail
+			}
+			suffixes = append(suffixes, ".mcp-prefix")
+			if preview.Config.Mode == "replay" {
+				suffixes = append(suffixes, ".mcp-input")
+			}
+			if complete {
+				suffixes = append(suffixes, ".mcp")
+			}
+		}
 		values := map[string][]byte{}
 		for _, suffix := range suffixes {
 			expectedFiles[role+suffix] = true
 			limit := 16384
-			if suffix == ".json" || suffix == ".job" || suffix == ".physical" {
+			if suffix == ".json" || suffix == ".job" || suffix == ".physical" || suffix == ".mcp-prefix" || suffix == ".mcp-input" || suffix == ".mcp" {
 				limit = MaxBytes
 			}
 			if strings.HasPrefix(suffix, ".physical-user-") {
 				limit = 65536
 			}
-			v, e := read(prefix+suffix, limit, !(LifecycleSeals(end) && suffix == ".receipt"))
+			v, e := read(prefix+suffix, limit, !(LifecycleSeals(end) && (suffix == ".receipt" || suffix == ".mcp")))
 			if e != nil {
 				return "", nil, fmt.Errorf("lifecycle role %s artifact %s unreadable: %w", role, suffix, e)
 			}
@@ -204,6 +217,9 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			if !decode(values[".completed"], &completion) || ValidateConversationCompletion(completion, role, revision, c.OwnerPID, brokerPID, tape.Tape) != nil {
 				return "", nil, fail
 			}
+		}
+		if MCPScenario(scenario) && readMCPArtifactValues(values, job, tape.Tape, revision, sourceSHA, daemonSHA, brokerPID, complete) != nil {
+			return "", nil, mcpError()
 		}
 		if PhysicalFamily(scenario) != "" {
 			declarations := []PhysicalOperationDeclaration{}
