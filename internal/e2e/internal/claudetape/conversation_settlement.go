@@ -98,6 +98,12 @@ func newConversationCompletionObserver(c LifecycleBrokerConfig, template *Tape, 
 		if published {
 			return nil
 		}
+		// Only a native result can complete the exchange. Full-prefix validation
+		// between streaming frames would consume their absolute output schedule.
+		var header struct{ Type string }
+		if direction != "stdout" || json.Unmarshal(raw, &header) != nil || header.Type != "result" {
+			return nil
+		}
 		source, err := derive(&observed)
 		if err != nil {
 			return nil
