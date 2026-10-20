@@ -1220,6 +1220,23 @@
       "retained_live": [
         "Current Claude startup and live streaming remain retained. Replay runs the original two wire-created conversations and both per-conversation streaming liveness assertions against independent native process roles. Actual persisted session/conversation identities, complete prompt/settings files, ordered inputs, provider output schedules and every observed finite fallback attempt/status remain strict."
       ]
+    },
+    {
+      "name": "fallback-suggestion",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStream_FallbackReplySuggestionSetThenClear"
+      ],
+      "live_contracts": {
+        "TestInteractiveStream_FallbackReplySuggestionSetThenClear": "7a49199f85b7f66976c38f3158b1019f0a98dce6d70ea758d14257a502e354ce"
+      },
+      "retained_live": [
+        "Current Claude generation of usable fallback suggestions remains live. Replay runs the original observer wrapper, completed exchange, fallback set and higher-revision explicit-null clear assertions through the real daemon. The first completed source turn requires exactly one successful finite native worker. Every observed worker retains exact input, output, EOF, owned observer/helper/native group and actual production Wait status; no optional worker count or invented cancellation."
+      ]
     }
   ],
   "batches": {
@@ -1387,6 +1404,9 @@
     "conversation-isolation": [
       "conversation-system-prompt",
       "conversation-active-switch"
+    ],
+    "fallback-suggestion": [
+      "fallback-suggestion"
     ]
   },
   "reviews": {
@@ -1449,11 +1469,6 @@
       "disposition": "needs_harness",
       "reason": "Session grant must suppress a second permission yet a fresh independent session must prompt. Add distinct fresh-home/process roles or a reviewed paired-scenario driver; retain first file creation and second touch timestamp as physical live evidence.",
       "contract_sha256": "46501c8676a820142217867dd2072b31b9acf58712cbe6dd4a04310aaa1a5986"
-    },
-    "TestInteractiveStream_FallbackReplySuggestionSetThenClear": {
-      "disposition": "needs_harness",
-      "reason": "Suggestion fallback uses the persistent stream plus a separate print-mode Claude invocation. Need multi-invocation argv/EOF/exit/result support and an explicit suggestion-set checkpoint before clear; keep source-producer isolation assertions.",
-      "contract_sha256": "7a49199f85b7f66976c38f3158b1019f0a98dce6d70ea758d14257a502e354ce"
     },
     "TestRealClaudeComposerStopClosedInputKillsHeldTask": {
       "disposition": "live_only",

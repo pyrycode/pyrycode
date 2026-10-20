@@ -901,3 +901,25 @@ the native overlap, and every actual finite suggestion worker still requires its
 own completed source turn and actual production Wait. Current provider startup
 and streaming remain retained live checks. The `conversation-isolation` batch
 groups this root with per-conversation system-prompt isolation for one full gate.
+
+## Fallback suggestion observer ownership
+
+`fallback-suggestion` proposes the original fallback set/clear root, including
+its unchanged Python source observer. Recording selects the reviewed recorder as
+that observer's underlying CLI; it keeps the observer installed on the real
+daemon path rather than bypassing its stream counters or print child. Native
+suggestions remain disabled by the original stream-only wrapper. The first
+completed exchange must have exactly one successful finite fallback worker;
+zero workers cannot stand in for this root's suggestion publication.
+
+For this closed profile the original observer owns the production worker PGID
+and directly parents the finite recording helper. The kernel-authenticated peer
+must be that helper, its current PPID must be the group owner, and the owner's
+current PPID must be the original daemon. Darwin kernel process information and
+Linux procfs supply those current relationships; unsupported systems reject the
+observed shape. Other profiles retain direct helper/group ownership. The native
+child still runs inside the original production group, while its recorder stays
+outside it. Final inventory joins the actual production Wait to the observer
+PID and separately requires both helper and group owner to be gone. Fixture PIDs
+are never signal targets. Complete native I/O, EOF, status and source-turn input
+remain strict, as do the original set and higher-revision explicit-null clear.

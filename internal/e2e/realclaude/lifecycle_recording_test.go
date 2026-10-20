@@ -82,6 +82,9 @@ func lifecycleProviderEnvironment(t *testing.T) (string, string, bool) {
 			t.Fatal("lifecycle directory is not private")
 		}
 	}
+	if c.Process.Scenario == "fallback-suggestion" {
+		return lifecycleRecordingSuggestProvider(t, c), c.Process.Home, true
+	}
 	return c.Wrapper, c.Process.Home, true
 }
 func lifecycleRecordingRegisterSocket(t *testing.T, home, daemon, socket string) {

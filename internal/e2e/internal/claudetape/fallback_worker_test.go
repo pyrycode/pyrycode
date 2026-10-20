@@ -84,8 +84,10 @@ func TestFallbackWorkerClosedCarrier(t *testing.T) {
 	}
 }
 func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
-	for _, kind := range []string{"capture-zero", "capture-seven", "capture-kill", "capture-retained-pipe", "replay-zero", "replay-kill"} {
+	for _, kind := range []string{"capture-zero", "capture-seven", "capture-kill", "capture-retained-pipe", "replay-zero", "replay-kill", "observer-capture-zero", "observer-capture-seven", "observer-capture-kill", "observer-replay-zero", "observer-replay-kill"} {
 		t.Run(kind, func(t *testing.T) {
+			observed := strings.HasPrefix(kind, "observer-")
+			kind = strings.TrimPrefix(kind, "observer-")
 			home, err := os.MkdirTemp("/tmp", "fw-")
 			if err != nil {
 				t.Fatal(err)
@@ -114,6 +116,9 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 			}
 			producer := lifecycleSuiteControl().Producer
 			base := PoolProcessConfig{Mode: mode, Scenario: "session-resume", Home: home, Claude: script, Producer: producer}
+			if observed {
+				base.Scenario = "fallback-suggestion"
+			}
 			path := FallbackWorkerJobPath(home, 1)
 			tapePath := strings.TrimSuffix(path, ".job") + ".json"
 			saved := fallbackWorkerControlTape()
@@ -143,7 +148,11 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 			defer server.Join(2 * time.Second)
 			cfg := FallbackWorkerJob{Version: 1, GroupPID: 0, DaemonPID: os.Getpid(), BrokerParentPID: os.Getpid(), Scenario: base.Scenario, Home: home, WorkDir: cwd, Claude: script, Path: tapePath, Abort: strings.TrimSuffix(path, ".job") + ".abort", SourceBinarySHA256: sourceSHA, Args: fallbackWorkerControlArgs(), Producer: producer}
 			encoded, _ := json.Marshal(cfg)
-			cmd := exec.Command(exe, "-test.run=^TestFallbackWorkerOSHelper$", "--", "wrapper", path, mode)
+			wrapperKind := "wrapper"
+			if observed {
+				wrapperKind = "observer"
+			}
+			cmd := exec.Command(exe, "-test.run=^TestFallbackWorkerOSHelper$", "--", wrapperKind, path, mode)
 			env := []string{}
 			for _, entry := range os.Environ() {
 				key, _, _ := strings.Cut(entry, "=")
@@ -238,7 +247,14 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 				t.Fatal("native output omitted")
 			}
 			var receipt FallbackWorkerReceipt
-			if ReadLifecycleControl(strings.TrimSuffix(path, ".job")+".receipt", 16384, &receipt) != nil || !receipt.Success || receipt.OwnerPID != cmd.Process.Pid || receipt.GroupPID != cmd.Process.Pid {
+			var actualJob FallbackWorkerJob
+			if ReadLifecycleControl(path, 16384, &actualJob) != nil {
+				t.Fatal("missing actual helper claim")
+			}
+			if observed && actualJob.OwnerPID == cmd.Process.Pid || !observed && actualJob.OwnerPID != cmd.Process.Pid {
+				t.Fatal("helper and group ownership conflated")
+			}
+			if ReadLifecycleControl(strings.TrimSuffix(path, ".job")+".receipt", 16384, &receipt) != nil || !receipt.Success || receipt.OwnerPID != actualJob.OwnerPID || receipt.GroupPID != cmd.Process.Pid {
 				t.Fatal("no actual owned terminal receipt")
 			}
 			file, err := os.Open(tapePath)
@@ -260,6 +276,20 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 			}
 			if mode == "capture" && receipt.NativePID <= 1 || mode == "replay" && receipt.NativePID != 0 {
 				t.Fatal("native ownership metadata wrong")
+			}
+			if observed {
+				if syscall.Kill(receipt.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(receipt.GroupPID, 0) != syscall.ESRCH || mode == "capture" && syscall.Kill(receipt.NativePID, 0) != syscall.ESRCH {
+					t.Fatal("observer/helper/native terminal identity remains alive")
+				}
+				if tape.Status.Signal == 0 {
+					var observation struct {
+						OwnerPID, ChildPID int
+						Status             FallbackWorkerStatus
+					}
+					if ReadLifecycleControl(filepath.Join(home, "observer-wait.json"), 16384, &observation) != nil || observation.OwnerPID != cmd.Process.Pid || observation.ChildPID != actualJob.OwnerPID || observation.Status != tape.Status {
+						t.Fatal("actual observer Wait not joined to helper/native status")
+					}
+				}
 			}
 			if tape.Input != saved.Input || !reflect.DeepEqual(tape.Args, saved.Args) {
 				t.Fatal("native exact input changed")
@@ -308,6 +338,36 @@ func TestFallbackWorkerOSHelper(t *testing.T) {
 			os.Exit(7)
 		}
 		os.Exit(0)
+	case "observer":
+		exe, err := os.Executable()
+		if err != nil {
+			os.Exit(2)
+		}
+		child := exec.Command(exe, "-test.run=^TestFallbackWorkerOSHelper$", "--", "wrapper", os.Args[at+1], os.Args[at+2])
+		child.Stdin = os.Stdin
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		child.Env = os.Environ()
+		if child.Start() != nil {
+			os.Exit(2)
+		}
+		_ = child.Wait()
+		status := FallbackWorkerStatus{ExitCode: child.ProcessState.ExitCode()}
+		wait := child.ProcessState.Sys().(syscall.WaitStatus)
+		if wait.Signaled() {
+			status = FallbackWorkerStatus{ExitCode: -1, Signal: int(wait.Signal())}
+		}
+		observation := struct {
+			OwnerPID, ChildPID int
+			Status             FallbackWorkerStatus
+		}{os.Getpid(), child.Process.Pid, status}
+		if PublishLifecycleControl(filepath.Join(os.Getenv("HOME"), "observer-wait.json"), observation) != nil {
+			os.Exit(2)
+		}
+		if status.Signal != 0 {
+			os.Exit(2)
+		}
+		os.Exit(status.ExitCode)
 	case "wrapper":
 		var job FallbackWorkerJob
 		if json.Unmarshal([]byte(os.Getenv("PYRY_FINITE_WORKER_CONTROL")), &job) != nil {
@@ -356,8 +416,10 @@ func TestFallbackWorkerOSHelper(t *testing.T) {
 }
 
 func TestFallbackWorkerInventoryRejectsForeignEvidence(t *testing.T) {
-	for _, kind := range []string{"valid", "missing-job", "missing-receipt", "extra-file", "foreign-source", "foreign-owner", "foreign-daemon", "wrong-wait", "unknown-wait", "unjoined-cancel", "changed-input", "wrong-native", "mutate-output-after-receipt", "duplicate-attempt"} {
+	for _, kind := range []string{"valid", "missing-job", "missing-receipt", "extra-file", "foreign-source", "foreign-owner", "foreign-daemon", "wrong-wait", "unknown-wait", "unjoined-cancel", "changed-input", "wrong-native", "mutate-output-after-receipt", "duplicate-attempt", "observer-valid", "observer-helper-wait", "observer-wrong-wait", "observer-live-helper", "observer-live-group"} {
 		t.Run(kind, func(t *testing.T) {
+			observed := strings.HasPrefix(kind, "observer-")
+			kind = strings.TrimPrefix(kind, "observer-")
 			home := t.TempDir()
 			if os.Chmod(home, 0700) != nil {
 				t.Fatal("private home")
@@ -380,7 +442,24 @@ func TestFallbackWorkerInventoryRejectsForeignEvidence(t *testing.T) {
 			tape := fallbackWorkerControlTape()
 			receipt := FallbackWorkerReceipt{Version: 1, OwnerPID: owner, GroupPID: owner, NativePID: native, BrokerPID: os.Getpid(), Success: true, Frames: len(tape.Frames), Status: tape.Status}
 			observation := FallbackWorkerObservation{OwnerPID: owner, WaitCompleted: true, ExitObserved: true, Status: tape.Status}
+			if observed {
+				job.Scenario = "fallback-suggestion"
+				job.GroupPID = exited()
+				receipt.GroupPID = job.GroupPID
+				observation.OwnerPID = job.GroupPID
+			}
+
 			switch kind {
+			case "helper-wait":
+				observation.OwnerPID = job.OwnerPID
+			case "live-helper":
+				job.OwnerPID = os.Getpid()
+				receipt.OwnerPID = job.OwnerPID
+				receipt.BrokerPID = exited()
+			case "live-group":
+				job.GroupPID = os.Getpid()
+				receipt.GroupPID = job.GroupPID
+				observation.OwnerPID = job.GroupPID
 			case "foreign-source":
 				job.SourceBinarySHA256 = strings.Repeat("f", 64)
 			case "foreign-owner":
@@ -433,7 +512,7 @@ func TestFallbackWorkerInventoryRejectsForeignEvidence(t *testing.T) {
 				}
 			}
 			roles := map[string]*LifecycleTape{"bootstrap": {Version: 1, Tape: fallbackExchangeControl(), End: "idle-evict"}}
-			workers, err := ReadLifecycleWorkers(home, "session-resume", "capture", producer.Revision, producer.BinarySHA256, os.Getpid(), roles)
+			workers, err := ReadLifecycleWorkers(home, job.Scenario, "capture", producer.Revision, producer.BinarySHA256, os.Getpid(), roles)
 			if kind == "valid" {
 				if err != nil || len(workers) != 1 || workers[0].SourceRole != "bootstrap" || workers[0].UserSequence != 1 {
 					t.Fatal("valid complete source", err)

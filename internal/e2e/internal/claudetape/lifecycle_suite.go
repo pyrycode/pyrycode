@@ -14,6 +14,7 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
+		"fallback-suggestion":        {"TestInteractiveStream_FallbackReplySuggestionSetThenClear", []string{"bootstrap"}},
 		"conversation-active-switch": {"TestInteractivePerConversationLiveness_ActiveSwitch", []string{"bootstrap", "created-1", "created-2"}},
 		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bootstrap", "bare", "prompted"}},
 		"conversation-lifecycle":     {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
@@ -47,7 +48,7 @@ func LifecycleBootstrapFor(scenario string) string {
 		return bootstrap
 	}
 	switch scenario {
-	case "conversation-lifecycle", "conversation-system-prompt", "conversation-active-switch":
+	case "conversation-lifecycle", "conversation-system-prompt", "conversation-active-switch", "fallback-suggestion":
 		return LifecycleBootstrapSession
 	case "session-rotation":
 		return LifecycleRotationSession
@@ -58,6 +59,10 @@ func LifecycleBootstrapFor(scenario string) string {
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "fallback-suggestion":
+		if role == "bootstrap" {
+			return "seal"
+		}
 	case "conversation-active-switch":
 		if role == "bootstrap" || role == "created-1" || role == "created-2" {
 			return "seal"
@@ -120,6 +125,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 	bootstrap := LifecycleBootstrapFor(scenario)
 	if role == "bootstrap" {
 		conv := ""
+		if scenario == "fallback-suggestion" {
+			conv = "28310000-0000-4000-8000-000000000002"
+		}
 		if scenario == "session-rotation" {
 			conv = LifecycleRotationConversation
 		}
@@ -221,7 +229,7 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 			return err
 		}
 	}
-	if s.Scenario == "conversation-system-prompt" || s.Scenario == "conversation-active-switch" {
+	if s.Scenario == "fallback-suggestion" || s.Scenario == "conversation-system-prompt" || s.Scenario == "conversation-active-switch" {
 		for _, role := range profile.Roles {
 			if s.Roles[role].Timeline == nil {
 				return fail
@@ -237,6 +245,17 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 		}
 		if err := validateLifecycleResumeInput(s.Roles["resumed"].Tape, s.Snapshots["bootstrap"]); err != nil {
 			return err
+		}
+	}
+	if s.Scenario == "fallback-suggestion" {
+		first := 0
+		for _, worker := range s.Workers {
+			if worker.SourceRole == "bootstrap" && worker.UserSequence == 1 && worker.Tape != nil && worker.Tape.Status == (FallbackWorkerStatus{ExitCode: 0}) {
+				first++
+			}
+		}
+		if first != 1 {
+			return fail
 		}
 	}
 	for _, worker := range s.Workers {
