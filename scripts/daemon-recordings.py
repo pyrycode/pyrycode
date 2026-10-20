@@ -37,7 +37,7 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
         env.pop('PYRY_CLAUDE_TAPE_FRESH', None)
     if report_dir:
         evidence = report_dir / ((label or mode) + '-native-events')
-        evidence.mkdir(parents=True, exist_ok=False)
+        evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
         env['PYRY_CLAUDE_TAPE_EVIDENCE'] = str(evidence.resolve())
     else:
         env.pop('PYRY_CLAUDE_TAPE_EVIDENCE', None)
@@ -98,6 +98,27 @@ def run(mode, directory, report_dir, compare=None, label=None, scenarios=None):
             if policy == 'native_coding_prefix':
                 required |= {'baseline_coding_iterations', 'fresh_coding_iterations'}
                 if any(type(row.get(k)) is not int or not 1 <= row[k] <= 6 for k in required - {'scenario', 'policy'}):
+                    return False
+            if policy == 'settled_conversation_workers':
+                required |= {'baseline_workers', 'fresh_workers'}
+                roles = {'prompted', 'bare'} if name == 'conversation-system-prompt' else {'created-1', 'created-2'} if name == 'conversation-active-switch' else set()
+                def worker_facts(values):
+                    if not roles or not isinstance(values, list) or len(values) != 2:
+                        return False
+                    seen = set()
+                    for fact in values:
+                        if not isinstance(fact, dict) or set(fact) != {'source_role', 'user_sequence', 'native_status'}:
+                            return False
+                        role = fact['source_role']
+                        if not isinstance(role, str) or role not in roles or role in seen or type(fact['user_sequence']) is not int or fact['user_sequence'] != 1:
+                            return False
+                        seen.add(role)
+                        status = fact['native_status']
+                        if not isinstance(status, dict) or set(status) != {'ExitCode', 'Signal'} or any(type(x) is not int for x in status.values()) or status != {'ExitCode': 0, 'Signal': 0}:
+                            return False
+
+                    return True
+                if not all(worker_facts(row.get(key)) for key in ('baseline_workers', 'fresh_workers')):
                     return False
             return set(row) == required and row.get('scenario') == name and row.get('policy') == policy
         success = success and set(comparisons) == set(expected_policies) and all(valid_contract(n, p) for n, p in expected_policies.items())

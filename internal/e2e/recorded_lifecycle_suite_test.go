@@ -165,6 +165,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			}
 		}
 	}
+	workerWaits := []*claudetape.FallbackProductionWait{}
 	workerLimit := claudetape.LifecycleWorkerLimit(name)
 	if workerLimit > 0 {
 		if os.Mkdir(filepath.Join(home, "recording-workers"), 0700) != nil {
@@ -181,6 +182,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 				t.Fatal(err)
 			}
 			for i, worker := range suite.Workers {
+				workerWaits = append(workerWaits, worker.ProductionWait)
 				path := strings.TrimSuffix(claudetape.FallbackWorkerJobPath(home, i+1), ".job") + ".json"
 				if worker.Tape.Save(path) != nil {
 					t.Fatal("cannot stage reviewed finite worker")
@@ -196,11 +198,12 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		t.Fatal("cannot prepare daemon recording wrapper")
 	}
 	config := struct {
+		WorkerWaits                              []*claudetape.FallbackProductionWait `json:",omitempty"`
 		BrokerParentPID                          int
 		Process                                  claudetape.PoolProcessConfig
 		Root, Receipt, Wrapper                   string
 		DaemonSHA256, Daemon, SourceBinarySHA256 string
-	}{os.Getpid(), process, profile.Root, filepath.Join(home, "receipt"), wrapper, hex.EncodeToString(daemonSum[:]), daemon, sourceSHA}
+	}{workerWaits, os.Getpid(), process, profile.Root, filepath.Join(home, "receipt"), wrapper, hex.EncodeToString(daemonSum[:]), daemon, sourceSHA}
 	raw, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
@@ -214,6 +217,8 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	for _, role := range profile.Roles {
 		brokerJobs = append(brokerJobs, filepath.Join(children, role+".job"))
 	}
+	ownedBrokers := map[string]*exec.Cmd{}
+	var ownedBrokersMu sync.Mutex
 	server, err := claudetape.NewLifecycleBrokerServer(filepath.Join(home, "broker.sock"), brokerJobs, func(jobPath string, peer int) (*exec.Cmd, error) {
 		var job claudetape.LifecycleJob
 		if claudetape.ReadLifecycleControl(jobPath, claudetape.MaxBytes, &job) != nil || claudetape.ValidateLifecycleLaunch(job, jobPath, peer, os.Getpid(), process, sourceSHA, daemon) != nil {
@@ -225,6 +230,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			cmd.Env = recordedPoolOfflineEnv()
 		}
 		cmd.Env = append(cmd.Env, "PYRY_LIFECYCLE_RECORDING_CONFIG="+configPath)
+		ownedBrokersMu.Lock()
+		ownedBrokers[job.Role] = cmd
+		ownedBrokersMu.Unlock()
 		return cmd, nil
 	})
 	if err != nil {
@@ -268,6 +276,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		workerServer, err = claudetape.NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), jobs, func(path string, peer int) (*exec.Cmd, error) {
 			var job claudetape.FallbackWorkerJob
 			if claudetape.ReadLifecycleControl(path, 16384, &job) != nil || claudetape.ValidateFallbackWorkerLaunch(job, path, peer, os.Getpid(), process, sourceSHA) != nil {
+				return nil, os.ErrInvalid
+			}
+			if claudetape.ValidateFallbackReplayWait(job, path, mode, home, workerWaits) != nil {
 				return nil, os.ErrInvalid
 			}
 			launchRaw, err := os.ReadFile(path)
@@ -434,6 +445,15 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+	brokerPIDs := map[string]int{}
+	for role, cmd := range ownedBrokers {
+		if cmd.Process != nil {
+			brokerPIDs[role] = cmd.Process.Pid
+		}
+	}
+	if err := claudetape.ValidateConversationBrokerOwnership(home, name, brokerPIDs); err != nil {
+		t.Fatal(err)
+	}
 	digest, tapes, err := claudetape.AuditLifecycleArtifacts(home, name, revision, sourceSHA, config.DaemonSHA256, os.Getpid(), true)
 	if err != nil || digest != receipt.ArtifactSHA256 {
 		for _, role := range profile.Roles {
@@ -463,6 +483,10 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	workers, err := claudetape.ReadLifecycleWorkers(home, name, mode, revision, sourceSHA, os.Getpid(), tapes)
 	if err != nil {
+		destination := filepath.Join(evidenceDir, name+"-invalid-worker-diagnostic.json")
+		if diagnosticErr := claudetape.SaveLifecycleWorkerDiagnostic(home, name, destination, tapes); diagnosticErr == nil {
+			t.Log("validated invalid/unpromoted worker carriers retained privately")
+		}
 		t.Fatal(err)
 	}
 	if len(workerLaunchHashes) != len(workers) {
@@ -498,7 +522,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers}
+		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
 		if err := suite.Save(process.Path, profile.Roles); err != nil {
 			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}

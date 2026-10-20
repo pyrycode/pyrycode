@@ -173,6 +173,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	if lifecycleTimelineEnabled(c.Scenario) {
 		if c.Mode == "capture" {
 			tape.Timeline = &LifecycleTimeline{Kind: lifecycleTimelineKind, OutputAfterNS: []int64{}}
+			if lifecycleInputTimeline(c.Scenario) {
+				tape.Timeline.Kind = lifecycleInputTimelineKind
+				tape.Timeline.OutputAfterUser = []int{}
+			}
 		} else if tape.Timeline == nil {
 			return 0, errors.New("missing required native output timeline")
 		}
@@ -184,7 +188,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return 0, fail
 		}
 	}
+	observeCompletion := NewConversationCompletionObserver(c, tape.Tape)
 	timelineOrigin := time.Now()
+	timelineOrigins := []time.Time{timelineOrigin}
+	recordTimelineInput := func(raw []byte) {
+		if lifecycleTimelineUser(raw) {
+			timelineOrigins = append(timelineOrigins, time.Now())
+		}
+	}
 	timelineOutput := 0
 	if _, err = originals[6].Write([]byte{1}); err != nil {
 		return 0, fail
@@ -236,8 +247,19 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
 				return fail
 			}
+			origin := timelineOrigin
+			if tape.Timeline.Kind == lifecycleInputTimelineKind {
+				if timelineOutput >= len(tape.Timeline.OutputAfterUser) {
+					return fail
+				}
+				anchor := tape.Timeline.OutputAfterUser[timelineOutput]
+				if anchor < 0 || anchor >= len(timelineOrigins) {
+					return fail
+				}
+				origin = timelineOrigins[anchor]
+			}
 			offset := tape.Timeline.OutputAfterNS[timelineOutput]
-			if err := forwardLifecycleOutput(timelineOrigin, offset, time.Now, time.Sleep, func() error { return emit(timelineOrigin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
+			if err := forwardLifecycleOutput(origin, offset, time.Now, time.Sleep, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
 				return err
 			}
 			timelineOutput++
@@ -245,7 +267,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		frames++
-		return nil
+		return observeCompletion("stdout", raw)
 	}
 	if player != nil {
 		for _, raw := range player.Prefix() {
@@ -289,6 +311,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if e = write(originals[3], append(raw, '\n')); e != nil {
 				return fail
 			}
+			recordTimelineInput(normalized)
+			if e := observeCompletion("stdin", normalized); e != nil {
+				return e
+			}
 			if c.OnInput != nil {
 				if e := c.OnInput(normalized); e != nil {
 					return e
@@ -315,7 +341,19 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			return err
 		}
 		if direction == "stdout" && tape.Timeline != nil {
-			tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, time.Since(timelineOrigin).Nanoseconds())
+			origin := timelineOrigin
+			if tape.Timeline.Kind == lifecycleInputTimelineKind {
+				anchor := len(timelineOrigins) - 1
+				tape.Timeline.OutputAfterUser = append(tape.Timeline.OutputAfterUser, anchor)
+				origin = timelineOrigins[anchor]
+			}
+			tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, time.Since(origin).Nanoseconds())
+		}
+		if direction == "stdin" {
+			recordTimelineInput(normalized)
+		}
+		if err := observeCompletion(direction, normalized); err != nil {
+			return err
 		}
 		if direction == "stdin" && c.OnInput != nil {
 			return c.OnInput(normalized)

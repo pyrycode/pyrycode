@@ -420,10 +420,11 @@ func TestClaudeTapeCompatibility(t *testing.T) {
 					}
 					return suite
 				}
-				if claudetape.SameLifecycleSuiteContract(load(baseline), load(fresh), profile.Roles) != nil {
+				report, err := claudetape.CompareLifecycleSuite(load(baseline), load(fresh), profile.Roles, recordedManifestFor(t).scenario(scenario).ComparisonPolicy)
+				if err != nil {
 					t.Fatal("lifecycle outgoing contract changed")
 				}
-				raw, _ := json.Marshal(map[string]string{"scenario": scenario, "policy": "strict_ordered"})
+				raw, _ := json.Marshal(report)
 				t.Logf("CLAUDE_COMPARISON %s", raw)
 				return
 			}

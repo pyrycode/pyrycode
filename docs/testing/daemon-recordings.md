@@ -869,3 +869,105 @@ A native attempt with no worker that cannot replay its timing remains unpromoted
 Another attempt passed the original root but failed its outer broker join; it also
 remains unpromoted. Worker failures now expose only fixed stage diagnostics over
 the separate broker capability, never argv, environment or native output text.
+
+## Per-conversation system prompt isolation
+
+`conversation-system-prompt` captures the unchanged original two-conversation
+reply test. Its bootstrap, prompted and bare providers have separate exclusive
+kernel-owned claims. The two nonbootstrap roles are published from the original
+persisted seed and checked against its fixed session/conversation identities.
+The recording nonce is stable only inside the selected original root; ordinary
+live runs keep their fresh marker. Both original reply assertions and both
+per-session prompt-file assertions remain in the original test body. Every
+complete literal appended prompt file, mode, argv and ordered input stays strict.
+
+Each role retains its successful stdout forwarding schedule. After the complete
+original oracle, recording adds a declared `completed-native-workers-v1`
+settlement boundary: both owned first turns and exactly one real finite worker
+per source must finish successfully before sealing. A single 45-second bound
+covers the entire phase. The real fallback timer and launch path stay unchanged.
+No worker, native suggestion winner, failed/cancelled worker, partial IO or
+missing actual production Wait can count as settled. Ordinary live cleanup stays
+immediate; its cancellation timing remains a live obligation. Current Claude
+instruction following and physical prompt composition remain retained live proof.
+
+
+`conversation-active-switch` uses the same closed three-role transport for the
+original active-switch liveness root. Both created roles come from the original
+phone create acknowledgements and persisted registry, not invented sessions.
+The audit rejects a duplicate session or conversation across those roles and the
+bootstrap. The original send to A, observed A streaming reply, send to B and
+observed B streaming reply remain unchanged. Captured output schedules preserve
+the native overlap, and every actual finite suggestion worker still requires its
+own completed source turn and actual production Wait. Current provider startup
+and streaming remain retained live checks. The `conversation-isolation` batch
+groups this root with per-conversation system-prompt isolation for one full gate.
+
+## Fallback suggestion observer ownership
+
+`fallback-suggestion` captures the original fallback set/clear root, including
+its unchanged Python source observer. Recording selects the reviewed recorder as
+that observer's underlying CLI; it keeps the observer installed on the real
+daemon path rather than bypassing its stream counters or print child. Native
+suggestions remain disabled by the original stream-only wrapper. The first
+completed exchange must have exactly one successful finite fallback worker;
+zero workers cannot stand in for this root's suggestion publication. All top-level native
+`prompt_suggestion` output frames are rejected for this profile, including empty
+ones; a successful worker cannot excuse a competing native publication.
+
+For this closed profile the original observer owns the production worker PGID
+and directly parents the finite recording helper. The kernel-authenticated peer
+must be that helper, its current PPID must be the group owner, and the owner's
+current PPID must be the original daemon. Darwin kernel process information and
+Linux procfs supply those current relationships; unsupported systems reject the
+observed shape. Other profiles retain direct helper/group ownership. The native
+child still runs inside the original production group, while its recorder stays
+outside it. Final inventory joins the actual production Wait to the observer
+PID and separately requires both helper and group owner to be gone. Fixture PIDs
+are never signal targets. Complete native I/O, EOF, status and source-turn input
+remain strict, as do the original set and higher-revision explicit-null clear.
+
+Finite worker records keep the native child's actual `exec.Cmd.Wait` status in its
+immutable tape and separately owned receipt. The additive optional
+`production_wait` records only the proved case where that native child exited 0
+before daemon cleanup actually reaped its wrapper with SIGKILL and a logged group
+cancellation. Absence retains the original exact native/production status rule.
+Replay closes native output, withholds wrapper completion until the original
+daemon actually cancels the current owned group, then checks its real Wait.
+Strict fresh policies retain exact native status, optional production Wait,
+worker counts and source identity; the two conversation profiles declare their
+separate fresh policy below. Failed diagnostics never become fixtures.
+
+The two conversation profiles require explicit fixture settlement metadata and
+use the named fresh-comparison policy `settled_conversation_workers`. Old
+cancellation-prefix fixtures for these unmerged profiles cannot satisfy that
+boundary. Complete main-provider argv, input files and ordered requests remain
+exact. Both captures require the complete source-declared production argv, exactly
+the two allowed first-turn source keys, native exit0 and actual wrapper Wait0,
+complete native IO/EOF, and no separate cancelled production status. A source AST
+guard pins the full production argv including its system prompt. The fresh report
+uses canonical source-key ordering; replay keeps its actual attempt ordering and
+complete literal worker input/output exact. Fallback-suggestion and session-resume
+retain their strict fresh comparison policies.
+
+Each main broker publishes one immutable completed-source digest only after its
+successful native result is actually forwarded. The final tape must reproduce
+that completed prefix and exact exchange. The real daemon's locked lifecycle logs
+supply the independent worker Wait observations before sealing. Prefix and final
+audits pin completion bytes and check the receipt against actual outer-owned
+broker processes, launch claims and the sealed native source. The final finite
+worker audit still checks literal IO, source attribution, independent broker
+completion proofs and every original production Wait after daemon cleanup.
+The original active-switch first A delta still triggers the B send before this
+additional recording settlement begins.
+
+New captures for those conversation profiles and fallback-suggestion record
+`user-forwarded-stdout-v2` timing. Each output carries the ordinal of its actual
+preceding forwarded user input (zero means broker readiness) and its native
+forwarding offset from that epoch. Replay requires that same preceding input and
+preserves absolute output due times within each user epoch, including the
+100ms scheduling/forwarding drift check. A later output cannot reset an existing
+epoch. This separates provider response latency from variable queue/startup
+latency without changing production timers. Legacy timelines remain supported;
+session-resume bootstrap keeps its readiness-based timeline because its idle
+timer starts at activation. No old accepted fixture is rewritten.

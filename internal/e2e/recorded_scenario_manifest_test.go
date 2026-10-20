@@ -6,11 +6,12 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 	"io"
 	"os"
 	"regexp"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 )
 
 //go:embed testdata/claude-scenarios.json
@@ -62,7 +63,7 @@ func recordedManifestFor(t *testing.T) recordedManifest {
 		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(s.Name) || names[s.Name] || (recordedScenarioDrivers[s.Name] == nil && recordedPoolProfiles[s.Name].Root == "" && claudetape.DaemonSuiteProfiles()[s.Name].Root == "" && claudetape.CLIProfiles()[s.Name] == "" && claudetape.RunnerProfiles()[s.Name].Root == "" && s.Name != claudetape.RecoveryScenario && claudetape.LifecycleProfiles()[s.Name].Root == "") {
 			t.Fatal("scenario manifest has duplicate, invalid or unimplemented driver")
 		}
-		if s.ComparisonPolicy != "strict_ordered" && (s.ComparisonPolicy != "native_coding_prefix" || s.Name != "native-suggestions") {
+		if s.ComparisonPolicy != "strict_ordered" && (s.ComparisonPolicy != "native_coding_prefix" || s.Name != "native-suggestions") && (s.ComparisonPolicy != claudetape.ConversationWorkerPolicy || !claudetape.ConversationWorkerScenario(s.Name)) {
 			t.Fatal("unsupported scenario comparison policy")
 		}
 		if s.Name == "native-suggestions" && s.ComparisonPolicy != "native_coding_prefix" {

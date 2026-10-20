@@ -90,6 +90,13 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if !decode(raw, &b) || !validLifecycleRoleBinding(home, scenario, role, b) {
 			return "", nil, fail
 		}
+		if scenario == "conversation-active-switch" {
+			for _, prior := range bindings {
+				if b.SessionID == prior.SessionID || b.ConversationID == prior.ConversationID {
+					return "", nil, fail
+				}
+			}
+		}
 		bindings[role] = b
 	}
 	expectedFiles := map[string]bool{}
@@ -123,6 +130,9 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			for i := 1; i <= lifecycleUserInputs(preview.Tape); i++ {
 				suffixes = append(suffixes, fmt.Sprintf(".user-%06d", i))
 			}
+		}
+		if _, _, required := conversationCompletionScenario(scenario + "-" + role); required {
+			suffixes = append(suffixes, ".completed")
 		}
 		values := map[string][]byte{}
 		for _, suffix := range suffixes {
@@ -177,6 +187,12 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			var receipt LifecycleReceipt
 			if !decode(values[suffix], &receipt) || !receipt.Success || receipt.Error != "" || receipt.Frames != len(tape.Tape.Frames) || receipt.OwnerPID != c.OwnerPID || receipt.BrokerPID != brokerPID {
 				return "", nil, fmt.Errorf("lifecycle role %s artifact %s invalid terminal receipt", role, suffix)
+			}
+		}
+		if _, _, required := conversationCompletionScenario(scenario + "-" + role); required {
+			var completion ConversationCompletion
+			if !decode(values[".completed"], &completion) || ValidateConversationCompletion(completion, role, revision, c.OwnerPID, brokerPID, tape.Tape) != nil {
+				return "", nil, fail
 			}
 		}
 		if LifecycleAction(end) != "" {

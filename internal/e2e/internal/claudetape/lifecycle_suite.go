@@ -14,11 +14,14 @@ const LifecycleBootstrapSession = "88888888-8888-4888-8888-888888888888"
 
 func LifecycleProfiles() map[string]DaemonSuiteProfile {
 	return map[string]DaemonSuiteProfile{
-		"conversation-lifecycle": {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
-		"session-rotation":       {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
-		"session-resume":         {"TestInteractiveStreamResumeAfterEviction", []string{"bootstrap", "resumed"}},
-		"clear-wrapup-skipped":   {"TestInteractiveStreamClearWrapUpSkipped", []string{"bootstrap", "bound", "rotated"}},
-		"clear-reset":            {"TestInteractiveStreamClearRunsDaemonReset", []string{"bootstrap", "bound", "rotated"}},
+		"fallback-suggestion":        {"TestInteractiveStream_FallbackReplySuggestionSetThenClear", []string{"bootstrap"}},
+		"conversation-active-switch": {"TestInteractivePerConversationLiveness_ActiveSwitch", []string{"bootstrap", "created-1", "created-2"}},
+		"conversation-system-prompt": {"TestInteractiveConversationSystemPrompt_ReachesTheReply", []string{"bootstrap", "bare", "prompted"}},
+		"conversation-lifecycle":     {"TestInteractiveConversationLifecycle", []string{"bootstrap", "created-1"}},
+		"session-rotation":           {"TestInteractiveStreamNewSessionRotatesAndSpawnsFresh", []string{"bootstrap", "rotated"}},
+		"session-resume":             {"TestInteractiveStreamResumeAfterEviction", []string{"bootstrap", "resumed"}},
+		"clear-wrapup-skipped":       {"TestInteractiveStreamClearWrapUpSkipped", []string{"bootstrap", "bound", "rotated"}},
+		"clear-reset":                {"TestInteractiveStreamClearRunsDaemonReset", []string{"bootstrap", "bound", "rotated"}},
 	}
 }
 
@@ -45,7 +48,7 @@ func LifecycleBootstrapFor(scenario string) string {
 		return bootstrap
 	}
 	switch scenario {
-	case "conversation-lifecycle":
+	case "conversation-lifecycle", "conversation-system-prompt", "conversation-active-switch", "fallback-suggestion":
 		return LifecycleBootstrapSession
 	case "session-rotation":
 		return LifecycleRotationSession
@@ -56,6 +59,18 @@ func LifecycleBootstrapFor(scenario string) string {
 }
 func LifecycleEnd(scenario, role string) string {
 	switch scenario {
+	case "fallback-suggestion":
+		if role == "bootstrap" {
+			return "seal"
+		}
+	case "conversation-active-switch":
+		if role == "bootstrap" || role == "created-1" || role == "created-2" {
+			return "seal"
+		}
+	case "conversation-system-prompt":
+		if role == "bare" || role == "bootstrap" || role == "prompted" {
+			return "seal"
+		}
 	case "session-resume":
 		switch role {
 		case "bootstrap":
@@ -110,6 +125,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 	bootstrap := LifecycleBootstrapFor(scenario)
 	if role == "bootstrap" {
 		conv := ""
+		if scenario == "fallback-suggestion" {
+			conv = "28310000-0000-4000-8000-000000000002"
+		}
 		if scenario == "session-rotation" {
 			conv = LifecycleRotationConversation
 		}
@@ -127,6 +145,9 @@ func ReadLifecycleRole(home, scenario, role string) (LifecycleRoleBinding, error
 }
 
 func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBinding) bool {
+	if scenario == "conversation-system-prompt" && !validPromptRole(b) {
+		return false
+	}
 	if scenario == "session-resume" && (role != "resumed" || b.SessionID != LifecycleResumeSession || b.ConversationID != LifecycleResumeConversation) {
 		return false
 	}
@@ -137,6 +158,7 @@ func validLifecycleRoleBinding(home, scenario, role string, b LifecycleRoleBindi
 }
 
 type LifecycleSuite struct {
+	Settlement   *ConversationSettlement    `json:"settlement,omitempty"`
 	Version      int                        `json:"version"`
 	Scenario     string                     `json:"scenario"`
 	Producer     Producer                   `json:"producer"`
@@ -149,6 +171,9 @@ type LifecycleSuite struct {
 func (s *LifecycleSuite) Validate(expected []string) error {
 	fail := errors.New("invalid lifecycle suite")
 	if s == nil {
+		return fail
+	}
+	if !reflect.DeepEqual(s.Settlement, RequiredConversationSettlement(s.Scenario)) {
 		return fail
 	}
 	profile, ok := LifecycleProfiles()[s.Scenario]
@@ -208,6 +233,13 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 			return err
 		}
 	}
+	if s.Scenario == "fallback-suggestion" || s.Scenario == "conversation-system-prompt" || s.Scenario == "conversation-active-switch" {
+		for _, role := range profile.Roles {
+			if s.Roles[role].Timeline == nil {
+				return fail
+			}
+		}
+	}
 	if s.Scenario == "session-resume" {
 		if s.Roles["bootstrap"].Timeline == nil {
 			return fail
@@ -219,9 +251,38 @@ func (s *LifecycleSuite) Validate(expected []string) error {
 			return err
 		}
 	}
+	if s.Scenario == "fallback-suggestion" {
+		// This root disables native suggestions to prove fallback publication. A
+		// successful worker alone cannot attribute a competing native set revision.
+		for _, frame := range s.Roles["bootstrap"].Tape.Frames {
+			if frame.Direction != "stdout" {
+				continue
+			}
+			var header struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(frame.Data, &header) != nil || header.Type == "prompt_suggestion" {
+				return fail
+			}
+		}
+		first := 0
+		for _, worker := range s.Workers {
+			if worker.SourceRole == "bootstrap" && worker.UserSequence == 1 && worker.Tape != nil && worker.Tape.Status == (FallbackWorkerStatus{ExitCode: 0}) {
+				first++
+			}
+		}
+		if first != 1 {
+			return fail
+		}
+	}
 	for _, worker := range s.Workers {
 		if worker.Tape == nil || !reflect.DeepEqual(worker.Tape.Producer, s.Producer) {
 			return fail
+		}
+	}
+	if ConversationWorkerScenario(s.Scenario) {
+		if _, err := conversationWorkerFacts(s); err != nil {
+			return err
 		}
 	}
 	if err := ValidateLifecycleWorkers(s.Scenario, s.Roles, s.Workers); err != nil {
@@ -278,6 +339,12 @@ func (s *LifecycleSuite) Save(path string, expected []string) error {
 	return nil
 }
 func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
+	if err := sameLifecycleProviderContract(a, b, expected); err != nil {
+		return err
+	}
+	return SameLifecycleWorkers(a, b)
+}
+func sameLifecycleProviderContract(a, b *LifecycleSuite, expected []string) error {
 	fail := errors.New("lifecycle outgoing contract changed")
 	if a.Validate(expected) != nil || b.Validate(expected) != nil || a.Scenario != b.Scenario {
 		return fail
@@ -310,7 +377,7 @@ func SameLifecycleSuiteContract(a, b *LifecycleSuite, expected []string) error {
 			return fail
 		}
 	}
-	return SameLifecycleWorkers(a, b)
+	return nil
 }
 
 // LifecycleJob is private per-launch evidence, never serialized into fixtures.

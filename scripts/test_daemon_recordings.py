@@ -61,6 +61,10 @@ class RecordedEvidenceTest(unittest.TestCase):
                     contract = dict(scenario=row['name'], policy=row['comparison_policy'])
                     if row['comparison_policy'] == 'native_coding_prefix':
                         contract.update(baseline_coding_iterations=1, fresh_coding_iterations=2)
+                    if row['comparison_policy'] == 'settled_conversation_workers':
+                        roles = ['bare','prompted'] if row['name'] == 'conversation-system-prompt' else ['created-1','created-2']
+                        facts = [dict(source_role=role,user_sequence=1,native_status=dict(ExitCode=0,Signal=0)) for role in roles]
+                        contract.update(baseline_workers=facts, fresh_workers=facts)
                     contracts.append(json.dumps(dict(Action='output', Test=name + '/' + row['name'], Output='CLAUDE_COMPARISON ' + json.dumps(contract))) + '\n')
                 process.stdout = iter(contracts + list(process.stdout))
             return process
@@ -87,6 +91,28 @@ class RecordedEvidenceTest(unittest.TestCase):
                 self.assertEqual(mutate is None, RUNNER.run('replay', Path('/baseline'), None, compare=Path('/fresh'), scenarios=['native-suggestions']))
         with patch.object(RUNNER.subprocess, 'Popen', return_value=FakeRun([(name, 'pass')])), contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(RUNNER.run('replay', Path('/baseline'), None, compare=Path('/fresh'), scenarios=['native-suggestions']))
+
+    def test_conversation_comparison_reports_closed_actual_worker_inventories(self):
+        name = 'TestClaudeTapeCompatibility/conversation-system-prompt'
+        fact = dict(source_role='prompted', user_sequence=1, native_status=dict(ExitCode=0, Signal=0))
+        bare = dict(source_role='bare', user_sequence=1, native_status=dict(ExitCode=0, Signal=0))
+        good = dict(scenario='conversation-system-prompt', policy='settled_conversation_workers', baseline_workers=[bare,fact], fresh_workers=[bare,fact])
+        mutations = [None, lambda r: r.pop('baseline_workers'), lambda r: r.update(fresh_workers=None),
+                     lambda r: r.update(fresh_workers=[fact, fact]), lambda r: r.update(policy='strict_ordered'),
+                     lambda r: r['fresh_workers'][0].update(source_role='bootstrap'),
+                     lambda r: r['fresh_workers'][0].update(user_sequence=True),
+                     lambda r: r['fresh_workers'][0].update(extra='unknown'),
+                     lambda r: r['fresh_workers'][0]['native_status'].update(ExitCode=7),
+                     lambda r: r['fresh_workers'][0].update(production_wait=dict(status=dict(ExitCode=-1, Signal=9),group_cancel=True)),
+                     lambda r: r['fresh_workers'][0]['native_status'].update(Signal=0.0), lambda r: r.update(fresh_workers=[]), lambda r: r.update(baseline_workers=[fact])]
+        for mutate in mutations:
+            row = json.loads(json.dumps(good))
+            if mutate:
+                mutate(row)
+            process = FakeRun([(name, 'pass')])
+            process.stdout = iter([json.dumps(dict(Action='output', Test=name, Output='CLAUDE_COMPARISON ' + json.dumps(row))) + '\n'] + list(process.stdout))
+            with patch.object(RUNNER.subprocess, 'Popen', return_value=process), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mutate is None, RUNNER.run('replay', Path('/baseline'), None, compare=Path('/fresh'), scenarios=['conversation-system-prompt']))
 
     def test_batch_cli_runs_four_comparisons_and_one_gate_group(self):
         calls = []

@@ -259,9 +259,18 @@ func TestInteractiveStream_NativeReplySuggestionSetThenClear(t *testing.T) {
 // proof disables prompt suggestions only on the persistent stream child.
 func installSuggestCLI(t *testing.T, native bool) string {
 	t.Helper()
-	real, err := exec.LookPath("claude")
-	if err != nil {
-		t.Skip("claude unavailable")
+	var real string
+	if c, recording := lifecycleRecordingCurrent(t); recording {
+		if native || c.Process.Scenario != "fallback-suggestion" {
+			t.Fatal("suggestion observer escaped selected recording root")
+		}
+		real = c.Wrapper
+	} else {
+		var err error
+		real, err = exec.LookPath("claude")
+		if err != nil {
+			t.Skip("claude unavailable")
+		}
 	}
 	dir := t.TempDir()
 	evidence := filepath.Join(dir, "source.jsonl")
@@ -430,6 +439,7 @@ sys.exit(code)
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	lifecycleRecordingSuggestObserver(t, real, filepath.Join(dir, "claude"))
 	return evidence
 }
 

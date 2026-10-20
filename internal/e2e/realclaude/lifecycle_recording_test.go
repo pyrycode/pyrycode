@@ -18,6 +18,7 @@ import (
 )
 
 type lifecycleRecordingConfig struct {
+	WorkerWaits                                                      []*claudetape.FallbackProductionWait `json:",omitempty"`
 	BrokerParentPID                                                  int
 	Process                                                          claudetape.PoolProcessConfig
 	Root, Receipt, Wrapper, Daemon, DaemonSHA256, SourceBinarySHA256 string
@@ -32,6 +33,14 @@ func readLifecycleRecordingConfig(path string) (lifecycleRecordingConfig, error)
 	p, ok := claudetape.LifecycleProfiles()[c.Process.Scenario]
 	if !ok || c.BrokerParentPID <= 1 || p.Root != c.Root || poolRecordedRevision == "" || c.Process.Producer.Revision != poolRecordedRevision || !filepath.IsAbs(c.Process.Home) || c.Process.WorkDir != filepath.Join(c.Process.Home, "work") || c.Process.Finish != filepath.Join(c.Process.Home, "finish") || c.Receipt != filepath.Join(c.Process.Home, "receipt") || c.Wrapper != filepath.Join(c.Process.Home, "recording-bin", "claude") || !filepath.IsAbs(c.Daemon) || len(c.SourceBinarySHA256) != 64 || len(c.DaemonSHA256) != 64 {
 		return c, os.ErrInvalid
+	}
+	if len(c.WorkerWaits) > claudetape.LifecycleWorkerLimit(c.Process.Scenario) || c.Process.Mode == "capture" && len(c.WorkerWaits) != 0 {
+		return c, os.ErrInvalid
+	}
+	for _, wait := range c.WorkerWaits {
+		if claudetape.ValidateFallbackProductionWait(claudetape.FallbackWorkerStatus{ExitCode: 0}, wait) != nil {
+			return c, os.ErrInvalid
+		}
 	}
 	exe, e := os.Executable()
 	if e != nil {
@@ -82,6 +91,9 @@ func lifecycleProviderEnvironment(t *testing.T) (string, string, bool) {
 			t.Fatal("lifecycle directory is not private")
 		}
 	}
+	if c.Process.Scenario == "fallback-suggestion" {
+		return lifecycleRecordingSuggestProvider(t, c), c.Process.Home, true
+	}
 	return c.Wrapper, c.Process.Home, true
 }
 func lifecycleRecordingRegisterSocket(t *testing.T, home, daemon, socket string) {
@@ -116,6 +128,20 @@ func lifecycleRecordingRegisterConversation(t *testing.T, conv string) {
 		t.Fatal("cannot validate lifecycle conversation ownership")
 	}
 	role := daemonRecordingRole{Role: "created-1", ConversationID: conv}
+	if c.Process.Scenario == "conversation-active-switch" {
+		var prior claudetape.LifecycleRoleBinding
+		path := filepath.Join(c.Process.Home, "recording-roles", "created-1.json")
+		if _, err := os.Lstat(path); err == nil {
+			var e error
+			prior, e = claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, "created-1")
+			if e != nil || prior.ConversationID == conv {
+				t.Fatal("active switch repeated or foreign first conversation")
+			}
+			role.Role = "created-2"
+		} else if !os.IsNotExist(err) {
+			t.Fatal("active switch role inventory unreadable")
+		}
+	}
 	for _, row := range registry.Conversations {
 		if row.ID == conv {
 			if role.SessionID != "" {
@@ -127,7 +153,7 @@ func lifecycleRecordingRegisterConversation(t *testing.T, conv string) {
 	if role.SessionID == "" || role.SessionID == claudetape.LifecycleBootstrapSession || role.WorkDir != filepath.Join(c.Process.Home, "work") {
 		t.Fatal("lifecycle conversation lacks its independent session")
 	}
-	if daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-roles", "created-1.json"), role) != nil {
+	if daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-roles", role.Role+".json"), role) != nil {
 		t.Fatal("additional lifecycle conversation")
 	}
 }
@@ -189,6 +215,7 @@ func finishLifecycleRecording(t *testing.T) {
 	if !ok || t.Failed() {
 		return
 	}
+	settleLifecycleRecording(t, c)
 	profile := claudetape.LifecycleProfiles()[c.Process.Scenario]
 	for _, role := range profile.Roles {
 		prefix := filepath.Join(c.Process.Home, "recording-children", role)
@@ -272,7 +299,12 @@ func TestLifecycleTapeHelperProcess(t *testing.T) {
 		}
 	}
 	var role claudetape.LifecycleRoleBinding
-	if c.Process.Scenario == "session-resume" {
+	if c.Process.Scenario == "conversation-system-prompt" || c.Process.Scenario == "conversation-active-switch" {
+		role, e = lifecycleRecordingMappedRole(c, session)
+		if e != nil {
+			fail()
+		}
+	} else if c.Process.Scenario == "session-resume" {
 		role, e = lifecycleRecordingResumeRole(c, session, args)
 		if e != nil {
 			fail()
@@ -352,6 +384,10 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		r := claudetape.LifecycleReceipt{Success: err == nil, Frames: n, OwnerPID: job.Config.OwnerPID, BrokerPID: os.Getpid()}
 		if err != nil {
 			r.Error = "lifecycle boundary failed"
+			switch err.Error() {
+			case "native output timeline missed absolute due time", "native output timeline scheduling drift", "native output timeline forwarding drift":
+				r.Error = err.Error()
+			}
 		}
 		return r
 	}
