@@ -77,3 +77,35 @@ None. Sequential Start requires the previous Wait, matching the sessions adapter
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-20
+
+## Revisions
+
+### 2026-10-20 — verifier finding 1: stdout progress during delivery
+
+The adapter's exit mutex does not order stdout against successful-write arming.
+An assistant or completed result consumed before the writer resumes must remain
+authoritative; otherwise healthy silence becomes a false stall. This repairs the
+same owed-silence invariant, with its regressions, rather than a separate behavior.
+Repair estimate: about 160 written lines, no new exported types, one consumer.
+No other feature branch currently overlaps the repair's files.
+
+This supersedes the delivery portion of Design and Concurrency model:
+`Watchdog.TrackUserTurn(write func() error) error` snapshots an owed-state revision
+under the tracker mutex, releases it for the write, then commits arming only on
+success and only if that revision is unchanged. Assistant, result, user/tool_result
+and child exit advance the revision; activity-only lines do not suppress arming.
+Neither the tracker mutex nor a stdout lock spans stdin I/O. The adapter still
+serializes this transaction against exit reset and other deliveries. Existing
+`UserTurnSent` remains available for callers already ordered against stdout.
+
+`TestStreamWatchdog_ResponseBeforeArming` pauses after real child delivery until
+production publication proves assistant/tool silence or completed-result output
+was consumed, then resumes arming. Both must stay quiet and a later silent turn
+must still stall. Include activity-only and tool-result controls. Existing
+write/exit, failed/refused-write, lifecycle and approval race tests remain required.
+
+Security re-review: PASS. The revised transaction introduces no I/O, subprocess,
+credential, cryptographic, logging or trust-boundary change. Its revision counter
+shares the tracker leaf mutex; no lock spans the callback and no goroutine is added.
+The adapter exit ordering remains necessary to prevent predecessor delivery from
+arming an idle replacement. Documentation handoff above remains pending.
