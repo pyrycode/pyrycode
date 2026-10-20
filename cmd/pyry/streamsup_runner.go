@@ -15,44 +15,15 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
-// streamRunner adapts *streamsup.Runner to sessions.Runner. The shapes differ in
-// exactly one method: sessions.Runner.State returns supervisor.State, but
-// internal/streamsup must not import internal/supervisor (its package doc forbids
-// it), so *streamsup.Runner declares State() streamsup.State instead. Go has no
-// covariant return on interface satisfaction, so the concrete runner cannot
-// satisfy the interface directly. This adapter — living in cmd/pyry, which knows
-// both types — maps that one method and forwards the rest unchanged. The
-// precedent for this covariant-return seam is poolResolver in main.go.
-//
-// The factory that constructs a streamRunner from a supervisor.Config —
-// newStreamRunnerFactory below (#1109 delivered the constructor; #1098 gave it
-// the turnevent sink) — the interactive_runner selection that injects it on
-// sessions.Config.RunnerFactory is #1081.
-//
-// The embedded sessionRetentions carries the per-session holds newSessionParser mints:
-// models the model-list retention added by #1840, commands the slash-command-list
-// retention added by #2004, tasks the background-task-roster retention added by #2077, and
-// windows the per-model context-window retention added by #2106. Every field is a pointer,
-// so the adapter stays a value type and the compile-time sessions.Runner assertion below is
-// unaffected.
-//
-// EMBEDDED rather than restated field by field, since #2106 made newSessionParser return
-// the set as one value: the holds then cross the factory unsplit and cannot be bound apart
-// on the way, the construction site sets one field instead of four, and a fifth hold costs
-// neither this declaration nor the factory a line. sessionRetentions declares no methods,
-// so nothing is promoted into this type's method set and the four accessors below reach
-// their holds by ordinary field promotion.
-//
-// The install field is the #2446 seam: the three methods Pool.UpdateSettings
-// drives go through it rather than straight to the runner, so the argv that
-// update recomposes is shaped the way the construction path shapes one. A
-// POINTER, unlike the embedded retentions above, because one of its fields
-// moves — see settingsInstaller. A hand-built streamRunner{} leaves it nil,
-// which is inert: the compile-time interface assertions in this package's tests
-// are the only such values and they call nothing.
+// streamRunner adapts streamsup.State to sessions.State and owns the interactive
+// watchdog's Run lifetime and successful-write arming. The factory builds the
+// parser, its retentions, and the watchdog once; they survive child respawns and
+// sequential Run calls. Mutable helpers are pointers so the adapter remains a
+// value type. Settings updates use install to preserve the factory's argv shaping.
 type streamRunner struct {
 	r             *streamsup.Runner
 	beginProducer func()
+	watchdog      *streamRunnerWatchdog
 	sessionRetentions
 	install *settingsInstaller
 	// wrapUp is the #2477 reply capture chained into this runner's sink chain. A
@@ -207,12 +178,21 @@ func (s *settingsInstaller) setSpawnArgs(args []string) { s.target.SetSpawnArgs(
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
 
 func (a streamRunner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
-	return a.r.WriteUserTurn(ctx, conversationID, payload)
+	write := func() error { return a.r.WriteUserTurn(ctx, conversationID, payload) }
+	if a.watchdog == nil {
+		return write()
+	}
+	return a.watchdog.write(write)
 }
 
 func (a streamRunner) WaitForPTY(ctx context.Context) error { return a.r.WaitForPTY(ctx) }
 
 func (a streamRunner) Run(ctx context.Context) error {
+	if a.watchdog != nil {
+		watchCtx, cancel := context.WithCancel(ctx)
+		a.watchdog.detector.Start(watchCtx)
+		defer func() { cancel(); a.watchdog.detector.Wait() }()
+	}
 	if a.beginProducer != nil {
 		a.beginProducer()
 	}
@@ -622,8 +602,8 @@ func mapStreamState(s streamsup.State) sessions.State {
 // factory is never built, so mcpServersPath is "" and unused there. The live
 // wire is exercised end-to-end by TestInteractiveStreamModalResolution (#1154).
 
-// streamApprovalConfig carries daemon-singleton host-response dependencies into
-// each session's handler. stdio selects ordinary non-bypass approval transport;
+// streamApprovalConfig carries daemon-singleton host-response and stall-report
+// dependencies into each session. stdio selects ordinary non-bypass approval transport;
 // bypass always uses stdio for questions. A zero value selects MCP for non-bypass.
 //
 // account is the instance's Claude account token provider (#2824). It rides here
@@ -639,7 +619,10 @@ type streamApprovalConfig struct {
 	// instance's daemon-wide settings file; nil when none is configured.
 	settings streamsup.SettingsComposer
 	// usage receives every Claude session's allowance readings; nil discards them.
-	usage *claudeUsageStore
+	usage        *claudeUsageStore
+	watchdogIdle time.Duration // zero preserves the production watchdog default
+	// pendingPermission resolves the producing session, independently of the cursor.
+	pendingPermission func(sessionID string) bool
 }
 
 // approvalSurfaceReport bridges the composition-order gap between runner creation
@@ -829,7 +812,16 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		}
 		parser, held := newSessionParser(parserSink, cfg.Logger)
 		held.models.live, held.commands.live = inventory, inventory
-		scfg.Stdout = parser
+		watchdog := &streamRunnerWatchdog{detector: streamsup.NewWatchdog(streamsup.WatchdogConfig{
+			Idle:   approval.watchdogIdle,
+			Logger: cfg.Logger,
+			PendingPermission: func() bool {
+				return approval.pendingPermission != nil && approval.pendingPermission(tag.ID())
+			},
+			OnStall: func(bool) { parserSink(turnevent.Stall{}) },
+		})}
+		scfg.Stdout = io.MultiWriter(watchdog.detector.Writer(), parser)
+		scfg.ControlParser = parser
 		exitSink := sink.exitForSessionTag(tag)
 		// The hold outlives respawns; invalidate joins before either exit path
 		// reports the child gone. Retention never infers task completion.
@@ -848,6 +840,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 			parser.SetUsageWindowsHandler(approval.usage.record)
 		}
 		scfg.OnChildExit = func() {
+			watchdog.childExited()
 			handler.childExited()
 			onChildExit()
 		}
@@ -892,7 +885,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string, vocab *
 		// path cannot be handed different shaping inputs. It sits below
 		// streamsup.New because the runner is what it forwards to.
 		install := newSettingsInstaller(r, mcpServersPath, approval.stdio, cfg.OperatorBypass, cfg.PermissionMode)
-		return streamRunner{r: r, sessionRetentions: held, install: install, wrapUp: wrapUp, beginProducer: func() { sink.beginRuntimeProducer(tag) }}, nil
+		return streamRunner{r: r, watchdog: watchdog, sessionRetentions: held, install: install, wrapUp: wrapUp, beginProducer: func() { sink.beginRuntimeProducer(tag) }}, nil
 	}
 }
 
