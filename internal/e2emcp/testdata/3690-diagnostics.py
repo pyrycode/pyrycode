@@ -54,7 +54,7 @@ manifest['phases'] = overlay('phases', server, phases)
 old = test.read_text()
 start = old.index('\t\t\t\t\t// A byte proves forwarding')
 end = old.index('\n\t\t\t\t}', start)
-old = old[:start] + old[end:]
+old = old[:start] + '\t\t\t\t\tt.Logf("validation-only readiness age=%s", time.Since(observedAt))' + old[end:]
 old = replace_once(old, 'joinElapsed := time.Since(started)',
                   'joinElapsed := time.Since(started)\n'
                   '\t\t\tif joinElapsed > time.Second {\n'
