@@ -114,13 +114,16 @@ func (a *FallbackLaunchAudit) sample() {
 	if ReadLifecycleControl(filepath.Join(a.home, "recording-worker-daemon.json"), 16384, &daemon) != nil || daemon.PID <= 1 || !a.ownDaemon(daemon.PID) {
 		return
 	}
-	children, err := unix.SysctlKinfoProcSlice("kern.proc.all")
-	if err != nil {
+	// PROC_PPID_ONLY lists current children with a fixed memory bound. A full
+	// buffer is ambiguous and cannot establish a closed observation.
+	var children [256]int32
+	n, _, err := unix.Syscall6(unix.SYS_PROC_INFO, 1, 6, uintptr(daemon.PID), 0, uintptr(unsafe.Pointer(&children[0])), unsafe.Sizeof(children))
+	if err != 0 || n >= unsafe.Sizeof(children) || n%4 != 0 {
 		return
 	}
-	for _, child := range children {
-		if int(child.Eproc.Ppid) == daemon.PID && child.Proc.P_pid > 1 {
-			a.observe(int(child.Proc.P_pid), daemon.PID)
+	for _, child := range children[:n/4] {
+		if child > 1 {
+			a.observe(int(child), daemon.PID)
 		}
 	}
 }

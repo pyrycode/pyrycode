@@ -116,3 +116,4 @@ exchange distinctions, historical attribution limits, and offline versus live pr
   zero on success; accept its terminated path only after executable-vnode checks.
   `TestDarwinLaunchOwnership/live-group` independently rejects a reaped worker
   whose actual owned group member survives. No accounting or timer changes.
+  Child discovery uses fixed-buffer `PROC_PPID_ONLY`, rejecting a full buffer.
