@@ -69,6 +69,16 @@ func TestMCPPrivacyRejectsPrivateCapabilitiesInEscapedUnknownFields(t *testing.T
 			t.Fatal("private/invalid bytes became persistable")
 		}
 	}
+	for _, inner := range []string{
+		`{"private":"` + strings.Repeat(`\u0061`, 64) + `"}`,
+		`{"private":"/tmp/controlled-private-mcp\u002esock"}`,
+		`{"private":"\u0050YRY_E2E_MCP_TOKEN"}`,
+	} {
+		outer, _ := json.Marshal(map[string]string{"unknown": inner})
+		if mcpPrivateSafe(outer, token, "/tmp/controlled-private-mcp.sock") == nil {
+			t.Fatal("nested JSON-valued private string accepted")
+		}
+	}
 	if mcpPrivateSafe([]byte(`{"unknown":"complete literal <>& text"}`), token) != nil {
 		t.Fatal("unrelated unknown field rejected")
 	}

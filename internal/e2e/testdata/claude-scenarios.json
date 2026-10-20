@@ -1271,6 +1271,23 @@
       "retained_live": [
         "Current Claude Bash background execution and actual stop_task semantics remain live. Capture retains the original single-execution marker, FIFO arrival and terminal stopped-or-roster-omission assertion while its writer remains held. Replay executes only the current original closed script and requires actual owned cancellation Wait9 before the exact native terminal can pass. A control acceptance cannot substitute for terminal evidence. Immutable current rig declarations, complete source inputs and every observed finite fallback attempt remain mandatory."
       ]
+    },
+    {
+      "name": "mcp-send-file",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestInteractiveStreamSendFile"
+      ],
+      "live_contracts": {
+        "TestInteractiveStreamSendFile": "1dd4b2edf984359605333db4ce072db866e23b6f29841167bf1fa9adbe12f036"
+      },
+      "retained_live": [
+        "Current native Claude MCP discovery, SDK child spawning/environment/process groups/reaping, and provider protocol remain live obligations. Capture runs the original permission modal, allow_once, completed turn, current driving-conversation canonical attachment ID, exact filename and exact copied-byte assertions unchanged. Replay executes the current source daemon MCP approve/files commands against its real control socket and requires real current attachment bytes before forwarding the joined tool result. Complete literal RPC and stderr, primary/RPC causal joins, exact current command configuration, immutable prefix evidence and actual current server EOF/Wait proofs are mandatory. Only the precisely joined success text UUID is rebound; unrelated fields and model prose stay literal."
+      ]
     }
   ],
   "batches": {
@@ -1450,6 +1467,9 @@
     "physical-background": [
       "composer-stop",
       "stop-background-task"
+    ],
+    "mcp-sidechannels": [
+      "mcp-send-file"
     ]
   },
   "reviews": {
@@ -1502,11 +1522,6 @@
       "disposition": "live_only",
       "reason": "The central assertion is a real minimum responding interval with no idle while a foreground Bash loop still runs. Untimed stdout playback would remove the test purpose; deterministic state-sequence projection is only partial coverage.",
       "contract_sha256": "16e6369c2a92850b64b80371ef8889cc5d507ce98c5c0e93aa69e220677c6d4e"
-    },
-    "TestInteractiveStreamSendFile": {
-      "disposition": "needs_harness",
-      "reason": "Send-file invokes daemon file/MCP side effects which do not occur merely by replaying Claude tool-use/result stdout. Add a causal MCP/control-socket side-channel boundary or independently exercise its real RPC, then preserve attachment bytes and physical capture witnesses.",
-      "contract_sha256": "1dd4b2edf984359605333db4ce072db866e23b6f29841167bf1fa9adbe12f036"
     },
     "TestInteractiveStreamStdioAlwaysAllowIsSessionScoped": {
       "disposition": "needs_harness",
