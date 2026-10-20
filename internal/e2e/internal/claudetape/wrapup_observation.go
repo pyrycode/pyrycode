@@ -21,9 +21,9 @@ type WrapUpObservation struct {
 	StartedUnixNS                              int64
 	DeadlineNS                                 int64
 	Events                                     []WrapUpObservationEvent
+	Truncated                                  string `json:",omitempty"`
 	start                                      time.Time
 	interruptID                                string
-	overflow                                   bool
 }
 
 type WrapUpObservationEvent struct {
@@ -40,14 +40,18 @@ func NewWrapUpObservation(revision, source, daemon string) *WrapUpObservation {
 // Add retains only closed classifications. Request IDs used for correlation
 // remain in memory and cannot enter the serialized record.
 func (o *WrapUpObservation) Add(stage string, raw []byte, err error) {
-	if o == nil {
+	if o == nil || o.Truncated != "" {
 		return
 	}
 	if len(o.Events) >= 128 {
-		o.overflow = true
+		o.Truncated = "event_limit"
 		return
 	}
 	after := time.Since(o.start).Nanoseconds()
+	if after > int64(20*time.Minute) {
+		o.Truncated = "elapsed_limit"
+		return
+	}
 	kind := "other"
 	var v struct {
 		Type      string
@@ -86,7 +90,7 @@ func (o *WrapUpObservation) Add(stage string, raw []byte, err error) {
 
 func (o *WrapUpObservation) Validate(complete bool) error {
 	fail := errors.New("invalid native wrap-up observation")
-	if o == nil || o.Kind != "native-bounded-wrapup-observation-v1" || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(o.Revision) || !physicalSHA256.MatchString(o.SourceSHA256) || !physicalSHA256.MatchString(o.DaemonSHA256) || o.StartedUnixNS <= 0 || o.StartedUnixNS > 4102444800000000000 || o.DeadlineNS != 1000000 || o.overflow || len(o.Events) == 0 || len(o.Events) > 128 {
+	if o == nil || o.Kind != "native-bounded-wrapup-observation-v1" || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(o.Revision) || !physicalSHA256.MatchString(o.SourceSHA256) || !physicalSHA256.MatchString(o.DaemonSHA256) || o.StartedUnixNS <= 0 || o.StartedUnixNS > 4102444800000000000 || o.DeadlineNS != 1000000 || !slices.Contains([]string{"", "event_limit", "elapsed_limit"}, o.Truncated) || complete && o.Truncated != "" || len(o.Events) == 0 && o.Truncated == "" || len(o.Events) > 128 {
 		return fail
 	}
 	counts := map[string]int{}

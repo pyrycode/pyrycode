@@ -105,6 +105,7 @@ func TestWrapUpObservationValidation(t *testing.T) {
 		{"unknown-kind", func(o *WrapUpObservation) { o.Events[0].Kind = "secret" }},
 		{"combined-kinds", func(o *WrapUpObservation) { o.Events[0].Kind = "other|user" }},
 		{"unknown-error", func(o *WrapUpObservation) { o.Events[0].Error = "secret" }},
+		{"unknown-truncation", func(o *WrapUpObservation) { o.Truncated = "secret" }},
 		{"negative-time", func(o *WrapUpObservation) { o.Events[0].AfterNS = -1 }},
 		{"time-reversal", func(o *WrapUpObservation) { o.Events[1].AfterNS = o.Events[4].AfterNS + 1 }},
 		{"oversized-bytes", func(o *WrapUpObservation) { o.Events[0].Bytes = MaxBytes + 1 }},
