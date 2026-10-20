@@ -7,6 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"golang.org/x/sys/unix"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +60,7 @@ func TestMCPProxyRejectsInvalidUnixBytesBeforeJSONEncoding(t *testing.T) {
 	}
 }
 func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
-	for _, mutation := range []string{"complete-duplex", "quiet-input", "backpressure", "wrong-cwd", "wrong-session", "wrong-token", "wrong-tool", "wrong-parent", "bad-rights"} {
+	for _, mutation := range []string{"complete-duplex", "complete-sockets", "quiet-input", "backpressure", "wrong-cwd", "wrong-session", "wrong-token", "wrong-tool", "wrong-parent", "bad-rights"} {
 		t.Run(mutation, func(t *testing.T) {
 			b := actualUnitBinding(t)
 			if mutation == "wrong-parent" {
@@ -115,23 +118,53 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 			if mutation == "bad-rights" {
 				cmd.Env = append(cmd.Env, "PYRY_E2EMCP_UNIT_BAD_RIGHTS=1")
 			}
-			input, err := cmd.StdinPipe()
-			if err != nil {
-				t.Fatal(err)
+			var input io.WriteCloser
+			var output, stderr io.ReadCloser
+			var socketChildren []*os.File
+			if mutation == "complete-sockets" {
+				pair := func() (*os.File, *os.File) {
+					fds, e := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+					if e != nil {
+						t.Fatal(e)
+					}
+					for _, fd := range fds {
+						unix.CloseOnExec(fd)
+						if unix.SetNonblock(fd, true) != nil {
+							t.Fatal("nonblocking socketpair")
+						}
+					}
+					parent, child := os.NewFile(uintptr(fds[0]), "parent-stdio"), os.NewFile(uintptr(fds[1]), "child-stdio")
+					t.Cleanup(func() { parent.Close(); child.Close() })
+					socketChildren = append(socketChildren, child)
+					return parent, child
+				}
+				in, childIn := pair()
+				out, childOut := pair()
+				log, childErr := pair()
+				input, output, stderr = in, out, log
+				cmd.Stdin, cmd.Stdout, cmd.Stderr = childIn, childOut, childErr
+			} else {
+				input, err = cmd.StdinPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				output, err = cmd.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				stderr, err = cmd.StderrPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			defer input.Close()
-			output, err := cmd.StdoutPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
 			defer output.Close()
-			stderr, err := cmd.StderrPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
 			defer stderr.Close()
 			if cmd.Start() != nil {
 				t.Fatal("proxy start")
+			}
+			for _, child := range socketChildren {
+				child.Close()
 			}
 			waited := false
 			defer func() {
@@ -146,7 +179,7 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 				if err != nil || line != "controlled helper stderr\n" {
 					t.Fatal("actual server did not start", err)
 				}
-				if mutation == "backpressure" || mutation == "complete-duplex" {
+				if mutation == "backpressure" || (mutation == "complete-duplex" || mutation == "complete-sockets") {
 					if WriteLine(input, []byte(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}`)) != nil {
 						t.Fatal("initialize")
 					}
@@ -156,13 +189,13 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 						t.Fatal("initialize response", err)
 					}
 					params := `{"unitBackpressure":true}`
-					if mutation == "complete-duplex" {
+					if mutation == "complete-duplex" || mutation == "complete-sockets" {
 						params = `{}`
 					}
 					if WriteLine(input, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)) != nil || WriteLine(input, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":`+params+`}`)) != nil {
 						t.Fatal("tool request")
 					}
-					if mutation == "complete-duplex" {
+					if mutation == "complete-duplex" || mutation == "complete-sockets" {
 						if _, err := r.ReadBytes('\n'); err != nil {
 							t.Fatal("real complete response", err)
 						}
@@ -224,5 +257,54 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMCPConnectedUnixStreamRejectsOtherDescriptors(t *testing.T) {
+	for _, kind := range []int{unix.SOCK_STREAM, unix.SOCK_DGRAM} {
+		fds, e := unix.Socketpair(unix.AF_UNIX, kind, 0)
+		if e != nil {
+			t.Fatal(e)
+		}
+		f := os.NewFile(uintptr(fds[0]), "controlled-socket")
+		peer := os.NewFile(uintptr(fds[1]), "controlled-peer")
+		err := connectedUnixStream(f)
+		f.Close()
+		peer.Close()
+		if (err == nil) != (kind == unix.SOCK_STREAM) {
+			t.Fatal("socket transport type misclassified")
+		}
+	}
+	fd, e := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if e != nil {
+		t.Fatal(e)
+	}
+	f := os.NewFile(uintptr(fd), "unconnected")
+	defer f.Close()
+	if connectedUnixStream(f) == nil {
+		t.Fatal("unconnected local socket accepted")
+	}
+	listener, e := net.Listen("tcp4", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer listener.Close()
+	client, e := net.Dial("tcp4", listener.Addr().String())
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer client.Close()
+	server, e := listener.Accept()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer server.Close()
+	network, e := client.(*net.TCPConn).File()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer network.Close()
+	if connectedUnixStream(network) == nil {
+		t.Fatal("network stream accepted")
 	}
 }

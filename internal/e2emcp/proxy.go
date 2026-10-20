@@ -172,7 +172,7 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 	for i, f := range owned {
 		stage = "launch-fd-kind"
 		info, x := f.Stat()
-		if x != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		if x != nil {
 			return proxyLaunch{}, files, protocolError()
 		}
 		stage = "launch-fd-identity"
@@ -188,7 +188,20 @@ func receiveLaunch(c *net.UnixConn, b LaunchBinding, token string) (launch proxy
 		if i == 0 {
 			want = unix.O_RDONLY
 		}
-		if mode&unix.O_ACCMODE != want {
+		if info.Mode()&os.ModeNamedPipe != 0 {
+			if mode&unix.O_ACCMODE != want {
+				return proxyLaunch{}, files, protocolError()
+			}
+		} else if info.Mode()&os.ModeSocket != 0 {
+			// Native SDKs may implement child stdio with distinct socketpairs.
+			// These descriptors are bidirectional; use only the declared stdio
+			// role and require a connected local stream, never a network socket.
+			stage = "launch-fd-local-stream"
+			if mode&unix.O_ACCMODE != unix.O_RDWR || connectedUnixStream(f) != nil {
+				return proxyLaunch{}, files, protocolError()
+			}
+		} else {
+			stage = "launch-fd-kind"
 			return proxyLaunch{}, files, protocolError()
 		}
 	}
@@ -285,4 +298,29 @@ func closedFields(raw []byte, names ...string) bool {
 		}
 	}
 	return true
+}
+
+// connectedUnixStream validates the actual received descriptor, not sender
+// metadata. Kernel peer/source authentication remains mandatory independently.
+func connectedUnixStream(f *os.File) error {
+	fd := int(f.Fd())
+	kind, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE)
+	if err != nil || kind != unix.SOCK_STREAM {
+		return protocolError()
+	}
+	local, err := unix.Getsockname(fd)
+	if err != nil {
+		return protocolError()
+	}
+	if _, ok := local.(*unix.SockaddrUnix); !ok {
+		return protocolError()
+	}
+	peer, err := unix.Getpeername(fd)
+	if err != nil {
+		return protocolError()
+	}
+	if _, ok := peer.(*unix.SockaddrUnix); !ok {
+		return protocolError()
+	}
+	return nil
 }
