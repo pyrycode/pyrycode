@@ -16,6 +16,10 @@ type LifecycleDiagnostic struct {
 	ActionAcknowledged, TerminalChecked, Completed                bool
 	InputSampled, OutputSampled, StderrSampled                    bool
 	InputsMatched, OutputsDelivered, ProviderInputsForwarded      int
+	// Maxima retain the output ordinal for each timing substage independently.
+	// Order: restoration, physical observation, replay projection, forwarding.
+	OutputWorkMaxNS      [4]int64
+	OutputWorkMaxOrdinal [4]int
 }
 
 func lifecycleInputKind(raw []byte) string {

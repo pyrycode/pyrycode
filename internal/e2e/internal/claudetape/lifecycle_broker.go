@@ -311,23 +311,42 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
 		diagnostic.Stage = "deliver-output"
+		var outputWork [4]int64
+		defer func() {
+			for i, elapsed := range outputWork {
+				if elapsed > diagnostic.OutputWorkMaxNS[i] {
+					diagnostic.OutputWorkMaxNS[i] = elapsed
+					diagnostic.OutputWorkMaxOrdinal[i] = timelineOutput
+				}
+			}
+		}()
 		emit := func(extra time.Time) error {
+			work := time.Now()
 			restored, err := binding.Frame(raw, true)
+			outputWork[0] = time.Since(work).Nanoseconds()
 			if err != nil {
 				return err
 			}
 			if c.BeforeOutput != nil {
-				if err := c.BeforeOutput(restored); err != nil {
-					return err
-				}
-			}
-			if c.ReplayOutput != nil {
-				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
+				work = time.Now()
+				err := c.BeforeOutput(restored)
+				outputWork[1] = time.Since(work).Nanoseconds()
 				if err != nil {
 					return err
 				}
 			}
-			return forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
+			if c.ReplayOutput != nil {
+				work = time.Now()
+				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
+				outputWork[2] = time.Since(work).Nanoseconds()
+				if err != nil {
+					return err
+				}
+			}
+			work = time.Now()
+			err = forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
+			outputWork[3] = time.Since(work).Nanoseconds()
+			return err
 		}
 		if tape.Timeline != nil {
 			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
@@ -357,6 +376,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					timing.StartupNS, timing.ReadyNS = startupNS, time.Since(timelineOrigin).Nanoseconds()
 					timing.CompletionNS, timing.WitnessNS = completionNS, witnessNS
 					timing.PriorOutputCompletionNS = outputCompletionNS
+					timing.OutputWorkNS = outputWork
 				}
 				return err
 			}
