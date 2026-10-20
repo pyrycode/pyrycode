@@ -95,8 +95,11 @@ type LifecycleBrokerConfig struct {
 	BrokerParentPID  int
 	Deadline         time.Time
 	End, Kill, Abort string
-	OnSeal           func(int) error    `json:"-"`
-	OnInput          func([]byte) error `json:"-"`
+	OnSeal           func(int) error           `json:"-"`
+	OnInput          func([]byte) error        `json:"-"`
+	BeforeOutput     func([]byte) error        `json:"-"`
+	BeforeSeal       func(*Tape) error         `json:"-"`
+	OnFailure        func(*LifecycleTape, int) `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -145,6 +148,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		return 0, fail
 	}
 	var tape *LifecycleTape
+	defer func() {
+		if resultErr != nil && tape != nil && c.OnFailure != nil {
+			c.OnFailure(tape, count)
+		}
+	}()
 	var player *Player
 	if c.Mode == "capture" {
 		version := 1
@@ -177,6 +185,10 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				tape.Timeline.Kind = lifecycleInputTimelineKind
 				tape.Timeline.OutputAfterUser = []int{}
 			}
+			if lifecycleFrameTimeline(c.Scenario) {
+				tape.Timeline.Kind = lifecycleFrameTimelineKind
+				tape.Timeline.OutputAfterInput = []int{}
+			}
 		} else if tape.Timeline == nil {
 			return 0, errors.New("missing required native output timeline")
 		}
@@ -192,7 +204,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	timelineOrigin := time.Now()
 	timelineOrigins := []time.Time{timelineOrigin}
 	recordTimelineInput := func(raw []byte) {
-		if lifecycleTimelineUser(raw) {
+		if lifecycleFrameTimeline(c.Scenario) || lifecycleTimelineUser(raw) {
 			timelineOrigins = append(timelineOrigins, time.Now())
 		}
 	}
@@ -241,6 +253,11 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if err != nil {
 				return err
 			}
+			if c.BeforeOutput != nil {
+				if err := c.BeforeOutput(restored); err != nil {
+					return err
+				}
+			}
 			return writeBounded(originals[1], append(restored, '\n'), extra)
 		}
 		if tape.Timeline != nil {
@@ -248,11 +265,15 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return fail
 			}
 			origin := timelineOrigin
-			if tape.Timeline.Kind == lifecycleInputTimelineKind {
-				if timelineOutput >= len(tape.Timeline.OutputAfterUser) {
+			if tape.Timeline.Kind == lifecycleInputTimelineKind || tape.Timeline.Kind == lifecycleFrameTimelineKind {
+				anchors := tape.Timeline.OutputAfterUser
+				if tape.Timeline.Kind == lifecycleFrameTimelineKind {
+					anchors = tape.Timeline.OutputAfterInput
+				}
+				if timelineOutput >= len(anchors) {
 					return fail
 				}
-				anchor := tape.Timeline.OutputAfterUser[timelineOutput]
+				anchor := anchors[timelineOutput]
 				if anchor < 0 || anchor >= len(timelineOrigins) {
 					return fail
 				}
@@ -337,14 +358,23 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if direction == "stdin" {
 			target = originals[3]
 		}
+		if direction == "stdout" && c.BeforeOutput != nil {
+			if err := c.BeforeOutput(raw); err != nil {
+				return err
+			}
+		}
 		if err := write(target, append(raw, '\n')); err != nil {
 			return err
 		}
 		if direction == "stdout" && tape.Timeline != nil {
 			origin := timelineOrigin
-			if tape.Timeline.Kind == lifecycleInputTimelineKind {
+			if tape.Timeline.Kind == lifecycleInputTimelineKind || tape.Timeline.Kind == lifecycleFrameTimelineKind {
 				anchor := len(timelineOrigins) - 1
-				tape.Timeline.OutputAfterUser = append(tape.Timeline.OutputAfterUser, anchor)
+				if tape.Timeline.Kind == lifecycleFrameTimelineKind {
+					tape.Timeline.OutputAfterInput = append(tape.Timeline.OutputAfterInput, anchor)
+				} else {
+					tape.Timeline.OutputAfterUser = append(tape.Timeline.OutputAfterUser, anchor)
+				}
 				origin = timelineOrigins[anchor]
 			}
 			tape.Timeline.OutputAfterNS = append(tape.Timeline.OutputAfterNS, time.Since(origin).Nanoseconds())
@@ -501,7 +531,17 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			if e := write(originals[2], []byte(tape.Stderr)); e != nil {
 				return frames, fail
 			}
+			if c.BeforeSeal != nil {
+				if err := c.BeforeSeal(tape.Tape); err != nil {
+					return frames, err
+				}
+			}
 			return frames, nil
+		}
+		if c.BeforeSeal != nil {
+			if err := c.BeforeSeal(tape.Tape); err != nil {
+				return frames, err
+			}
 		}
 		return frames, tape.Save(c.Path)
 	}

@@ -24,6 +24,7 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 	defer release()
 	hold := newStopHoldOperation(t, h.workdir, fifo)
 	reader := newStopTaskReader(t, h)
+	declarePhysicalRecording(t, h.home, "stop-hold", 1, hold.prompt())
 	sealSendMessage(t, h.phone, h.initSend, 27960, convID, "stop-held-task", hold.prompt())
 	setup := stopHeldTaskSetup{hold: hold}
 	var taskID string

@@ -56,7 +56,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -134,14 +133,7 @@ func TestInteractiveStreamRunningTurn(t *testing.T) {
 func startStreamRunningTurnHarness(t *testing.T) (*perConvHarness, string) {
 	t.Helper()
 	// Parallel only through runParallel; see liveHome.
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("realclaude: claude not on PATH: %v", err)
-	}
-	home := liveHome(t) // skips cleanly when no creds
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		t.Fatalf("realclaude: resolve claude: %v", err)
-	}
+	claudeBin, home := daemonProviderEnvironment(t)
 
 	// Isolated workdir under the authenticated HOME: guarantees the fresh-daemon
 	// state (empty claude sessions dir) and sidesteps the shared-session-folder
@@ -199,6 +191,7 @@ func startStreamRunningTurnHarness(t *testing.T) (*perConvHarness, string) {
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	t.Cleanup(func() { finishDaemonRecording(t) })
 	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir}, runningTurnConvID
 }
 

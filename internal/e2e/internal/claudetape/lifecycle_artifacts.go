@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 )
 
 // AuditLifecycleArtifacts pins all prefix evidence before original cleanup and
@@ -134,12 +135,21 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 		if _, _, required := conversationCompletionScenario(scenario + "-" + role); required {
 			suffixes = append(suffixes, ".completed")
 		}
+		if PhysicalFamily(scenario) != "" {
+			suffixes = append(suffixes, ".physical")
+			for i := range physicalKinds(PhysicalFamily(scenario)) {
+				suffixes = append(suffixes, fmt.Sprintf(".physical-user-%06d", i+1))
+			}
+		}
 		values := map[string][]byte{}
 		for _, suffix := range suffixes {
 			expectedFiles[role+suffix] = true
 			limit := 16384
-			if suffix == ".json" || suffix == ".job" {
+			if suffix == ".json" || suffix == ".job" || suffix == ".physical" {
 				limit = MaxBytes
+			}
+			if strings.HasPrefix(suffix, ".physical-user-") {
+				limit = 65536
 			}
 			v, e := read(prefix+suffix, limit, !(LifecycleSeals(end) && suffix == ".receipt"))
 			if e != nil {
@@ -193,6 +203,24 @@ func AuditLifecycleArtifacts(home, scenario, revision, sourceSHA, daemonSHA stri
 			var completion ConversationCompletion
 			if !decode(values[".completed"], &completion) || ValidateConversationCompletion(completion, role, revision, c.OwnerPID, brokerPID, tape.Tape) != nil {
 				return "", nil, fail
+			}
+		}
+		if PhysicalFamily(scenario) != "" {
+			declarations := []PhysicalOperationDeclaration{}
+			for i, kind := range physicalKinds(PhysicalFamily(scenario)) {
+				var record PhysicalDeclarationRecord
+				if !decode(values[fmt.Sprintf(".physical-user-%06d", i+1)], &record) || ValidatePhysicalDeclarationRecord(record, bindings[role], kind, revision, sourceSHA, c.OwnerPID, brokerPID, i+1) != nil || strings.Contains(record.Declaration.UserText, physicalHome) {
+					return "", nil, fail
+				}
+				declarations = append(declarations, record.Declaration)
+			}
+			contract, err := physicalContractFromDeclarations(home, scenario, declarations)
+			if err != nil {
+				return "", nil, fail
+			}
+			var proof PhysicalRecordingProof
+			if !decode(values[".physical"], &proof) || ValidatePhysicalRecordingProof(proof, scenario, home, revision, sourceSHA, c.Mode, c.OwnerPID, brokerPID, contract, tape.Tape) != nil {
+				return "", nil, errors.New("physical current source or operation proof changed")
 			}
 		}
 		if LifecycleAction(end) != "" {

@@ -117,3 +117,38 @@ func TestLifecycleInputTimelineDoesNotResetAnExistingUserPhase(t *testing.T) {
 		t.Fatal("second output reset user epoch or caught up")
 	}
 }
+
+func TestLifecyclePhysicalTimelineBindsEveryActualInputIncludingControl(t *testing.T) {
+	for _, mutation := range []string{"none", "stale-control-anchor", "future", "missing", "foreign-v2", "mixed-fields", "nonphysical", "backward-within-control"} {
+		t.Run(mutation, func(t *testing.T) {
+			tape := &LifecycleTape{Tape: &Tape{Scenario: "composer-stop-bootstrap", Frames: []Frame{
+				{Direction: "stdout", Data: json.RawMessage(`{"type":"system","subtype":"init"}`)},
+				{Direction: "stdin", Data: json.RawMessage(`{"type":"user"}`)},
+				{Direction: "stdout", Data: json.RawMessage(`{"type":"assistant"}`)},
+				{Direction: "stdin", Data: json.RawMessage(`{"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}`)},
+				{Direction: "stdout", Data: json.RawMessage(`{"type":"result"}`)},
+				{Direction: "stdout", Data: json.RawMessage(`{"type":"system"}`)},
+			}}, Timeline: &LifecycleTimeline{Kind: lifecycleFrameTimelineKind, OutputAfterNS: []int64{100, 200, 10, 20}, OutputAfterInput: []int{0, 1, 2, 2}}}
+			switch mutation {
+			case "stale-control-anchor":
+				tape.Timeline.OutputAfterInput = []int{0, 1, 1, 1}
+			case "future":
+				tape.Timeline.OutputAfterInput = []int{0, 1, 3, 3}
+			case "missing":
+				tape.Timeline.OutputAfterInput = nil
+			case "foreign-v2":
+				tape.Timeline.Kind = lifecycleInputTimelineKind
+			case "mixed-fields":
+				tape.Timeline.OutputAfterUser = []int{0, 1, 1, 1}
+			case "nonphysical":
+				tape.Tape.Scenario = "fallback-suggestion-bootstrap"
+			case "backward-within-control":
+				tape.Timeline.OutputAfterNS = []int64{100, 200, 20, 10}
+			}
+			err := validateLifecycleTimeline(tape)
+			if (err == nil) != (mutation == "none") {
+				t.Fatalf("physical native schedule mutation %s: %v", mutation, err)
+			}
+		})
+	}
+}

@@ -590,7 +590,7 @@ func ConnectFallbackWorker(socket, job string, env []string) (FallbackWorkerStat
 }
 
 func LifecycleWorkerLimit(scenario string) int {
-	if scenario == "fallback-suggestion" || scenario == "session-resume" || scenario == "conversation-system-prompt" || scenario == "conversation-active-switch" {
+	if PhysicalFamily(scenario) != "" || scenario == "fallback-suggestion" || scenario == "session-resume" || scenario == "conversation-system-prompt" || scenario == "conversation-active-switch" {
 		return 2
 	}
 	return 0
@@ -653,7 +653,7 @@ func ValidateLifecycleWorkers(scenario string, roles map[string]*LifecycleTape, 
 		}
 		source, ok := sources[worker.UserSequence]
 		key := fmt.Sprintf("%s/%d", worker.SourceRole, worker.UserSequence)
-		if !ok || used[key] || ValidateFallbackInput([]byte(worker.Tape.Input), source) != nil {
+		if !ok || used[key] || validateLifecycleWorkerSource(scenario, worker.SourceRole, worker.UserSequence, role.Tape, []byte(worker.Tape.Input), source) != nil {
 			return fail
 		}
 		used[key] = true
@@ -772,7 +772,7 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 				return nil, fail
 			}
 			for seq, source := range sources {
-				if ValidateFallbackInput([]byte(tape.Input), source) == nil {
+				if validateLifecycleWorkerSource(scenario, role, seq, provider.Tape, []byte(tape.Input), source) == nil {
 					sourceMatches++
 					worker.SourceRole = role
 					worker.UserSequence = seq
