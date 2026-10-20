@@ -114,8 +114,10 @@ func (a *FallbackLaunchAudit) observe(pid, daemon int) {
 		if previous.Start != launch.Start || previous.DaemonPID != daemon {
 			a.invalid = true
 		}
-		if previous.Registration == "absent" {
-			launch.Registration = "absent"
+		if previous.Registration == "unknown" || launch.Registration == "unknown" {
+			launch.Registration = "unknown"
+		} else if previous.Registration == "registered" {
+			launch.Registration = "registered"
 		}
 	}
 	if len(a.launches) >= LifecycleWorkerLimit(a.scenario) && a.launches[pid].PID == 0 {

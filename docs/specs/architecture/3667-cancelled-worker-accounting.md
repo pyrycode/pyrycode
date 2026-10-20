@@ -121,3 +121,8 @@ retain the strict reviewed-worker and cleanup guarantees.
   that owned replay process silent and bounded until actual production
   cancellation; never start a broker or publish a job/receipt for it. The outer
   independent launch audit and real Wait must still prove its cancellation.
+- 2026-10-20: original-root failures must also retain production Wait observations
+  after daemon stop. Remove the diagnostic cleanup's failed-root early return;
+  this preserves evidence and does not change the failed verdict. Bind the audit
+  capability to its source revision/hash, outer parent and actual daemon, and
+  retain unknown or previously observed registration as non-absent.

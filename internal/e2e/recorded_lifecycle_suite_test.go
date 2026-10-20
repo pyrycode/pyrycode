@@ -318,7 +318,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	var launchAudit *claudetape.FallbackLaunchAudit
 	if name == "session-resume" {
-		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary)
+		launchAudit = claudetape.StartFallbackLaunchAudit(home, name, binary, revision, sourceSHA, os.Getpid())
 		defer launchAudit.Stop()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)

@@ -65,11 +65,22 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 	image, _ := os.Stat(exe)
 	done := make(chan struct{})
 	close(done)
-	audit := &FallbackLaunchAudit{home: home, scenario: "session-resume", binary: exe, image: image, stop: make(chan struct{}), done: done, launches: map[int]workerLaunch{}}
+	producer := lifecycleSuiteControl().Producer
+	audit := &FallbackLaunchAudit{home: home, scenario: "session-resume", binary: exe, image: image, revision: producer.Revision, sourceSHA: producer.BinarySHA256, parent: os.Getpid(), stop: make(chan struct{}), done: done, launches: map[int]workerLaunch{}}
 	audit.observe(cmd.Process.Pid, os.Getpid())
 	if len(audit.launches) != 1 || audit.launches[cmd.Process.Pid].Registration != "absent" {
 		t.Fatal("missing independent current launch/absent-registration observation")
 	}
+	launch := audit.launches[cmd.Process.Pid]
+	changed := launch
+	changed.Start = "foreign-start"
+	audit.launches[cmd.Process.Pid] = changed
+	audit.observe(cmd.Process.Pid, os.Getpid())
+	if !audit.invalid {
+		t.Fatal("reused PID accepted")
+	}
+	audit.invalid = false
+	audit.launches[cmd.Process.Pid] = launch
 	if syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) != nil {
 		t.Fatal("cancel")
 	}
@@ -88,7 +99,6 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 	if PublishLifecycleControl(path, []FallbackWorkerObservation{observation}) != nil {
 		t.Fatal("Wait")
 	}
-	producer := lifecycleSuiteControl().Producer
 	read := func(a ...*FallbackLaunchAudit) error {
 		workers, err := ReadLifecycleWorkers(home, "session-resume", "replay", producer.Revision, producer.BinarySHA256, os.Getpid(), nil, a...)
 		if len(workers) != 0 {
@@ -102,10 +112,10 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 	if err := read(audit); err != nil {
 		t.Fatalf("proved cancelled launch rejected: %v", err)
 	}
-	for _, kind := range []string{"unknown-launch", "unknown-registration", "pid-reuse", "duplicate", "foreign", "no-cancel", "no-wait", "no-exit", "wrong-signal", "extra-launch"} {
+	for _, kind := range []string{"unknown-launch", "unknown-registration", "registered", "wrong-source", "pid-reuse", "duplicate", "foreign", "no-cancel", "no-wait", "no-exit", "wrong-signal", "extra-launch"} {
 		t.Run(kind, func(t *testing.T) {
 			launch := audit.launches[cmd.Process.Pid]
-			candidate := &FallbackLaunchAudit{home: home, scenario: "session-resume", stop: make(chan struct{}), done: done, launches: map[int]workerLaunch{cmd.Process.Pid: launch}}
+			candidate := &FallbackLaunchAudit{home: home, scenario: "session-resume", revision: producer.Revision, sourceSHA: producer.BinarySHA256, parent: os.Getpid(), stop: make(chan struct{}), done: done, launches: map[int]workerLaunch{cmd.Process.Pid: launch}}
 			observations := []FallbackWorkerObservation{observation}
 			switch kind {
 			case "unknown-launch":
@@ -115,6 +125,11 @@ func TestFallbackCancelledLaunchBoundary(t *testing.T) {
 				candidate.launches[cmd.Process.Pid] = launch
 			case "pid-reuse":
 				candidate.invalid = true
+			case "wrong-source":
+				candidate.sourceSHA = "foreign"
+			case "registered":
+				launch.Registration = "registered"
+				candidate.launches[cmd.Process.Pid] = launch
 			case "duplicate":
 				observations = append(observations, observation)
 			case "foreign":

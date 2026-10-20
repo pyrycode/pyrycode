@@ -13,6 +13,8 @@ import (
 // cannot be supplied by a Wait log, job file or native provider.
 type FallbackLaunchAudit struct {
 	home, scenario, binary string
+	revision, sourceSHA    string
+	parent                 int
 	image                  os.FileInfo
 	stop, done             chan struct{}
 	once                   sync.Once
@@ -28,8 +30,8 @@ type workerLaunch struct {
 
 // StartFallbackLaunchAudit observes current helper launches without delaying or
 // signalling production. Unobserved launches remain unknown, never absent.
-func StartFallbackLaunchAudit(home, scenario, binary string) *FallbackLaunchAudit {
-	a := &FallbackLaunchAudit{home: home, scenario: scenario, binary: binary, stop: make(chan struct{}), done: make(chan struct{}), launches: map[int]workerLaunch{}}
+func StartFallbackLaunchAudit(home, scenario, binary, revision, sourceSHA string, parent int) *FallbackLaunchAudit {
+	a := &FallbackLaunchAudit{home: home, scenario: scenario, binary: binary, revision: revision, sourceSHA: sourceSHA, parent: parent, stop: make(chan struct{}), done: make(chan struct{}), launches: map[int]workerLaunch{}}
 	a.image, _ = os.Stat(binary)
 	go func() {
 		defer close(a.done)
@@ -53,13 +55,16 @@ func (a *FallbackLaunchAudit) Stop() {
 	<-a.done
 }
 
-func (a *FallbackLaunchAudit) cancelled(home, scenario string, observations []FallbackWorkerObservation) (map[int]bool, error) {
+func (a *FallbackLaunchAudit) cancelled(home, scenario, revision, sourceSHA string, parent, daemon int, observations []FallbackWorkerObservation) (map[int]bool, error) {
 	a.Stop()
-	if a.home != home || a.scenario != scenario || scenario != "session-resume" || a.invalid || len(a.launches) > LifecycleWorkerLimit(scenario) {
+	if a.home != home || a.scenario != scenario || a.revision != revision || a.sourceSHA != sourceSHA || a.parent != parent || scenario != "session-resume" || a.invalid || len(a.launches) > LifecycleWorkerLimit(scenario) {
 		return nil, os.ErrInvalid
 	}
 	joined := map[int]bool{}
 	for pid, launch := range a.launches {
+		if launch.PID != pid || launch.DaemonPID != daemon || launch.Start == "" {
+			return nil, os.ErrInvalid
+		}
 		registered := false
 		for i := 1; i <= LifecycleWorkerLimit(scenario); i++ {
 			var job FallbackWorkerJob
