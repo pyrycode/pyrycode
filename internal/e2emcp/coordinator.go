@@ -174,3 +174,6 @@ func WriteLine(w io.Writer, raw []byte) error {
 	}
 	return nil
 }
+
+// Abort prevents a failed runtime transfer or child from leaving sealable evidence.
+func (c *Coordinator) Abort() { c.mu.Lock(); defer c.mu.Unlock(); c.failed = true }
