@@ -60,7 +60,7 @@ func TestMCPProxyRejectsInvalidUnixBytesBeforeJSONEncoding(t *testing.T) {
 	}
 }
 func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
-	for _, mutation := range []string{"complete-duplex", "complete-sockets", "quiet-input", "backpressure", "wrong-cwd", "wrong-session", "wrong-token", "wrong-tool", "wrong-parent", "bad-rights"} {
+	for _, mutation := range []string{"complete-duplex", "complete-sockets", "quiet-input", "quiet-sockets", "backpressure", "backpressure-sockets", "wrong-cwd", "wrong-session", "wrong-token", "wrong-tool", "wrong-parent", "bad-rights"} {
 		t.Run(mutation, func(t *testing.T) {
 			b := actualUnitBinding(t)
 			if mutation == "wrong-parent" {
@@ -121,7 +121,7 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 			var input io.WriteCloser
 			var output, stderr io.ReadCloser
 			var socketChildren []*os.File
-			if mutation == "complete-sockets" {
+			if strings.HasSuffix(mutation, "-sockets") {
 				pair := func() (*os.File, *os.File) {
 					fds, e := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 					if e != nil {
@@ -179,7 +179,7 @@ func TestMCPProxyActualSCMTransferCancellationAndBindings(t *testing.T) {
 				if err != nil || line != "controlled helper stderr\n" {
 					t.Fatal("actual server did not start", err)
 				}
-				if mutation == "backpressure" || (mutation == "complete-duplex" || mutation == "complete-sockets") {
+				if strings.HasPrefix(mutation, "backpressure") || (mutation == "complete-duplex" || mutation == "complete-sockets") {
 					if WriteLine(input, []byte(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}`)) != nil {
 						t.Fatal("initialize")
 					}
