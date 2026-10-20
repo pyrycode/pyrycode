@@ -84,6 +84,9 @@ func NewPhysicalRecordingSession(c LifecycleBrokerConfig, binding LifecycleRoleB
 	if family == "" || c.Scenario != scenario+"-bootstrap" || c.Mode != "capture" && c.Mode != "replay" || c.Path != filepath.Join(c.Home, "recording-children", "bootstrap.json") || c.WorkDir != binding.WorkDir || c.OwnerPID <= 1 || broker <= 1 || broker == c.OwnerPID || !physicalSHA256.MatchString(source) || c.Producer.Revision == "" {
 		return nil, errors.New("invalid physical recording session")
 	}
+	if _, err := physicalWork(c.Home); err != nil {
+		return nil, err
+	}
 	var p *PhysicalReplayProtocol
 	var err error
 	if c.Mode == "capture" {
@@ -319,4 +322,86 @@ func ValidatePhysicalRecordingProof(proof PhysicalRecordingProof, scenario, home
 		return fail
 	}
 	return nil
+}
+
+func physicalContractFromDeclarations(home, scenario string, declarations []PhysicalOperationDeclaration) (*PhysicalScenarioContract, error) {
+	if PhysicalFamily(scenario) == "" {
+		if len(declarations) == 0 {
+			return nil, nil
+		}
+		return nil, errors.New("extra physical declarations")
+	}
+	contract := &PhysicalScenarioContract{Kind: "original-rig-physical-v1", Declarations: declarations}
+	if physicalReplaceHome(contract, home, physicalHome) != nil {
+		return nil, errors.New("cannot bind physical contract home")
+	}
+	return contract, nil
+}
+func ReadPhysicalScenarioContract(home, scenario string) (*PhysicalScenarioContract, error) {
+	kinds := physicalKinds(PhysicalFamily(scenario))
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	prefix := filepath.Join(home, "recording-children", "bootstrap")
+	declarations := []PhysicalOperationDeclaration{}
+	for i := range kinds {
+		var r PhysicalDeclarationRecord
+		if ReadLifecycleControl(PhysicalDeclarationPath(prefix, i+1), 65536, &r) != nil {
+			return nil, errors.New("missing physical declaration")
+		}
+		declarations = append(declarations, r.Declaration)
+	}
+	return physicalContractFromDeclarations(home, scenario, declarations)
+}
+func ValidatePhysicalBrokerOwnership(home, scenario string, actual map[string]int) error {
+	if PhysicalFamily(scenario) == "" {
+		return nil
+	}
+	var proof PhysicalRecordingProof
+	if ReadLifecycleControl(filepath.Join(home, "recording-children", "bootstrap.physical"), MaxBytes, &proof) != nil || actual["bootstrap"] <= 1 || proof.BrokerPID != actual["bootstrap"] {
+		return errors.New("physical proof broker differs from actual current child")
+	}
+	return nil
+}
+
+// The worker boundary can derive only the closed user/spec sequence from its
+// independently validated whole main tape. The artifact audit separately pins
+// this same sequence to the original rig's immutable current declarations.
+func physicalContractFromTape(scenario string, tape *Tape) (*PhysicalScenarioContract, error) {
+	kinds := physicalKinds(PhysicalFamily(scenario))
+	if len(kinds) == 0 {
+		return nil, errors.New("unknown physical worker source")
+	}
+	declarations := []PhysicalOperationDeclaration{}
+	for _, frame := range tape.Frames {
+		if frame.Direction == "stdin" && lifecycleTimelineUser(frame.Data) {
+			var user struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(frame.Data, &user) != nil || len(user.Message.Content) != 1 || len(declarations) >= len(kinds) {
+				return nil, errors.New("invalid physical worker source user")
+			}
+			spec, _ := physicalSpec(kinds[len(declarations)])
+			declarations = append(declarations, PhysicalOperationDeclaration{Version: 1, UserSequence: len(declarations) + 1, Owner: LifecycleRoleBinding{Role: "bootstrap", SessionID: "33333333-3333-4333-8333-333333333333", ConversationID: "44444444-4444-4444-8444-444444444444", WorkDir: physicalHome + "/work"}, Spec: spec, UserText: user.Message.Content[0].Text})
+		}
+	}
+	contract := &PhysicalScenarioContract{Kind: "original-rig-physical-v1", Declarations: declarations}
+	if ValidatePhysicalScenarioContract(scenario, contract, tape) != nil {
+		return nil, errors.New("incomplete physical worker source trace")
+	}
+	return contract, nil
+}
+func validateLifecycleWorkerSource(scenario, role string, sequence int, tape *Tape, input []byte, source FallbackExchange) error {
+	if PhysicalFamily(scenario) == "" {
+		return ValidateFallbackInput(input, source)
+	}
+	contract, err := physicalContractFromTape(scenario, tape)
+	if err != nil || role != "bootstrap" || sequence < 1 || sequence > len(contract.Declarations) {
+		return errors.New("unbound physical worker source")
+	}
+	return ValidatePhysicalFallbackSource(contract.Declarations[sequence-1].Spec, input, source)
 }

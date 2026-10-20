@@ -451,6 +451,9 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			brokerPIDs[role] = cmd.Process.Pid
 		}
 	}
+	if err := claudetape.ValidatePhysicalBrokerOwnership(home, name, brokerPIDs); err != nil {
+		t.Fatal(err)
+	}
 	if err := claudetape.ValidateConversationBrokerOwnership(home, name, brokerPIDs); err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +525,11 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		suite := &claudetape.LifecycleSuite{Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
+		physical, err := claudetape.ReadPhysicalScenarioContract(home, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		suite := &claudetape.LifecycleSuite{Physical: physical, Version: 1, Scenario: name, Producer: process.Producer, DaemonSHA256: config.DaemonSHA256, Roles: tapes, Snapshots: snapshots, Workers: workers, Settlement: claudetape.RequiredConversationSettlement(name)}
 		if err := suite.Save(process.Path, profile.Roles); err != nil {
 			t.Fatalf("cannot publish complete original lifecycle capture: %v", err)
 		}

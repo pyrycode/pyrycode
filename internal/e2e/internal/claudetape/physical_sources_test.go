@@ -62,3 +62,20 @@ func TestPhysicalInputShapeDoesNotAcceptNullPostureOrDescription(t *testing.T) {
 		t.Fatal("closed foreground input rejected", err)
 	}
 }
+
+func TestPhysicalSourceAliasPreservesOriginalBarePathSentencePeriod(t *testing.T) {
+	spec, _ := physicalSpec("composer-background")
+	main := FallbackExchange{User: "Use exactly cat ${CHILD_HOME}/work/composer-background.fifo. Do nothing else.", Assistant: "Started ${CHILD_HOME}/work/composer-background.fifo."}
+	worker := FallbackExchange{User: strings.ReplaceAll(main.User, "${CHILD_HOME}", "${FALLBACK_HOME}"), Assistant: strings.ReplaceAll(main.Assistant, "${CHILD_HOME}", "${FALLBACK_HOME}")}
+	raw, _ := json.Marshal(map[string]string{"assistant": worker.Assistant, "user": worker.User})
+	if ValidatePhysicalFallbackSource(spec, raw, main) != nil {
+		t.Fatal("original path punctuation changed")
+	}
+	for _, suffix := range []string{".foreign", "..", "./child", ".foreign extra"} {
+		forged := FallbackExchange{User: "${FALLBACK_HOME}/work/composer-background.fifo" + suffix, Assistant: "Started"}
+		raw, _ := json.Marshal(map[string]string{"assistant": forged.Assistant, "user": forged.User})
+		if ValidatePhysicalFallbackSource(spec, raw, FallbackExchange{User: strings.ReplaceAll(forged.User, "${FALLBACK_HOME}", "${CHILD_HOME}"), Assistant: forged.Assistant}) == nil {
+			t.Fatal("punctuation admitted a foreign path suffix", suffix)
+		}
+	}
+}

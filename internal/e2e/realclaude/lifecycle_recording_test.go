@@ -393,7 +393,38 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 	}
 	job.Config.OnSeal = func(n int) error { return daemonRecordingWrite(prefix+".prefix", receipt(n, nil)) }
 	job.Config.OnInput = lifecycleRecordingInputWitness(job, c.Process.Home, c.Process.Scenario)
+	var physical *claudetape.PhysicalRecordingSession
+	if claudetape.PhysicalFamily(c.Process.Scenario) != "" {
+		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
+		if err != nil {
+			os.Exit(2)
+		}
+		physical, err = claudetape.NewPhysicalRecordingSession(job.Config, binding, c.SourceBinarySHA256, os.Getpid())
+		if err != nil {
+			os.Exit(2)
+		}
+		priorInput := job.Config.OnInput
+		job.Config.OnInput = func(raw []byte) error {
+			if priorInput != nil {
+				if err := priorInput(raw); err != nil {
+					return err
+				}
+			}
+			actual, err := b.Frame(raw, true)
+			if err != nil {
+				return err
+			}
+			return physical.Input(actual)
+		}
+		job.Config.BeforeOutput = physical.Output
+		job.Config.BeforeSeal = physical.Seal
+	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
+	if physical != nil {
+		if err := physical.Close(); err != nil && e == nil {
+			e = err
+		}
+	}
 	if daemonRecordingWrite(prefix+".receipt", receipt(n, e)) != nil {
 		os.Exit(2)
 	}

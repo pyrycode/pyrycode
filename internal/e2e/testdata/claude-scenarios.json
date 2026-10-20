@@ -1237,6 +1237,40 @@
       "retained_live": [
         "Current Claude generation of usable fallback suggestions remains live. Replay runs the original observer wrapper, completed exchange, fallback set and higher-revision explicit-null clear assertions through the real daemon. The first completed source turn requires exactly one successful finite native worker. Every observed worker retains exact input, output, EOF, owned observer/helper/native group and actual production Wait status; no optional worker count or invented cancellation."
       ]
+    },
+    {
+      "name": "composer-stop",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaudeComposerStopPreservesBackgroundTask"
+      ],
+      "live_contracts": {
+        "TestRealClaudeComposerStopPreservesBackgroundTask": "3a8eea6e521932f981b11e82a79a3c1a38e82b8cc77758b083b6f46fd42cda56"
+      },
+      "retained_live": [
+        "Current Claude Bash execution, task identity and interrupt semantics remain live. Capture executes the original foreground PID/hold and surviving background FIFO reader assertions unchanged. Replay starts only the current original closed operations, requires actual foreground cancellation Wait9, retains the actual background reader through cancelled turn-end and requires actual background Wait0 after the original FIFO release before forwarding native completion. Immutable current rig declarations, complete native source inputs, every observed finite fallback attempt and owned broker proofs are mandatory."
+      ]
+    },
+    {
+      "name": "stop-background-task",
+      "boundary": "lifecycle_suite",
+      "comparison_policy": "strict_ordered",
+      "stdio_permission": false,
+      "initial_yolo": false,
+      "claude_args": [],
+      "live_tests": [
+        "TestRealClaudeStopBackgroundTaskCompletion"
+      ],
+      "live_contracts": {
+        "TestRealClaudeStopBackgroundTaskCompletion": "086f6963b6d5e510b78dd468a5fda73919e4eca7356f33545a0f9166e7ab0c51"
+      },
+      "retained_live": [
+        "Current Claude Bash background execution and actual stop_task semantics remain live. Capture retains the original single-execution marker, FIFO arrival and terminal stopped-or-roster-omission assertion while its writer remains held. Replay executes only the current original closed script and requires actual owned cancellation Wait9 before the exact native terminal can pass. A control acceptance cannot substitute for terminal evidence. Immutable current rig declarations, complete source inputs and every observed finite fallback attempt remain mandatory."
+      ]
     }
   ],
   "batches": {
@@ -1412,6 +1446,10 @@
       "conversation-system-prompt",
       "conversation-active-switch",
       "fallback-suggestion"
+    ],
+    "physical-background": [
+      "composer-stop",
+      "stop-background-task"
     ]
   },
   "reviews": {
@@ -1479,16 +1517,6 @@
       "disposition": "live_only",
       "reason": "Closed stdin must leave held work alive until foreground release, then actually exit and remove its background FIFO reader. These are OS/process/descendant effects, not stdout assertions.",
       "contract_sha256": "c969302a9bc35c483de24d01916d789b475062cbe526623efd7501486e557b47"
-    },
-    "TestRealClaudeComposerStopPreservesBackgroundTask": {
-      "disposition": "needs_checkpoint",
-      "reason": "Composer Stop has background and foreground held operations plus an external FIFO release after cancellation. Add causal operator-action checkpoints for holds/release and interrupt input; keep actual surviving background reader/tool completion live.",
-      "contract_sha256": "3a8eea6e521932f981b11e82a79a3c1a38e82b8cc77758b083b6f46fd42cda56"
-    },
-    "TestRealClaudeStopBackgroundTaskCompletion": {
-      "disposition": "needs_checkpoint",
-      "reason": "Stop held task can share targeted task identity, accepted stop and terminal stopped/roster removal, but only with a verified stop-control stdin before terminal source boundary. Physical FIFO hold and process termination remain live.",
-      "contract_sha256": "086f6963b6d5e510b78dd468a5fda73919e4eca7356f33545a0f9166e7ab0c51"
     },
     "TestRealClaude_APIRetryCapture": {
       "disposition": "live_only",

@@ -971,3 +971,34 @@ epoch. This separates provider response latency from variable queue/startup
 latency without changing production timers. Legacy timelines remain supported;
 session-resume bootstrap keeps its readiness-based timeline because its idle
 timer starts at activation. No old accepted fixture is rewritten.
+
+## Physical background-task boundary
+
+The `physical-background` candidate batch retains the original
+`TestRealClaudeComposerStopPreservesBackgroundTask` and
+`TestRealClaudeStopBackgroundTaskCompletion` bodies and their real phone actions.
+A candidate profile is not accepted coverage until its native fixture, exact replay,
+source review and full batch gate pass.
+
+Each original constructor creates the current script/FIFO/gate. An exclusive
+private declaration binds that inspected input and complete source user to the
+current source binary, revision, owned broker and bootstrap session/conversation.
+Capture observes native protocol order without executing an additional operation
+or deriving OS Wait statuses from provider frames. The original physical assertions
+supply native evidence and remain live.
+
+Replay starts only those closed current Bash commands. An opaque native task/tool
+identity selects an owned process capability, never a captured PID. Targeted stop
+and foreground interrupt must produce an actual SIGKILL Wait; Composer cancellation
+must leave the background reader present, then the original FIFO release must
+produce an actual successful Wait before native completion passes. All process
+groups drain before proof publication. Complete ordered protocol facts, current
+owner identity and tape/declaration bytes are pinned before and after cleanup.
+A physical-only stdout schedule anchors to every actually forwarded stdin frame,
+including stop/interrupt, preserving absolute offsets within each input phase.
+Production timers and original phone/control actions remain unchanged.
+
+Finite fallback attempts retain their complete literal worker IO and actual status.
+Only the exact declared original paths in the two typed source fields can bridge
+worker HOME aliases to main HOME aliases; a different path, prefix, suffix or cwd
+alias fails. Full native main-source validation precedes that comparison.

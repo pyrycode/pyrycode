@@ -38,6 +38,12 @@ func physicalPathEnd(text string, index int) bool {
 	if index == len(text) {
 		return true
 	}
+	// The original rafcapPrompt places a sentence-final period immediately
+	// after its bare FIFO path. Only a period followed by whitespace/end is
+	// punctuation here; a filename suffix such as .foreign still rejects.
+	if text[index] == '.' {
+		return index+1 == len(text) || strings.ContainsRune(" \t\r\n", rune(text[index+1]))
+	}
 	switch text[index] {
 	case ' ', '\t', '\r', '\n', '\'', '"', '`', ';', ')', ']', '}', ',':
 		return true
