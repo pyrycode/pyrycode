@@ -106,6 +106,7 @@ type LifecycleBrokerConfig struct {
 	BeforeOutput     func([]byte) error               `json:"-"`
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
+	OnTerminalState  func(bool, bool, bool, bool)     `json:"-"`
 	OnDiagnostic     func(LifecycleDiagnostic)        `json:"-"`
 
 	// ReplayTurnReady runs once after startup playback reaches its first user input.
@@ -384,6 +385,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
 	defer func() {
+		if c.OnTerminalState != nil {
+			c.OnTerminalState(inputEOF, outputEOF, stderrEOF, sealed)
+		}
 		diagnostic.PendingInput, diagnostic.PendingOutput = len(pendingInput), len(pendingOutput)
 		diagnostic.InputEOF, diagnostic.OutputEOF, diagnostic.StderrEOF = inputEOF, outputEOF, stderrEOF
 		diagnostic.Sealed, diagnostic.ActionAccepted = sealed, actionAccepted
