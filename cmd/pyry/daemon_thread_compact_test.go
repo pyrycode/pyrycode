@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +112,18 @@ type testCompactFrame struct {
 func testCompactRead(t *testing.T, w *switchWire, mgr *relay.V2SessionManager, peers ...string) []testCompactFrame {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	// noise_resp is sent before Run creates the open-session push queue.
+	// A snapshot round trip orders the drain marker after that admission.
+	open := make(map[string]bool)
+	for _, conn := range mgr.ActiveConns(ctx) {
+		open[conn.ConnID] = true
+	}
+	for _, peer := range peers {
+		if !open[peer] {
+			t.Fatalf("compact drain peer %q is not open: %v", peer, ctx.Err())
+		}
+	}
 	done := make(chan error, 1)
 	go func() {
 		if err := mgr.FlushPushes(ctx); err != nil {
@@ -408,12 +421,31 @@ func equalCount(a, b *uint64) bool {
 // A compact load captured before a nested change is cancelled by the compact
 // live frame its unjoined connection receives; the retry converges on the Store.
 func TestDaemonThreadCompactBoundary(t *testing.T) {
+	testDaemonThreadCompactBoundary(t, false)
+}
+
+func TestDaemonThreadCompactBoundaryDelayedRefusal(t *testing.T) {
+	testDaemonThreadCompactBoundary(t, true)
+}
+
+func testDaemonThreadCompactBoundary(t *testing.T, delayRefusal bool) {
+	t.Helper()
 	s, store, _ := testDaemonExpansionFixture(t, 3, 1, 64)
 	captured, release, published := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	refusalRelease := make(chan struct{})
+	var releaseAfterDrain atomic.Bool
 	var once, delivered sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	w, mgr := testDaemonThreadQueryWire(t, s, func(c *relay.V2SessionConfig) {
+		send := c.OutboundContext
+		c.OutboundContext = func(ctx context.Context, e protocol.RoutingEnvelope) error {
+			err := send(ctx, e)
+			if releaseAfterDrain.CompareAndSwap(true, false) {
+				close(refusalRelease)
+			}
+			return err
+		}
 		query := c.ThreadCompactCatchUp
 		first := true
 		c.ThreadCompactCatchUp = func(ctx context.Context, r protocol.ThreadCatchUpPayload) (thread.CompactQueryResult, error) {
@@ -424,6 +456,12 @@ func TestDaemonThreadCompactBoundary(t *testing.T) {
 				select {
 				case <-release:
 				case <-ctx.Done():
+				}
+				if delayRefusal {
+					select {
+					case <-refusalRelease:
+					case <-t.Context().Done():
+					}
 				}
 			}
 			return q, err
@@ -443,18 +481,17 @@ func TestDaemonThreadCompactBoundary(t *testing.T) {
 	awaitSwitchPublication(t, captured)
 	testDaemonThreadAppend(t, s.history, "tool_use", `{"turn_id":"t","parent_tool_use_id":"root","tool_use_id":"late","name":"Read","input":{}}`)
 	awaitSwitchPublication(t, published)
-	unblock()
-	failed := false
-	for _, f := range testCompactRead(t, w, mgr, "phone") {
-		if f.env.InReplyTo != nil && *f.env.InReplyTo == 10 {
-			if f.env.Type != protocol.TypeError {
-				t.Fatal("racing compact load certified a stale capture")
-			}
-			failed = true
-		}
+	if delayRefusal {
+		// Drain the live update while its cancelled query is still held. The
+		// next drain marker releases refusal, so it must arrive after the marker.
+		testCompactRead(t, w, mgr, "phone")
+		releaseAfterDrain.Store(true)
 	}
-	if !failed {
-		t.Fatal("racing compact load was not refused")
+	unblock()
+	// A push drain does not join the cancelled query's asynchronous refusal.
+	typ, _ := testCompactReply(t, w, mgr, "phone", 10)
+	if typ != protocol.TypeError {
+		t.Fatal("racing compact load certified a stale capture")
 	}
 	got, _, _ := testCompactQuery(t, w, mgr, "phone", 11, protocol.TypeThreadCatchUp, request)
 	want, err := store.CompactNewestWindow(t.Context(), testConvID, 256)
