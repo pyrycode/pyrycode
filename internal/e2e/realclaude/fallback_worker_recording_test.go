@@ -67,7 +67,19 @@ func lifecycleRecordingFiniteWorker(c lifecycleRecordingConfig, args []string) b
 		fail()
 	}
 	var daemon struct{ PID int }
-	if claudetape.ReadLifecycleControl(filepath.Join(c.Process.Home, "recording-worker-daemon.json"), 16384, &daemon) != nil || daemon.PID <= 1 || os.Getppid() != daemon.PID || syscall.Getpgrp() != os.Getpid() || os.Getenv("HOME") != c.Process.Home {
+	if claudetape.ReadLifecycleControl(filepath.Join(c.Process.Home, "recording-worker-daemon.json"), 16384, &daemon) != nil || daemon.PID <= 1 || os.Getenv("HOME") != c.Process.Home {
+		fail()
+	}
+	expectedParent := daemon.PID
+	if c.Process.Scenario == "fallback-suggestion" {
+		expectedParent = syscall.Getpgrp()
+		if expectedParent == os.Getpid() {
+			fail()
+		}
+	} else if syscall.Getpgrp() != os.Getpid() {
+		fail()
+	}
+	if os.Getppid() != expectedParent {
 		fail()
 	}
 	cwd, err := os.Getwd()

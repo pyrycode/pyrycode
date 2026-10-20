@@ -193,7 +193,7 @@ func runFallbackWorkerBroker(job FallbackWorkerJob, mode string, budget time.Dur
 		}
 	}()
 	fail := errors.New("finite fallback broker failed")
-	if job.Version != 1 || job.OwnerPID <= 1 || job.GroupPID != job.OwnerPID || job.BrokerParentPID != os.Getppid() || (mode != "capture" && mode != "replay") || fallbackWorkerArgs(job.Args) != nil {
+	if job.Version != 1 || job.OwnerPID <= 1 || !fallbackWorkerGroupShape(job) || job.BrokerParentPID != os.Getppid() || (mode != "capture" && mode != "replay") || fallbackWorkerArgs(job.Args) != nil {
 		return fail
 	}
 	for fd := 3; fd <= 9; fd++ {
@@ -573,15 +573,14 @@ func ValidateFallbackWorkerLaunch(job FallbackWorkerJob, path string, peer, pare
 	for i := 1; i <= LifecycleWorkerLimit(base.Scenario); i++ {
 		validPath = validPath || path == FallbackWorkerJobPath(base.Home, i)
 	}
-	if !validPath || job.Version != 1 || job.OwnerPID != peer || peer <= 1 || job.GroupPID != peer || job.BrokerParentPID != parent || job.Scenario != base.Scenario || job.Home != base.Home || job.Claude != base.Claude || job.Path != strings.TrimSuffix(path, ".job")+".json" || job.Abort != strings.TrimSuffix(path, ".job")+".abort" || job.SourceBinarySHA256 != sourceSHA || !reflect.DeepEqual(job.Producer, base.Producer) || fallbackWorkerArgs(job.Args) != nil {
+	if !validPath || job.Version != 1 || job.OwnerPID != peer || peer <= 1 || !fallbackWorkerGroupShape(job) || job.BrokerParentPID != parent || job.Scenario != base.Scenario || job.Home != base.Home || job.Claude != base.Claude || job.Path != strings.TrimSuffix(path, ".job")+".json" || job.Abort != strings.TrimSuffix(path, ".job")+".abort" || job.SourceBinarySHA256 != sourceSHA || !reflect.DeepEqual(job.Producer, base.Producer) || fallbackWorkerArgs(job.Args) != nil {
 		return fail
 	}
 	var daemon struct{ PID int }
 	if ReadLifecycleControl(filepath.Join(base.Home, "recording-worker-daemon.json"), 16384, &daemon) != nil || daemon.PID <= 1 || job.DaemonPID != daemon.PID {
 		return fail
 	}
-	group, err := syscall.Getpgid(peer)
-	if err != nil || group != peer {
+	if validateFallbackWorkerKernelGroup(job, peer) != nil {
 		return fail
 	}
 	info, err := os.Lstat(job.WorkDir)
@@ -667,7 +666,7 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 			break
 		}
 		var job FallbackWorkerJob
-		if ReadLifecycleControl(jobPath, 16384, &job) != nil || job.Version != 1 || job.OwnerPID <= 1 || owners[job.OwnerPID] || job.GroupPID != job.OwnerPID || job.DaemonPID != daemon.PID || job.BrokerParentPID != parent || job.Scenario != scenario || job.Home != home || job.SourceBinarySHA256 != sourceSHA || job.Producer.Revision != revision || fallbackWorkerArgs(job.Args) != nil || job.Path != strings.TrimSuffix(jobPath, ".job")+".json" || job.Abort != strings.TrimSuffix(jobPath, ".job")+".abort" {
+		if ReadLifecycleControl(jobPath, 16384, &job) != nil || job.Version != 1 || job.OwnerPID <= 1 || owners[job.OwnerPID] || !fallbackWorkerGroupShape(job) || job.DaemonPID != daemon.PID || job.BrokerParentPID != parent || job.Scenario != scenario || job.Home != home || job.SourceBinarySHA256 != sourceSHA || job.Producer.Revision != revision || fallbackWorkerArgs(job.Args) != nil || job.Path != strings.TrimSuffix(jobPath, ".job")+".json" || job.Abort != strings.TrimSuffix(jobPath, ".job")+".abort" {
 			return nil, fail
 		}
 		owners[job.OwnerPID] = true
@@ -698,14 +697,14 @@ func ReadLifecycleWorkers(home, scenario, mode, revision, sourceSHA string, pare
 
 		matches := 0
 		for _, observation := range observations {
-			if observation.OwnerPID == job.OwnerPID {
+			if observation.OwnerPID == fallbackWorkerObservationPID(job) {
 				matches++
 				if !observation.WaitCompleted || !observation.ExitObserved || observation.Status != tape.Status || tape.Status.Signal != 0 && !observation.GroupCancel {
 					return nil, fail
 				}
 			}
 		}
-		if matches != 1 || syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH {
+		if matches != 1 || syscall.Kill(job.OwnerPID, 0) != syscall.ESRCH || syscall.Kill(job.GroupPID, 0) != syscall.ESRCH {
 			return nil, fail
 		}
 		worker := LifecycleWorker{Tape: tape}
