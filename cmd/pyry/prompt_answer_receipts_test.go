@@ -140,42 +140,6 @@ func TestPromptAnswerReceiptsValidation(t *testing.T) {
 	}
 }
 
-func TestPromptAnswerReceiptsReadTargets(t *testing.T) {
-	for _, visibility := range []string{"absent", "hidden", "shown"} {
-		t.Run(visibility, func(t *testing.T) {
-			dir := t.TempDir()
-			store := history.New(dir)
-			conv := conversations.ConversationID(testConvID)
-			var shown *bool
-			if visibility != "absent" {
-				v := visibility == "shown"
-				shown = &v
-			}
-			ts := time.Date(2026, 10, 12, 1, 2, 3, 4, time.UTC)
-			if _, err := store.AppendWithMetadata(conv, historyPromptAnswered, testPromptReceiptRaw(t, ts, nil), ts, history.Metadata{Shown: shown}); err != nil {
-				t.Fatal(err)
-			}
-			for _, reader := range []*history.Store{store, history.New(dir)} {
-				entries, _ := testLegacyReceipts(t, reader)
-				if testLegacyCheckpoint(entries, 0, 0, false) != 0 {
-					t.Fatal("receipt established presentation")
-				}
-				if testLegacyLatest(entries) != 1 {
-					t.Fatal("receipt did not count toward legacy target")
-				}
-				latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conv)
-				want := uint64(1)
-				if visibility == "hidden" {
-					want = 0
-				}
-				if err != nil || latest != want {
-					t.Fatalf("legacy latest=%d %v", latest, err)
-				}
-			}
-		})
-	}
-}
-
 // The probe snapshots the registry under the bridge lock during delivery, then
 // reacquires the registry lock. Publication cannot retain either lock at a peer.
 type promptReceiptBroadcaster struct {

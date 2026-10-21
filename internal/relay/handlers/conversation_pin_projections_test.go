@@ -85,7 +85,7 @@ func TestConversationPinProjections(t *testing.T) {
 					}, logger)
 					suffix = `,"up_to":7`
 				case "list":
-					h = ListConversationsWithAgents(reg, nil, &fakeLatestHistory{})
+					h = ListConversationsWithAgents(reg, nil)
 				}
 				if h != nil {
 					req.Payload = []byte(`{"conversation_id":"` + muteConvTargetID + `"` + suffix + `}`)

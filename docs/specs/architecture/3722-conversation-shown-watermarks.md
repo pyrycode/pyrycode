@@ -80,3 +80,7 @@ None. Keep receipt publication and thread-capability negotiation until their own
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+
+- 2026-10-21: Added `TestDaemonThreadListShownAuthority` in `cmd/pyry/daemon_thread_list_test.go` to exercise actual list delivery with corrupt source segments, an eligible nonzero certificate, certified zero and a cold unknown row together. Repeated negotiated/non-thread lists must preserve every row and held mark, start no workers and leave unknown raw progress cold. Receipt validators formerly reached through checkpoint oracles now assert receipt acceptance directly; their source/identity coverage remains. No authority or read-clamping contract changes.
