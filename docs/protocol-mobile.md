@@ -1350,9 +1350,23 @@ missing IDs still refuse the whole send with `attachment.not_found`; malformed
 payload shapes retain `protocol.malformed`.
 Recorded names survive history/thread reopening without another name lookup,
 including when an unresolved acceptance becomes `lost` on daemon restart.
-Legacy ID-only history remains readable with no guessed filenames. These facts
-describe queued acceptance; retention when delivery replaces content is the
-separate [#3694](https://github.com/pyrycode/pyrycode/issues/3694) contract.
+The exact usable acceptance-owned ID/name pairs and their recorded array order
+also survive written/delivered revisions, compact full-root replacements,
+full/compact catch-up and pages, and fresh daemon responses after reopening
+(#3694). Delivery retains the permanent acceptance identity, recorded sender,
+times and queue handle, with the existing delivery placement and receiving
+provenance; its safe text and `attachment_ids` remain the delivered content.
+
+Acceptance alone supplies filename facts. Delivery-provided `attachments`,
+including case variants, never supply replacements or fallback names. Missing,
+null or non-array acceptance metadata adds no facts. Within an array, delivery
+omits ill-typed or incomplete entries, IDs outside the acceptance's
+`attachment_ids`, and filenames that are empty, `.` or `..`, contain `/` or `\`,
+or have a drive prefix. Usable facts retain their exact ID/name strings and
+relative order, with only those two fields projected; if none remain,
+`attachments` is omitted. Legacy ID-only history remains readable without
+invented filenames. Names are never derived from IDs or host paths, and neither
+host paths nor composed delivery prompts enter these display facts.
 
 Drop and Send now require `kind: user_message`, `status: queued`, `active: true`
 and a valid handle. Target the existing [queue commands](#queue-v2) with the

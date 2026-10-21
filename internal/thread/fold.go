@@ -171,6 +171,7 @@ func (f *Fold) feedEntry(e history.Entry) error {
 	index := f.addItem(e, item)
 	if item.Kind == "user_message" {
 		f.messages[e.ID] = index
+		return f.sendMessage(e, index)
 	}
 	return nil
 }

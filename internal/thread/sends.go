@@ -2,6 +2,7 @@ package thread
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 	"time"
 
@@ -79,39 +80,28 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 		return true, nil
 	}
 	prior := f.items[index].Status
-	if prior != "queued" && !(prior == "written" && (status == "delivered" || status == "lost")) {
+	item := &f.items[index]
+	// A linked message already proves delivery. Its first matching outcome may
+	// enrich it once, without reopening the owner or claiming another message.
+	earlyOutcome := prior == "delivered" && status == "delivered" &&
+		item.Order == p.DeliveryEntryID && item.Rev == item.Order && f.messages[p.DeliveryEntryID] < 0
+	if !earlyOutcome && prior != "queued" && !(prior == "written" && (status == "delivered" || status == "lost")) {
 		return true, nil
 	}
-	item := &f.items[index]
 	f.countPublicWork(1)
-	if status == "delivered" {
+	if status == "delivered" && !earlyOutcome {
 		delivery, ok := f.messages[p.DeliveryEntryID]
 		f.countPublicWork(1)
 		if !ok || delivery < 0 || p.DeliveryEntryID >= e.ID {
 			return true, nil
 		}
-		// Validate both sources before claiming or suppressing either identity.
-		rendered, err := f.render([]Item{*item, f.items[delivery]})
-		if err != nil {
+		if err := f.deliverSend(index, delivery, true); err != nil {
 			return true, err
 		}
-		message := rendered[1]
-		f.countPublicWork(1)
-		if r := f.recipes[item.ID]; r.creating != 0 {
-			r.delivery = p.DeliveryEntryID
-			f.recipes[item.ID] = r
-		} else {
-			f.countIngestion(len(item.Content) + len(message.Content))
-			item.Content = deliveredSendContent(item.Content, message.Content)
-			f.countIngestion(len(item.Content) * 3)
-			item.Summary = message.Summary
+		if f.messages[p.DeliveryEntryID] >= 0 {
+			return true, nil // Explicit references cannot enter legacy joins.
 		}
-		item.Order = message.ID
-		item.Session, item.Agent, item.NoChild = message.Session, message.Agent, message.NoChild
-		// Preserve internal indexes held by main work; suppress only the public row.
-		f.messages[p.DeliveryEntryID] = -1
-		f.markAffected(delivery)
-	} else {
+	} else if status != "delivered" {
 		item.Shown = status == "lost" || status == "written"
 	}
 	item.Status, item.Active, item.Rev = status, status == "written", e.ID
@@ -123,9 +113,84 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 	return true, nil
 }
 
+// deliveryReference distinguishes absent legacy links from invalid explicit ones.
+// Every case variant must name the same strictly earlier durable identity.
+func (f *Fold) deliveryReference(e history.Entry) (uint64, bool) {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(e.Payload, &fields) // The message was validated on ingestion.
+	f.countIngestion(len(e.Payload))
+	var accepted uint64
+	present := false
+	for key, raw := range fields {
+		f.countIngestion(len(key) + len("accepted_entry_id"))
+		if !strings.EqualFold(key, "accepted_entry_id") {
+			continue
+		}
+		present = true
+		var id uint64
+		f.countIngestion(len(raw))
+		if json.Unmarshal(raw, &id) != nil || id == 0 || id >= e.ID || (accepted != 0 && accepted != id) {
+			return 0, true
+		}
+		accepted = id
+	}
+	return accepted, present
+}
+
+func (f *Fold) sendMessage(e history.Entry, delivery int) error {
+	id, _ := f.deliveryReference(e)
+	index, ok := f.accepted[id]
+	f.countPublicWork(1)
+	if !ok || (f.items[index].Status != "queued" && f.items[index].Status != "written") {
+		return nil
+	}
+	if err := f.deliverSend(index, delivery, false); err != nil {
+		return err
+	}
+	item := &f.items[index]
+	item.Status, item.Active, item.Rev = "delivered", false, e.ID
+	return nil
+}
+
+func (f *Fold) deliverSend(index, delivery int, legacy bool) error {
+	item := &f.items[index]
+	// Validate both sources before claiming or suppressing either identity.
+	rendered, err := f.render([]Item{*item, f.items[delivery]})
+	if err != nil {
+		return err
+	}
+	message := rendered[1]
+	if legacy {
+		if _, explicit := f.deliveryReference(history.Entry{ID: message.ID, Payload: message.Content}); explicit {
+			return nil
+		}
+	}
+	f.countPublicWork(1)
+	if r := f.recipes[item.ID]; r.creating != 0 {
+		r.delivery = message.ID
+		// Delivery replaces the intermediate written outcome in both fold modes.
+		r.fields = maps.Clone(r.fields)
+		delete(r.fields, "outcome")
+		f.recipes[item.ID] = r
+	} else {
+		f.countIngestion(len(item.Content) + len(message.Content))
+		item.Content = deliveredSendContent(item.Content, message.Content)
+		f.countIngestion(len(item.Content) * 3)
+		item.Summary = message.Summary
+	}
+	item.Order = message.ID
+	item.Session, item.Agent, item.NoChild = message.Session, message.Agent, message.NoChild
+	// Preserve indexes held by main work; suppress only the public row, before
+	// a newly linked message has ever appeared in a captured publication.
+	f.messages[message.ID] = -1
+	f.markAffected(delivery)
+	f.markAffected(index)
+	return nil
+}
+
 // deliveredSendContent uses safe receiving content while retaining recorded
-// acceptance sender identity, times and queue handle. A terminal handle is
-// historical data; only a queued active item supplies a queue action target.
+// acceptance attachment facts, sender identity, times and queue handle. A terminal
+// handle is historical data; only a queued active item supplies a queue action target.
 // These fields never establish a history join.
 func deliveredSendContent(accepted, delivered json.RawMessage) json.RawMessage {
 	var sender struct {
@@ -134,15 +199,40 @@ func deliveredSendContent(accepted, delivered json.RawMessage) json.RawMessage {
 		AcceptedAt      json.RawMessage `json:"accepted_at"`
 		ClientSentAt    json.RawMessage `json:"client_sent_at"`
 		QueuedMessageID json.RawMessage `json:"queued_msg_id"`
+		AttachmentIDs   []string        `json:"attachment_ids"`
+		Attachments     json.RawMessage `json:"attachments"`
 	}
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(accepted, &sender) // Both objects were validated on ingestion.
 	_ = json.Unmarshal(delivered, &fields)
-	// A legacy acceptance cannot acquire a handle from its delivered message.
+	// Acceptance alone supplies attachment names and queue handles.
 	for key := range fields {
-		if strings.EqualFold(key, "queued_msg_id") {
+		if strings.EqualFold(key, "queued_msg_id") || strings.EqualFold(key, "attachments") {
 			delete(fields, key)
 		}
+	}
+	var facts []json.RawMessage
+	_ = json.Unmarshal(sender.Attachments, &facts) // Missing or non-array metadata adds no facts.
+	acceptedIDs := make(map[string]bool, len(sender.AttachmentIDs))
+	for _, id := range sender.AttachmentIDs {
+		acceptedIDs[id] = true
+	}
+	type attachmentFact struct {
+		AttachmentID string `json:"attachment_id"`
+		Filename     string `json:"filename"`
+	}
+	var attachments []attachmentFact
+	for _, raw := range facts {
+		var fact attachmentFact
+		if json.Unmarshal(raw, &fact) != nil || fact.AttachmentID == "" || !acceptedIDs[fact.AttachmentID] ||
+			fact.Filename == "" || fact.Filename == "." || fact.Filename == ".." ||
+			strings.ContainsAny(fact.Filename, `/\`) || (len(fact.Filename) >= 2 && fact.Filename[1] == ':') {
+			continue
+		}
+		attachments = append(attachments, fact)
+	}
+	if len(attachments) > 0 {
+		fields["attachments"], _ = json.Marshal(attachments) // Only strings in a fixed display shape.
 	}
 	for key, value := range map[string]json.RawMessage{
 		"device_id": sender.DeviceID, "message_id": sender.MessageID,

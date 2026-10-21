@@ -280,6 +280,16 @@ notifications carry no item version: counting or decoding them as item changes
 would reject valid retirement recovery. Keep exact item counts, original
 connection ownership and the separate successful query completion marker intact.
 
+Legacy delivery fixtures must also account for public-row suppression. Publishing
+an unlinked delivery message before its `send_delivered` outcome can require a
+producer-gap reset when the outcome claims that row. To isolate attachment
+retention, `TestDeliveredAttachmentWire` publishes acceptance/written boundaries,
+then loads the linked legacy message/outcome pair together across a clean idle
+unload under shadow coordination. This preserves reset behavior and the original
+acceptance identity; the later fresh-daemon reopening separately proves durable
+names and bytes. New messages with an explicit acceptance reference use the
+[message-time join](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
+
 `dropRingOnConversationDelete` retains the registry's single removal observer
 for explicit deletion and sweep, including with the relay disabled. It preserves
 ring/reply-suggestion cleanup, tombstones the ID, joins shadow coordination and
@@ -512,12 +522,37 @@ release it. Keep the load parent alive through the join to preserve the
 [retirement certification contract](thread-package-background-store-lifecycle.md#isolation-and-lifecycle).
 
 Wire lifecycle tests must read the live acceptance before completing same-version
-catch-up, which can suppress duplicate publication. A delivered message and its
-outcome can reach separate fold batches; suppressing the earlier public message
-then requires a baseline and retires the peer. `TestQueuedSendHandleActions`
-checks retained-range continuity, asserting the live terminal patch when usable
-or authenticated replacement-peer catch-up when retirement is required. Waiting
-only for a terminal patch would mistake valid retirement for missing content.
+catch-up, which can suppress duplicate publication. Newly produced accepted
+deliveries establish their permanent identity from the message's durable
+acceptance reference before any public delivery row appears (#3725). Message
+and outcome can therefore reach separate follower batches without a join-induced
+baseline/reset or retirement. Delivery and outcome may each patch the same item;
+wire fixtures must consume every retained change before their correlated query
+response. `TestQueuedSendHandleActions` permits replacement-peer recovery, so
+it alone cannot prove that a fresh refusal reached the original joined peer.
+
+`TestAcceptedDeliveryLiveRefusal` uses real producer appends, `ForwardReader`,
+source-backed Store folding/publication and `daemonThreadPublisher`. It publishes
+an accepted baseline, then uses barriers for coalesced delivery/outcome and
+separated publication with an actual segment cut. Both retain the original peer
+and publish exactly one fresh refusal addition with no duplicate delivery root.
+Interrupted-prefix and settled replay, independent source-backed reopening,
+catch-up and retained observations must agree. Reopening copies only raw
+segments into an independent instance: two live Store owners must not share
+derived checkpoint files. The committed
+[Linux evidence](../../../cmd/pyry/testdata/accepted_delivery/evidence.json)
+pins raw before/after Go JSON, revisions and counts; the separated schedule
+failed before repair and both schedules passed afterwards, with zero skips or
+real Claude turns. The [verifier review](https://github.com/pyrycode/pyrycode/pull/3726#issuecomment-6322486428)
+also confirms the repaired written-prefix checks and current-head gates.
+
+Older unlinked message/outcome suppression and genuine gaps still require
+retirement before dependent output; `TestStoreObservationDelivery`,
+`TestCatchUpBoundedRecovery` and `TestDaemonThreadGapReasons` retain those checks.
+A replacement peer obtains earlier refusals only through explicit history or
+catch-up, without unsolicited live replay or a fresh recovery offer. The Core
+regression proves this publisher boundary; post-merge phone/transport acceptance
+belongs to [Mobile #2374](https://github.com/pyrycode/pyrycode-mobile/issues/2374).
 
 Nil or failed shadow storage leaves legacy traffic operational.
 `TestThreadShadowLegacy` checks an authenticated Noise peer through

@@ -38,7 +38,8 @@ Each item also has recorded `Session`/`Agent`, `NoChild`, optional `Turn`/`Paren
 `Status`, `Active`, `Shown`, a plain one-line `Summary` and kind-specific
 `Content`. Standalone items leave turn and parent unset and are inactive.
 Accepted sends also leave turn and parent unset, but remain active while queued
-and become inactive at a valid terminal outcome.
+or written and become inactive at a valid linked delivery message or terminal
+outcome.
 Main-work items retain the recorded turn and leave parent unset; running text
 and calls are active, while closed work and ending rows are inactive. Updates
 retain the creating item's attribution and visibility, except for the send
@@ -82,7 +83,7 @@ for source resolution and separate Store publication budgets.
 
 | Raw source type | Item kind | Rendered content and status |
 | --- | --- | --- |
-| `message` with `role: user` | `user_message` | Text, attachment IDs and recorded client/device/send metadata; `Status: delivered`. |
+| `message` with `role: user` | `user_message` | Text, attachment IDs and recorded client/device/send metadata; `Status: delivered`. A valid acceptance reference updates its permanent send item instead of exposing another row. |
 | `session_divider` or unmatched `session_transition` | `session_divider` | Recorded boundary cause/reason, session IDs, agents and reset handoff outcome; `Status: done`. |
 | `compaction_boundary` | `compaction` | Trigger and recorded token counts, preserving absent versus zero; `Status: done`. |
 | `banner` | `notice` | Banner text and fields; Codex reroutes retain this banner representation; `Status: done`. |
@@ -127,6 +128,25 @@ version without creating or reserving an item.
 Normal attribution applies: absent provenance stays unknown or uses recorded
 successor fallback; explicit `kind: none` remains distinct and blocks that fallback.
 
+New operator delivery messages carry a durable `accepted_entry_id` (#3725).
+After ordinary user-message validation and main-text closure, `sendMessage`
+validates this reference and merges delivery into its queued or written
+acceptance before the message can appear as a separate public row. The
+acceptance keeps its ID/kind and visibility, takes the message's order and
+receiving provenance, and becomes delivered/inactive with the message ID as
+revision. The committed message alone proves this state; folding never waits
+for `send_delivered` or fabricates its payload. The first matching final outcome
+can then enrich that same item and advance its revision once.
+
+`deliveryReference` requires a nonzero JSON integer strictly earlier than the
+message; all case-insensitive field variants must agree. It must identify a
+valid acceptance in this conversation still queued or written. Malformed,
+forward, wrong-kind, foreign or already-claimed references cannot change
+ownership. An invalid explicit reference leaves the otherwise valid
+message standalone and cannot be rescued by a later legacy outcome; an absent
+reference retains the older join path below. App IDs, text, timestamps and
+queue-handle reuse provide no fallback identity.
+
 Production `newReferenceFold` sends retain only history IDs and lifecycle
 metadata in their items and `contentRecipe` values: the creating acceptance ID,
 optional delivery ID and terminal `outcome` entry reference. Queued, delivered,
@@ -150,21 +170,44 @@ nothing. A message claimed by another acceptance cannot be reused. Invalid
 links reserve neither acceptance nor message, so a later valid outcome can
 still resolve the send. The first valid terminal in entry-ID order wins; later
 duplicate or conflicting terminals change no content, state or revision and
-cannot claim another message. Text, app IDs, daemon-local queue IDs and
-timestamps never establish the join. Equal app IDs across devices still create
-distinct acceptance items.
+cannot claim another message. A message that already established delivery only
+accepts its matching `send_delivered`; a later drop/loss cannot replace it.
+Text, app IDs, daemon-local queue IDs and timestamps never establish the join.
+Equal app IDs across devices still create distinct acceptance items.
 
 Delivery keeps the acceptance ID/kind. At render time, `renderShared` applies
 `deliveredSendContent` to the acceptance and delivery entries, starting content
-from the linked message's safe delivered text, attachments and client metadata,
-then enriches it with the referenced outcome. This preserves legacy JSON
-encoding and unknown fields. Recorded acceptance `device_id`, `message_id`,
+from the linked message's safe delivered text, attachment IDs and client metadata,
+then enriches it with a committed matching outcome when present. This preserves
+legacy JSON encoding and unknown fields. Recorded acceptance `device_id`, `message_id`,
 `accepted_at` and `client_sent_at` override
 the corresponding delivered fields only when present. `deliveredSendContent`
 decodes those sender fields in JSON order with case-insensitive matching before
 merging. Selecting them by map iteration would make duplicate case variants
 nondeterministic; the last matching recorded value wins. It removes delivered
 case variants when replacing a field, keeping one canonical sender key.
+
+Attachment names have acceptance-owned presence as well as value (#3694).
+`deliveredSendContent` removes every delivered `attachments` case variant, then
+projects only usable recorded acceptance facts: string `attachment_id` and
+`filename`, with the ID in the acceptance's `attachment_ids` and a nonempty
+basename excluding `.`, `..`, slash, backslash and drive prefixes. Entries are
+decoded independently so one malformed fact cannot discard usable neighbors or
+the accepted send. Only the two display fields survive; exact strings and
+relative array order are retained. Missing, null, non-array or wholly unusable
+metadata omits `attachments`; delivery supplies no fallback, and IDs or host
+paths never supply invented names. Both inline delivery and
+`renderSharedLookup` use this helper, preserving the same contract after source
+cache eviction and reopening. See the
+[full thread item contract](../../protocol-mobile.md#full-thread-item).
+
+History owns these display names independently of current attachment storage.
+`TestDeliveredAttachmentWire` renames stored files before reopening, then checks
+the original acceptance facts through full/compact catch-up and pages while
+authenticated retrieval returns identical bytes with the current storage names.
+A byte-only retrieval assertion would miss lost or forged thread filenames.
+`TestSendAttachmentFacts` checks independent filtering, conflicting delivery
+names, recorded order and inline/source-backed agreement through repeat outcomes.
 
 The queue handle has acceptance-owned presence as well as value.
 `deliveredSendContent` removes every delivered `queued_msg_id` case variant
@@ -187,7 +230,7 @@ history join. See the
 [queue wire contract](../../protocol-mobile.md#queue-v2) and
 [queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out).
 
-Before a reference-backed delivery changes either identity, `sendFact` renders
+Before a reference-backed delivery changes either identity, `deliverSend` renders
 both acceptance and delivery candidates to validate source availability. A
 missing, unreadable, malformed or null source fails the feed without changing
 either item, recording a delivery recipe or claiming/suppressing the message.
@@ -212,20 +255,36 @@ retaining reason, `occurred_at` and links, and sets revision to that entry ID.
 Only legacy inline folds copy the terminal payload. Outcome visibility cannot
 override the table's rules.
 
+Linking delivery removes any intermediate `send_written` outcome in both inline
+and source-backed folds. A message-only delivery prefix has no `outcome` field;
+only a committed matching `send_delivered` supplies the final object. Clone
+recipe fields before removing the written reference so retained observations
+stay immutable. Comparing only queued prefixes or final successful delivery
+would miss a written-prefix mismatch when the final append fails.
+`TestSendWrittenDeliveryPrefixes` compares incremental observations and full
+replay at every prefix; `TestAcceptedDeliveryAppendFailures/written_outcome`
+also checks real append failure, source-backed reopening and catch-up.
+`foldingRules` invalidates derived caches from older interpretations.
+
 After delivery, `Items` omits the claimed message's public row; unmatched
 messages retain their delivered identity and order. **Keep internal item indexes
 stable:** removing a reconciled message from storage would shift indexes held
 by assistant/tool state and corrupt later updates. The claim suppresses only
-the public row. A chunk ending between message and outcome can temporarily
-expose both rows; later reconciliation leaves the permanent acceptance item.
+the public row. For newly linked messages this happens before publication, so
+every committed prefix retains one permanent acceptance item, without a
+join-induced baseline or retirement. Older messages lacking the explicit
+reference can still expose both rows in a chunk ending before the outcome;
+later suppression of that public message retains genuine-withdrawal safety.
+See the [live publication regression](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 Acceptance alone does not split assistant text; the delivered message still
 closes main text runs when ingested.
 
-Without a valid terminal, acceptance stays queued. **Loss requires an explicit
-recorded `send_lost`; absence never infers it.** Recorded loss identifies missing
+Without a valid delivery message or terminal, acceptance stays queued or written.
+**Loss requires an explicit recorded `send_lost`; absence never infers it.**
+Recorded loss identifies missing
 durable resolution after restart, not proof that the agent never received the
-bytes. A successful write followed by a failed outcome append can leave that
-same unresolved history. See the
+bytes. A successful write without a committed linked delivery or final outcome
+can leave unresolved history; a committed linked message remains delivered even
+if the final outcome is missing. See the
 [producer durability boundary](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
 and [ADR 042](../decisions/042-daemon-built-thread.md#the-six-approved-decisions).
-

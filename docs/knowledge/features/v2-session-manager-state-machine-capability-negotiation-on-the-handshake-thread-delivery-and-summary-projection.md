@@ -283,6 +283,37 @@ reply can mistake a late live update for query output. `TestDaemonThreadQueriesJ
 awaits both the refusal and queued updates before retry, then reconstructs full
 states through subsequent real publisher changes.
 
+**Await hosted handling before retrying after a push (#3731).** `FlushPushes`
+acknowledges push-queue progress: `drainOnce` closes its marker when popped,
+while preceding output can remain queued in the asynchronous hosted lane.
+`pushSource` calls `cancelThreadQuery` before enqueueing, so the cancelled
+query's refusal can reach the wire before the live row reaches the hosted head.
+Even after both flush and refusal receipt, `threadQueryGate` can cancel a newly
+admitted complete retry when that same row is selected. Against a compact join,
+the complete row is then withheld; absence of unsolicited wire output cannot
+prove it has been handled.
+
+`TestThreadCompactLiveInFlight` follows Push/FlushPushes with
+`testCompactHostedFence`: a serial `DeliverThread` compact progress frame for
+another, unjoined conversation must return exactly `ErrThreadWithheld`. Its
+acknowledged handling fences earlier hosted work without cancelling the tested
+query, changing joins or emitting a frame. Direct `DeliverThread` already
+acknowledges the live row's withholding. After that boundary and the first
+correlated retryable `thread.query_failed`, one version-zero complete retry
+must finish at the fixture's `epoch`/90 checkpoint and replace the compact join.
+The compact-load cases still require complete live rows to leave the query
+uncancelled and its output uninterleaved, including over a complete join.
+
+`TestThreadCompactPushCompletionBoundary` holds the refusal sender after its
+wire frame is recorded, flushes the live row behind it, and proves a premature
+retry is admitted with a live context. Releasing the sender then produces that
+retry's correlated `thread.query_failed`. Admission is observed through a later
+Run-owned control enqueue and the matching query token under `hostedMu`:
+waiting for provider entry would strand the diagnostic because `appFrameWorker`
+still awaits the first refusal's delivery outcome after its query slot clears.
+See the [controlled boundary proof](../../specs/architecture/3731-compact-retry-completion.md)
+and [hosted lane ownership](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
+
 **Project fields without round-tripping a partial DTO.** `conversation_updated`
 has supplied fields that `ConversationUpdatedPayload` does not represent,
 including binding and legacy watermark fields. Rebuilding the row through that
