@@ -254,7 +254,7 @@ test: the frame is admitted and the worker calls a method on a nil pointer.
 `internal/relay` has no `recover()` anywhere, so that crashes the daemon —
 fail-closed for authorization (nothing reaches a child) but a remote-triggerable
 crash once a wiring bug exists. Every optional seam on `V2SessionConfig`
-(`QuestionResolver`, `ModalResolver`, `AttachmentIntake`, `HistoryPager`, …)
+(`QuestionResolver`, `ModalResolver`, `AttachmentIntake`, …)
 shares this exact shape; it is called out on `MCPActuator` specifically because
 here a mis-wire turns a stop-the-world crash into the fail path for an
 authorization gate rather than for a convenience feature. Not escalated to a

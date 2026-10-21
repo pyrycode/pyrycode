@@ -36,14 +36,14 @@ Concurrent posts to one conversation deliver FIFO by durable acceptance, with
 each post's chunks contiguous relative to other posts and Claude output. Each
 has its own turn ID, sequences from zero, and text whose concatenation reproduces
 the input byte-for-byte. Its ordered `assistant_delta` chunks are followed by
-exactly one `turn_end` with the same turn ID, in live delivery and served history.
+exactly one `turn_end` with the same turn ID, in live delivery and the durable source log.
 All chunks and completion reach history before the first live announcement;
 publication follows their recorded order. A failed head keeps later
 posts in that conversation pending while other conversations can progress.
 
 An active Claude turn holds delivery, not acceptance: `channel post` returns
 success after persisting the whole post without waiting for that turn to finish.
-No held delta or post completion enters served history or live frames. Release
+No held delta or post completion enters the durable source log or live frames. Release
 follows the preceding turn's published real completion, or an accepted actual
 child exit/confirmed
 runner stop after preceding queued deltas have been handled, buffered text
@@ -90,11 +90,10 @@ uses, and constructs each payload once for both history and announcement.
 `<`-filled post against the envelope cap and checks its rejoined bytes. If it
 fails, lower `maxDeltaTextBytes` rather than relaxing the measurement.
 
-A heavily escaped maximum post can exceed a single served history page's byte
-bound even though every envelope fits. Follow page cursors to reconstruct the
-whole post; a short page is not the entire log. The multi-chunk fake-daemon
-fixture fits one page, while `TestChannelPost_RecordingReplayLiveWakeOrder`
-retains maximum-size byte reconstruction.
+`TestChannelPost_RecordingReplayLiveWakeOrder` retains maximum-size byte
+reconstruction. Fake-daemon channel-post checks compare the direct source log
+with live/replay delivery; the raw history endpoint is retired (#3715).
+Client content recovery uses [Thread query messages](../../protocol-mobile.md#thread-query-messages).
 
 ## Live announcements, bounded replay and durable recovery
 
@@ -221,7 +220,7 @@ absence from live/history before release, and the intact reply followed by its
 real completion before the separate completed post and successor turn.
 `TestChannelPost_E2E_DisconnectedWakeReplayAndHistory` routes the replay
 conversation, observes an actual content-free outbound wake, then checks ordered
-reconnect replay and the same completed post in served history, with no replay wake.
+reconnect replay and the same completed post in the source log, with no replay wake.
 
 See the [original fan-out design](../../specs/architecture/2498-channel-post-live-delivery.md#revisions)
 and [durable-delivery design](../../specs/architecture/2810-durable-channel-post.md)

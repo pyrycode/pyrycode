@@ -4,10 +4,8 @@
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
 `dispatch.Route`, and answered **inline on the `Run` dispatch goroutine** —
 [`request_session_settings`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md)'s
-shape, not
-[`request_history`](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md)'s
-off-`Run` worker handoff. It is the read half of the #2151 cluster, which
-shipped write-only: a client that did not itself perform the write had no way
+shape. It needs no worker handoff for disk reads. It is the read half of the
+\#2151 cluster, which shipped write-only: a client that did not itself perform the write had no way
 to learn what a conversation's stored prompt holds, and no way at all to learn
 that the child it is typing at predates an edit — because a stored prompt
 takes effect only at the conversation's *next* session start.
@@ -29,8 +27,8 @@ the adjacent ticket number — would have dropped the gate.
 2. **Decode, tolerated.** `_ = json.Unmarshal(env.Payload, &p)` leaves
    `ConversationID == ""` on failure, which resolves nothing at step 3. Safe
    here because the id reaches a registry lookup and nothing else — it never
-   becomes a path component the way `request_history`'s does, where the same
-   tolerance would resolve an empty id to the log root.
+   becomes a path component. A filesystem consumer cannot borrow this tolerance:
+   joining an empty component resolves the root instead of producing an error.
 3. **Resolve, or don't.** Empty-id guard, nil-seam guard, comma-ok honoured —
    `payload` is overwritten only on `ok == true`.
 4. **No `KnownConversation` call, and that is a decision, not an omission.**

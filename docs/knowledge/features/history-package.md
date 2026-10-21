@@ -9,9 +9,9 @@ the interactive emitter's `emit` chokepoint and session transitions — and
 the safe `msgqueue.QueuedMessage` projection. Stream Claude delivery commits
 at a receiving-child echo or normal answering-turn completion (with Send now's
 carried-close grace for no-echo completion); Codex/no-stream delivery commits at
-write confirmation (see [Producers](history-package-producers.md#producers-2114-2115)). `#2116` is the
-wire-serving consumer,
-`#2113` declares the cursor as an opaque wire string. Spec:
+write confirmation (see [Producers](history-package-producers.md#producers-2114-2115)).
+The raw wire pager is retired (#3715); source storage still feeds
+[`internal/thread`](thread-package.md) and list/read watermarks. Spec:
 [`specs/architecture/2112-conversation-history-log.md`](../../specs/architecture/2112-conversation-history-log.md).
 
 ## Topic map
@@ -170,76 +170,29 @@ load.
 
 ## Reader (#2116)
 
-`internal/relay`'s `request_history` handler reads through `newHistoryPager`,
-wired at `cmd/pyry/relay.go`. The adapter projects exactly one bounded raw
-`Store.Page` result; it never scans ahead to fill a page. `legacyHistoryType`
-preserves eligible legacy events regardless of `Entry.Shown`, with their original
-durable ID, timestamp and payload bytes, newest-first. `legacyRuntimeReceipt`
-projects only validated runtime/startup and agent/task facts, including
-`agent_ended_with_session`, into nonvisual `banner` receipts (#3026, #3032).
-The [receipt vocabulary and validation](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
-define their eligibility. Their payload is `{conversation_id, level:"info", text:"",
-truncated:false, stops_turn:false}` with all five fields present; ID and timestamp
-remain those of the raw fact. Raw facts and metadata are unchanged, and neither
-metadata field nor runtime payload is forwarded to the legacy wire.
+The remote raw pager and `newHistoryPager` adapter are removed (#3715).
+Content recovery uses [Thread query messages](../../protocol-mobile.md#thread-query-messages)
+and the publisher Store; raw `history.Entry` records remain the fold source.
+`Store.Page`, forward walks/tailing and watermark APIs remain internal storage
+operations. Legacy live/replay receipt projection and list/read content policy
+also remain; see [producer eligibility and verification](history-package-producers-legacy-compatibility.md).
 
-Known facts need matching ownership, occurrence time and required identities;
-unknown types and malformed facts remain excluded without being certified
-harmless. A valid receipt accounts for its durable ID but grants no presentation
-and changes no turn, permission, model or status state. Unknown, malformed or
-unidentified receipts and unaccounted numeric holes remain mobile read barriers.
-Receipt-only pages and repeated/overlapping delivery cannot establish sight.
-Join receipts by conversation and durable ID: closures/dividers may share both
-an occurrence timestamp and identical banner bytes, so the legacy (`type`, `ts`)
-fallback cannot distinguish them.
-See [receipt validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
-and the [wire contract](../../protocol-mobile.md#a-history-entry).
+Storage cursors describe the returned range. Never truncate a returned page and
+retain its old cursor: that cursor points before the oldest returned entry, so
+the next request would skip the discarded entries. Re-query at a smaller limit
+when a consumer needs a smaller range. Entry-count bounds also do not bound bytes;
+a downstream storage clamp can be larger than an upstream transport or memory
+budget. Check both before exposing a storage query to untrusted callers.
+These storage rules do not restore the retired wire protocol.
 
-The adapter forwards that raw page's opaque `Cursor` and `AtStart` unchanged.
-An empty filtered page with `AtStart == false` retains a usable cursor to the
-next older raw page. Consecutive empty pages and an entirely filtered log are
-valid walks; **consumers terminate on `AtStart`, never on an empty entry list**.
-A terminal page has `AtStart == true` and an empty cursor. Treating an empty
-list as exhaustion loses older eligible content; scanning ahead instead would
-turn one bounded request into work proportional to the hidden history.
-
-**Projected counts cannot determine raw page boundaries.** A hidden startup
-divider now occupies a nonvisual receipt, while excluded unknown or malformed
-facts still shorten pages. An all-runtime page can contain only receipts; it
-retains the raw cursor and `AtStart` just as an entirely excluded page does.
-`TestRelayV2_ConversationHistory` compares cursors and `AtStart` with each raw
-page, covering a nonempty partial terminal page, an exact-fill walk with an
-empty terminal page, and a receipt-only nonterminal page containing the startup
-divider. Deriving exhaustion from seeded content counts would miss these boundaries.
-`TestLegacyRuntimeReceipts_BoundedPages` checks all four facts at page edges and
-in the middle, repeated walks and warm/reopened stores; `TestLegacyRuntimeReceipts_StartupDivider`
-uses the real startup writer, which intentionally has no predecessor/successor
-session identity. Requiring those sessions would leave restart holes while
-running-turn tests stayed green.
-
-`TestHistoryProjection_BoundedWalk` compares each projected page with its raw
-page in warm and reopened stores, using mixed and entirely excluded logs,
-consecutive empty pages and nil/false/true visibility. It verifies cursor
-preservation, termination and exactly-once delivery of eligible IDs, timestamps
-and payloads. `TestHistoryProjection_UnknownEmitIsDurableOnly` checks one raw
-append and no ring/live publication with and without connected clients.
-
-Cursor validation stays in `Store.Page`: the adapter passes cursors through
-unparsed and retains the existing error outcomes. It classifies
-`Store.Page`'s sentinels with `errors.Is` — the same pattern
-[`historyAppendFailure`](history-package-producers.md#producers-2114-2115) established for the write side — into
-`historyPageFailure`, a read-path twin in the same file: `invalid_cursor`,
-`not_contained`, `corrupt_segment`, `unknown_version`, `read`, never the
-error's own text, for the same reason `historyAppendFailure` doesn't log one
-(`open segment %q` and `resolve log directory %q` format absolute
-filesystem paths). `ErrNotContained` earns its own discriminant despite
-being unreachable past the relay's membership gate, because an occurrence
-there is a symlink-containment attack signal rather than a malfunction, and
-an operator needs to be able to tell the two apart even when the client
-can't. See
-[Inbound `request_history`](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md)
-for the seam shape this classification feeds and why it carries an outcome
-enum rather than a bare error.
+`historyPageFailure` remains the content-free read-error classifier used by
+`reconcileStartupHistory`. It maps sentinels via `errors.Is` to `invalid_cursor`,
+`invalid_id`, `invalid_page_size`, `not_contained`, `corrupt_segment`,
+`unknown_version` or `read`, without logging the underlying error's absolute
+filesystem paths. Keep `TestHistoryPageFailure_NamesEverySentinel` even though
+the remote pager is gone. `not_contained` distinguishes a confinement refusal
+from ordinary I/O for the operator; public list/read failures still use the
+shared retryable `history.unavailable` contract.
 
 ## Files
 
