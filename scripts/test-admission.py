@@ -73,10 +73,22 @@ def main():
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            # The dispatcher owns the clock and gives each spawn a private
+            # telemetry directory. Report directly even when output is hidden
+            # in a file or the shell has moved this command to the background.
+            wait = None
+            if os.environ.get('PYRY_TEST_WAIT_DIRECTORY'):
+                root = Path(__file__).resolve().parents[1]
+                agents = Path(os.environ.get('AGENTS_REPO_PATH', root.parent / 'pyrycode-agents'))
+                helper = agents / 'dispatcher/scripts/test-wait.py'
+                if helper.is_file():
+                    wait = runpy.run_path(str(helper))['AdmissionWait']()
             started = time.monotonic()
             next_note = started
             while True:
                 now = time.monotonic()
+                if wait is not None:
+                    wait.heartbeat()
                 if now >= next_note:
                     print(f"Test admission: waiting ({int(now - started)} s so far).", file=sys.stderr, flush=True)
                     next_note = now + 30
@@ -86,6 +98,8 @@ def main():
                     break
                 except BlockingIOError:
                     pass
+            if wait is not None:
+                wait.finish()
             print(f"Test admission: acquired after {int(time.monotonic() - started)}s waiting", file=sys.stderr, flush=True)
     os.set_inheritable(fd, True)
     os.environ["PYRY_TEST_ADMISSION_FD"] = str(fd)
