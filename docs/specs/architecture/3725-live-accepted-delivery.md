@@ -113,3 +113,6 @@ Pending for the documentation stage:
 - Errors/logs/telemetry: source failures use generic existing errors; no message payload, sender identity or filesystem path is logged by new code.
 - Concurrency: readiness publishes immutable acceptance ID; no additional lock ordering or goroutine; interrupted message/outcome prefixes reconstruct from committed facts.
 - Threat model: preserves conversation isolation and refusal history/live separation under the protocol Security model. No auth or replay protection is weakened; broader existing protocol threats remain owned by their existing mechanisms.
+
+## Revisions
+- 2026-10-21: `internal/thread/cache.go` requires `foldingRules` to change when item semantics change. Increment it so saved old interpretations cannot bypass the new reference validation. Existing cache compatibility tests cover invalidation. The regression copies only raw segments into an independent instance for reopen proof; simultaneous Store owners must not share derived checkpoint files. This preserves the design and adds one literal edit, keeping the estimate below 800 lines.
