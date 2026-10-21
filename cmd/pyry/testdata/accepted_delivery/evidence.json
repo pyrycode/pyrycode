@@ -1,0 +1,63 @@
+{
+  "os": "linux",
+  "architecture": "amd64",
+  "real_claude_turns": 0,
+  "selector": "^TestAcceptedDeliveryLiveRefusal$",
+  "before": {
+    "revision": "7e7c93e149337c118e4e59cac33a1bc25af945f5",
+    "file": "before.jsonl",
+    "exit_code": 1,
+    "leaf_counts": {
+      "executed": 2,
+      "passed": 1,
+      "failed": 1,
+      "skipped": 0
+    },
+    "test_event_counts": {
+      "executed": 3,
+      "passed": 1,
+      "failed": 2,
+      "skipped": 0
+    }
+  },
+  "after": {
+    "revision": "34c185e1a3843db9779b46573360f38566ed9936",
+    "file": "after.jsonl",
+    "exit_code": 0,
+    "leaf_counts": {
+      "executed": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    "test_event_counts": {
+      "executed": 3,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "commands": {
+    "before": "python3 scripts/test-admission.py -- go test -timeout=30m -race -json -run '^TestAcceptedDeliveryLiveRefusal$' ./cmd/pyry",
+    "after": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^TestAcceptedDeliveryLiveRefusal$' ./cmd/pyry"
+  },
+  "verification": {
+    "affected_leaf_counts": {
+      "executed": 292,
+      "passed": 292,
+      "failed": 0,
+      "skipped": 0
+    },
+    "safety_selection_leaf_counts": {
+      "executed": 30,
+      "passed": 30,
+      "failed": 0,
+      "skipped": 0
+    },
+    "vet": "passed",
+    "build": "passed",
+    "full_module_gate": "pending dispatcher",
+    "mobile_2374": "pending post-merge Linux scripted refusal"
+  },
+  "provenance": "Revisions pin the tested Go sources. During before execution only a plan-only commit followed its launch revision; Go sources remained unchanged. Earlier fixture-cleanup and legacy-byte compatibility failures remain in /tmp/builder-3725 on pyrybox."
+}
