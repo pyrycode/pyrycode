@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,22 @@ import (
 
 const tapeSession = "ecda0000-0000-4000-8000-000000000001"
 const tapeConversation = "ecda0000-0000-4000-8000-000000000002"
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	// The recorded binary caches are shared across top-level tests. Retire
+	// their private directories only after every consumer has finished.
+	for _, binary := range []string{recordedPoolBinary.path, recordedMCPDaemon.path} {
+		if binary == "" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Dir(binary)); err != nil {
+			fmt.Fprintf(os.Stderr, "remove recorded binary fixture: %v\n", err)
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
 
 func TestRecordedClaude(t *testing.T) {
 	selected := selectedRecordedScenarios(t)
@@ -62,6 +79,12 @@ func TestRecordedClaude(t *testing.T) {
 		})
 
 	}
+}
+
+func TestRecordedMCPSendFileWaitsForStartup(t *testing.T) {
+	t.Setenv("PYRY_CLAUDE_TAPE_MODE", "replay")
+	t.Setenv("PYRY_CLAUDE_TAPE_HOLD_INITIALIZE", "1")
+	runRecordedLifecycleSuite(t, "mcp-send-file")
 }
 
 // The daemon may write a turn once claude confirms the permission posture, which

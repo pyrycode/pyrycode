@@ -106,7 +106,12 @@ type LifecycleBrokerConfig struct {
 	BeforeOutput     func([]byte) error               `json:"-"`
 	BeforeSeal       func(*Tape) error                `json:"-"`
 	OnFailure        func(*LifecycleTape, int)        `json:"-"`
+	OnTerminalState  func(bool, bool, bool, bool)     `json:"-"`
+	Observation      *WrapUpObservation               `json:"-"`
 	OnDiagnostic     func(LifecycleDiagnostic)        `json:"-"`
+
+	// ReplayTurnReady runs once after startup playback reaches its first user input.
+	ReplayTurnReady func() error `json:"-"`
 }
 type LifecycleKill struct {
 	PID    int
@@ -262,7 +267,16 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 	}
 	_ = originals[6].Close()
+	c.Observation.Add("ready", nil, nil)
 	frames, total := 0, 0
+	turnReady := false
+	signalTurnReady := func() error {
+		if turnReady || player == nil || c.ReplayTurnReady == nil || !player.AwaitsTurn() {
+			return nil
+		}
+		turnReady = true
+		return c.ReplayTurnReady()
+	}
 	sealed := false
 	actionAccepted := false
 	var observeAction func() error
@@ -300,23 +314,64 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 	write := func(f *os.File, raw []byte) error { return writeBounded(f, raw, time.Time{}) }
 	writeOutput := func(raw []byte) error {
 		diagnostic.Stage = "deliver-output"
-		emit := func(extra time.Time) error {
-			restored, err := binding.Frame(raw, true)
-			if err != nil {
-				return err
-			}
-			if c.BeforeOutput != nil {
-				if err := c.BeforeOutput(restored); err != nil {
-					return err
+		var outputWork [4]int64
+		outputOrdinal := timelineOutput
+		entry, cpu := time.Now(), lifecycleCPUTime()
+		var outputOrigin time.Time
+		var outputAnchor int
+		var outputDue int64
+		defer func() {
+			for i, elapsed := range outputWork {
+				if elapsed > diagnostic.OutputWorkMaxNS[i] {
+					diagnostic.OutputWorkMaxNS[i] = elapsed
+					diagnostic.OutputWorkMaxOrdinal[i] = outputOrdinal
 				}
 			}
-			if c.ReplayOutput != nil {
-				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
+			if !outputOrigin.IsZero() {
+				elapsedCPU := lifecycleCPUTime()
+				if cpu < 0 || elapsedCPU < 0 {
+					elapsedCPU = -1
+				} else {
+					elapsedCPU -= cpu
+				}
+				sample := [10]int64{int64(outputOrdinal), int64(outputAnchor), outputDue, entry.Sub(outputOrigin).Nanoseconds(), outputWork[0], outputWork[1], outputWork[2], outputWork[3], time.Since(outputOrigin).Nanoseconds(), elapsedCPU}
+				if len(diagnostic.OutputTiming) < 64 {
+					diagnostic.OutputTiming = append(diagnostic.OutputTiming, sample)
+				} else {
+					diagnostic.OutputTiming[outputOrdinal%64] = sample
+				}
+			}
+		}()
+		var restored []byte
+		prepare := func() error {
+			work := time.Now()
+			var err error
+			restored, err = binding.Frame(raw, true)
+			outputWork[0] = time.Since(work).Nanoseconds()
+			return err
+		}
+		emit := func(extra time.Time) error {
+			var err error
+			if c.BeforeOutput != nil {
+				work := time.Now()
+				err := c.BeforeOutput(restored)
+				outputWork[1] = time.Since(work).Nanoseconds()
 				if err != nil {
 					return err
 				}
 			}
-			return forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
+			if c.ReplayOutput != nil {
+				work := time.Now()
+				restored, err = c.ReplayOutput(append([]byte(nil), restored...))
+				outputWork[2] = time.Since(work).Nanoseconds()
+				if err != nil {
+					return err
+				}
+			}
+			work := time.Now()
+			err = forwardLifecycleFrame(restored, c.ForwardOutput, func(actual []byte) error { return writeBounded(originals[1], append(actual, '\n'), extra) })
+			outputWork[3] = time.Since(work).Nanoseconds()
+			return err
 		}
 		if tape.Timeline != nil {
 			if timelineOutput >= len(tape.Timeline.OutputAfterNS) {
@@ -339,17 +394,21 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				origin = timelineOrigins[anchor]
 			}
 			offset := tape.Timeline.OutputAfterNS[timelineOutput]
-			if err := forwardLifecycleOutput(origin, offset, time.Now, time.Sleep, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
+			outputOrigin, outputAnchor, outputDue = origin, anchor, offset
+			if err := forwardPreparedLifecycleOutput(origin, offset, time.Now, time.Sleep, prepare, func() error { return emit(origin.Add(time.Duration(offset)).Add(100 * time.Millisecond)) }); err != nil {
 				var timing *LifecycleTimingError
 				if errors.As(err, &timing) {
 					timing.Output, timing.Anchor = timelineOutput, anchor
 					timing.StartupNS, timing.ReadyNS = startupNS, time.Since(timelineOrigin).Nanoseconds()
 					timing.CompletionNS, timing.WitnessNS = completionNS, witnessNS
 					timing.PriorOutputCompletionNS = outputCompletionNS
+					timing.OutputWorkNS = outputWork
 				}
 				return err
 			}
 			timelineOutput++
+		} else if err := prepare(); err != nil {
+			return err
 		} else if err := emit(time.Time{}); err != nil {
 			return err
 		}
@@ -366,10 +425,16 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 				return frames, err
 			}
 		}
+		if err := signalTurnReady(); err != nil {
+			return frames, err
+		}
 	}
 	var pendingInput, pendingOutput []byte
 	inputEOF, outputEOF, stderrEOF := false, false, false
 	defer func() {
+		if c.OnTerminalState != nil {
+			c.OnTerminalState(inputEOF, outputEOF, stderrEOF, sealed)
+		}
 		diagnostic.PendingInput, diagnostic.PendingOutput = len(pendingInput), len(pendingOutput)
 		diagnostic.InputEOF, diagnostic.OutputEOF, diagnostic.StderrEOF = inputEOF, outputEOF, stderrEOF
 		diagnostic.Sealed, diagnostic.ActionAccepted = sealed, actionAccepted
@@ -378,6 +443,9 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		}
 	}()
 	accept := func(direction string, raw []byte) error {
+		if direction == "stdin" {
+			c.Observation.Add("received", raw, nil)
+		}
 		if direction == "stdout" && observeAction != nil {
 			if err := observeAction(); err != nil {
 				return err
@@ -436,7 +504,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 					return e
 				}
 			}
-			return nil
+			return signalTurnReady()
 		}
 		total += len(normalized)
 		if total > MaxBytes || len(tape.Tape.Frames) >= MaxFrames || Safe(normalized) != nil {
@@ -462,11 +530,16 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			callback = c.ForwardInput
 		}
 		if err := forwardLifecycleFrame(raw, callback, func(actual []byte) error { return write(target, append(actual, '\n')) }); err != nil {
+			if direction == "stdin" {
+				c.Observation.Add("forwarded", raw, err)
+			}
 			return err
 		}
 		if direction == "stdin" {
+			c.Observation.Add("forwarded", raw, nil)
 			diagnostic.ProviderInputsForwarded++
 		} else {
+			c.Observation.Add("output", raw, nil)
 			diagnostic.OutputsDelivered++
 		}
 		if direction == "stdout" && tape.Timeline != nil {
@@ -561,6 +634,14 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 			}
 			if n == 0 {
 				*eof = true
+				switch direction {
+				case "stdin":
+					c.Observation.Add("stdin_eof", nil, nil)
+				case "stdout":
+					c.Observation.Add("stdout_eof", nil, nil)
+				case "stderr":
+					c.Observation.Add("stderr_eof", nil, nil)
+				}
 				if direction == "stdin" {
 					_ = originals[3].Close()
 				}
@@ -623,6 +704,7 @@ func RunLifecycleBroker(c LifecycleBrokerConfig, binding childBinding) (count in
 		if err := PublishLifecycleControl(c.Kill+".ready", LifecycleKill{PID: c.OwnerPID, Signal: c.End}); err != nil {
 			return fail
 		}
+		c.Observation.Add("action", nil, nil)
 		diagnostic.ActionAcknowledged = true
 		return nil
 	}

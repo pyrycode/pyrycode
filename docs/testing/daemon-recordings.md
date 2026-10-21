@@ -759,6 +759,26 @@ note or file is synthesized for this root. Bootstrap and successor remain alive
 until the original daemon cleanup; the bound predecessor journals all traffic
 through its actual output EOF.
 
+The reviewed capture includes the outgoing wrap-up user input even though the
+stored handoff is skipped. In this native run the broker forwarded interrupt,
+then wrap-up input, before forwarding the interrupt acknowledgement. Strict
+replay retains that order: the acknowledgement is released only after both exact
+inputs match. The old 25-frame bound recording omitted that user input; its
+strict completion failure remains in the source history. The replacement is the
+complete 28-frame native bound prefix, with bootstrap and successor captured in
+the same run. No synthetic frame, extra delay or deadline change supplies it.
+
+Three reviewed witnesses under `realclaude/testdata/clear-wrapup-skipped-native*`
+retain the complete carrier, content-free broker observations and original-root
+observations. Their existing bounded readers validate source/helper/daemon
+identity, complete native EOFs and the original root pass before capture is
+accepted. Measured arrival and successful forwarding are distinct phases. The
+root recorded `deadline`, while internal deadline activation and unseen write
+attempts remain unknown. These timestamps diagnose the old carrier and do not
+schedule replay. A passing offline root and its outer ownership/inventory audit
+establish faithful replay for this recording; the final live gate still tests
+current provider behavior.
+
 `clear-reset` runs the original successful `/clear` root with the same three
 owned roles and distinct original seed IDs. The original planted build tag uses
 the existing deterministic recording nonce hook. All original precondition,
@@ -836,6 +856,22 @@ native appends may extend the saved prefix but cannot rewrite it. Current Claude
 writing, actual reload and semantic recall remain obligations of the retained
 original live root.
 
+Recording validates the executing helper's content identity once per process.
+Subsequent hooks reuse that digest or its initial read error, while still reading
+and validating the complete current configuration and expected source identity
+on every call. A foreign expected digest still rejects after a cache hit. This
+keeps repeated executable hashing outside the live resumed provider's seal path
+without changing the activation-based idle timer.
+
+A live prefix seal, an exact inventory sample and the later audit return are
+separate observations. A seal-ended broker may observe genuine provider EOF
+while the original root is auditing the prefix. It withholds its successful final
+receipt until that root atomically publishes the digest it actually audited.
+Failed terminal evidence remains immediate. The post-cleanup audit still requires
+the final receipt and the same pinned digest; no extra inventory entry or
+fabricated EOF is accepted. The provider must be alive at its actual seal, while
+its observed state after audit return may already reflect real idle eviction.
+
 The idle-resume profile permits at most two finite suggestion-worker attempts,
 one per completed original turn; proved cancelled launches consume this same
 allowance. The first native resume attempt exposed an unowned
@@ -854,6 +890,14 @@ SIGKILL Wait for each, while the original root passed and the old outer inventor
 failed at `total-wait-cardinality`. See the
 [revision-bound Linux evidence](../../internal/e2e/testdata/3667-cancelled-worker-evidence.json).
 
+Native observation supports both Linux and macOS for session-resume and Composer
+Stop. On macOS, bounded libproc queries through cgo and kernel sysctls observe
+current children, process lifetimes, executable path and mapped executable vnode,
+closed helper/worker argv and private cwd vnode. Worker and ancestry identities
+are rechecked across observation. Unavailable queries, including builds without
+cgo, cannot authorize cancellation accounting; unreadable, missed or dying
+identities remain unknown and changed retained identities invalidate the audit.
+
 `StartFallbackLaunchAudit` begins immediately after the outer-owned command
 starts. It binds that actual command to the current outer process, then retains
 and rechecks the complete current kernel ancestry from the daemon through that
@@ -864,7 +908,8 @@ use the current helper executable and exact closed invocation/print argv, and
 have the private empty temporary cwd. The audit also binds home, scenario, source
 revision and binary hash. Missed observations remain unknown. Unknown
 registration or previously observed registration cannot become absent merely
-because a job is missing later.
+because a job is missing later. Control-file, fixture, job and Wait PIDs supply
+no ownership authority.
 
 After original daemon cleanup, `ReadLifecycleWorkers` joins every registered
 exchange and independently proved cancelled launch to exactly one actual
@@ -877,6 +922,17 @@ zero reviewed workers, a helper reaching this branch stays silent without
 starting a broker or publishing a job; it must receive actual production
 cancellation or fail after its bounded 45-second hold. Replay still requires
 exactly the reviewed native exchanges, including an exactly empty inventory.
+
+`TestDarwinCancelledLaunch` holds a real owned helper before registration until
+the normal sampler observes it, then cancels and reaps it. Both scenarios join
+one launch and one actual completed SIGKILL group-cancellation Wait with zero
+registered workers and zero exchanges; the inventory without the audit rejects.
+The [native macOS evidence](../../internal/e2e/internal/claudetape/testdata/3703-macos-evidence.md)
+retains failed-before and passed-after controls and the original session-resume
+replay. This controlled proof does not attribute the historical macOS failures;
+the passing original replay observed zero launches, registrations and Waits.
+Historical failures remain failed, and offline replay establishes no new
+live-provider behavior.
 
 The sampler sends no signals and joins before inventory or diagnostic reads.
 Failed original roots still retain production Wait observations after daemon
@@ -1063,6 +1119,14 @@ A physical-only stdout schedule anchors to every actually forwarded stdin frame,
 including stop/interrupt, preserving absolute offsets within each input phase.
 Production timers and original phone/control actions remain unchanged.
 
+Foreground readiness in the physical Composer controls requires the complete
+matching PID witness from the currently owned shell. Opening the shell's
+redirected witness file can precede its `printf`; a successful file read alone
+does not establish readiness. The controlled publication proof holds that exact
+empty-file interval, then releases the shell and requires its complete witness.
+Cancellation must still produce the actual owned SIGKILL Wait and preserve the
+background operation until its original release.
+
 Finite fallback attempts retain their complete literal worker IO and actual status.
 Only the exact declared original paths in the two typed source fields can bridge
 worker HOME aliases to main HOME aliases; a different path, prefix, suffix or cwd
@@ -1073,20 +1137,73 @@ a job. The synchronized Linux `TestFallbackCancelledLaunchBoundary/composer-stop
 demonstrates one independently owned launch and one completed cancellation Wait
 with zero registered workers. Without the independent audit, that inventory
 rejects at `total-wait-cardinality`. This establishes the accounting boundary;
-the historical gate failure's exact cause remains unproved because its original
-counts were lost. Passing ordinary focused replays observed zero launches,
+the original 2026-10-20T07:59:47.077Z gate sighting rejected inventory at
+`total-wait-cardinality`, but its launch/registration/Wait counts remain unknown.
+Earlier passing ordinary focused replays observed zero launches,
 registrations and Waits. The [retained evidence manifest](../../internal/e2e/internal/claudetape/testdata/worker_inventory_3677.json)
 binds the failing and passing controls, replay reports, revisions and hashes.
 
-On Linux, `runRecordedLifecycleSuite` supplies its outer-owned
+The recurrence recorded at 2026-10-20T15:25:13.409Z is a different stage.
+The recovered original log and matching bootstrap receipt at `4b1e799a` show
+forwarding drift at output 68, anchor 3: due 34330542 ns, observed 267210453 ns,
+lateness 232879911 ns. The original root failed before inventory. Its retained
+audit independently records one current owned launch, absent registration,
+one completed SIGKILL cancellation Wait and zero registered workers. Historical
+process/group death, timing-substage and scheduler contributions, and causal
+order relative to the `job-publish` observation remain unknown. The same-tree
+comparison passed with one owned jobless cancellation; that pass cannot explain
+the failure or turn it into an inventory rejection. Both historical failures
+remain failed evidence in the [recurrence manifest](../../internal/e2e/internal/claudetape/testdata/composer_recurrence_3677.json).
+
+For timed replay, `RunLifecycleBroker` now restores immutable bytes once with
+`DaemonBinding.Frame` before the absolute output wait, using
+`forwardPreparedLifecycleOutput`. Waiting until due before restoration wasted
+the captured gap and charged all preparation against the forwarding allowance.
+`BeforeOutput` physical validation, replay projection and actual forwarding
+remain at delivery. The input anchor, absolute offset, 100 ms allowance and
+final pipe-write deadline are unchanged; capture is unchanged. `safeCLIJSON`
+still rejects duplicate keys and unsafe carriers before physical parsing, so
+`BeforeOutput` needs no second duplicate-key scan.
+
+`TestComposerOutputPreparationSchedule` gates real restoration of the exact
+reviewed output 68 and charges 120 ms on a deterministic clock. With the old
+wait-first ordering it misses due + 100 ms; preparation before waiting fits
+that same deadline. Preparation overrun/errors, late input, scheduler overshoot,
+physical-observer delay and write backpressure still reject, and no physical
+observer or write runs early. This controlled failure/pass establishes the
+preparation-order defect, without attributing the historical 232879911 ns miss.
+The recurrence manifest retains failing/passing revisions, exact commands,
+scenario order, report paths/digests and helper/daemon/fixture hashes. Linux
+race-enabled checks passed 1052/1052 package events, including 9/9 scheduling
+events; the adjacent fallback-suggestion → composer-stop replay passed 2/2
+original roots and final worker/artifact audits without skips. macOS is outside
+this ticket's verification scope.
+
+On macOS, `TestDarwinCancelledLaunch/composer-stop` proves the same join by holding
+the real owned helper before registration until the normal sampler observes it,
+then obtaining an actual completed SIGKILL group-cancellation Wait. The
+[native macOS evidence](../../internal/e2e/internal/claudetape/testdata/3703-macos-evidence.md)
+retains the failed stub regression and corrected proof. Neither controlled test
+establishes the scheduling cause of historical failures; those failures remain
+failed evidence.
+
+On Linux and macOS, `runRecordedLifecycleSuite` supplies its outer-owned
 `FallbackLaunchAudit` to `ReadLifecycleWorkers` for Composer Stop as well as
 session-resume. A jobless cancellation requires independently observed current
 helper identity and kernel ancestry through the daemon to the actual outer-owned
 root, observed absent registration, exactly one completed production SIGKILL Wait
-with group cancellation and exit observed, and process/group death. Unobserved
-launches and unreadable or partial registration remain unknown. Unknown,
+with group cancellation and exit observed, and process/group death. The macOS
+boundary uses libproc through cgo and kernel sysctls, checking lifetimes, group
+identities, actual executable path and mapped vnode, exact closed arguments and
+private cwd vnode, with worker and ancestry identity rechecks. Without cgo or
+readable native queries, observation remains unknown and cannot authorize a
+cancellation. Unobserved or dying launches and unreadable or partial registration
+remain unknown; changed retained identities invalidate the audit. Previously
+observed registration cannot become absent after a job disappears. Unknown,
 duplicate, foreign and unmatched evidence still fails; a Wait alone cannot
-authorize a launch, native exchange or receipt.
+authorize a launch, native exchange or receipt. Control-file, fixture and job
+PIDs likewise grant no ownership authority. The sampler neither signals nor
+delays production and joins before inventory reads.
 
 Each registered worker exchange and independently proved cancelled launch joins
 exactly once to an actual production Wait. Cancelled launches consume the same
@@ -1094,6 +1211,14 @@ two-attempt allowance but add no completed native worker exchanges. Reviewed
 fixture bytes and exchange cardinality, registered-worker source/peer checks,
 literal I/O/EOF, original foreground-stop/background-survival assertions and
 bounded cleanup remain required.
+
+Native rejection controls include a reaped worker with a surviving owned group
+member, so process death alone cannot satisfy group death. The macOS test owner's
+failure cleanup closes its control pipe to request cancellation from the daemon
+before the daemon's sole worker Wait. A reported worker PID is never a cleanup
+signal target: it may already have been reused after reaping. Decoder-timeout
+controls require bounded owned-tree cleanup before cancellation and after reaping
+while preserving an unrelated live group.
 
 Use an external private `PYRY_CLAUDE_TAPE_EVIDENCE` directory to retain
 `composer-stop-launch-audit.json` beyond disposable-home cleanup.
@@ -1103,6 +1228,14 @@ hashes. Known-state flags distinguish unknown observations from empty inventorie
 the diagnostic contains no raw protocol, argv, environment or credentials and
 confers no completion authority. Offline replay evidence establishes no new
 live-provider behavior; the original physical assertions remain live obligations.
+
+Broker `LifecycleDiagnostic` separately retains four numeric stage maxima and
+their output ordinals, plus a ring of at most 64 output timing samples. Slots
+are output ordinal, anchor, due, entry, restoration, observation, replay
+projection, write, completion and process CPU elapsed; times are nanoseconds,
+with entry/completion relative to the selected anchor. CPU includes other broker
+goroutines and uses `-1` for unknown. These bounded, content-free diagnostics
+cannot grant completion authority or reconstruct missing historical substages.
 
 For fresh comparison, the exact stop-control `request.task_id` alone is bound to
 its validated native task/tool join in a disposable comparison copy. Native task

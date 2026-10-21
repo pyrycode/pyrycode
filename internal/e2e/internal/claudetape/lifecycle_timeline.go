@@ -123,6 +123,15 @@ func waitLifecycleOutput(origin time.Time, offset int64, now func() time.Time, s
 	return nil
 }
 
+// Preparation transforms immutable bytes only. Physical observation and actual
+// forwarding remain behind the absolute wait and its final delivery check.
+func forwardPreparedLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), prepare, forward func() error) error {
+	if err := prepare(); err != nil {
+		return err
+	}
+	return forwardLifecycleOutput(origin, offset, now, sleep, forward)
+}
+
 func forwardLifecycleOutput(origin time.Time, offset int64, now func() time.Time, sleep func(time.Duration), forward func() error) error {
 	if err := waitLifecycleOutput(origin, offset, now, sleep); err != nil {
 		return err
@@ -148,6 +157,9 @@ type LifecycleTimingError struct {
 	StartupNS, ReadyNS           int64
 	CompletionNS, WitnessNS      int64
 	PriorOutputCompletionNS      int64
+	// OutputWorkNS measures restoration, BeforeOutput observation, replay projection
+	// and actual forwarding, in that order. It grants no completion authority.
+	OutputWorkNS [4]int64
 }
 
 func (e *LifecycleTimingError) Error() string {

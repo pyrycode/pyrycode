@@ -33,6 +33,22 @@ The worker's recent-entry cache (256 entries, inclusive 1 MiB), history's bounde
 caches and the detached change ring (64 batches, 1 MiB encoded) are separate
 budgets. Transient rendering creates no unbounded rendered-item or entry cache.
 
+The daemon's installed `ThreadLastShownVersion` provider checks registry
+membership first. Its authority boundary is:
+
+| Store state | Shown-watermark authority |
+| --- | --- |
+| Loaded and usable | `Store.Status` supplies the in-memory watermark, including numeric zero, without certificate I/O. |
+| Rebuilding or unavailable | No reading; no fallback to older persisted metadata. |
+| Retiring | `Status` reports `StateNotLoaded`, but the retained worker still blocks unloaded certificate authority until joined removal. |
+| Fully unloaded | Only the clean certificate at independently known exact V = H can supply a reading, including authoritative zero. |
+
+Unregistered/removed IDs supply no reading. `V2SessionManager.threadSummary`
+replaces or removes supplied `last_shown_version` at delivery for both
+[`conversations` and `conversation_updated`](../../protocol-mobile.md#conversations),
+so temporary absence cannot retain an older supplied value. Lookup starts no
+worker, warms no cursor, reads no segments and writes nothing.
+
 For unloaded unread metadata, `Store.UnloadedLastShownVersion` holds the store
 lock and rejects a closed store or any worker, including one still retiring.
 It obtains H from `history.Store.CachedLatestEntryID`, which never warms a cold
@@ -54,6 +70,16 @@ can restore eligibility. This metadata read validates checksum syntax only;
 it proves neither replay/checksum equality nor catch-up continuity. Epoch reuse
 requires the validated checkpoint recovery below; the scalar certificate alone
 cannot authorize it.
+
+A successful joined retirement can still leave V < H when an append races the
+consumed boundary, even for hidden/state-only history. The daemon follower reloads
+that suffix and refreshes the summary after successful quiet retirement;
+projection checks authority again rather than reusing the former loaded reading.
+An initial refresh may therefore still omit the field, with a later eligible
+retirement restoring it. This preserves both V < H and V > H rejection and does
+not raise the shown watermark for hidden entries or completion-only revisions.
+See [offscreen summary recovery](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+for the producer sequence and pending Mobile acceptance.
 
 `entryChecksum` hashes the stored entry at V with SHA-256. Its ordered input is
 ID, type byte length, type bytes, timestamp Unix seconds, timestamp nanoseconds,

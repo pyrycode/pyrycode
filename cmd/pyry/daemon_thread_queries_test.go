@@ -84,7 +84,6 @@ func testDaemonThreadQueryWire(t *testing.T, s *threadShadow, tweak func(*relay.
 			}
 			return send(e)
 		}
-		c.HistoryPage = newHistoryPager(s.history, discardLogger())
 		if tweak != nil {
 			tweak(c)
 		}
@@ -139,7 +138,14 @@ func testDaemonThreadReply(t *testing.T, w *switchWire, id uint64, expectedPeer 
 			t.Fatalf("query %d expired during decryption after %v (%d frames)", id, time.Since(started), frames)
 		}
 		raw, err := json.Marshal(e)
-		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes || e.TS.IsZero() || peer != recipient || e.InReplyTo == nil || *e.InReplyTo != id {
+		if err != nil || len(raw) > protocol.MaxThreadEnvelopeBytes || e.TS.IsZero() {
+			t.Fatalf("invalid query envelope: %s %#v %v", peer, e, err)
+		}
+		// Quiet retirement can refresh list metadata beside a correlated query.
+		if e.Type == protocol.TypeConversationUpdated && e.InReplyTo == nil {
+			continue
+		}
+		if peer != recipient || e.InReplyTo == nil || *e.InReplyTo != id {
 			t.Fatalf("invalid correlated envelope: %s %#v %v", peer, e, err)
 		}
 		if e.Type == protocol.TypeError {
@@ -363,11 +369,7 @@ func testDaemonThreadQueriesRecovery(t *testing.T, tweak func(*relay.V2SessionCo
 		t.Fatal("newest-window coverage")
 	}
 	testDaemonThreadRows(t, newest.Items, want.Items)
-	testDaemonThreadRequest(t, w, "legacy", 51, protocol.TypeRequestHistory, protocol.RequestHistoryPayload{ConversationID: testConvID, Limit: 1})
-	peer, e := w.read()
-	if peer != "legacy" || e.Type != protocol.TypeHistoryPage || e.InReplyTo == nil || *e.InReplyTo != 51 {
-		t.Fatal("legacy raw history lost")
-	}
+
 }
 
 func mustQueryJSON(t *testing.T, v any) json.RawMessage {

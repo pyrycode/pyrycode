@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"slices"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 )
 
 type runtimeBoundary struct {
+	child       io.Writer
 	live        *daemonLiveCursor
 	incarnation uint64
 	exitAfter   uint64
@@ -67,6 +69,10 @@ func (s *streamTurnSink) queueBoundary(t sessions.SessionTransition, publish fun
 	s.offerMu.Lock()
 	live := s.live.transition(t)
 	incarnation := s.runtimeProducers[string(t.PreviousID)]
+	var child io.Writer
+	if tag := s.runtimeProducerTags[string(t.PreviousID)]; tag != nil && tag.child != nil {
+		child = tag.child()
+	}
 	after := s.queued
 	if t.PreviousID != "" {
 		after = s.runtimeLastQueued[streamProducerKey{string(t.PreviousID), incarnation}]
@@ -78,7 +84,7 @@ func (s *streamTurnSink) queueBoundary(t sessions.SessionTransition, publish fun
 		s.runtimeHolds = make(map[string]int)
 	}
 	s.runtimeHolds[t.ConversationID]++
-	s.runtimePending = append(s.runtimePending, runtimeBoundary{live: live, fact: t, after: after, publish: publish, done: done, exitAfter: s.exits.Load(), incarnation: incarnation})
+	s.runtimePending = append(s.runtimePending, runtimeBoundary{child: child, live: live, fact: t, after: after, publish: publish, done: done, exitAfter: s.exits.Load(), incarnation: incarnation})
 	s.offerMu.Unlock()
 	select {
 	case s.runtimeWake <- struct{}{}:
@@ -146,6 +152,9 @@ func (s *streamTurnSink) publishRuntimeBoundaries(ctx context.Context, e *intera
 		t := b.fact
 		_, divider := runtimeDivider(t)
 		if divider || (t.PreviousID != "" && (t.Reason == sessions.ReasonClear || t.Reason == sessions.ReasonEviction)) {
+			if s.placement != nil {
+				s.placement.retire(t.ConversationID, string(t.PreviousID), b.child)
+			}
 			cause := string(t.Cause)
 			if cause == "" {
 				cause = "unknown"
@@ -154,11 +163,6 @@ func (s *streamTurnSink) publishRuntimeBoundaries(ctx context.Context, e *intera
 		}
 		b.publish()
 		if t.ConversationID != "" && !e.hasRuntimeTurn(t.ConversationID) {
-			sid := string(t.NewID)
-			if sid == "" {
-				sid = string(t.PreviousID)
-			}
-			s.observePlacementIdle(sid)
 			if busy != nil {
 				busy.setBusy(t.ConversationID, false, toolCallDelta{})
 			}
@@ -185,12 +189,17 @@ func (s *streamTurnSink) sinkForSessionTag(tag *streamSessionTag, kind string) f
 	if tag.incarnation.Load() == 0 {
 		s.beginRuntimeProducer(tag)
 	}
-	return s.sinkForProducer(func() string {
+	return s.sinkForChild(func() string {
 		id := tag.ID()
 		source := history.SessionProvenance{Kind: kind, SessionID: id}
 		tag.lastSource.Store(&source)
 		return id
-	}, kind, tag.incarnation.Load)
+	}, kind, tag.incarnation.Load, func() io.Writer {
+		if tag.child != nil {
+			return tag.child()
+		}
+		return nil
+	})
 }
 
 func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
@@ -199,6 +208,9 @@ func (s *streamTurnSink) exitForSessionTag(tag *streamSessionTag) func() {
 			s.offerMu.Lock()
 		}
 		env := streamTurnEnvelope{sessionID: tag.ID(), incarnation: tag.incarnation.Load(), exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
+		if tag.child != nil {
+			env.child = tag.child()
+		}
 		if source := tag.lastSource.Load(); source != nil {
 			env.source = *source
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,7 @@ type streamTurnEnvelope struct {
 	// routing ID reactivation reuses. It never crosses history or wire seams.
 	incarnation uint64
 	sourceEpoch uint64
+	child       io.Writer
 	occurredAt  time.Time
 	sessionID   string
 	// source is captured from the runner's kind and this event's routing tag.
@@ -114,6 +116,11 @@ type streamTurnEnvelope struct {
 type confirmedStreamStop struct {
 	env   streamTurnEnvelope
 	after uint64
+}
+
+type streamChildKey struct {
+	streamProducerKey
+	child io.Writer
 }
 
 // streamTurnSink is the late-bound, daemon-singleton fan-in that lines up two
@@ -149,7 +156,7 @@ type streamTurnSink struct {
 	// a leaf lock: no I/O, publication or tracker operation runs underneath it.
 	offerMu     sync.Mutex
 	queued      uint64
-	stopped     map[streamProducerKey]confirmedStreamStop
+	stopped     map[streamChildKey]confirmedStreamStop
 	stoppedWake chan struct{}
 	// droppableCap is the high-water mark the droppable class may not cross,
 	// leaving cap(ch) - droppableCap slots that only a closing-class envelope can
@@ -197,6 +204,7 @@ type streamTurnSink struct {
 	// fallback covers.
 	echo              atomic.Pointer[func(sessionID string, ev turnevent.UserEcho)]
 	placementIdle     atomic.Pointer[func(string)]
+	placement         *sendNowPlacement // bound before workers start
 	operatorPublisher atomic.Pointer[func(operatorMessage)]
 	placementCommands chan func()
 }
@@ -251,7 +259,7 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 		runtimeWake:           make(chan struct{}, 1),
 		ch:                    make(chan streamTurnEnvelope, buf),
 		placementCommands:     make(chan func(), operatorMessageQueueSize),
-		stopped:               make(map[streamProducerKey]confirmedStreamStop),
+		stopped:               make(map[streamChildKey]confirmedStreamStop),
 		stoppedWake:           make(chan struct{}, 1),
 		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),
 		logger:                logger,
@@ -296,11 +304,11 @@ func (s *streamTurnSink) offer(env streamTurnEnvelope, closing bool) bool {
 	}
 }
 
-// retainExitLocked requires offerMu and keeps the newest stamp per incarnation.
+// retainExitLocked requires offerMu and keeps the newest stamp per child.
 // A child exit may acquire the lock after a later confirmed stop; that older
 // exit must never replace the stronger producer boundary.
 func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
-	key := streamProducerKey{env.sessionID, env.incarnation}
+	key := streamChildKey{streamProducerKey{env.sessionID, env.incarnation}, env.child}
 	if old, ok := s.stopped[key]; ok && old.env.exitEpoch >= env.exitEpoch {
 		return
 	}
@@ -312,13 +320,16 @@ func (s *streamTurnSink) retainExitLocked(env streamTurnEnvelope) {
 }
 
 // runnerStopped runs only after Runner.Run joins its producer. It retains
-// one latest boundary per producer incarnation without relying on queue capacity, ordered
-// behind every envelope queued before that join. Coalescing repeated stops for
-// one incarnation moves the boundary later, after all of that producer's old tails.
+// the child's latest boundary without relying on queue capacity, ordered behind
+// every envelope queued before that join. Repeated stops for the same child move
+// its boundary later, after all of that producer's old tails.
 // The wake is a level trigger, never the owner of the notification.
 func (s *streamTurnSink) runnerStopped(sessionID string) {
 	s.offerMu.Lock()
 	env := streamTurnEnvelope{sessionID: sessionID, incarnation: s.runtimeProducers[sessionID], exit: true, exitEpoch: s.exits.Add(1), occurredAt: runtimeExitTime()}
+	if tag := s.runtimeProducerTags[sessionID]; tag != nil && tag.child != nil {
+		env.child = tag.child()
+	}
 	if s.live != nil {
 		src := s.live.capture(sessionID, env.incarnation, history.SessionProvenance{SessionID: sessionID}, false)
 		env.live = s.live.closeProducer(src)
@@ -379,6 +390,7 @@ func (s *streamTurnSink) takeLifecycleCloses() []string {
 // registered incarnation even before the new routing ID produces output. Empty
 // IDs are refused because they cannot resolve to a conversation.
 type streamSessionTag struct {
+	child          func() io.Writer // construction-bound before Run
 	runtimeSink    atomic.Pointer[streamTurnSink]
 	incarnation    atomic.Uint64
 	id             atomic.Pointer[string]
@@ -491,12 +503,20 @@ func (s *streamTurnSink) sinkForTag(tag func() string, kind ...string) func(turn
 }
 
 func (s *streamTurnSink) sinkForProducer(tag func() string, producerKind string, incarnation func() uint64) func(turnevent.Event) {
+	return s.sinkForChild(tag, producerKind, incarnation, nil)
+}
+
+func (s *streamTurnSink) sinkForChild(tag func() string, producerKind string, incarnation func() uint64, child func() io.Writer) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
+		var target io.Writer
+		if child != nil {
+			target = child()
+		}
 		if s.live != nil {
 			s.offerMu.Lock()
 		}
 		sessionID := tag()
-		env := streamTurnEnvelope{sessionID: sessionID, ev: ev}
+		env := streamTurnEnvelope{sessionID: sessionID, ev: ev, child: target}
 		if incarnation != nil {
 			env.incarnation = incarnation()
 		}
@@ -648,6 +668,9 @@ func startStreamTurnDrainV2(
 				return
 			}
 			for _, conversationID := range sink.takeLifecycleCloses() {
+				if sink.placement != nil {
+					sink.placement.retire(conversationID, "", nil)
+				}
 				unlock := busy.lockPostBoundary()
 				emitter.closeForConversation(ctx, conversationID)
 				busy.publishPostBoundary(conversationID, false)
@@ -667,6 +690,9 @@ func startStreamTurnDrainV2(
 			unlock := busy.lockPostBoundary()
 			defer unlock()
 			if env.exit {
+				if sink.placement != nil {
+					sink.placement.observe(env)
+				}
 				if emitter.runtimeFacts {
 					if sink.noteRuntimeStop(env) {
 						return
@@ -686,7 +712,6 @@ func startStreamTurnDrainV2(
 							if _, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); !cleared && busy != nil {
 								return
 							}
-							sink.observePlacementIdle(env.sessionID)
 							busy.publishPostBoundary(id, false)
 							if busy != nil && busy.posts != nil {
 								busy.posts.teardown.Delete(id)
@@ -707,7 +732,6 @@ func startStreamTurnDrainV2(
 				// Retain exit-epoch protection; flush and close publication before
 				// releasing posts, only when the producing exit was accepted.
 				if conversationID, cleared := busy.clearForExit(env.sessionID, env.exitEpoch); cleared {
-					sink.observePlacementIdle(env.sessionID)
 					emitter.closeForConversation(ctx, conversationID)
 					busy.publishPostBoundary(conversationID, false)
 					if teardownEpoch != nil {
@@ -721,7 +745,11 @@ func startStreamTurnDrainV2(
 			if emitter.runtimeFacts {
 				if id, ok := resolve(env.sessionID); ok && emitter.runtimeSealed[runtimeSourceKey(id, env.source.SessionID, env.incarnation)] {
 					if echo, ok := env.ev.(turnevent.UserEcho); ok {
-						sink.observeEcho(env.sessionID, echo)
+						if sink.placement != nil {
+							sink.placement.observe(env)
+						} else {
+							sink.observeEcho(env.sessionID, echo)
+						}
 					} else {
 						emitter.handleForSource(ctx, id, env.ev, env.source, env.incarnation)
 					}
@@ -732,7 +760,9 @@ func startStreamTurnDrainV2(
 			// BEFORE the resolution below, and the ordering IS the contract: an
 			// event that resolves to no conversation is dropped there, and the
 			// tracker keeps its own resolution and its own unbound-session record.
-			if turnMarkFor(env.ev) == turnMarkClose {
+			if sink.placement != nil {
+				sink.placement.observe(env)
+			} else if turnMarkFor(env.ev) == turnMarkClose {
 				sink.observePlacementIdle(env.sessionID)
 			}
 			busy.observe(env.sessionID, env.ev)
@@ -744,7 +774,9 @@ func startStreamTurnDrainV2(
 			// so the operator-message push it may commit lands after it, and a
 			// background conversation's echo is placed too.
 			if echo, ok := env.ev.(turnevent.UserEcho); ok {
-				sink.observeEcho(env.sessionID, echo)
+				if sink.placement == nil {
+					sink.observeEcho(env.sessionID, echo)
+				}
 				return
 			}
 

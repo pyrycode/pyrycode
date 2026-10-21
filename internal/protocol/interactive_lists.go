@@ -102,14 +102,13 @@ func (p ModelListPayload) MarshalJSON() ([]byte, error) {
 // never-empty and DroppedModels contracts stated there say nothing about this one.
 //
 // IT NAMES A CONVERSATION, because a model menu is conversation-scoped on this
-// wire and this wire is multi-conversation; TypeRequestSessionSettings and
-// TypeRequestHistory both name one. THE ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED
+// wire and this wire is multi-conversation. THE ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED
 // AS SENT: it is resolved against the daemon's own registry, the reported id in
 // the reply comes out of the RESOLVED RECORD rather than being echoed back, and
 // NAMING A CONVERSATION IS NOT AUTHORIZATION — authorization is pairing, enforced
 // structurally at the Noise_IK handshake.
 //
-// UNLIKE RequestHistoryPayload THE ID NEVER BECOMES A PATH COMPONENT. That single
+// THE ID NEVER BECOMES A PATH COMPONENT. That single
 // difference is why a decode failure here is TOLERATED rather than rejected: it
 // leaves ConversationID empty, which reaches only a registry membership check and
 // is refused there, where an empty path component would have resolved to a

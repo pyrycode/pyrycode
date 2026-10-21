@@ -91,9 +91,9 @@ pages of 128 entries until it finds visible content or `AtStart`. Empty and
 hidden-only histories return `0`. It keeps bounded memory and adds no cache that
 could become stale after append or reopen. Only a zero raw durable cursor can
 short-circuit the scan: the store's metadata-only displayable API has different
-classification semantics. This scan is separate from `newHistoryPager`, which
-projects exactly one bounded raw page and retains its cursor and `AtStart`,
-including pages containing only receipts.
+classification semantics. This internal scan remains after retirement of
+`newHistoryPager` and the raw wire endpoint; list/read target selection is not
+a content-recovery API.
 
 `read_up_to` stays in the original durable ID space. The registry persists
 `max(held, min(up_to, latest))`; a higher held mark is never lowered, including

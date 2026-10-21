@@ -90,18 +90,9 @@ const (
 	CodeAttachmentNotFound        = "attachment.not_found"
 	CodeAttachmentStreamAborted   = "attachment.stream_aborted" // a TypeError correlated via in_reply_to, never a second attachment frame
 
-	// Conversation-history errors (docs/protocol-mobile.md § Conversation
-	// history). An unknown or non-canonical conversation_id is
-	// CodeConversationNotFound: there is no second id to probe for, and
-	// request_snapshot already answers an unknown conversation distinguishably.
-	// history.invalid_cursor is one answer for a cursor that does not decode, was
-	// minted for another conversation, or names a position not in this log; the
-	// handler sees only history.ErrInvalidCursor and never echoes the cursor. Only
-	// history.unavailable is retryable; the other three need a different request.
-	CodeHistoryInvalidRequest  = "history.invalid_request"   // the payload did not decode; never an empty-but-successful request
-	CodeHistoryInvalidPageSize = "history.invalid_page_size" // a negative limit; 0 is not a reject, it asks the daemon to choose
-	CodeHistoryInvalidCursor   = "history.invalid_cursor"    // undecodable, foreign, or naming a position not in this log; one merged answer
-	CodeHistoryUnavailable     = "history.unavailable"       // the log could not be read; the only retryable member of this group
+	// CodeHistoryUnavailable reports a retryable history lookup failure for
+	// conversation listing or read tracking.
+	CodeHistoryUnavailable = "history.unavailable"
 
 	// Read-mark save error (docs/protocol-mobile.md § Marking a conversation
 	// read). The advance could not be persisted, so the daemon reverted it and
@@ -871,43 +862,6 @@ const (
 // relay_guard_test.go; it has no inbound leg.
 const (
 	TypeAttachmentOffered = "attachment_offered" // binary → phone, unsolicited push: a file exists on the host for this conversation
-)
-
-// TypeRequestHistory asks for conversation-history entries older than the ones a
-// client holds (RequestHistoryPayload; docs/protocol-mobile.md § Conversation
-// history). It reads internal/history's durable log; catch-up after a dropped
-// connection (replayMissed over internal/eventring) is a separate, bounded
-// mechanism. Pages walk backwards, newest first, addressed by an opaque cursor
-// rather than an offset or page number, which a concurrent append would
-// invalidate. RequestHistoryPayload's block carries the handler's rules: the
-// cursor is not a secret or a capability, a Limit of 0 means the daemon chooses,
-// and the conversation id is validated against the registry before any path join.
-//
-// MUST NOT be added to inboundAppTypeSet. v2OnlyTypes in compat_test.go,
-// switch-intercepted in relay_guard_test.go.
-const (
-	TypeRequestHistory = "request_history" // phone → binary, inbound v2 control (switch-intercepted)
-)
-
-// TypeHistoryPage is one backward step of a history walk: the entries, the cursor
-// to ask again with, and whether the start of the log was reached
-// (HistoryPagePayload, mirroring history.Page; docs/protocol-mobile.md
-// § Conversation history). It is a reply correlated via InReplyTo, like
-// TypeSessionSettings, and carries no conversation id because the client knows
-// what it asked.
-//
-// Each entry is one wire envelope's worth (type, payload, timestamp, durable entry
-// id), so a client re-reduces a page oldest first through its live-stream
-// reducer. The id is the log's durable per-conversation id, not Envelope.EventID,
-// which does not survive a restart. A walk ends on at_start, never on an empty
-// entries list (HistoryPagePayload says why). Unlike the request, this frame
-// carries replayed content, claude-authored for assistant entries, so § Security
-// model's threat 1 applies (see HistoryEntry).
-//
-// MUST NOT be added to inboundAppTypeSet. v2OnlyTypes in compat_test.go, reply in
-// relay_guard_test.go.
-const (
-	TypeHistoryPage = "history_page" // binary → phone, one backward step of a history walk, correlated via in_reply_to
 )
 
 // TypeRequestModelList asks for a conversation's model menu at any time

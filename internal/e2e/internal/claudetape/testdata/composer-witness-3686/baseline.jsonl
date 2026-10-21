@@ -1,0 +1,8 @@
+{"Time":"2026-10-20T13:19:17.011190859Z","Action":"start","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"}
+{"Time":"2026-10-20T13:19:17.028916984Z","Action":"run","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease"}
+{"Time":"2026-10-20T13:19:17.028997459Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease","Output":"=== RUN   TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease\n"}
+{"Time":"2026-10-20T13:19:17.059078808Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease","Output":"--- PASS: TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease (0.03s)\n"}
+{"Time":"2026-10-20T13:19:17.059128057Z","Action":"pass","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Test":"TestPhysicalProtocolComposerForegroundStopsBeforeActualBackgroundRelease","Elapsed":0.03}
+{"Time":"2026-10-20T13:19:17.059303297Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Output":"PASS\n"}
+{"Time":"2026-10-20T13:19:18.063040698Z","Action":"output","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Output":"ok  \tgithub.com/pyrycode/pyrycode/internal/e2e/internal/claudetape\t1.052s\n"}
+{"Time":"2026-10-20T13:19:18.063088333Z","Action":"pass","Package":"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape","Elapsed":1.052}

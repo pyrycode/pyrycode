@@ -224,6 +224,9 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 						delete(s.queryRetiring, id)
 						close(retired)
 						s.quietMu.Unlock()
+						if w.idleUnloaded {
+							s.refreshThreadSummary(ctx, id)
+						}
 					}
 				}
 			}

@@ -94,6 +94,7 @@ type Runner struct {
 	// leaf lock and then reject a target that was replaced in the gap.
 	mcpStatusEligible bool
 	childGeneration   uint64
+	childTarget       io.Writer
 	childWorkspace    string
 	childPATH         *string
 
@@ -907,6 +908,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, workDir s
 func (r *Runner) setStdin(w io.WriteCloser, spawnFreshSeq uint64, mcpEligible bool) {
 	r.mu.Lock()
 	r.stdin = w
+	r.childTarget = w
 	r.mcpStatusEligible = mcpEligible
 	r.childGeneration++
 	r.childWorkspace = ""

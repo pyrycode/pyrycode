@@ -44,18 +44,7 @@ func readLifecycleRecordingConfig(path string) (lifecycleRecordingConfig, error)
 			return c, os.ErrInvalid
 		}
 	}
-	exe, e := os.Executable()
-	if e != nil {
-		return c, os.ErrInvalid
-	}
-	f, e := os.Open(exe)
-	if e != nil {
-		return c, os.ErrInvalid
-	}
-	h := sha256.New()
-	_, e = io.Copy(h, f)
-	_ = f.Close()
-	if e != nil || hex.EncodeToString(h.Sum(nil)) != c.SourceBinarySHA256 {
+	if lifecycleRecordingSource(c.SourceBinarySHA256) != nil {
 		return c, os.ErrInvalid
 	}
 	if c.Process.Mode == "replay" {
@@ -213,9 +202,19 @@ func waitLifecycleReceipt(t *testing.T, path string) claudetape.LifecycleReceipt
 }
 func finishLifecycleRecording(t *testing.T) {
 	t.Helper()
+	started := time.Now()
+	// Observe entry without repeating the expensive executable validation.
+	var observed lifecycleRecordingConfig
+	if claudetape.ReadLifecycleControl(os.Getenv("PYRY_LIFECYCLE_RECORDING_CONFIG"), 16384, &observed) == nil && observed.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, observed, "finish-entry", started)
+	}
 	c, ok := lifecycleRecordingCurrent(t)
 	if !ok || t.Failed() {
 		return
+	}
+	if c.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, c, "config-validated", started)
+		defer observeResumeSeal(t, c, "finish-return", started)
 	}
 	settleLifecycleRecording(t, c)
 	profile := claudetape.LifecycleProfiles()[c.Process.Scenario]
@@ -242,16 +241,22 @@ func finishLifecycleRecording(t *testing.T) {
 	if daemonRecordingWrite(c.Process.Finish, struct{}{}) != nil {
 		t.Fatal("lifecycle prefix seal repeated")
 	}
+	if c.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, c, "finish-published", started)
+	}
 	for _, role := range profile.Roles {
 		if claudetape.LifecycleSeals(claudetape.LifecycleEnd(c.Process.Scenario, role)) {
 			_ = waitLifecycleReceipt(t, filepath.Join(c.Process.Home, "recording-children", role+".prefix"))
 		}
 	}
 	digest, _, e := claudetape.AuditLifecycleArtifacts(c.Process.Home, c.Process.Scenario, poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256, c.BrokerParentPID, false)
+	if c.Process.Scenario == "session-resume" {
+		observeResumeSeal(t, c, "prefix-audited", started)
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
-	if daemonRecordingWrite(c.Receipt, daemonRecordingReceipt{Success: true, Frames: len(profile.Roles), ArtifactSHA256: digest}) != nil {
+	if claudetape.PublishLifecycleControl(c.Receipt, daemonRecordingReceipt{Success: true, Frames: len(profile.Roles), ArtifactSHA256: digest}) != nil {
 		t.Fatal("lifecycle root receipt repeated")
 	}
 }
@@ -431,8 +436,51 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		}
 		return r
 	}
-	job.Config.OnSeal = func(n int) error { return daemonRecordingWrite(prefix+".prefix", receipt(n, nil)) }
+	var sealDeadline time.Time
+	job.Config.OnSeal = func(n int) error {
+		sealDeadline = time.Now().Add(30 * time.Second)
+		return daemonRecordingWrite(prefix+".prefix", receipt(n, nil))
+	}
 	job.Config.OnInput = lifecycleRecordingInputWitness(job, c.Process.Home, c.Process.Scenario)
+	if c.Process.Mode == "replay" && c.Process.Scenario == "mcp-send-file" {
+		job.Config.ReplayTurnReady = func() error {
+			return daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-turn-ready"), true)
+		}
+	}
+	if c.Process.Mode == "replay" && c.Process.Scenario == "mcp-send-file" && os.Getenv("PYRY_CLAUDE_TAPE_HOLD_INITIALIZE") == "1" {
+		initializeID := ""
+		job.Config.OnInput = func(raw []byte) error {
+			var env struct {
+				RequestID string `json:"request_id"`
+				Request   struct{ Subtype string }
+			}
+			if err := json.Unmarshal(raw, &env); err != nil {
+				return err
+			}
+			if env.Request.Subtype == "initialize" {
+				initializeID = env.RequestID
+			}
+			return nil
+		}
+		job.Config.BeforeOutput = func(raw []byte) error {
+			var env struct {
+				Response struct {
+					RequestID string `json:"request_id"`
+				}
+			}
+			if err := json.Unmarshal(raw, &env); err != nil {
+				return err
+			}
+			if initializeID != "" && env.Response.RequestID == initializeID {
+				if err := daemonRecordingWrite(filepath.Join(c.Process.Home, "recording-initialize-held"), true); err != nil {
+					return err
+				}
+				time.Sleep(2 * time.Second)
+				initializeID = ""
+			}
+			return nil
+		}
+	}
 	var physical *claudetape.PhysicalRecordingSession
 	if claudetape.PhysicalFamily(c.Process.Scenario) != "" {
 		binding, err := claudetape.ReadLifecycleRole(c.Process.Home, c.Process.Scenario, job.Role)
@@ -462,6 +510,20 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.BeforeOutput = physical.Output
 		job.Config.BeforeSeal = physical.Seal
 	}
+	job.Config.OnTerminalState = func(input, output, diagnostic, sealed bool) {
+		if c.Process.Scenario == "session-resume" && os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE") != "" {
+			path := filepath.Join(os.Getenv("PYRY_CLAUDE_TAPE_EVIDENCE"), "session-resume-"+job.Role+"-terminal.json")
+			if daemonRecordingWrite(path, struct {
+				OwnerPID, BrokerPID                    int
+				InputEOF, OutputEOF, StderrEOF, Sealed bool
+			}{job.Config.OwnerPID, os.Getpid(), input, output, diagnostic, sealed}) != nil {
+				os.Exit(2)
+			}
+		}
+	}
+	if c.Process.Mode == "capture" && c.Process.Scenario == "clear-wrapup-skipped" && job.Role == "bound" {
+		job.Config.Observation = claudetape.NewWrapUpObservation(poolRecordedRevision, c.SourceBinarySHA256, c.DaemonSHA256)
+	}
 	job.Config.OnDiagnostic = func(d claudetape.LifecycleDiagnostic) {
 		if json.NewEncoder(os.Stdout).Encode(d) != nil {
 			os.Exit(2)
@@ -484,6 +546,12 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 		job.Config.OnFailure = func(tape *claudetape.LifecycleTape, frames int) { _ = mcp.RetainFailure(tape, frames) }
 	}
 	n, e := claudetape.RunLifecycleBroker(job.Config, b)
+	if observation := job.Config.Observation; observation != nil {
+		observation.Add("complete", nil, e)
+		if err := observation.Save(wrapUpEvidencePath(t, "clear-wrapup-skipped-bound-native.json")); err != nil && e == nil {
+			e = err
+		}
+	}
 	if mcp != nil {
 		if err := mcp.Close(e == nil); err != nil && e == nil {
 			e = err
@@ -495,7 +563,19 @@ func TestLifecycleTapeBrokerProcess(t *testing.T) {
 			e = err
 		}
 	}
-	if daemonRecordingWrite(prefix+".receipt", receipt(n, e)) != nil {
+	publish := func() error { return daemonRecordingWrite(prefix+".receipt", receipt(n, e)) }
+	if claudetape.LifecycleSeals(job.Config.End) {
+		publish = func() error {
+			return publishLifecycleTerminalReceipt(prefix+".receipt", c.Receipt, len(claudetape.LifecycleProfiles()[c.Process.Scenario].Roles), receipt(n, e), func() error {
+				if _, err := os.Lstat(job.Config.Abort); !os.IsNotExist(err) || !time.Now().Before(sealDeadline) {
+					return os.ErrDeadlineExceeded
+				}
+				time.Sleep(5 * time.Millisecond)
+				return nil
+			})
+		}
+	}
+	if publish() != nil {
 		os.Exit(2)
 	}
 	if e != nil {

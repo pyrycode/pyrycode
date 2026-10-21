@@ -272,6 +272,9 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		r.log.Info("streamsup: turn refused; new_session rotation in flight",
 			"session", r.liveSessionID())
 	}
+	if observe, ok := ctx.Value(turnTargetKey{}).(func(io.Writer)); ok && w != nil {
+		observe(w)
+	}
 	return WriteTurn(ctx, w, payload)
 }
 

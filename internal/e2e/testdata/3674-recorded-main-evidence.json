@@ -1,0 +1,526 @@
+{
+  "schema": "recorded-main-acceptance-v1",
+  "ticket": "pyrycode/pyrycode#3674",
+  "counts_order": [
+    "executed",
+    "passed",
+    "failed",
+    "skipped"
+  ],
+  "tested_main_revision": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+  "tested_tree": "60d2b847d99fd6ebdc750dbd7aaf91b24df2330f",
+  "toolchain": "go version go1.26.9 linux/amd64",
+  "platform": "linux/amd64",
+  "prerequisite_and_coordinated_merge_identities": {
+    "3669": {
+      "commit": "95c47b4525107e9b081747c52e3af4280cac7f99",
+      "ancestor_of_tested_main": true
+    },
+    "3671": {
+      "commit": "998460bc38fb322aa03d4db0717fe2ca3c3e7f08",
+      "ancestor_of_tested_main": true
+    },
+    "3680": {
+      "commit": "e3cab0dfea6d6a1a35fbddc7a693a7dedfb99653",
+      "ancestor_of_tested_main": true
+    },
+    "3676": {
+      "commit": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+      "ancestor_of_tested_main": true
+    },
+    "3701": {
+      "commit": "90109fa25c4a5c93d8dfbca827857e985109241b",
+      "ancestor_of_tested_main": true
+    },
+    "3704": {
+      "commit": "7582a17b72f14109d09309541e4091e932ded32a",
+      "ancestor_of_tested_main": true
+    },
+    "3702": {
+      "commit": "f90990dd142f206422bfd4a24a8feedcc94f8274",
+      "ancestor_of_tested_main": true
+    },
+    "3692": {
+      "commit": "73f826e21000a0935d47dfc72310153aa70c91c2",
+      "ancestor_of_tested_main": true
+    }
+  },
+  "mode": "replay",
+  "scenario_order": [
+    "clear-wrapup-skipped",
+    "session-resume",
+    "conversation-system-prompt",
+    "conversation-active-switch"
+  ],
+  "command": [
+    "python3",
+    "scripts/test-admission.py",
+    "--",
+    "go",
+    "test",
+    "-timeout=10m",
+    "-tags=e2e",
+    "-race",
+    "-count=1",
+    "-json",
+    "-run",
+    "^TestRecordedClaude$",
+    "./internal/e2e"
+  ],
+  "outer_report": "/tmp/manual-daemon-main-evidence/focused/four-recorded-scenarios.jsonl",
+  "outer_report_sha256": "000a4cf3b0bf34dd66ae05a13f5d7bab7ca7708b65200b041554ee7bb56158e1",
+  "outer_leaf_counts": {
+    "executed": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "started": 4
+  },
+  "scenarios": [
+    {
+      "scenario": "clear-wrapup-skipped",
+      "outer_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "original_root_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "identity": {
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "helper_sha256": "a153272b3d749adf64be0b5efef64d9b39c0c39a48511e09105d1c6a63aa4287",
+        "daemon_sha256": "7e1f15c76f42126eba220d8537c2d379125f763b1e980091cb1c76bac29433d3",
+        "scenario": "clear-wrapup-skipped",
+        "mode": "replay"
+      },
+      "fixture_sha256": "1562223ff725d73bdf058a3f00cfb461788932a329edbebaac1a75f05ff54571",
+      "original_report": "/tmp/manual-daemon-main-evidence/focused/clear-wrapup-skipped-replay.jsonl",
+      "original_report_sha256": "e841faf2bd336449240c9a86b88a1174df703777b3973b73dde82fb64981f0c5",
+      "retained_inventory_report_sha256": "f154e83244de3b59a19457f9aaeb815c86faf641307c12c4c5a404dedbf7e5e3",
+      "final_outer_audit": "passed by unchanged original harness; diagnostics-only superset inventory is not an authorization verdict"
+    },
+    {
+      "scenario": "session-resume",
+      "outer_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "original_root_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "identity": {
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "helper_sha256": "a153272b3d749adf64be0b5efef64d9b39c0c39a48511e09105d1c6a63aa4287",
+        "daemon_sha256": "7e1f15c76f42126eba220d8537c2d379125f763b1e980091cb1c76bac29433d3",
+        "scenario": "session-resume",
+        "mode": "replay"
+      },
+      "fixture_sha256": "1a1e6faee135a83b4deba4b2a84630bc846526e69c5db8c793e72b7eb80cb002",
+      "original_report": "/tmp/manual-daemon-main-evidence/focused/session-resume-replay.jsonl",
+      "original_report_sha256": "6eee375cbde2cd11a454999649019d363b815e570f74e7dca1b80662f3693937",
+      "retained_inventory_report_sha256": "0e2ba5e1cb472a945950ceab0e91665441bbafb7f22e0b931addd1f1be5afc7e",
+      "final_outer_audit": "passed by unchanged original harness; diagnostics-only superset inventory is not an authorization verdict"
+    },
+    {
+      "scenario": "conversation-system-prompt",
+      "outer_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "original_root_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "identity": {
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "helper_sha256": "a153272b3d749adf64be0b5efef64d9b39c0c39a48511e09105d1c6a63aa4287",
+        "daemon_sha256": "7e1f15c76f42126eba220d8537c2d379125f763b1e980091cb1c76bac29433d3",
+        "scenario": "conversation-system-prompt",
+        "mode": "replay"
+      },
+      "fixture_sha256": "4c3e799086fa84758a7bbd51705a580f01ec343af087f7dfe7d0e07918d87b4e",
+      "original_report": "/tmp/manual-daemon-main-evidence/focused/conversation-system-prompt-replay.jsonl",
+      "original_report_sha256": "6e17485f2db52a67a0542badf91f08b3c6449db66a898e59544a87a141581929",
+      "retained_inventory_report_sha256": "28d8a80fe3e5edda2165d2977425cf889a7e8f800b99ef0f4056387e6ab70d18",
+      "final_outer_audit": "passed by unchanged original harness; diagnostics-only superset inventory is not an authorization verdict"
+    },
+    {
+      "scenario": "conversation-active-switch",
+      "outer_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "original_root_counts": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "identity": {
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "helper_sha256": "a153272b3d749adf64be0b5efef64d9b39c0c39a48511e09105d1c6a63aa4287",
+        "daemon_sha256": "7e1f15c76f42126eba220d8537c2d379125f763b1e980091cb1c76bac29433d3",
+        "scenario": "conversation-active-switch",
+        "mode": "replay"
+      },
+      "fixture_sha256": "53cc33f28eb2c209ea1c2b59a9378a0c8139088411bcbf27813572224b5b7b9e",
+      "original_report": "/tmp/manual-daemon-main-evidence/focused/conversation-active-switch-replay.jsonl",
+      "original_report_sha256": "ae8f54616128eb570f636a0b646df2072e88639754ac828d6d88c193a5080d11",
+      "retained_inventory_report_sha256": "3b219f3f220bebf2ef2794d542241e2c562f4263b5844aca22fde23abf4e1f12",
+      "final_outer_audit": "passed by unchanged original harness; diagnostics-only superset inventory is not an authorization verdict"
+    }
+  ],
+  "session_resume_pinned_audit": {
+    "prefix_sha256": "fc1e56fc2663a88c20b20e0fd9ca0df8e2b54c0ac62485f3b2176c4b2018fb3b",
+    "cleanup_sha256": "fc1e56fc2663a88c20b20e0fd9ca0df8e2b54c0ac62485f3b2176c4b2018fb3b"
+  },
+  "shared_gate": {
+    "configured_steps": [
+      {
+        "stage": "gate-01",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "$AGENTS_REPO_PATH/bin/pyrycode-tool cite-guard",
+        "started_utc": "2026-10-20T16:41:25.967256+00:00",
+        "elapsed_seconds": 1.014,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-01.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-01.stderr",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-02",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "$AGENTS_REPO_PATH/bin/pyrycode-tool docs-guard",
+        "started_utc": "2026-10-20T16:41:26.981128+00:00",
+        "elapsed_seconds": 0.182,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-02.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-02.stderr",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-03",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "make vet",
+        "started_utc": "2026-10-20T16:41:27.163667+00:00",
+        "elapsed_seconds": 2.979,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-03.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-03.stderr",
+        "stdout_sha256": "685d158f951e3eb11749d2e519a64eba4f57dcc93cd562eaee2cc9457f72846e",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-04",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "make test-tools",
+        "started_utc": "2026-10-20T16:41:30.142857+00:00",
+        "elapsed_seconds": 6.223,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-04.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-04.stderr",
+        "stdout_sha256": "ee125fc1fd982d383e6f29b3837664f9b34c2fea38dec6146f97a1b13f6f9f27",
+        "stderr_sha256": "febd6662f48a9b3245a2b5771e24f84981c426b830062d51a6b294df8f891860"
+      },
+      {
+        "stage": "gate-05",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./...",
+        "started_utc": "2026-10-20T16:41:36.365658+00:00",
+        "elapsed_seconds": 712.554,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-05.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-05.stderr",
+        "stdout_sha256": "c884df0949f63d0c3b377a80640617ff8840c90797f4f7f6685f1c8f045581af",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-06",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "python3 scripts/check-restoration.py",
+        "started_utc": "2026-10-20T16:53:29.028901+00:00",
+        "elapsed_seconds": 0.248,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-06.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-06.stderr",
+        "stdout_sha256": "fae99e80cd0e75ed6e7f49d69279f4d27b8518a4b22675617e3eec0e00b34b56",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-07",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "make staticcheck",
+        "started_utc": "2026-10-20T16:53:29.277291+00:00",
+        "elapsed_seconds": 24.852,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-07.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-07.stderr",
+        "stdout_sha256": "c8e9928c03a1c6d4b7dee7e24a234475d71225f9162769d960e05fdfd483f661",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-08",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "make substrate-guard",
+        "started_utc": "2026-10-20T16:53:54.129118+00:00",
+        "elapsed_seconds": 0.311,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-08.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-08.stderr",
+        "stdout_sha256": "02e12300f2ebaa48c22ccaba6537fe19f5cc7c76d9e24fabef0315055824b516",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-09",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -count=1 -json ./internal/e2e/...",
+        "started_utc": "2026-10-20T16:53:54.440778+00:00",
+        "elapsed_seconds": 440.46,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-09.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-09.stderr",
+        "stdout_sha256": "5849b9a2b731aa01457a82e518040f6b920341293e09e31c7e3c732af621ce5f",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "stage": "gate-10",
+        "source": "25e5e50dbc99ce83655f3d1fa8c2c9ed0607c7f0",
+        "command": "make build",
+        "started_utc": "2026-10-20T17:01:14.907501+00:00",
+        "elapsed_seconds": 0.689,
+        "exit": 0,
+        "stdout": "/tmp/manual-daemon-main-evidence/gates/gate-10.jsonl",
+        "stderr": "/tmp/manual-daemon-main-evidence/gates/gate-10.stderr",
+        "stdout_sha256": "780feca9e27d98a3424ab887f90be751187ac52f610140c83bbf9da7a8ab6934",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "reports": [
+      {
+        "path": "/tmp/manual-daemon-main-evidence/gates/gate-05.jsonl",
+        "sha256": "c884df0949f63d0c3b377a80640617ff8840c90797f4f7f6685f1c8f045581af",
+        "leaf_counts": {
+          "executed": 28122,
+          "passed": 28122,
+          "failed": 0,
+          "skipped": 27,
+          "started": 28149
+        },
+        "failed_tests": [],
+        "skipped_tests": [
+          "TestRunAgentRun_RealClaude",
+          "TestMarkWorkdirTrusted_CaseMismatchWritesOnDiskKey",
+          "TestResolve_CaseMismatchFoldsToOnDiskCase",
+          "TestResolve_DarwinRealpath",
+          "TestBackupNodeDirectoryIdentity",
+          "TestBackupNodeFailures/sql",
+          "TestBackupSQLiteCancellation",
+          "TestBackupSQLiteStorageErrors",
+          "TestBackupSQLiteWAL",
+          "TestCandidateSupportedTemplate",
+          "TestCommittedTemplateUpdateSnapshot",
+          "TestFilesystemAttacks/owner",
+          "TestOwnerSupportedNode",
+          "TestMacOSInstallCancelled",
+          "TestMacOSHostGate",
+          "TestPublishTemplate",
+          "TestAccountTokenReadDeadline",
+          "TestUpdateTemplateSnapshot",
+          "TestUpdateTemplateRollback",
+          "TestRestoreSQLiteWAL",
+          "TestRestoreSQLiteGenericAndCancellation",
+          "TestStartupTemplateRecovery",
+          "TestCheckpointResumeCorpus",
+          "TestDaemonThreadMetadataReadiness",
+          "TestReferenceDiskHeap",
+          "TestMemoryPathsCaseInsensitive",
+          "TestPushWakeFeedbackExpiryIntegration"
+        ]
+      },
+      {
+        "path": "/tmp/manual-daemon-main-evidence/gates/gate-09.jsonl",
+        "sha256": "5849b9a2b731aa01457a82e518040f6b920341293e09e31c7e3c732af621ce5f",
+        "leaf_counts": {
+          "executed": 1928,
+          "passed": 1928,
+          "failed": 0,
+          "skipped": 2,
+          "started": 1930
+        },
+        "failed_tests": [],
+        "skipped_tests": [
+          "TestInnerFatalChild",
+          "TestHostedAppsRecoverySQL"
+        ]
+      }
+    ],
+    "recorded_scenarios_passed": 70,
+    "source_status_after_gate": "",
+    "configured_unit_change": "Added -count=1 to the configured unit command to force fresh execution; other steps unchanged."
+  },
+  "complete_live_acceptance": {
+    "source_revision": "f09dcefaba359f15b982024423ae6d3f2c560cf3",
+    "same_committed_tree_as_tested_main": true,
+    "generated_capture_status_after_run": "M internal/e2e/realclaude/testdata/background_reply_completion.json\n?? internal/e2e/realclaude/testdata/ask_user_question_v2.1.280.json\n?? internal/e2e/realclaude/testdata/bypass_approval_argv_v2.1.280_approval_only.json\n?? internal/e2e/realclaude/testdata/bypass_approval_argv_v2.1.280_bypass_then_default.json\n?? internal/e2e/realclaude/testdata/bypass_approval_argv_v2.1.280_prewrite_1.json\n?? internal/e2e/realclaude/testdata/bypass_approval_argv_v2.1.280_prewrite_2.json\n?? internal/e2e/realclaude/testdata/bypass_approval_argv_v2.1.280_prewrite_3.json\n?? internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.280_control_bypass.json\n?? internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.280_control_default.json\n?? internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.280_enable.json\n?? internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.280_reescalate.json\n?? internal/e2e/realclaude/testdata/default_posture_outside_read_v2.1.280.json\n?? internal/e2e/realclaude/testdata/initialize_control_v2.1.280_after_completed_turn.json\n?? internal/e2e/realclaude/testdata/initialize_control_v2.1.280_before_first_turn.json\n?? internal/e2e/realclaude/testdata/initialize_control_v2.1.280_control_no_request.json\n?? internal/e2e/realclaude/testdata/permission_mode_switch_v2.1.280_acceptEdits.json\n?? internal/e2e/realclaude/testdata/permission_mode_switch_v2.1.280_auto.json\n?? internal/e2e/realclaude/testdata/permission_mode_switch_v2.1.280_auto_unsupported.json\n?? internal/e2e/realclaude/testdata/permission_mode_switch_v2.1.280_dontAsk.json\n?? internal/e2e/realclaude/testdata/permission_mode_switch_v2.1.280_plan.json\n?? internal/e2e/realclaude/testdata/set_permission_mode_v2.1.280_control_bypass.json\n?? internal/e2e/realclaude/testdata/set_permission_mode_v2.1.280_control_default.json\n?? internal/e2e/realclaude/testdata/set_permission_mode_v2.1.280_enable.json\n?? internal/e2e/realclaude/testdata/set_permission_mode_v2.1.280_revoke.json\n?? internal/e2e/realclaude/testdata/tool_result_sidecar_v2.1.280.json",
+    "capture_retention": "The clean initial source was pinned to the recorded integration commit. The native sweep generated capture files; all changed/new capture bytes were retained separately and were not substituted into reviewed main fixtures.",
+    "command": [
+      "python3",
+      "scripts/test-admission.py",
+      "--",
+      "go",
+      "test",
+      "-tags=e2e_realclaude",
+      "-timeout=30m",
+      "-count=1",
+      "-json",
+      "./internal/e2e/realclaude/..."
+    ],
+    "report": {
+      "path": "/tmp/manual-daemon-acceptance-evidence/live/complete-live-suite.jsonl",
+      "sha256": "feaa84f170933da7add78a42e9facf1e414a3c9e57e613044786870a33dbaaf4",
+      "leaf_counts": {
+        "executed": 2248,
+        "passed": 2248,
+        "failed": 0,
+        "skipped": 27,
+        "started": 2275
+      },
+      "failed_tests": [],
+      "skipped_tests": [
+        "TestRealClaude_APIRetryCapture",
+        "TestRealClaude_BackgroundReachability",
+        "TestRealClaude_BackgroundHandleTrigger",
+        "TestCodexQuestionLive",
+        "TestCodexConversationLive",
+        "TestRealClaude_CompactionCapture",
+        "TestRealClaude_ContextUsageCapture",
+        "TestRealClaude_DroppedLineCapture",
+        "TestRealClaude_EffortInitCapture",
+        "TestRealClaude_ExitPathWhileCommandRuns",
+        "TestRealClaude_StreamExitPathWhileCommandRuns",
+        "TestInteractiveStreamBackgroundIdleProbe",
+        "TestRealClaude_MCP_QMD",
+        "TestRealClaude_MCP_Context7",
+        "TestRealClaude_MCP_CodeGraph",
+        "TestRealClaude_MCP_Figma",
+        "TestRealClaude_MCPStatusCapture",
+        "TestRealClaude_MidTurnUserCapture",
+        "TestRealClaude_OperatorSystemLinesCapture",
+        "TestRealClaude_ParentToolUseCapture",
+        "TestRealClaude_RosterAfterFinishCapture",
+        "TestRealClaude_SetModelProbe",
+        "TestRealClaude_StreamEventCapture",
+        "TestRealClaude_SubagentPromptCapture",
+        "TestRealClaude_TaskNotificationCapture",
+        "TestRealClaude_TeardownLiveness",
+        "TestRealClaude_ToolProgressCapture"
+      ]
+    },
+    "required_original_root": "TestInteractiveStreamClearWrapUpSkipped passed without skip; complete original report retained in the raw stream.",
+    "scope_limit": "The 27 named skips are not counted as executed or live proof."
+  },
+  "post_merge_overlap_checks": {
+    "reports": [
+      {
+        "path": "/tmp/manual-daemon-main-evidence/overlaps/compact-boundaries-20.jsonl",
+        "sha256": "7822b52a81fb850a0958f0eff9da9da1e3cc0397c8f0cfc648d0063ed24f0d05",
+        "leaf_counts": {
+          "executed": 100,
+          "passed": 100,
+          "failed": 0,
+          "skipped": 0,
+          "started": 100
+        },
+        "failed_tests": [],
+        "skipped_tests": []
+      },
+      {
+        "path": "/tmp/manual-daemon-main-evidence/overlaps/mcp-backpressure-10.jsonl",
+        "sha256": "8b3af4d003bd496b65b31f46bb3e21aa8f8e155daf69a0d917627570ade66c32",
+        "leaf_counts": {
+          "executed": 140,
+          "passed": 140,
+          "failed": 0,
+          "skipped": 0,
+          "started": 140
+        },
+        "failed_tests": [],
+        "skipped_tests": []
+      },
+      {
+        "path": "/tmp/manual-daemon-main-evidence/overlaps/mcp-startup-combined.jsonl",
+        "sha256": "5a7696ca27614b31dd5e971894a5b85cb4e4305375e7d0698d882d096ac67704",
+        "leaf_counts": {
+          "executed": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0,
+          "started": 2
+        },
+        "failed_tests": [],
+        "skipped_tests": []
+      }
+    ],
+    "required_mcp_leaf_repetitions": 10,
+    "required_compact_admission_leaf_repetitions": 20,
+    "tagged_lifecycle_controls": [
+      {
+        "path": "/tmp/manual-daemon-main-evidence/native-controls/source-publication-capture-controls.jsonl",
+        "sha256": "f548370d58012374cee930be6ca0b29304bf28369457aeab9c5409b7123b50e7",
+        "leaf_counts": {
+          "executed": 22,
+          "passed": 22,
+          "failed": 0,
+          "skipped": 0,
+          "started": 22
+        },
+        "failed_tests": [],
+        "skipped_tests": []
+      }
+    ]
+  },
+  "run_conditions": {
+    "checkout": "Fresh isolated clone of actual GitHub main, clean before focused execution; live primary checkouts and user changes untouched.",
+    "processes": "One fresh Go process runs the four scenarios in context order. Each original daemon root has a fresh isolated HOME/process; the helper binary cache is shared within that Go process.",
+    "preceding_selection": "Coordinated integration hermetic gate, then complete live suite. Final main: four scenarios, MCP count10, compact count20, combined startup proof, tagged lifecycle controls, then the ten-step shared gate.",
+    "cache_state": "Go/build caches warmed by preceding work; no cache purge. Runtime commands carry the explicit recorded count flags.",
+    "admission": "Normal scripts/test-admission.py for every runtime step; the focused stderr is empty. Core new admissions were fleet-drained; no active Core managed runs were reported before the final main checks.",
+    "historical_host_contention": "Unknown. Other projects and hardware coldness are not inferred."
+  },
+  "historical_failures": {
+    "status": "FAILED; later passes do not convert the original results.",
+    "source_revision": "9ed3b03a737957112c81eac336e3669f4fa7f083",
+    "unchanged_base_revision": "2e1af187d3e58cc89f73244763a87950dda79fe5",
+    "original_tracking": "#3674 context and refinement evidence; #3668 and #3673 committed plans/evidence retain their separately scoped controlled and original failures.",
+    "limits": "Historical normalized MCP inputs and exact scheduler phases remain unavailable. Available candidate/base raw reports were recovered privately; no missing observation was reconstructed."
+  },
+  "protected_workspace_archive_sha256": {
+    "main-focused.tar.gz": "214bafb1b4d9529814469923c23dee3288bc5245cc31acae203c9e5b96b25762",
+    "main-gates.tar.gz": "7649a8086b9b9e50fc75cd747c3e85cd3d9229b9b20091cc7fbe156db4700048",
+    "main-overlaps.tar.gz": "73e0eb6cb75c65adaf4f8e5f092fe98211d64b91b63e774c0423a4af249bbbab",
+    "main-native-controls.tar.gz": "4b20519af68f73747f6b7f121b0e9a56dde2b05bf7ca4e36ed856a45ebab7207",
+    "integration-gates.tar.gz": "bbd9e24885245a23a7da4e0035aee9754cc4ff50e7eb06383a0885e9536a7903",
+    "integration-live.tar.gz": "2306ee59a05735d5b37f1d6fb38ae1eb5b6df48f1f2c1f89ef34e9401cde4479",
+    "live-generated-captures.tar.gz": "64342a4fb12342dec9001a4584fad866018b4c48bfd7afff8434d29e2ec99c02",
+    "main-mcp-startup-audits.tar.gz": "427ee17bd1fdaf8bbfc36d9d736424b101ddd753b09580babf1fb8d8a1f65460"
+  },
+  "artifact_scope": "Descriptive evidence only. No runtime authority, production code, protocol frame, assertion, timeout, ownership or matching rule changes."
+}

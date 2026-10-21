@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -15,13 +16,16 @@ var recordedMCPDaemon struct {
 	err  error
 }
 
-// The caller warms this cache on the parent test before scenario subtests, so
-// the private build remains available throughout a batch. Ordinary suites keep
-// their ordinary daemon; only the MCP recording profile enables this tag.
+// The cached private build remains available until all tests finish. Ordinary
+// suites keep their ordinary daemon; only the MCP recording profile enables this tag.
 func buildRecordedMCPDaemon(t *testing.T) string {
 	t.Helper()
 	recordedMCPDaemon.Do(func() {
-		dir := t.TempDir()
+		dir, err := os.MkdirTemp("", "pyry-recorded-mcp-")
+		if err != nil {
+			recordedMCPDaemon.err = err
+			return
+		}
 		recordedMCPDaemon.path = filepath.Join(dir, "pyry")
 		cmd := exec.Command("go", "build", "-tags=e2e_mcp_recording", "-o", recordedMCPDaemon.path, "github.com/pyrycode/pyrycode/cmd/pyry")
 		cmd.Env = recordedPoolOfflineEnv()

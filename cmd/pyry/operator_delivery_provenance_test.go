@@ -140,6 +140,7 @@ func TestOperatorDeliveryProvenance_Placement(t *testing.T) {
 			} else if tc.echo {
 				place.echo("receiving-B", echoOf("composed /host/private attachment"))
 			} else if tc.now {
+				place.idle("receiving-B") // normal completion precedes carried-close readiness
 				close(idle)
 			} else {
 				place.idle("receiving-B")

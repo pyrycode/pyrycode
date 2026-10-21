@@ -16,6 +16,22 @@ type LifecycleDiagnostic struct {
 	ActionAcknowledged, TerminalChecked, Completed                bool
 	InputSampled, OutputSampled, StderrSampled                    bool
 	InputsMatched, OutputsDelivered, ProviderInputsForwarded      int
+	// Maxima retain the output ordinal for each timing substage independently.
+	// Order: restoration, BeforeOutput observation, replay projection, forwarding.
+	OutputWorkMaxNS      [4]int64
+	OutputWorkMaxOrdinal [4]int
+	// Ring of at most 64 samples: ordinal, anchor, due, entry, four work stages,
+	// completion (relative to that anchor), and process CPU elapsed. CPU includes
+	// other broker goroutines; it cannot attribute a historical scheduling stall.
+	OutputTiming [][10]int64
+}
+
+func lifecycleCPUTime() int64 {
+	var usage syscall.Rusage
+	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) != nil {
+		return -1
+	}
+	return usage.Utime.Nano() + usage.Stime.Nano()
 }
 
 func lifecycleInputKind(raw []byte) string {
