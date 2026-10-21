@@ -1177,11 +1177,7 @@ func startRelayV2(
 			// out, through the same hook send_message's auto-naming uses.
 			protocol.TypeSetConversationMuted:  handlers.SetConversationMuted(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
 			protocol.TypeSetConversationPinned: handlers.SetConversationPinned(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
-			// mark_conversation_read (#2780) likewise takes no session surface. It
-			// clamps to w.hist's newest entry and fans out only an actual advance,
-			// through the same hook.
-			protocol.TypeMarkConversationRead: handlers.MarkConversationRead(w.convReg, legacyHistoryReader{store: w.hist}, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
-			protocol.TypeChangeWorkspace:      handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
 			// set_system_prompt takes no session surface (#2151): the value's route
 			// to a running child is the registry, re-read at the pool's own spawn
 			// funnel by #2150's refreshSystemPrompt. Wiring a pool or runner in here
@@ -1441,22 +1437,6 @@ func startRelayV2(
 		// KnownConversation gate above. The size bound is the attach_file verb's
 		// unpublished receiver policy.
 		WorkspaceFileRead: workspaceFileReader(w.convReg, maxAttachFileBytes, w.readFolders...),
-		// Inbound conversation-HISTORY seam (#2116): the read half of the durable
-		// log #2114 and #2115 append to, over w.hist — the daemon's ONE store,
-		// minted at the composition root, so a served page and a just-appended
-		// entry cannot disagree about ids. Wired unconditionally: newHistoryPager
-		// answers a nil store as unavailable rather than leaving the seam nil, and
-		// the difference is load-bearing — a nil SEAM makes the verb inert and
-		// parses nothing, which is the posture for a build with no history at all,
-		// not for a daemon whose store failed to open.
-		//
-		// It validates through KnownConversation above, membership alone, and that
-		// is the correct reading here for the same reason it is for attachment
-		// retrieval and the opposite reason it would be for send_message: a
-		// SessionRouter.Route check refuses a known conversation with NO BOUND
-		// SESSION, which is precisely the reopened conversation this verb exists to
-		// serve, and would answer it the retryable server.binary_offline.
-		HistoryPage: newHistoryPager(w.hist, logger),
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
 		// supervisor. The activeInterrupter adapter (main.go) resolves active →
@@ -1508,6 +1488,8 @@ func startRelayV2(
 	}
 	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
 	installDaemonThreadRelay(&sessionConfig, w.shadow)
+	// Read marks share the installed summary authority, including its absent-evidence refusal.
+	sessionConfig.Handlers[protocol.TypeMarkConversationRead] = handlers.MarkConversationRead(w.convReg, sessionConfig.ThreadLastShownVersion, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger)
 	mgr, detachApps, err := newDaemonAppsManager(ctx, sessionConfig, w.appRegistry, w.appOwner)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)

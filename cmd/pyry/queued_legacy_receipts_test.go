@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -41,9 +40,9 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 	testQueuedReceiptIdentity(t, store, bcast, ring)
 	raw := historyEntries(t, store, testConvID)
 	for _, reader := range []*history.Store{store, history.New(dir)} {
-		entries, _ := testLegacySerializedPage(t, reader)
+		entries, _ := testLegacyReceipts(t, reader)
 		var presented uint64
-		var old []protocol.HistoryEntry
+		var old []history.Entry
 		for _, entry := range entries {
 			if entry.Type == protocol.TypeAssistantDelta {
 				presented = entry.ID
@@ -62,13 +61,13 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 		if testLegacyCheckpoint(append(slices.Clone(entries), entries...), 0, 0, false) != 0 {
 			t.Fatal("arrival supplied sight")
 		}
-		versions := map[string][]protocol.HistoryEntry{"phone": nil, "peer": nil, "replay": nil}
+		versions := map[string][]history.Entry{"phone": nil, "peer": nil, "replay": nil}
 		for _, push := range bcast.pushes {
-			versions[push.connID] = append(versions[push.connID], protocol.HistoryEntry{ID: *push.env.HistoryEntryID, Type: push.env.Type, Payload: push.env.Payload, TS: push.env.TS})
+			versions[push.connID] = append(versions[push.connID], history.Entry{ID: *push.env.HistoryEntryID, Type: push.env.Type, Payload: push.env.Payload, TS: push.env.TS})
 		}
 		events, _ := ring.After(testConvID, 0)
 		for _, event := range events {
-			versions["replay"] = append(versions["replay"], protocol.HistoryEntry{ID: event.HistoryEntryID, Type: event.Type, Payload: event.Payload, TS: event.TS})
+			versions["replay"] = append(versions["replay"], history.Entry{ID: event.HistoryEntryID, Type: event.Type, Payload: event.Payload, TS: event.TS})
 		}
 		for name, version := range versions {
 			overlap := append(slices.Clone(entries), version...)
@@ -86,86 +85,6 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 		if !reflect.DeepEqual(historyEntries(t, reader, testConvID), raw) {
 			t.Fatal("raw facts/metadata changed")
 		}
-	}
-}
-
-func TestQueuedLegacyReceipts_Pages(t *testing.T) {
-	t.Parallel()
-	for _, mixed := range []bool{false, true} {
-		t.Run(fmt.Sprint(mixed), func(t *testing.T) {
-			dir := t.TempDir()
-			store := history.New(dir)
-			facts := []struct{ typ, reason string }{{historySendAccepted, ""}, {historySendDelivered, "delivered"}, {historySendDropped, "removed"}, {historySendDropped, "give_up"}, {historySendLost, "daemon_restart"}}
-			for i := 0; i < 15; i++ {
-				f := facts[i%len(facts)]
-				p := queuedSendFact{ConversationID: testConvID, AcceptedAt: historyTS, OccurredAt: historyTS, AcceptedEntryID: 1, DeliveryEntryID: 2, Reason: f.reason, Text: "private text", DeviceID: "private sender", AttachmentIDs: []string{"private attachment"}}
-				raw, _ := json.Marshal(p)
-				if mixed && i%3 == 1 {
-					raw = json.RawMessage(`{}`)
-				}
-				if mixed && i%3 == 2 {
-					f.typ = "unknown_send"
-				}
-				shown := i%2 == 0
-				if _, err := store.AppendWithMetadata(conversations.ConversationID(testConvID), f.typ, raw, historyTS.Add(time.Duration(i)*time.Second), history.Metadata{Shown: &shown}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for _, reader := range []*history.Store{store, history.New(dir)} {
-				cursor := ""
-				var entries []protocol.HistoryEntry
-				for step := 0; step < 8; step++ {
-					raw, err := reader.Page(conversations.ConversationID(testConvID), cursor, 3)
-					if err != nil {
-						t.Fatal(err)
-					}
-					page := newHistoryPager(reader, discardLogger())(testConvID, cursor, 3)
-					want := 3
-					if mixed {
-						want = 1
-					}
-					if len(raw.Entries) == 0 {
-						want = 0
-					}
-					if page.Cursor != raw.Cursor || page.AtStart != raw.AtStart || len(page.Entries) != want {
-						t.Fatalf("raw bounds/projection: %+v / %+v", page, raw)
-					}
-					for _, entry := range page.Entries {
-						var keys map[string]any
-						_ = json.Unmarshal(entry.Payload, &keys)
-						wantPayload := map[string]any{"conversation_id": testConvID, "level": "info", "text": "", "truncated": false, "stops_turn": false}
-						if entry.Type != protocol.TypeBanner || !reflect.DeepEqual(keys, wantPayload) {
-							t.Fatalf("unsafe receipt: %+v", entry)
-						}
-						found := false
-						for _, r := range raw.Entries {
-							if r.ID == entry.ID && r.TS.Equal(entry.TS) {
-								found = true
-							}
-						}
-						if !found {
-							t.Fatal("receipt changed durable identity")
-						}
-					}
-					if !reflect.DeepEqual(page, newHistoryPager(reader, discardLogger())(testConvID, cursor, 3)) {
-						t.Fatal("repeated page changed")
-					}
-					entries = append(entries, page.Entries...)
-					if page.AtStart {
-						break
-					}
-					cursor = page.Cursor
-				}
-				if testLegacyCheckpoint(entries, 0, 0, false) != 0 {
-					t.Fatal("receipt-only page grants sight")
-				}
-				if !mixed {
-					if latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID)); err != nil || latest != 15 {
-						t.Fatalf("receipt latest: %d %v", latest, err)
-					}
-				}
-			}
-		})
 	}
 }
 
@@ -238,13 +157,13 @@ func testQueuedReceiptEmitter(h *queuedSendHistory) (*operatorMessageEmitterV2, 
 
 func testQueuedReceiptIdentity(t *testing.T, store *history.Store, bcast *fakeInteractiveBcast, ring *eventring.Ring) {
 	t.Helper()
-	page := newHistoryPager(store, discardLogger())(testConvID, "", 128)
+	page, _ := testLegacyReceipts(t, store)
 	events, _ := ring.After(testConvID, 0)
-	if len(events) != len(page.Entries) || len(bcast.pushes) != 2*len(events) {
-		t.Fatalf("page/live/replay counts %d/%d/%d", len(page.Entries), len(bcast.pushes), len(events))
+	if len(events) != len(page) || len(bcast.pushes) != 2*len(events) {
+		t.Fatalf("page/live/replay counts %d/%d/%d", len(page), len(bcast.pushes), len(events))
 	}
 	for i, event := range events {
-		expected := page.Entries[len(page.Entries)-1-i]
+		expected := page[len(page)-1-i]
 		if event.HistoryEntryID != expected.ID || event.Type != expected.Type || !event.TS.Equal(expected.TS) || !bytes.Equal(event.Payload, expected.Payload) {
 			t.Fatalf("replay identity/chronology at %d", i)
 		}
@@ -276,11 +195,11 @@ func TestQueuedLegacyReceipts_Startup(t *testing.T) {
 		t.Fatal("startup backfilled live/replay")
 	}
 	for _, reader := range []*history.Store{store, history.New(dir)} {
-		page := newHistoryPager(reader, discardLogger())(testConvID, "", 128)
-		if len(page.Entries) != 2 || page.Entries[0].Type != protocol.TypeBanner {
+		page, _ := testLegacyReceipts(t, reader)
+		if len(page) != 2 || page[0].Type != protocol.TypeBanner {
 			t.Fatal("loss receipt absent")
 		}
-		if testLegacyCheckpoint(page.Entries, 0, 0, false) != 0 {
+		if testLegacyCheckpoint(page, 0, 0, false) != 0 {
 			t.Fatal("startup receipts granted sight")
 		}
 	}

@@ -27,7 +27,7 @@ func operatorMessageHistory(store *history.Store, push func(operatorMessage), pl
 		if len(source) != 0 {
 			captured = source[0]
 		}
-		payload, err := json.Marshal(protocol.MessagePayload{
+		message := protocol.MessagePayload{
 			ConversationID: convID,
 			MessageID:      msg.MessageID,
 			QueuedMsgID:    msg.ID,
@@ -38,7 +38,8 @@ func operatorMessageHistory(store *history.Store, push func(operatorMessage), pl
 			ClientVersion:  msg.ClientVersion,
 			ClientSentAt:   formatClientSentAt(msg.ClientSentAt),
 			SentNow:        msg.SentNow,
-		})
+		}
+		payload, err := json.Marshal(message)
 		if err != nil {
 			logger.Debug("relay: operator-message history drop; payload marshal",
 				"event", "operator_message.marshal_err",
@@ -47,12 +48,26 @@ func operatorMessageHistory(store *history.Store, push func(operatorMessage), pl
 		}
 		commit := func() {
 			ref := sends.beforeDelivery(convID, msg.ID)
+			stored := payload
+			if ref != nil && ref.id != nil {
+				// The committed acceptance supplies identity before any reader can
+				// publish this delivery, even if its outcome append fails.
+				var err error
+				stored, err = json.Marshal(struct {
+					protocol.MessagePayload
+					AcceptedEntryID uint64 `json:"accepted_entry_id"`
+				}{message, *ref.id})
+				if err != nil {
+					logger.Warn("history: delivery marshal failed", "event", "operator_message.marshal_err")
+					return
+				}
+			}
 			ts := time.Now().UTC()
 			historyEntryID := appendConversationHistory(store, logger, "operator_message.history_append_err",
-				convID, protocol.TypeMessage, payload, ts, captured)
+				convID, protocol.TypeMessage, stored, ts, captured)
 			receipt := sends.delivered(convID, msg.ID, ref, historyEntryID, ts, captured)
 			if push != nil {
-				push(operatorMessage{convID: convID, payload: payload, ts: ts, historyEntryID: historyEntryID, receipt: receipt})
+				push(operatorMessage{convID: convID, payload: stored, ts: ts, historyEntryID: historyEntryID, receipt: receipt})
 			}
 		}
 		place.attach(convID, msg.ID, commit)

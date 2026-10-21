@@ -143,7 +143,7 @@ func (p *PhysicalReplayProtocol) BeforeOutput(raw []byte) error {
 	if p.failed != nil {
 		return p.failed
 	}
-	if !uniqueSuiteKeys(raw) || safeCLIJSON(raw) != nil {
+	if safeCLIJSON(raw) != nil {
 		return p.reject()
 	}
 	var envelope map[string]json.RawMessage

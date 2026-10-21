@@ -162,32 +162,29 @@ func TestQueuedSendHandleActions(t *testing.T) {
 			}
 			peer := "phone"
 			if changes.BaselineRequired {
-				closed := w.await()
-				if action != "send_now" || closed.ConnID != "phone" || closed.CloseCode != uint16(relay.StatusProducerGap) {
-					t.Fatal("unexpected retirement", closed)
-				}
-				w.open("again", false, protocol.CapabilityThread)
-				peer = "again"
-				testDaemonThreadRequest(t, w, peer, 43, protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 10})
-				recovered, typ := testDaemonThreadReply(t, w, 43, peer)
-				if typ != protocol.TypeThreadItems || len(recovered.Items) != 1 {
-					t.Fatal("retirement catch-up", recovered, typ)
-				}
-				testQueuedHandle(t, recovered.Items[0], 100, status)
-			} else {
+				t.Fatal("queue action withdrew a public delivery identity")
+			}
+			terminal := false
+			for range changes.Changes {
 				_, env := w.read()
 				var changed protocol.ThreadItemChangedPayload
 				if env.Type != protocol.TypeThreadItemChanged || json.Unmarshal(env.Payload, &changed) != nil || changed.ItemID != 100 {
 					t.Fatal("live terminal revision", env)
 				}
-				if string(changed.Changes["active"]) != "false" || string(changed.Changes["status"]) != `"`+status+`"` {
-					t.Fatal("terminal action remained active", changed)
+				if value, present := changed.Changes["status"]; present {
+					if string(changed.Changes["active"]) != "false" || string(value) != `"`+status+`"` {
+						t.Fatal("terminal action remained active", changed)
+					}
+					terminal = true
 				}
 				if content, present := changed.Changes["content"]; present {
 					added.Item.Content = content
 				}
 				added.Item.Status, added.Item.Active = status, false
 				testQueuedHandle(t, added.Item, 100, status)
+			}
+			if !terminal {
+				t.Fatal("terminal revision absent")
 			}
 			if action == "send_now" {
 				testDaemonThreadRequest(t, w, peer, 42, protocol.TypeThreadPage, protocol.ThreadPagePayload{ConversationID: testConvID, BeforeOrder: 103, Limit: 10})

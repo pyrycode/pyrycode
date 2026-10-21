@@ -358,16 +358,54 @@ allow duplicate publishers. `TestDaemonLivePublicationRetirement` and
 `TestDaemonLivePublicationShutdownInstallation` cover these boundaries.
 
 `daemonLiveCurrent`, installed as `LiveStateCurrent`, checks unsolicited snapshots
-and queued pushes again on relay Run. Removal/recreation or an overtaking update
-can invalidate a detached cursor after capture. Ordinary readings compare the
-retained revision, not an unfinished query reservation: a failed/refused query
-must leave prior accepted state available. Catalogs compare the greater of the
+and queued pushes again on relay Run; the publisher also checks it after
+recipient enumeration. Removal/recreation or an overtaking update can invalidate
+a detached cursor after capture. Ordinary readings require retained-revision
+equality, with the turn-progress exception below. An unfinished query reservation
+does not replace accepted state: a failed/refused query must leave prior accepted
+state available. Catalogs compare the greater of the
 retained revision and `catalogReplyRevision`, the latest successfully completed
 reply-only resolution. `daemonLiveOperation.complete` records that revision only
 after generation and reservation validation, without retaining or publishing
 borrowed bytes. Generation changes reset it and removal discards it. Comparing
 only retention rejects valid borrowed snapshots; comparing reservations blanks
 available inventory after a refused resolution.
+
+Admitted queued `turn_state` progress with a typed `thinking` or `responding`
+state survives a later same-generation idle at both delivery checks. Its revision
+must be positive and no greater than the retained turn-state revision, and the
+conversation and generation must still be current. The existing FIFO queues
+therefore deliver progress before idle to an admitted thread+interactive
+recipient. Generation retirement rejects held predecessor progress, including
+reused session IDs and conversation removal/recreation; successor clears and
+current readings remain deliverable. `forwardLiveState` still applies recipient
+access/capability gates and consumer revision watermarks, suppressing duplicate
+or older progress after newer delivery. This transient delivery does not restore
+old retention or add replay history: once idle is retained, a fresh snapshot
+contains idle. Superseded idle, unknown/malformed phases and other reading
+families receive no exception; inventory/catalog freshness keeps its separate
+rules above.
+
+`TestDaemonLiveQueuedTurnProgress` checks real source admission, publisher
+callbacks and authenticated decrypted relay delivery through terminal idle,
+holding recipient enumeration or the relay freshness check with bounded channel
+barriers. A successful publisher callback alone misses the second rejection
+point. The text/turn-end sequence must be `[responding idle]`, with corresponding
+thinking coverage; retirement/recreation cases require successor clears and idle
+without predecessor progress. Fresh snapshots must retain only idle.
+`TestDaemonLiveTurnProgressWatermark` checks duplicate/older replay rejection;
+`TestDaemonLiveTurnProgressFreshness` keeps the exception narrow.
+
+The demonstrated daemon cause in [#3711](https://github.com/pyrycode/pyrycode/issues/3711)
+was retained-revision equality dropping queued recovery progress after idle
+replaced it. Mobile clears session errors on recognized thinking/responding
+progress (or explicit send/retirement); assistant content and idle alone do not
+clear them. This daemon proof does not establish the historical native timeout
+sequence. [Mobile #2338](https://github.com/pyrycode/pyrycode-mobile/issues/2338)
+still owns fresh native phase correlation and deterministic acceptance with both
+fixture arms, child-input counts, teardown, preceding-host restoration and the
+original 20-second deadline. [Mobile #2327](https://github.com/pyrycode/pyrycode-mobile/issues/2327)
+scripted/UI acceptance and the later main sweep remain pending with the dispatcher.
 
 Accepted borrowed ordering is target-wide: another peer's request can invalidate
 a reconnect catalog parked behind its clear without publishing a replacement.

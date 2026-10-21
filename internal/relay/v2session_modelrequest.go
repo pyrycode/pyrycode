@@ -31,8 +31,8 @@ import (
 // THAT PLACEMENT IS A CONSTRAINT ON FUTURE EDITS, not just a description. The
 // reply is sealed by Run under the single-owner send CipherState, so emitting from
 // any other goroutine would be a concurrent Encrypt — a NONCE REUSE, a real break
-// rather than a race annoyance. If this arm is ever moved to enqueueAppFrame (as
-// request_history was, for work this verb does not do), the emit must switch from
+// rather than a race annoyance. If this arm is ever moved to enqueueAppFrame,
+// the emit must switch from
 // forwardEnvelope to forwardToRun in the SAME change, and the ModelListFor seam
 // must stay a bounded in-memory read until then.
 //
@@ -54,7 +54,7 @@ const (
 // The two answers, spelled once, reusing attachmentReject's shape so a code cannot
 // be paired with the wrong retryable flag — the field a client actually branches
 // on. Values rather than a map so each is addressable by name from the tests that
-// pin them. handleRequestHistory's rejectHistory* set is the precedent.
+// pin them.
 //
 // ONE IS PERMANENT FOR THE REQUEST AS SENT AND ONE IS NOT. A conversation this
 // daemon does not host stays unhosted however often the client asks; every cause
@@ -86,19 +86,14 @@ var (
 //  2. A PAYLOAD DECODE FAILURE IS TOLERATED, NOT REJECTED, and the reason does NOT
 //     generalise. It leaves ConversationID == "", which names no conversation —
 //     handlers.CreateConversation mints every id from conversations.NewID — so it
-//     is refused at step 3 without a third code. handleRequestHistory cannot do
-//     this because there the empty id becomes a path component, where
-//     filepath.Join(dir, "") is the log ROOT rather than an error; here it reaches
-//     a registry lookup and nothing else. There is deliberately no separate
-//     convID == "" pre-check: a second spelling of a check the gate below already
-//     performs would close nothing. NEVER echo or log the error — encoding/json
+//     is refused at step 3 without a third code. NEVER echo or log the error — encoding/json
 //     quotes offending input into its error string and those bytes are
 //     remote-authored.
 //  3. MEMBERSHIP SEPARATES THE TWO REFUSAL ARMS. KnownConversation answers "is this
 //     conversation ours", so a false here is the permanent conversation.not_found
 //     and a resolver refusal PAST it is the retryable model_list.unavailable. A nil
 //     seam refuses everything, the only fail-safe reading. Membership rather than a
-//     session router, for the reason HistoryPage's block gives: a router
+//     session router, because a router
 //     additionally refuses a known conversation with NO BOUND SESSION, which is
 //     precisely the conversation this verb exists to serve.
 //  4. RESOLVE, COMMA-OK HONOURED. A nil ModelListFor and a false comma-ok merge

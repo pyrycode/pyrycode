@@ -444,11 +444,11 @@ and session transitions remain outside ring replay.
 **The field is absent on older daemons, with absent or failed history storage,
 and on non-history-backed frames, including their replay.** An absent store
 or failed append still permits live delivery and existing ring recording.
-**When the field is absent, clients must fall back to history/list**,
-using a
-[`history_page`](#conversation-history-v2) entry's `id` or the target
-conversation's [`list_conversations`](#application-message-types) `latest_entry_id`
-as appropriate to what the operator has read. An unset pointer omits the key
+**When the field is absent, clients recover content through
+[Thread query messages](#thread-query-messages).** The target conversation's
+[`list_conversations`](#application-message-types) `latest_entry_id` remains a
+durable watermark; it is a read target only with evidence of what the operator
+has read, never merely because the list arrived. An unset pointer omits the key
 entirely; legacy envelopes decode and re-encode without adding it.
 
 Encoding: line-delimited JSON over WS text frames. One outer envelope per frame. UTF-8.
@@ -1072,7 +1072,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
 | `conversation_created` | binary → phone | no | Reply to `create_conversation`, correlated by `in_reply_to`. Its `cwd` is the resolved realpath the conversation's session actually spawns in for a non-null request (#2568), never the string the request sent, and is the same value `list_conversations` reports for that row from then on; a `null` request's `cwd` is the daemon's default. Carries **`workspace_label`** (#2210): the operator-set display name stored for this conversation's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every frame, so a client may treat a missing one as malformed rather than as an unlabelled workspace. A conversation created into an already-named folder is named by it immediately, from this reply, without a `list_conversations` round trip. Same value and same contract as the [`conversations`](#conversations) row's field, including that its 128-byte bound is a size limit and **not** a safety property — rendering it safely is the client's job. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the created conversation's session runs on, set only for a client that negotiated `multi_agent` — the `conversations` row's own rule. `omitempty` is load-bearing here: a request without `agent` from a client without `multi_agent` gets a reply with no `agent` key at all, byte-identical to the frame this document described before Codex conversations existed. **Since #2665, a request's `model` and `effort` become the created session's stored settings from the mint**, field by field — an absent field keeps what a mint gives without them: a Claude conversation still inherits the operator's configured model/effort, a Codex conversation still starts with neither set and runs at Codex's own defaults. A refused `model` or `effort` is answered on `create_conversation` itself (see that row) and never reaches this reply — no conversation is created. |
 | `promote_conversation` | phone → binary | no | |
-| `conversation_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `promote_conversation`, `rename_conversation`, `archive_conversation` / `unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted`, `set_conversation_pinned` or [`mark_conversation_read`](#marking-a-conversation-read). As an **unsolicited push** it carries **no `in_reply_to` at all**, and has **these producers**: when a conversation is created on the host by `pyry channel new` (#2156) or `conversation.new`, or announced after an agent switch; when a conversation that has never had a name takes one from the first message sent to it (#2159 — the daemon cuts a short title from that message's text and stores it, so a chat started from a client stops reading as `Untitled`; it fires at most once per conversation, since a name set by create, rename, promote or an earlier message is never overwritten); when a conversation's mute flag is set or cleared by `set_conversation_muted` (#2572); when its pin is set or cleared by [`set_conversation_pinned`](#set_conversation_pinned) (#3538), including no-ops; and when `mark_conversation_read` (#2780) actually **advances** the conversation's read mark — not on a no-op request, which still gets its reply but pushes nothing. **Three also answer a correlated reply for the same write** — `set_conversation_muted` and `set_conversation_pinned` always, `mark_conversation_read` only when it advances — so their requester receives both: the correlated `conversation_updated` reply and the uncorrelated push, which does not exclude it. Either way the daemon fans the stored record to every interactive-capable conn, because no client asked and none would otherwise learn of the change until its next `list_conversations` — and on the auto-naming, mute, pin and read-mark pushes in particular the requester is **not** excluded, since `send_message`'s own reply is a bare `ack` carrying no record and the correlated replies above are separate frames from their pushes. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `id` instead. The record is the same either way, and it is read back from the registry, so its `cwd` is the daemon's confined, symlink-resolved path. The push is **live-only** — there is no replay, and a client that was disconnected sees the row in its next list. Interactive-capability-gated: a conn without it is skipped. Every frame of both kinds carries **`workspace_label`** (#2210): the operator-set display name stored for that frame's own `cwd`, or `null` when that workspace has none, **nullable but never omitted** — so a client patching a row in place from a push renders the operator's chosen name instead of falling back to the folder name until its next list. After a `change_workspace` it names the **destination** workspace, which is the case a client cannot resolve for itself: `recent_workspaces` rows carry no label, and `workspace_updated` fires when a *label* changes, not when a *conversation moves*. Same value and same contract as the [`conversations`](#conversations) row's field, its 128-byte size-not-safety bound included. It is **not** a precedent for putting `system_prompt` here: the label is already on every `list_conversations` row, so broadcasting it widens no audience, which is exactly what a prompt reachable from no other read path would do. Every frame of both kinds also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, so a client paired with an older daemon keeps notifying. This matters for the push in particular: mobile folds each frame into its list in place (`ConversationListProjection.upsertConversation`), so a record that dropped the key would read as not muted and a plain rename would silently unmute the conversation. Every frame of both kinds also carries **`read_up_to`** (#2779): the same durable, per-conversation, host/operator-scoped read mark the [`conversations`](#conversations) row reports, unsigned 64-bit, **always present including `0`**. Read from the stored conversation at send time by every reply and push producer — so a `rename_conversation` on a conversation with a nonzero mark reports that mark unchanged, exactly as it already does for `is_muted`. Ordinary producers of this frame supply neither `current_session_id` nor `latest_entry_id`: unlike `conversations`, it is about one already-known conversation, and a client's next [`request_history`](#request_history) or [`list_conversations`](#list_conversations) resolves that separately. For a conn that negotiated **`multi_agent`**, every pushed or reply frame about a registry-known conversation also carries **`agent`** (#2669), resolved by the same [`conversations`](#conversations)-row rule at the moment this frame is sent, so replacing a cached row cannot lose the agent and a later agent change is observable. A conn without `multi_agent` receives the pre-#2669 bytes with no `agent` key. A registry miss leaves the frame untagged rather than inventing an agent for a conversation the daemon no longer knows. On a connection that negotiated **`thread`**, every push and reply adds that conversation's authoritative **numeric `last_shown_version`** from usable loaded status or an eligible unloaded clean certificate. The certificate must pass current schema/rules, epoch and evidence-field validation, and its consumed version V must exactly equal independently known current raw history progress H. Numeric `0` is authoritative, including valid empty evidence at V = H = 0. Unregistered/removed IDs and rebuilding/unavailable views remove the key, including any supplied stale value. For unloaded conversations, missing/unreadable/malformed/dirty/incompatible/invalid certificates, history lookup failures, V != H in either direction and cold/unknown raw progress also remove it. Any later append invalidates an unloaded reading even when it would not raise the shown watermark; ordinary loading/folding can restore it. The lookup never warms a cold cursor by reading segments or trusts V as H. Certificate metadata proves neither replay/checksum equality nor catch-up continuity; see [`conversations`](#conversations). Non-thread connections always omit it. Thread unread is **`last_shown_version > read_up_to`**. Projection preserves all other fields and their presence: `read_up_to` remains the durable read mark, and any supplied `current_session_id`/`latest_entry_id` retain the stored-binding/legacy-watermark meanings of the [`conversations`](#conversations) row; it does not add either when absent. Read-mark storage is unchanged. Production fold/watermark, retained-state and bounded query providers are installed (#3163/#3164/#3236), with thread-only replay/resync replacement (#3253/#3235). Each open conversation requires explicit catch-up; only its separate successful final marker certifies completion.  Every frame also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; absence from an older host means unpinned. The active [`set_conversation_pinned`](#set_conversation_pinned) handler (#3538) replies with this type before the matching uncorrelated push reaches the requester, including on no-ops; both requester and other interactive clients receive that push. All handler and command producers preserve stored pins, including channel/conversation creation and agent-switch announcements. |
+| `conversation_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `promote_conversation`, `rename_conversation`, `archive_conversation` / `unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted`, `set_conversation_pinned` or [`mark_conversation_read`](#marking-a-conversation-read). As an **unsolicited push** it carries **no `in_reply_to` at all**, and has **these producers**: when a conversation is created on the host by `pyry channel new` (#2156) or `conversation.new`, or announced after an agent switch; when a conversation that has never had a name takes one from the first message sent to it (#2159 — the daemon cuts a short title from that message's text and stores it, so a chat started from a client stops reading as `Untitled`; it fires at most once per conversation, since a name set by create, rename, promote or an earlier message is never overwritten); when a conversation's mute flag is set or cleared by `set_conversation_muted` (#2572); when its pin is set or cleared by [`set_conversation_pinned`](#set_conversation_pinned) (#3538), including no-ops; and when `mark_conversation_read` (#2780) actually **advances** the conversation's read mark — not on a no-op request, which still gets its reply but pushes nothing. **Three also answer a correlated reply for the same write** — `set_conversation_muted` and `set_conversation_pinned` always, `mark_conversation_read` only when it advances — so their requester receives both: the correlated `conversation_updated` reply and the uncorrelated push, which does not exclude it. Either way the daemon fans the stored record to every interactive-capable conn, because no client asked and none would otherwise learn of the change until its next `list_conversations` — and on the auto-naming, mute, pin and read-mark pushes in particular the requester is **not** excluded, since `send_message`'s own reply is a bare `ack` carrying no record and the correlated replies above are separate frames from their pushes. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `id` instead. The record is the same either way, and it is read back from the registry, so its `cwd` is the daemon's confined, symlink-resolved path. The push is **live-only** — there is no replay, and a client that was disconnected sees the row in its next list. Interactive-capability-gated: a conn without it is skipped. Every frame of both kinds carries **`workspace_label`** (#2210): the operator-set display name stored for that frame's own `cwd`, or `null` when that workspace has none, **nullable but never omitted** — so a client patching a row in place from a push renders the operator's chosen name instead of falling back to the folder name until its next list. After a `change_workspace` it names the **destination** workspace, which is the case a client cannot resolve for itself: `recent_workspaces` rows carry no label, and `workspace_updated` fires when a *label* changes, not when a *conversation moves*. Same value and same contract as the [`conversations`](#conversations) row's field, its 128-byte size-not-safety bound included. It is **not** a precedent for putting `system_prompt` here: the label is already on every `list_conversations` row, so broadcasting it widens no audience, which is exactly what a prompt reachable from no other read path would do. Every frame of both kinds also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, so a client paired with an older daemon keeps notifying. This matters for the push in particular: mobile folds each frame into its list in place (`ConversationListProjection.upsertConversation`), so a record that dropped the key would read as not muted and a plain rename would silently unmute the conversation. Every frame of both kinds also carries **`read_up_to`** (#2779): the same durable, per-conversation, host/operator-scoped read mark the [`conversations`](#conversations) row reports, unsigned 64-bit, **always present including `0`**. Read from the stored conversation at send time by every reply and push producer — so a `rename_conversation` on a conversation with a nonzero mark reports that mark unchanged, exactly as it already does for `is_muted`. Ordinary producers of this frame supply neither `current_session_id` nor `latest_entry_id`: unlike `conversations`, it is about one already-known conversation, and a client's next [thread query](#thread-query-messages) or [`list_conversations`](#list_conversations) resolves that separately. For a conn that negotiated **`multi_agent`**, every pushed or reply frame about a registry-known conversation also carries **`agent`** (#2669), resolved by the same [`conversations`](#conversations)-row rule at the moment this frame is sent, so replacing a cached row cannot lose the agent and a later agent change is observable. A conn without `multi_agent` receives the pre-#2669 bytes with no `agent` key. A registry miss leaves the frame untagged rather than inventing an agent for a conversation the daemon no longer knows. On a connection that negotiated **`thread`**, every push and reply adds that conversation's authoritative **numeric `last_shown_version`** from usable loaded status or an eligible unloaded clean certificate. The certificate must pass current schema/rules, epoch and evidence-field validation, and its consumed version V must exactly equal independently known current raw history progress H. Numeric `0` is authoritative, including valid empty evidence at V = H = 0. Unregistered/removed IDs and rebuilding/unavailable views remove the key, including any supplied stale value. For unloaded conversations, missing/unreadable/malformed/dirty/incompatible/invalid certificates, history lookup failures, V != H in either direction and cold/unknown raw progress also remove it. Any later append invalidates an unloaded reading even when it would not raise the shown watermark; ordinary loading/folding can restore it. The lookup never warms a cold cursor by reading segments or trusts V as H. Certificate metadata proves neither replay/checksum equality nor catch-up continuity; see [`conversations`](#conversations). Non-thread connections always omit it. Thread unread is **`last_shown_version > read_up_to`**. Projection preserves all other fields and their presence: `read_up_to` remains the durable read mark, and any supplied `current_session_id`/`latest_entry_id` retain the stored-binding/legacy-watermark meanings of the [`conversations`](#conversations) row; it does not add either when absent. Read-mark storage is unchanged. Production fold/watermark, retained-state and bounded query providers are installed (#3163/#3164/#3236), with thread-only replay/resync replacement (#3253/#3235). Each open conversation requires explicit catch-up; only its separate successful final marker certifies completion.  Every frame also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; absence from an older host means unpinned. The active [`set_conversation_pinned`](#set_conversation_pinned) handler (#3538) replies with this type before the matching uncorrelated push reaches the requester, including on no-ops; both requester and other interactive clients receive that push. All handler and command producers preserve stored pins, including channel/conversation creation and agent-switch announcements. |
 | `rename_conversation` | phone → binary | no | Renames an existing conversation; replies with the reused `conversation_updated` record. |
 | `delete_conversation` | phone → binary | no | Permanently removes a conversation (hard delete; the reversible path is `archive_conversation`); replies with `conversation_deleted`. |
 | `conversation_deleted` | binary → phone | no | Acknowledges a `delete_conversation`, correlated by `in_reply_to`; carries only the deleted conversation's `id` (the record no longer exists, so no name/cwd is projected). |
@@ -1080,7 +1080,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `unarchive_conversation` | phone → binary | no | Clears a conversation's durable archived flag (restore, `IsArchived = false`); replies with the reused `conversation_updated` record. |
 | `set_conversation_muted` | phone → binary | no | Sets or clears a conversation's durable mute-notifications flag (`IsMuted`, #2571) via a single payload key, `muted`. **`muted` is required**: it is decoded as a pointer, so an absent key or an explicit `null` is `protocol.malformed` rather than read as `false` — the same trap #2571 flagged for the field's own `omitempty`, now enforced on the write side too. An unknown `conversation_id` is `conversation.not_found`. Both reject cases are non-retryable, static-message and echo none of the payload. Replies with the reused `conversation_updated` record, correlated by `in_reply_to`. **Unlike `archive_conversation`, this write is also fanned out**: the same record is pushed, uncorrelated, to every interactive-capable conn — the requester included, like the [`conversation_updated`](#conversation_updated) auto-naming push — so muting a noisy conversation from one client silences it on every paired client without a `list_conversations` round trip. |
 | `set_conversation_pinned` | phone → binary | no | **Active in the daemon (#3538).** Requires nonempty `conversation_id` and boolean `pinned`; missing/null or non-boolean `pinned` is non-retryable `protocol.malformed`. Empty/unknown IDs return non-retryable `conversation.not_found`. Pinning an unpromoted conversation is non-retryable `conversation.not_promoted`; unpinning remains allowed on any existing row. Success, including a no-op, attempts best-effort persistence and replies with correlated `conversation_updated` before the matching uncorrelated push reaches the requester. Every connected interactive client, including the requester, receives the same stored record; announcement is still attempted if the reply fails. No new capability is needed. See [`set_conversation_pinned`](#set_conversation_pinned). |
-| `mark_conversation_read` | phone → binary | no | Raises a conversation's durable, host-local read mark (`read_up_to`, #2779) toward a requested durable history entry id, `up_to` — clamped to the newest entry and never lowered (#2780). Replies with the reused `conversation_updated` record on every request that names a known conversation, including a no-op; **only an actual advance is also fanned out**, uncorrelated, through the same hook `set_conversation_muted` uses. See [Marking a conversation read](#marking-a-conversation-read). |
+| `mark_conversation_read` | phone → binary | no | Raises a conversation's durable, host-local read mark (`read_up_to`, #2779) toward a requested durable history entry id, `up_to` — clamped to authoritative `last_shown_version` and never lowered. Missing shown evidence returns retryable `history.unavailable`, even for a no-op; known zero is valid. Every success replies with the reused `conversation_updated` record, including a no-op; **only an actual advance is also fanned out**, uncorrelated, through the same hook `set_conversation_muted` uses. See [Marking a conversation read](#marking-a-conversation-read). |
 | `change_workspace` | phone → binary | no | Moves a conversation to a client-chosen workspace folder (updates its `cwd`, confined to `$HOME`); replies with the reused `conversation_updated` record. |
 | `set_system_prompt` | phone → binary | no | Sets or clears a conversation's durable system prompt — the operator-authored text every session it spawns is given, on **either agent** (#2662: a Codex session reads the same composed file and sends it as `developerInstructions`). Replies with the reused `conversation_updated` record, which does **not** carry the value. Takes effect at the conversation's next session start or thread resume, not on a running child. The read half is [`request_system_prompt`](#request_system_prompt), a different type on a different dispatch surface. See [Setting a conversation's system prompt](#setting-a-conversations-system-prompt). |
 | `request_host_system_prompt` | client → daemon | no | Reads the connected daemon's current and default host instructions through authenticated paired-client map dispatch, without a conversation/session or interactive-capability gate. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
@@ -1161,10 +1161,8 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `read_workspace_file` | phone → binary | no | **New in v2.** Inbound control — a paired client asks to read one regular file of any type **live**, naming the conversation and a path and nothing else (#2598, widened #2893). Nothing is written to the attachment store; each request reads the disk again. The `conversation_id` is a **lookup key validated against the daemon's registry**, not authorization. Relative paths resolve only against its recorded workspace; absolute paths may also resolve inside configured `-pyry-read-folder` roots or the admitted daemon working folder. Both requested and resolved leaves must pass the case-insensitive secret-name denylist. Correlation rides `in_reply_to`; the answer is a bounded byte-for-byte [`attachment_chunk`](#attachment_chunk) stream with byte-sniffed MIME under a fresh daemon-minted `attachment_id`, or the single `attachment.not_found` that names no cause. See [`read_workspace_file`](#read_workspace_file) for the denylist, roots, size bound and stream-abort response. |
 | **`attachment_offered`** | binary → phone | no | **New in v2.** Outbound push — a file exists on the host for this conversation, naming it with an `attachment_id` **the client did not mint** (#2082). It closes the one gap the rest of this family leaves: every other attachment frame needs an id the client already holds, so a file `claude` produced reached a client as nothing at all. **No bytes ride it** — it announces, and a client fetches with [`request_attachment`](#request_attachment), which is what *offered* rather than *sent* carries. Correlation is `conversation_id` and nothing else (no `in_reply_to`, no `turn_id`), and it is **delivered to every attached client rather than routed to one**, scoped at the consumer exactly as [`modal_shown`](#modal_shown) is. Receiving it is **not a capability**: #2054 re-validates the id against the daemon's registry regardless. Its `filename` is **`claude`-authored** — the section's first such string, so [§ Security model](#security-model)'s threat 1 lands, flowing *out of* `claude` rather than into it. **Emitted since #2166**, when the daemon stores a file `claude` produced; the offer is **live-only** — no registry, no list verb, no replay, so one missed while disconnected is not re-sent. See [Attachments](#attachments). |
 | **`request_model_list`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a conversation's model menu at any time, naming the conversation and nothing else (#2125). It closes the window the frame's two unsolicited paths leave open: a conversation created **after** the client connected misses both the live lane and the connect-time reconcile, so its model and effort controls stay blank with nothing to wait for. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`model_list`](#model_list) — the same frame, the same payload source, **no `event_id`** — or `conversation.not_found` / the retryable `model_list.unavailable`. Interactive-capability-gated: a conn without it gets nothing at all. See [Asking for a model list on demand](#asking-for-a-model-list-on-demand). |
-| **`request_history`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for entries older than the ones it has, naming the conversation, an opaque `cursor` and a `limit` (#2113). Scroll-back over the **daemon-owned on-disk log** (#2112), which is **not** the [Mode A](#reconnect--backfill-semantics) event-ring replay: that one is catch-up across a dropped connection and is empty after a restart. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`history_page`](#history_page). Answered by the daemon since **#2116**, on the addressed conn's app-frame worker rather than inline, so a page read off disk never stalls another conn's frames. See [Conversation history](#conversation-history-v2). |
 | **`request_system_prompt`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks what system prompt one conversation holds, naming the conversation and nothing else (#2152). The read half [`set_system_prompt`](#setting-a-conversations-system-prompt) shipped without: that verb's ack is the broadcast `conversation_updated` record and deliberately carries no value, so a client that did not perform the write could not learn what is stored. The `conversation_id` is a **lookup key resolved against the daemon's registry**, not a value trusted as sent, and it never becomes a path component. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`system_prompt`](#system_prompt) and **never an error frame** — every unresolvable case, an unhosted conversation included, gets the same constant reply. Interactive-capability-gated: a conn without it gets nothing at all, which its write half does **not** do. See [Reading a conversation's system prompt](#reading-a-conversations-system-prompt). |
 | **`system_prompt`** | binary → phone | no | **New in v2.** Outbound reply to a `request_system_prompt`, correlated by `in_reply_to` (#2152). Carries the stored prompt as a **nullable** field preserving all three stored states, plus a three-value verdict on whether the **running** session was spawned with that same value — the gap the store-and-apply-at-next-start design opens. It reports a **difference, not a second copy of the text**: the spawned-with value is not carried. Unicast to the conn that asked; unlike `conversation_updated` it is never broadcast. See [Reading a conversation's system prompt](#reading-a-conversations-system-prompt). |
-| **`history_page`** | binary → phone | no | **New in v2.** Outbound reply to a [`request_history`](#request_history), correlated by `in_reply_to` (#2113): one backward step of a walk — `entries` **newest-first**, an opaque `cursor` to ask again with, and `at_start`. **A walk terminates on `at_start`, never on an empty `entries`**, and a **short page is not an end-of-log signal** (the entry clamp bounds a count, not bytes). Each entry carries a durable per-conversation `id` — **not** an [`event_id`](#reconnect-replay--resync-consumer-647), which is the ring's per-process one — plus the stored frame's `type`, `payload` and `ts`, so a client re-reduces a page through its existing timeline reducer. Entries are **replayed content** and can be `claude`-authored, so [§ Security model](#security-model)'s threat 1 lands here. Emitted since **#2116**, and **shortened where needed to fit the [application-envelope cap](#application-envelope-size-cap)** — see [Page size](#page-size). See [Conversation history](#conversation-history-v2). |
 | **`mint_pairing`** | phone → binary | no | **New in v2. Security-sensitive — its reply is a bearer credential.** Inbound control — an already-paired client asks the daemon to mint a pairing for **another** device, naming an optional `device_name` and nothing else (#2126). It is the pairing flow's second entry point: `pyry pair` needs a shell on the daemon's host, which a browser build of the desktop client and a second person's client do not have. **A write verb, not a read** — it creates a credential and a registry record, which is why it is named for its action rather than filed under the `request_*` family. **Nothing a client sends is input to what is minted**, and there is deliberately **no field for the remote-permissions flag**: a minted device is always unprivileged. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`pairing_minted`](#pairing_minted). **Answered since #2127** — by a privileged-device gate, a mint under the `devices.json` lock, and a `pairing_minted` reply; every other device is refused `pairing.not_permitted` with nothing created. See [Minting a pairing from a paired client](#minting-a-pairing-from-a-paired-client). |
 | **`pairing_minted`** | binary → phone | no | **New in v2.** Outbound reply to a [`mint_pairing`](#mint_pairing), correlated by `in_reply_to` (#2126). Carries the same daemon-encoded pairing that bare `pyry pair` receives through local control and renders as the QR symbol and paste fallback — one opaque base64url string a client hands to its existing pairing dialog unchanged — and **nothing else**: the four fields inside it are not repeated as loose keys, and no field of the request is echoed back. **The string is a plaintext bearer credential**: never logged, no decoded field of it logged, and it must never leave the AEAD-sealed envelope. Unicast to the conn that asked; never broadcast. Emitted by the mint handler since #2127. See [Minting a pairing from a paired client](#minting-a-pairing-from-a-paired-client). |
 | **`reply_suggestion`** | binary → phone | no | **New in v2** (interactive, capability-gated). Next-reply state for a conversation/session pair after an eligible successful turn: native first, then one Haiku fallback after a two-second native window (#2831, #2832). Broadcast to attached interactive clients. A higher revision with explicit `suggested_reply: null` clears it; reconnect reconciles current state, including clears. No `event_id`, replay or history. Unavailable fallback stays silent. See [`reply_suggestion`](#reply_suggestion). |
@@ -1329,6 +1327,32 @@ item `100` can carry queue handle `7`. The same identity and handle appear in
 live additions/changes, catch-up, pages and reopened history. Legacy acceptances
 omit the handle, including after delivery; clients must not infer one from text,
 order, `message_id`, item ID or the linked delivered message.
+
+New attachment-bearing queued acceptances also expose optional
+`content.attachments` (#3693), with exactly these keys per entry:
+
+```json
+"attachments": [{"attachment_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "filename": "report.txt"}]
+```
+
+`attachment_id` names the stored attachment; `filename` is its stored display
+basename, including upload sanitization. The daemon resolves names only within
+the owning registered conversation. A send-supplied filename, host path or
+composed delivery prompt cannot supply this metadata. The existing
+`content.attachment_ids` remains deduplicated in first-occurrence order;
+`attachments` contains exactly one fact per successfully resolved ID in that
+same order.
+
+If metadata becomes unavailable after send validation, acceptance retains its
+text and all validated IDs, omitting only the unavailable facts. With no resolved
+facts, `attachments` is omitted. This does not relax send validation: invalid or
+missing IDs still refuse the whole send with `attachment.not_found`; malformed
+payload shapes retain `protocol.malformed`.
+Recorded names survive history/thread reopening without another name lookup,
+including when an unresolved acceptance becomes `lost` on daemon restart.
+Legacy ID-only history remains readable with no guessed filenames. These facts
+describe queued acceptance; retention when delivery replaces content is the
+separate [#3694](https://github.com/pyrycode/pyrycode/issues/3694) contract.
 
 Drop and Send now require `kind: user_message`, `status: queued`, `active: true`
 and a valid handle. Target the existing [queue commands](#queue-v2) with the
@@ -2333,13 +2357,15 @@ catch-up continuity and does not make an unloaded conversation query-ready.
 | `pinned_at` | RFC3339 host-local pin timestamp or explicit JSON `null` when unpinned; never omitted. An absent field from an older host means unpinned. All list/update projections preserve stored pins, including command-package announcements (#3538); see [`set_conversation_pinned`](#set_conversation_pinned). |
 | `current_session_id` | Always-present stored session binding, including `""` when unbound. A nonempty binding does not prove a running process. |
 | `read_up_to` | Always-present durable host/operator read mark, including zero; shared by paired devices. |
-| `latest_entry_id` | Always-present newest visible-content durable entry ID, zero for empty/hidden-only history; see [content classification and clamping](#marking-a-conversation-read). Hidden metadata and receipt accounting alone do not raise it. It remains independent of the thread watermark. |
+| `latest_entry_id` | Always-present newest visible-content durable entry ID, zero for empty/hidden-only history; see [legacy content classification](#a-history-entry). Hidden metadata and receipt accounting alone do not raise it. It remains independent of the thread watermark. |
 
 Thread unread is **`last_shown_version > read_up_to`** when that authoritative
 reading is available; omission is unavailable metadata, not a numeric zero.
 Projection preserves every other field's presence and value. This contract
-does not change read-mark storage or the existing `mark_conversation_read`
-target/clamp. Non-thread connections retain the legacy unread comparison
+does not change read-mark storage. `mark_conversation_read` uses the same
+authoritative shown-version clamp for every client; see
+[Marking a conversation read](#marking-a-conversation-read).
+Non-thread connections retain the legacy unread comparison
 `latest_entry_id > read_up_to` and existing summary bytes with thread metadata
 omitted.
 
@@ -2377,6 +2403,20 @@ gains no `archived_at` field.
 
 An unpinned update carries `"pinned_at": null` in the same position, including
 when the update reports an unrelated change such as a rename.
+
+For a successful `mark_conversation_read`, `read_up_to` is the stored result of
+`max(stored read_up_to, min(up_to, last_shown_version))`. Available shown evidence
+is required even for a no-op; known zero is valid, while missing evidence returns
+correlated retryable `history.unavailable` without mutation, saving or announcement.
+Every success replies with `in_reply_to`; only an actual advance also produces
+an uncorrelated push, after the reply attempt and even if that attempt fails.
+At delivery, thread connections receive a freshly authoritative
+`last_shown_version`, including numeric `0`, or omit it if evidence has become
+unavailable. This independent projection can omit the field even after the mark
+was successfully persisted. Non-thread connections omit it. Stored `read_up_to`,
+pins, binding fields and other supplied values retain their presence and value.
+See [Marking a conversation read](#marking-a-conversation-read) for refusal and
+rollback semantics.
 
 ### `set_conversation_pinned`
 
@@ -2442,8 +2482,9 @@ support. No new capability negotiation is needed.
 ### Marking a conversation read
 
 `mark_conversation_read` raises the durable, host-local read mark (`read_up_to`,
-#2779) of a conversation toward a durable history entry id the operator has
-read up to (#2780). The mark is **host/operator-scoped, not per-device**: any
+\#2779) of a conversation toward the shown-thread version the operator has
+read up to, in the existing durable history-ID space. The mark is
+**host/operator-scoped, not per-device**: any
 paired client may raise it, and every paired client reads the one stored
 value — this is the write half [`list_conversations`](#list_conversations)
 and [`conversation_updated`](#conversation_updated) previously reported with
@@ -2463,38 +2504,37 @@ Both fields are required:
 | `conversation_id` | string | The target conversation. An unknown id, including an empty string, is `conversation.not_found`. |
 | `up_to` | unsigned 64-bit integer | The durable [history entry id](#a-history-entry) the operator has read up to. Decoded through a `*uint64`, so a missing key or explicit `null` decodes to `nil` and `encoding/json`'s range parsing rejects a negative, fractional, exponent, string, boolean or over-`2^64-1` value — every one of these is `protocol.malformed`. `0` is a valid, meaningful value: an empty conversation's own starting mark. |
 
-**The stored mark becomes `max(held, min(up_to, latest))`**, where `held` is
-the mark already on disk and `latest` is the newest visible conversational-content
-entry, the same target reported as `list_conversations.latest_entry_id` (#3463).
-The daemon shares one payload-aware policy with producer visibility metadata.
-Explicit stored `shown: false` always excludes an entry. Entries without
-visibility metadata use the same content classification as current writes;
-explicit true cannot promote metadata or unknown vocabulary into content.
-Unknown types default to non-content until supported as visible content, so
-adding a hidden type needs no separate unread exclusion.
+**The stored mark becomes
+`max(stored read_up_to, min(up_to, last_shown_version))`.** The daemon uses the
+installed authoritative shown-thread provider shared by summary projection,
+for every client. Its watermark records first public appearance and appended
+shown text. Hidden source records, hidden item/live-state updates and
+completion-only item revisions cannot raise it. Raw history progress, maximum
+item revisions and the legacy list visibility scan cannot substitute for it.
 
-Status/metadata-only entries, including `turn_state` and `context_usage`, normal
-successful `turn_end`, non-stopping info banners and restart/sleep dividers do
-not raise this target. Visible failed/stopped endings, interruption notices and
-loss notices can qualify. A valid legacy receipt establishes accounting, not
-visibility: a known raw content fact can qualify, but its nonvisual receipt
-projection does not itself make a hidden fact unread. Receipt validation and
-raw history retain their separate contracts.
+A present `last_shown_version: 0` is valid authority, including for an empty or
+hidden-only thread. Missing evidence is unavailable, never an assumed zero.
+Usable loaded metadata supplies a reading. Fully unloaded evidence requires a
+valid clean certificate at exact consumed version V = independently known
+current raw progress H. Rebuilding, unavailable and retiring views cannot fall
+back to persisted evidence. After restart, a certificate alone cannot establish
+H, even at zero. The lookup starts no worker, warms no raw cursor and scans no
+history segments; see [thread summary eligibility](#conversations).
 
-Missing/empty and hidden-only histories yield `0`. A request at or below `held`
-changes nothing; a request past `latest` clamps before the `max`. The mark never
-moves backward, including with racing devices, a held mark above the current
-target or a target of zero. It remains persistent and isolated by host and
-conversation, in the original durable ID space rather than a filtered count.
-Reading the newest visible entry clears unread despite later hidden entries;
-reading an older visible entry does not cover newer content. New visible content
-beyond the mark makes `latest_entry_id > read_up_to` again.
+Unavailable authority returns correlated retryable `history.unavailable`
+without changing, persisting or announcing a mark, **even if the request would
+otherwise be a no-op**. A hidden append invalidates unloaded evidence until
+usable loaded metadata or a newly eligible certificate restores authority;
+the held mark survives.
+Offscreen/quiet-retirement summary recovery retains the same eligibility rules.
 
-Reopening history and repeated startup reconciliation preserve both read and
-unread results when only hidden restart entries are added. Restart alone does
-not make a read conversation unread or clear previously unread content. Genuinely
-visible interruption/loss notices may still raise unread. No read marks or old
-history metadata are rewritten.
+With available authority, a request at or below the held mark changes nothing
+and does not save. Oversized requests clamp before the `max`. The mark never
+moves backward, including with racing devices, a held mark above the shown
+watermark or authoritative zero. It remains persistent and isolated by host and
+conversation, in the original durable ID space. Thread unread is
+`last_shown_version > read_up_to` when that reading is available. Hidden restart
+records do not themselves change shown progress or rewrite old marks.
 
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
@@ -2509,7 +2549,9 @@ unchanged for future thread consumers.
 For the completed reply below, IDs are in append order. Normal completion and
 the trailing idle state can extend client accounting without raising the daemon's
 visible-content target. The client wire accounting latest is a separate value
-from `list_conversations.latest_entry_id`.
+from `list_conversations.latest_entry_id`. For these completed-message examples,
+that list target and the shown watermark agree; their equality is not a
+read-clamping contract.
 
 | Runtime facts | Durable sequence | Client wire accounting latest | Presented checkpoint (`up_to`) | Daemon list latest / confirmed `read_up_to` from zero |
 | --- | --- | --- | --- | --- |
@@ -2521,19 +2563,11 @@ overlapping delivery cannot create presentation. The client merges the correlate
 daemon-confirmed mark, rather than assuming the requested checkpoint was persisted.
 Both controls clear `latest_entry_id > read_up_to`.
 
-Thread connections compare authoritative `last_shown_version` with the same
-stored mark. That watermark records first public appearance and appended shown
-text, not raw consumed history progress or the maximum final item revision.
-Hidden item/live-state updates and completion-only revisions do not raise it.
-For histories with completed messages followed by hidden entries, usable loaded
-metadata and eligible unloaded certificates give the same unread result as the
-legacy route.
-A hidden append can still invalidate an unloaded certificate because consumed
-progress no longer matches current raw history; an unavailable reading remains
-omitted, without a raw-progress fallback. See [thread summary eligibility](#conversations).
+`latest_entry_id` retains its legacy list meaning until its separate retirement
+in #3722. The read handler uses shown-thread authority independently.
 
-The registry resolves the conversation **before** its history is read, so an
-unknown or empty id never reaches the history store. The compare, the save and
+The registry resolves the conversation **before** shown evidence is consulted,
+so an unknown or empty id never reaches the provider. The compare, the save and
 a failed save's revert all happen in one locked step, the same precedent the
 conversation↔session rebind sets for a mutate-and-persist that must not be
 observed half-done: a failed save restores the in-memory mark rather than
@@ -2544,7 +2578,7 @@ best-effort-`Save` shape** — a mute flag that fails to persist is merely stale
 until the next successful write, where an unpersisted read mark acknowledged
 as advanced would desync the registry from what every client was just told.
 
-Every request that names a known conversation gets a correlated
+Every successful request gets a correlated
 `conversation_updated` reply carrying the stored `read_up_to` — **including a
 no-op**, so a client always learns the mark actually on disk, not only the
 one it asked for. **Only an actual advance is also pushed**, uncorrelated,
@@ -2561,7 +2595,7 @@ message that echoes no payload byte:
 |---|---|---|
 | `up_to` missing, `null`, or fails the uint64 decode | `protocol.malformed` | no |
 | unknown or empty `conversation_id` | `conversation.not_found` | no |
-| the conversation's history could not be read | `history.unavailable` | yes |
+| shown-thread authority is missing or unavailable, even for a no-op | `history.unavailable` | yes |
 | the advance could not be saved | `read_mark.unavailable` | yes |
 
 A `read_mark.unavailable` reply leaves the held mark exactly where it was
@@ -5196,7 +5230,7 @@ Each element of `models`:
 - **The session is busy.** The frame is classed droppable at the daemon's fan-in, so a loaded session can refuse it. **Missing it is not an error**: nothing is retried, and no error frame says a menu was lost.
 - **No interactive connection exists at that instant.** The emit fans out to the connections that are open and interactive-granted right then; a client connecting a moment later receives nothing from this path, and depends on the reconcile below instead.
 
-**Two things that used to be loss points no longer are (#2739).** Every event is now attributed to the conversation its own session is bound to, not to whichever conversation holds the daemon's cursor. The bootstrap child's menu is therefore **not** lost when it spawns before any conversation is routed — the bootstrap session is itself bound to the bootstrap conversation from startup, so the menu reaches that conversation's event ring and durable history immediately, and a client can read it later from [`request_history`](#request_history) even though it never saw the live frame. And a **session rotation now delivers a fresh menu**: the rotated child's events are attributed to the conversation that rotation belongs to, stamped with that conversation's id, the same as any other live frame.
+**Two things that used to be loss points no longer are (#2739).** Every event is now attributed to the conversation its own session is bound to, not to whichever conversation holds the daemon's cursor. The bootstrap child's menu is therefore **not** lost when it spawns before any conversation is routed — the bootstrap session is itself bound to the bootstrap conversation from startup, so the menu reaches that conversation's event ring and durable history immediately, and a client that missed the live frame can recover current menus through [supplied live-state reconciliation](#session-scoped-live-state-v2-supplied-delivery-contract) or an explicit [`request_model_list`](#asking-for-a-model-list-on-demand). Raw history queries are retired. And a **session rotation now delivers a fresh menu**: the rotated child's events are attributed to the conversation that rotation belongs to, stamped with that conversation's id, the same as any other live frame.
 
 What reliably arrives is the case #1845 proves end to end: a child spawned **while a conversation is already routed and a client is connected** — a respawn after the child died, for instance.
 
@@ -5402,8 +5436,10 @@ to the conversation its own session is bound to (#2739) and reaches that
 conversation's event ring and durable history as soon as it is admitted — including
 the bootstrap child's report, before any client has routed a message to the
 bootstrap conversation — so a client attaching to an already-running daemon can
-still read it from [`request_history`](#request_history) even though it never saw
-the live frame. A failed request attempt is not retried for that child. A client
+recover supported conversation content through
+[Thread query messages](#thread-query-messages). Raw stored status frames have
+no independent history-query endpoint; current MCP readings use
+[`request_mcp_status`](#asking-for-mcp-status-on-demand). A failed request attempt is not retried for that child. A client
 must not interpret absence from the live lane as either success or an empty server
 list — delivery still depends on an interactive connection being open at that
 instant. An on-demand request uses the separate contract below and never turns
@@ -7803,157 +7839,48 @@ Example, a `multi_agent` conn addressing a resolved Codex session:
 
 ### Conversation history (v2)
 
-Scroll-back. A client that opens an existing conversation sees only what arrived
-after it connected; this pair of frames is how it asks for what came before.
-Declared by **#2113**.
+Conversation content recovery uses [Thread query messages](#thread-query-messages):
+`thread_catch_up` obtains a bounded newest window or catches up from a completed
+checkpoint, and `thread_page` retrieves older thread items. Use their successful
+completion markers, bounds and continuation rules; a reconnect alone does not
+fetch older content. [ADR 042](knowledge/decisions/042-daemon-built-thread.md)
+defines the daemon-built thread contract.
 
-**This is not [Mode A](#reconnect--backfill-semantics).** The `last_event_id`
-replay below is catch-up across a *dropped connection*, over a bounded in-memory
-ring that is empty after a daemon restart. History is a **daemon-owned log on
-disk**, landed in #2112, and it survives restarts. The two answer different
-questions and a client uses both.
+**Raw history queries are retired (#3715).** `request_history` is no longer an
+inbound control type, and the daemon emits no `history_page` reply. The old
+`backfill_since` / `message_chunk` / `backfill_done` content-recovery vocabulary
+is also retired. None is a fallback for thread recovery.
 
-**The daemon answers `request_history` as of #2116**, which minted the four
-`history.*` reject codes this section's [Rejects](#rejects) had published the
-*conditions* for. The verb was declared one ticket ahead of its handler for the
-reason `attachment_chunk` (#1752) and `request_attachment` (#2052) were: the wire
-string is the contract, two client tickets were already written against this
-section rather than against the handler, and a name chosen twice is a name chosen
-wrong once.
+An authenticated, well-formed literal `request_history` receives an `error`
+correlated by `in_reply_to`, with exactly this payload:
 
-#### How a walk works
+```json
+{"code":"protocol.unknown_type","message":"unknown envelope type","retryable":false}
+```
 
-**Paged, newest-first, walking backwards.** A client opens a conversation at its
-most recent entries and asks for older ones as the operator scrolls up. It never
-reads forward from the beginning.
+The request payload is not interpreted and no history or conversation membership
+is consulted. Malformed envelopes retain the generic `protocol.malformed`
+rejection; `payload_encrypted: true` retains `protocol.unsupported` precedence.
+No retirement-specific error or successful empty page is returned.
 
-**A walk terminates on `at_start`, never on an empty `entries` list.** A page that
-fills *exactly* at the log's first entry reports `at_start` **false** with a
-usable `cursor`; the call after it returns no entries with `at_start` **true**.
-`cursor` is empty whenever `at_start` is set, so the two are never both
-meaningful. A client that stops when a page comes back empty is *usually* right
-and is wrong exactly at the boundary — which is why all three page shapes are
-committed as fixtures under `internal/protocol/testdata/` rather than left to
-inference.
+**Source history remains.** The daemon still appends durable per-conversation
+facts, and `internal/thread` folds those records into thread items. Storage
+paging/walk APIs, legacy live/replay publication and receipts, and list/read
+watermarks remain separate contracts. `history.unavailable` remains the shared
+retryable failure for `list_conversations` and `mark_conversation_read`.
 
-**A short page is not an end-of-log signal.** See [Page size](#page-size) below.
+#### A history entry
 
-#### `request_history`
-
-Direction **phone → binary** (inbound v2 control; not in `v1TypeSet` — an old
-phone never sends one, and `IsKnownAppType` rejects it, which is the structural
-bar against a v1 client pushing one into the application dispatch chain).
-
-**Every field is client-asserted.** This frame travels in one direction only, so
-unlike `attachment_chunk` there is no leg on which its fields are daemon-authored
-and no provenance to disambiguate.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `conversation_id` | string | The conversation whose history is wanted. A **lookup key validated against the daemon's own registry before it resolves anything**, never a value trusted as sent — and **naming a conversation here is not authorization**. The same rule [`request_attachment`](#request_attachment) publishes with its own `conversation_id`, and the same lowercase-UUIDv4 shape. The daemon serves the conversation the *authenticated session* is entitled to, and the name is how the client says *which*, not *whether*. |
-| `cursor` | string | The position handed back by the previous page, echoed **verbatim**. **Empty means "start at the newest"** — the first ask of a walk has nothing to echo yet, so empty is the normal opening value and not a missing one. See [The cursor](#the-cursor). |
-| `limit` | number | How many entries the client wants. **`0` — sent as zero, or omitted — asks the daemon to choose**, and never means "zero entries". See [Page size](#page-size). |
-
-**All three keys are always present** (no `omitempty`), so a decoder may rely on
-all three. **Correlation rides `in_reply_to`, so there is no request-id key** —
-the decision [`attachment_stored`](#attachment_stored) already took.
-
-##### The cursor
-
-**Opaque.** The daemon mints it, the client stores it and hands it back
-unexamined. It names a position in an **append-only** file rather than an offset
-or a page number, both of which an append landing while the operator scrolls
-would invalidate. A client MUST NOT parse one, and the daemon's `parseCursor` is
-the only thing anywhere that does.
-
-**Opacity is a convention, not a security primitive**, and reading it as one is
-the mistake this paragraph exists to prevent. A cursor is **not a secret and not a
-capability**: the encoding is trivially reversible and what it carries is the
-conversation id the client already knows. It is bound to that conversation when it
-comes back, and it is deliberately **unsigned** — a MAC would imply an
-authorization it does not carry. Authorization is **pairing**, enforced
-structurally at the Noise IK handshake, exactly as for every other verb here.
-
-A cursor that does not decode, was minted for a different conversation, or names a
-position no longer in the log is refused with **one merged answer**, and the
-refusal never echoes the cursor back. The distinctions are exactly what a probe
-would want, so a client that cannot tell them apart cannot leak them.
-
-##### Page size
-
-`limit` is a **request, not a guarantee**, and three separate rules narrow it:
-
-- **`0` means "you choose."** The daemon substitutes its own page size. This is why
-  an absent key is safe: a client that omits `limit` gets a sensible page rather
-  than an error, where a literal zero reaching the log would be refused.
-- **A large ask is clamped, not refused.** The ceiling is `history.MaxPageEntries`
-  — **4096** entries as of #2112. Asking for more is not an error; it is silently
-  narrowed.
-- **The clamp bounds a *count*, not *bytes*.** Nothing bounds a stored entry's
-  payload, so a full page can exceed the
-  [application-envelope cap](#application-envelope-size-cap) and be undeliverable
-  as the daemon's **own** outbound frame. The daemon may therefore return **fewer
-  entries than asked for** to fit it.
-
-So: **a client reads the reply's actual entry count and never assumes its ask was
-honoured**, and — the consequence that matters — **never infers "short page ⇒
-start of log"**. Byte-driven truncation is safe *only* because termination is
-`at_start`. A negative `limit` is a reject
-([`history.invalid_page_size`](#error-codes)).
-
-**How the daemon budgets the bytes (#2116).** Three things a client may rely on:
-
-- **A page that would not fit is re-asked, never truncated.** The daemon measures
-  the marshalled envelope, and when it is over the cap it asks its log again for a
-  smaller page rather than dropping entries from the one it already has. That is
-  not an implementation note: a page's `cursor` names the position just before the
-  **oldest entry the page carries**, so shortening a page while keeping its
-  original cursor would make the *next* ask skip exactly the dropped entries. The
-  guarantee is that **a walk visits every entry exactly once even when every page
-  is shortened**.
-- **`at_start` is never set by the shortening.** It always reports what the log
-  said for the size actually served, so a short page still says nothing about
-  whether the log continues.
-- **The daemon narrows a large ask before reading, too.** No page above roughly
-  1365 entries can serialise inside the cap whatever it contains, so an ask far
-  above that is narrowed before any segment is opened. This is invisible to a
-  client — it is the same "fewer entries than asked for" the rule above already
-  permits — and it is why the count ceiling and the byte ceiling are two separate
-  narrowings rather than one.
-- **One entry that cannot fit is still sent.** Nothing bounds a stored entry's
-  payload, so an entry can exist that no page can carry. The daemon emits it
-  anyway and the transport answers `message.too_long`; refusing would strand the
-  walk with the client never receiving a cursor to step past it.
-
-#### `history_page`
-
-Direction **binary → phone**. The answer to one `request_history`: one backward
-step of a walk, **correlated by `in_reply_to`**.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `entries` | array of [entry](#a-history-entry) | This page's entries, **newest-first**. Always present; an empty page carries `[]` and never `null` or an omitted key. |
-| `cursor` | string | The position to ask with next, opaque. **Empty whenever `at_start` is true.** |
-| `at_start` | bool | The start of the log was reached while filling this page. **The only termination signal.** |
-
-**It carries no `conversation_id`**, and that is a decision rather than an
-omission — the shape [`session_settings`](#session-settings-v2) already takes for
-the same reason. The client knows which conversation it asked about because it
-knows which envelope this answers, so it keeps its outstanding asks keyed by
-envelope id. Nothing in a page is echoed back from the request.
-
-##### A history entry
-
-One entry is **one wire envelope's worth**: a wire type, its payload, a timestamp
-and a durable entry id. That is what makes history renderable without a second
-mapping — a client re-reduces a loaded page **oldest-first** through the same
-timeline reducer it already runs for the live stream.
+A source entry stores a type, payload, timestamp and durable entry ID, plus
+optional visibility and session metadata. It is an internal record consumed by
+thread folding, not an independently queryable wire envelope. The retained
+legacy live/replay receipt projection below does not expose raw records.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | number | The **durable, per-conversation** entry id. Monotonic within one conversation's log and **stable across daemon restarts**. |
-| `type` | string | The eligible stored wire type, or `banner` for a validated runtime receipt. |
-| `payload` | object | Eligible stored payload bytes unchanged, or the nonvisual receipt shape below. |
+| `type` | string | Stored fact or event type; the legacy live/replay projection uses `banner` for a validated runtime receipt. |
+| `payload` | object | Original stored payload bytes; the legacy receipt projection substitutes the nonvisual shape below. |
 | `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
 
 **Known runtime, queued-send and remote prompt-answer facts use nonvisual receipts (#3026, #3167, #3222).**
@@ -7961,7 +7888,7 @@ timeline reducer it already runs for the live stream.
 `session_divider`, validated
 [agent/task facts](knowledge/features/history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
 `send_accepted`, `send_delivered`, `send_dropped`, `send_lost` and validated remote
-`prompt_answered` facts project into legacy history as `type: "banner"` with this
+`prompt_answered` facts project into legacy live/replay delivery as `type: "banner"` with this
 payload (all five keys are required and nonnull):
 
 ```json
@@ -8021,16 +7948,14 @@ accounting. Malformed, foreign, unknown-source/decision, missing-field and
 unidentified facts remain holes. The receipt contains only the five banner
 fields above, never decisions, prompt/question/tool context, raw answers,
 correlation/session identities or provenance. Raw `prompt_answered` payloads
-remain excluded from legacy history, live delivery and replay.
+remain excluded from legacy live delivery and replay.
 
 Unchanged mobile decoding/reduction understands this info banner as nonvisual
 accounting. It draws no content and changes no turn, permission, model or status
 state. Accounting grants no presentation of unseen content. Unknown, malformed
 or unidentified receipts and unaccounted holes remain read-evidence barriers;
-an all-receipt page cannot establish sight. The projection consumes exactly one
-bounded raw page and preserves its raw-page limit, opaque `cursor` and
-`at_start`, including receipt-only and mixed valid/invalid pages; it never scans
-ahead to fill a page after excluding facts.
+receipt arrival alone cannot establish sight. These live/replay receipts do not
+restore the retired raw history endpoint.
 
 **A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
 After a successful append, interactive-turn emission, session-transition
@@ -8049,7 +7974,7 @@ receipt enqueued before placement can proceed; the delivered user message
 precedes its linked delivery receipt in serialized publication. Ordinary and send-now delivery preserve that
 chronology through delayed echo/idle confirmation, and later confirmation adds
 no message or receipt. Startup reconciliation receipts, including `send_lost`,
-are available through history, without populating the
+remain durable source facts for thread folding, without populating the
 ring or sending live frames. Existing recipient and agent/isolation gates apply.
 Channel posts still omit it; ordinary `session_transition` frames are not
 ring-replayed. Use it as
@@ -8060,8 +7985,8 @@ absent or failed history storage, and non-history-backed frames (live or replaye
 omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
 and existing ring recording proceed even when history cannot be appended;
 failed or absent storage cannot mint a runtime, queued-send or prompt-answer
-receipt. Obtain a durable target only with presentation evidence, using a served
-entry's `id`; a list watermark alone is not a read checkpoint.
+receipt. Obtain a durable target only with presentation evidence, using the original
+durable identity; a list watermark alone is not a read checkpoint.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -8071,7 +7996,8 @@ both look like small integers, and a client must not join them.
 **This same durable id space is what `read_up_to` and `latest_entry_id` are stated
 in (#2779).** [`list_conversations`](#list_conversations)'s `conversations` reply
 reports the newest visible conversational-content entry as `latest_entry_id`
-using the shared [list/read content policy](#marking-a-conversation-read).
+using the legacy list content policy below. Read acknowledgements use
+[authoritative shown-thread evidence](#marking-a-conversation-read) independently.
 Explicit `shown: false` vetoes content; absent metadata uses the same payload-aware
 classification as producer metadata, and explicit true cannot promote hidden
 metadata or unknown types. Unknown vocabulary defaults to non-content. Hidden
@@ -8082,11 +8008,10 @@ Empty/hidden-only histories have target zero, and hidden restart appends preserv
 the read/unread result after reopening. Visible interruption/loss notices may
 still raise it.
 
-**History pages still contain eligible hidden/status entries and validated
-runtime receipts, all with their original durable IDs.** Neither `shown` nor
-session metadata is serialized on this legacy route. Raw history, metadata,
-receipt delivery/accounting and raw store watermark APIs retain their contracts.
-Both that reply and
+Source history retains hidden/status entries and original durable IDs, including
+visibility and session metadata. Legacy receipts disclose neither metadata nor
+raw fact payloads. Receipt delivery/accounting and raw store watermark APIs retain
+their contracts. Both that list reply and
 [`conversation_updated`](#conversation_updated) report `read_up_to`, the host
 operator's durable read mark, in the same space — a position among these durable
 ids, never a count of entries and never a connection's
@@ -8096,8 +8021,8 @@ same value, raised by [`mark_conversation_read`](#marking-a-conversation-read)
 (#2780).
 
 **Raw storage accepts arbitrary type strings; legacy transports use a closed
-projection.** A client MUST still tolerate an entry type it does not recognise
-rather than treating it as a protocol violation, but must not certify that entry
+projection.** A legacy client MUST still tolerate a live/replay type it does not recognise
+rather than treating it as a protocol violation, but must not certify it
 as harmless read accounting — the same forward-compatibility rule this document
 applies to unknown fields does not grant presentation evidence.
 
@@ -8114,7 +8039,7 @@ turn named any (#2596).** Same optional field, same key and element shape as
 [`send_message`](#send_message)'s own `attachment_ids` — the daemon carries
 forward the ids it already resolved for that turn, deduplicated to first
 occurrence, so a second client (or one that dropped its upload from cache)
-learns from history alone that a file exists and can fetch it with
+can learn the file identity through thread recovery and fetch it with
 [`request_attachment`](#request_attachment). **Omitted, not `null` or `[]`,
 when the message named none** — every entry stored before this ticket, and
 every attachment-less turn after it, decodes byte-identical to today, and an
@@ -8141,164 +8066,23 @@ client's clock may be wrong. An entry stored before this ticket, and one from
 an older client or a connection with no paired-device record, carries none of
 the three — same omitted-key contract as `attachment_ids` above.
 
-##### Joining a page to the live stream
+#### Legacy receipt identity
 
-A client that has just opened a conversation does two things at once: it asks for
-the newest page, and it receives the live stream. **The two must meet with no gap
-and no duplicate**, and an entry appended between the ask and the answer arrives
-on both.
+Live and replayed history-backed events retain the original successful append's
+`history_entry_id`, payload and timestamp. Join by conversation and durable ID;
+connection `id`, ring `event_id` and thread version are different namespaces.
+Several receipts can share both timestamp and banner bytes, so (`type`, `ts`)
+cannot distinguish their durable identities. For eligible legacy events without
+a durable ID, (`type`, `ts`) plus payload comparison can reconcile live/replay
+duplicates, but cannot certify a durable receipt or read target.
 
-**When present, join the live or replayed `history_entry_id` to the page entry's
-`id`, within the same conversation.** The direct live producer paths above share the
-successful append's id with their envelopes, so this join uses durable identity.
-History-backed ring replay retains that same id, payload and timestamp, even for
-an event emitted with no connected recipient; replay creates no new history entry.
-The pair (`conversation_id`, `history_entry_id`) also identifies the same entry
-across devices and daemon restarts.
-
-This join also applies to known runtime, queued-send and validated remote
-prompt-answer info-banner receipts, including `send_accepted`, `send_delivered`,
-`send_dropped`, `send_lost` and `prompt_answered`:
-receipts published while running carry the same projected bytes, original
-durable ID and timestamp in history, live publication and reconnect replay.
-Startup loss is page-only. These banners provide the same client accounting
-on every lane. The daemon's latest/clamp target instead follows the raw fact's
-content classification and explicit-false veto; receipt eligibility alone
-cannot make hidden content unread.
-Repeated or overlapping delivery accounts for that ID once, duplicates no
-content and cannot lower latest/read marks or grant additional sight. Do not
-derive harmlessness from a missing receipt: unknown/malformed/unidentified
-receipts and unaccounted holes remain barriers even when a later completed reply
-has been presented. Received durable identity enables joining and deduplication;
-a validated receipt accounts for its ID; explicit foreground presentation
-establishes sight; a correlated `conversation_updated.read_up_to` establishes the
-daemon-confirmed persisted mark. These are separate facts.
-Prompt-answer receipts on every lane come from the
-[original-resolution validation](#a-history-entry); raw answers and missing
-provenance never acquire authority from
-current routing or stored visibility. A winning successful append supplies the
-same receipt identity for disconnected replay; nil/failed storage and
-duplicate/losing resolutions supply none. Receipt accounting never advances a
-read mark or grants presentation of the answer or reply.
-Fetched pages and replay alone establish no presentation. The
-[completed-turn controls](#marking-a-conversation-read) compare client-derived
-latest, presented checkpoint and confirmation across all three lanes.
-Mobile [#2098](https://github.com/pyrycode/pyrycode-mobile/issues/2098) retains
-its pending live notification gate: real Claude completion while backgrounded,
-real FCM, exactly one alert, independently fetched private reply preview,
-public redaction and owning-thread tap. Deterministic daemon accounting does
-not replace that gate.
-
-Each history request projects one bounded raw page with its original IDs,
-timestamps, opaque `cursor`, raw-page limit and `at_start`. Receipt-only,
-mixed valid/invalid, repeated and overlapping pages retain those bounds;
-projection never scans ahead to replace filtered facts. Use `at_start` to
-terminate paging, since an empty projected page need not be the beginning.
-Keep one page per physical pull; page arrival does not itself request another
-catch-up page or grant sight. Startup `send_lost` receipts have no live/replay
-backfill; history supplies their durable identities.
-
-**Without `history_entry_id`, fall back to (`type`, `ts`).** An entry in a page
-and its twin on the live or replay lane carry the same `type` and the same `ts`,
-so a client reconciles on that pair within the conversation. This remains needed
-for older daemons and non-history-backed frames, including channel-post replay.
-An absent or failed history append may
-leave no stored twin to join at all; obtain a durable read-mark target from
-history together with presentation evidence rather than substituting either
-live counter or treating a list watermark as sight. Runtime receipts always
-require successful durable identity; the fallback cannot certify one without it.
-
-Why not the obvious candidates, each of which fails on some entry:
-
-- **Not the live envelope's `id` or `event_id`.** The first is a connection
-  counter; the second is the in-memory ring's, per-process and reset by a restart.
-  Neither shares the durable log's namespace. The producer of
-  `session_transition` skips the ring entirely, so its live frame carries no
-  `event_id` at all.
-- **Not `turn_id` + `seq`.** Only turn-scoped payloads carry `turn_id`;
-  `turn_state`, `stall`, `api_retry`, `compacting` and `session_transition` carry
-  none — and `session_transition` is precisely the type the log is the *only*
-  retention for.
-
-**The fallback applies to eligible legacy events.** Their timestamp is captured
-once above per-connection fan-out and shared with the durable entry; payload
-bytes match across history and live/replay. Compare payload bytes when resolving
-a possible (`type`, `ts`) collision. Runtime receipts require the durable join:
-multiple closures and their divider can share an occurrence timestamp and the
-same empty banner payload, so neither (`type`, `ts`) nor payload bytes can
-distinguish their original durable IDs.
-
-#### Rejects
-
-The **conditions** were published with the verb; their **codes are #2116's**,
-minted with the handler. No new code is invented ahead of the code that would send
-it — the rule [`attachment_chunk`](#attachment_chunk) states, and #2112's own
-security review assigns the sentinel-to-wire-code mapping to that ticket in as
-many words. A request is refused when:
-
-- the `conversation_id` is not of canonical shape, or names no conversation in the
-  daemon's registry → **`conversation.not_found`**. One condition, one gate: the
-  daemon's registry holds canonical ids only, so a malformed id fails membership
-  and needs no separate shape check. **An existing code rather than a fifth new
-  one, and the answer is deliberately distinguishable** from the cursor's — the
-  opposite of [`request_attachment`](#request_attachment), which merges an unknown
-  conversation into `attachment.not_found` to avoid a path-existence oracle over a
-  *second* id. There is no second id here, and
-  [`request_snapshot`](#request_snapshot) already answers a foreign conversation
-  distinguishably;
-- the `limit` is negative (**`0` is not a reject** — it asks the daemon to choose)
-  → **`history.invalid_page_size`**;
-- the `cursor` does not decode, was minted for another conversation, or names a
-  position not in this log → **`history.invalid_cursor`**, **one merged answer**,
-  per [The cursor](#the-cursor);
-- the payload does not decode → **`history.invalid_request`**. **A decode failure
-  is a rejected frame, never an empty-but-successful request.** Every key is
-  optional to a JSON decoder, so a truncated or hostile payload decodes to an empty
-  conversation id, which names nothing — and a receiver must not join it into a
-  path, where an empty component resolves to the log **root** rather than erroring;
-- the daemon cannot read the log → **`history.unavailable`**, the one **retryable**
-  member of the group. It is not in the list above because it is not a fault in the
-  request: a corrupt segment, an I/O failure, or a log that is wired but not open
-  all clear without the client changing anything.
-
-**A conversation the daemon no longer hosts has no reachable history**, and that
-is the fail-safe direction rather than a gap being papered over. Deleting a
-conversation, and the idle sweep, both drop it from the registry while **its log
-stays on disk** — the log has no delete, remove or archive operation at all. The
-membership gate above then answers `conversation.not_found` for it forever. So
-the residue is **on-disk only**: unreachable over this wire, and removed by
-whatever eventually reclaims the instance directory. This is the durable form of
-the same gap #1502 records for the in-memory replay ring.
-
-Both client-supplied strings are **loggable only after their shape is validated**,
-the rule this document already applies to an attachment's `filename`.
-
-```json
-{
-  "id": 140, "type": "request_history", "ts": "...",
-  "payload": {
-    "conversation_id": "3f8b1c04-9d27-4e5a-b6c1-2e9f70d8a413",
-    "cursor": "", "limit": 50
-  }
-}
-```
-
-```json
-{
-  "id": 812, "type": "history_page", "ts": "...", "in_reply_to": 140,
-  "payload": {
-    "entries": [
-      {"id": 412, "type": "assistant_delta", "payload": {"...": "..."}, "ts": "..."},
-      {"id": 411, "type": "send_message", "payload": {"...": "..."}, "ts": "..."}
-    ],
-    "cursor": "MS4zZjhiMWMwNC05ZDI3LTRlNWEtYjZjMS0yZTlmNzBkOGE0MTMuNy40MDk2",
-    "at_start": false
-  }
-}
-```
-
-The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, with
-`entries` either populated or `[]`.
+Received identity enables joining, a validated receipt accounts for its ID,
+foreground presentation establishes sight, and a correlated
+`conversation_updated.read_up_to` confirms persistence. Unknown, malformed or
+unidentified receipts and unaccounted holes remain barriers. Neither receipt
+arrival, replay nor a fetched thread query establishes presentation. Startup
+`send_lost` facts remain source history without live/ring publication; clients
+recover content through [Thread query messages](#thread-query-messages).
 
 ## Hosted apps (v2)
 
@@ -8755,9 +8539,9 @@ see [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
 
 ## Reconnect / Backfill semantics
 
-**Connection mode:** the legacy two-mode behavior below is unchanged for peers
-without `thread`, including raw `request_history`. A thread connection instead
-reconciles supplied current live state through the
+**Connection mode:** the legacy two-mode replay/control-state behavior below
+remains for peers without `thread`. Raw `request_history` is retired for every
+connection. A thread connection reconciles supplied current live state through the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
 including inactive retry/compaction and outstanding answerable prompts/questions.
 Its catalog snapshot also resolves registered targets without their own retained
@@ -8804,10 +8588,10 @@ only its bounded read; changed `rev` or epoch-scoped `subtree_version` makes
 cached detail stale and requires explicit refresh. Expansion does not advance
 the compact recovery checkpoint or subscribe descendants to live delivery.
 This per-connection replacement preserves simultaneous
-legacy peers; daemon-wide removal of replaced events, the replay buffer, resync
-and raw history pages belongs to
-[ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order),
-after raising the minimum app version. The durable log remains.
+legacy peers; daemon-wide removal of replaced events, the replay buffer and
+resync belongs to
+[ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order).
+Raw history pages are already retired (#3715). The durable log remains.
 
 Every reconnect performs a fresh Noise_IK handshake (there is no session resumption in v2), and on every (re)connection the daemon brings the client back to **current truth**. For legacy connections, reconciliation runs in **two modes, keyed on the kind of data — not on how long the client was away**. The axis of difference is data type, not outage length: the interactive event stream keeps a cursor backfill; control state is always a cheap current-state snapshot.
 
@@ -8818,7 +8602,10 @@ Every reconnect performs a fresh Noise_IK handshake (there is no session resumpt
   - **Bounded per conversation.** Each conversation retains at most `MaxEventsPerConversation` = **1024** events, and the bound is **not a plain FIFO age-out**: the oldest `assistant_delta` is evicted first (deltas are lossy and coalescable per ADR 025) and control-class events are retained in preference. A position that has fallen off the window answers with a single `resync` marker rather than a partial, gap-ful replay.
   - **Daemon-resolved conversation only.** The daemon replays the conversation **its own** cursor names, never one the client names — `last_event_id` is a position, not an address, and a phone can never reach another conversation's events.
 
-**Mode A is still not history, and there is still no bulk-history backfill on this path.** A client that wants past messages the ring no longer holds gets none from a reconnect; the answer Mode A gives is a full reload of the conversation the `resync` marker names. What has changed since #2090 is that the request is no longer unaskable: real history — a daemon-owned log rather than a replay window — landed as `internal/history` in #2112, and [§ Conversation history](#conversation-history-v2) publishes the verb to ask with (#2113). **That verb is answered as of #2116**, so a client that wants past messages asks for them and receives a `history_page` reply to its own ask — never anything a reconnect pushes. The two are complementary and neither substitutes for the other: this mode recovers events missed while disconnected, that one walks backwards through what is on disk.
+**Mode A cannot recover content outside the ring or across a daemon restart.**
+Recover conversation content with [Thread query messages](#thread-query-messages),
+using explicit catch-up and older-page requests. There is no raw history or
+bulk-backfill endpoint to use after a `resync`.
 
 **Mode B — legacy control state → current-state snapshot (the reconcile-on-connect rule).** For connections without `thread`, control state reconnects by *re-asserting current truth*, replaying no past events:
 
@@ -8858,9 +8645,6 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `attachment.storage_failed` | yes, after a backoff | A verified attachment could not be written to the host (#1743, surfaced by #1744). Carries a **static** message — never the host path and never the underlying filesystem error, either of which discloses the daemon's layout. The host condition may not clear at all, so a client MUST back off and MUST NOT hot-loop the re-upload. |
 | `attachment.not_found` | no | An attachment id did not resolve to a file inside the named conversation's directory. **Both verbs, as of #2036**: a [`request_attachment`](#request_attachment) (declared by #2052, answered by #2054), and a [`send_message`](#naming-a-messages-attachments) whose `attachment_ids` names an id that does not resolve under the message's own conversation. One code rather than a second minted for the message path, because the predicate, the retryability, the static message and the client's repair are identical, and the merge argument below applies with *more* force to `send_message` — the cheaper probe of the two. **Deliberately indistinguishable** across an unknown id, an id whose canonical shape is invalid, and an id resolving outside that directory — a disclosure decision, not an imprecision: two codes would make the asking verb a path-existence oracle for a traversal probe. Nothing is lost by the merge, because all of those outcomes mean the same thing to a client — re-list the conversation's attachments — so there are no sub-cases to branch on. The message is static and never echoes the requested id or the resolved path; where a request names **several** ids it also **never says which one failed**, since a per-id answer would rebuild the oracle as a batch probe. |
 | `attachment.stream_aborted` | yes, after a backoff | The daemon abandoned a retrieval **mid-stream** — the stream is #2053's and the `error` frame reporting it is #2054's to emit. An `error` envelope correlated via `in_reply_to` (naming the [`request_attachment`](#request_attachment) that asked), never a second attachment frame. The client **MUST discard everything accumulated for that transfer** and MUST NOT present the partial bytes as the file — with no completion frame this is the only negative signal the stream has. A re-request re-runs the same resolution work, so retry after a backoff, never immediately. |
-| **`history.invalid_request`** | no | A [`request_history`](#request_history) whose payload did not decode (#2116). **A decode failure is a rejected frame, never an empty-but-successful request** — every key is optional to a JSON decoder, so a truncated or hostile payload decodes to an empty `conversation_id`, which names nothing and must never be joined into a path, where an empty component resolves to the log **root**. The message is static and echoes **nothing** from the payload: `encoding/json` quotes offending input into its error string, and those bytes are remote-authored. |
-| **`history.invalid_page_size`** | no | A [`request_history`](#request_history) whose `limit` is **negative** (#2116). **`0` is not a reject** — it asks the daemon to choose. An ask *above* the ceiling is not a reject either; it is clamped. See [Page size](#page-size). |
-| **`history.invalid_cursor`** | no | A [`request_history`](#request_history) whose `cursor` does not decode, was minted for another conversation, or names a position not in this log (#2116). **Deliberately indistinguishable** across all three — a disclosure decision, not an imprecision: the distinctions are exactly what a probe would want, and the daemon's log raises one sentinel for all three, so the handler *cannot* branch on what it must not distinguish. The refusal **never echoes the cursor back**. Repair: restart the walk with an empty cursor. |
 | **`model_list.unavailable`** | yes, after a backoff | A [`request_model_list`](#asking-for-a-model-list-on-demand) naming a conversation the daemon **does** host, for which it has **no model vocabulary to answer with** (#2125), or a [`set_session_settings`](#set_session_settings) whose non-empty model cannot be checked conclusively because the retained vocabulary is missing, empty, reports dropped rows, or contains any row whose `value` was truncated (#2281). **It is not an empty menu**, and that distinction is the reason the code exists: `models` is documented never-`null` and never a stand-in for "unknown", so "no list" has to be said in an `error` frame rather than in a degraded `model_list`. On the settings path it refuses the whole frame before persistence or live delivery. These incomplete-vocabulary causes deliberately share one code because the client's repair is identical and the dominant cause clears on its own: back off until a complete menu may have arrived, then retry. Contrast a model absent from a complete menu (`protocol.malformed`, permanent for that value) and `conversation.not_found` (permanent for that request). The message is the static `model list is unavailable` and names no model, conversation or path. |
 | **`mcp_status.unavailable`** | yes, after a backoff | An [`mcp_status_request`](#asking-for-mcp-status-on-demand) naming a conversation the daemon **does** host, for which the configured resolver has no current status (#2381), **the daemon's wait for it ran past its own bound, or this connection already had four other asks waiting (#2702)** — merged deliberately, since the client's repair is identical for every cause: back off and retry. **It is not an empty or retained snapshot**: the handler emits an error rather than fabricate or reuse an `mcp_status`, so the same request may be retried after the live source becomes available. The message is static and names no conversation, server, or resolver detail. |
 | **`context_usage.unavailable`** | yes, after a backoff | A [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) naming a hosted conversation has neither a fresh reading nor a remembered summary (#2431/#2461). Causes include no bound session, no live child outside rotation, an unusable reply, or expiry of the shared readiness/query budget (#3639). After turn-idle deferral, successor readiness and query share 30 seconds; repeated rotations do not renew it, and success belongs to the entitled successor. Timeout uses remembered fallback when present, preserving its original `as_of` and producer provenance without re-recording or relabelling it; supplied replies retain stale-source rejection. With no summary, this code is returned instead of a zero-valued `context_usage`. Causes deliberately share one code because the client's repair is identical and machine details are private. Refusals collapse for the same two-second window as success within one source generation. A connection's fifth concurrent deferred ask is also refused immediately. The message is static and names no conversation. |
@@ -8868,7 +8652,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`workspace.not_found`** | no | A [`rename_workspace`](#renaming-a-workspace) whose `path` matches no stored conversation's `cwd` (#2207). Comparison is **byte-exact** and includes archived conversations, so a near-miss — a trailing separator, a trailing space, a case difference — is a miss. **Not `conversation.not_found`**, and the distinction is the point rather than a naming preference: this request names no conversation at all, so the conversation code would send a client looking for a row it never asked about and could not act on. It applies to a **clear as much as to a set** — a `null` label at an unmatched path is refused, not silently accepted. Permanent for the request as sent: the same path fails identically until a conversation exists there, which is not something a retry accomplishes. The message is static and **never echoes the requested path**, which matters more here than on the conversation verbs because a path is a filesystem location on the daemon's host. |
 | **`pairing.not_permitted`** | no | A [`mint_pairing`](#mint_pairing) from a device that does not hold the daemon-side `allow_remote_permissions` flag (#2127). **Nothing is created** — the gate fires before the token is drawn, and the refusal is written to the daemon's audit sink as `denied_unauthorized`. **Not `auth.invalid_token`**, and the distinction is the group's defining decision: a frame reaching this handler has already presented a token the handshake validated, so an auth code would tell a legitimate client its credential was rejected and invite it to re-pair — the one repair that cannot help. The device is authenticated; what it lacks is privilege. **It is not an oracle**: it reports only that the asking device may not mint, a fact that device can already establish by answering any permission [modal](#modal-v2) and being denied, and it is not conditioned on the requested `device_name`, so it cannot probe which labels exist. Permanent for the device as paired — only `pyry pair --allow-remote-permissions` at a shell on the host changes it. |
 | **`pairing.unavailable`** | **yes** | A [`mint_pairing`](#mint_pairing) the host could not complete (#2127): a busy `devices.json` lock, a registry that could not be read or written, or a refusing CSPRNG. **The three causes are merged deliberately** — each can clear without the client changing anything, the repair is identical, and distinguishing them would publish facts about the machine rather than about the request. The underlying error formats an absolute host path and **never reaches the wire**; the message is static. |
-| **`history.unavailable`** | yes, after a backoff | The daemon could not read the conversation's log (#2116) — a corrupt or unrecognised segment, an I/O failure, or a daemon whose log is wired but not open. The **only retryable** member of this group, because every cause can clear without the client changing its request; the other three are permanent for the request as sent. **Back off; never resend immediately.** The message is static and names no path: the log's own errors format absolute filesystem paths, so no value derived from one reaches the wire. **Since #2779 the same code also answers [`list_conversations`](#list_conversations)**: an unwired history store, or a `latest_entry_id` lookup failure on any row that survives `multi_agent` filtering, refuses the whole reply rather than sending a list with that one row's value missing or wrong. |
+| **`history.unavailable`** | yes, after a backoff | Shared list/read failure: `list_conversations` cannot resolve a retained row's latest content ID, or `mark_conversation_read` cannot obtain authoritative shown-thread evidence, including an unwired provider or unavailable reading, even for a no-op. Known zero is valid authority. List failure refuses the whole reply rather than returning a row with a missing or incorrect target. Messages are static and disclose no host path or raw history error. Back off before retrying. This code does not restore raw history queries. |
 | **`new_session.workspace_refused`** | **no** | A [`new_session`](#new-session-v2) rotation whose conversation had a `change_workspace`-recorded workspace (#1475) that re-confinement refused at the spawn site — deleted, or re-pointed outside `$HOME` since it was recorded (#2443). **The rotation still completed**; only the successor's directory did not move, and this is the one condition under which the otherwise-silent `new_session` sends any reply at all — every inert arm, an accepted workspace, and `installSpawnDir`'s distinct later failure stay silent. Non-retryable: the same stored workspace fails identically until the operator repairs the folder or re-points it with `change_workspace`, which a retry does not accomplish (`workspace.not_found`'s reasoning). Carries the rotated conversation's id in `ErrorPayload.conversation_id`, since a bare frame names none of its own and `in_reply_to` alone cannot say which conversation the daemon rotated. The message is static and names neither the folder nor any other filesystem detail. |
 | **`client.update_required`** | **no** | The app build named by `hello.client_version` is older than this host's minimum for that app (#2578), or — once this build sets any minimum — the version could not be parsed at all. Non-retryable: the same build fails identically, and only an app update repairs it. The minimum travels in `ErrorPayload.min_client_version`, omitted when the version was unparsable (the daemon cannot tell which app's minimum would apply) or when this build sets no minimum for that app. See [Compatibility](#compatibility). |
 
@@ -9260,6 +9044,8 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-21`: **Retired raw conversation-history queries (#3715).** `request_history` now follows ordinary unknown-type rejection; `history_page`, endpoint-only payloads, fixtures and three `history.invalid_*` codes are removed. Content recovery uses [Thread query messages](#thread-query-messages). Durable source history, legacy live/replay receipts and shared list/read `history.unavailable` remain.
 
 - `2026-10-19`: Corrected thread update revision continuity (#3612): combined field/text changes now produce one atomic [`thread_item_changed`](#thread_item_changed) containing complete resulting content; suffix-only changes retain [`thread_text_append`](#thread_text_append). Both require held revision equal to `base_rev` and `rev > base_rev`, preserving fold/full-read revisions. Bounded continuation parts advance state only after complete logical assembly.
 

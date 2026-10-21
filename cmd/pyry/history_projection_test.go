@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
@@ -15,86 +14,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
-
-func TestHistoryProjection_BoundedWalk(t *testing.T) {
-	t.Parallel()
-	for _, allFiltered := range []bool{false, true} {
-		t.Run(fmt.Sprint(allFiltered), func(t *testing.T) {
-			dir := t.TempDir()
-			store := history.New(dir)
-			id := conversations.ConversationID(testConvID)
-			var want []history.Entry
-			shown := []*bool{nil, new(bool), new(bool)}
-			*shown[2] = true
-			for i := 0; i < 15; i++ {
-				typ := "synthetic_thread_fact"
-				if !allFiltered && (i == 0 || i == 6 || i == 14) {
-					typ = protocol.TypeAssistantDelta
-				}
-				raw := json.RawMessage(fmt.Sprintf(`{"text":"entry-%d"}`, i))
-				ts := historyTS.Add(time.Duration(i) * time.Second)
-				n, err := store.AppendWithMetadata(id, typ, raw, ts, history.Metadata{Shown: shown[i%3]})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if typ == protocol.TypeAssistantDelta {
-					want = append([]history.Entry{{ID: n, Type: typ, Payload: raw, TS: ts}}, want...)
-				}
-			}
-			for _, reader := range []*history.Store{store, history.New(dir)} {
-				pager := newHistoryPager(reader, discardLogger())
-				cursor := ""
-				var got []protocol.HistoryEntry
-				emptyPages := 0
-				for steps := 0; ; steps++ {
-					if steps >= 15 {
-						t.Fatal("walk did not terminate")
-					}
-					raw, err := reader.Page(id, cursor, 2)
-					if err != nil {
-						t.Fatal(err)
-					}
-					page := pager(testConvID, cursor, 2)
-					if page.Outcome != relay.HistoryPageOK || page.Cursor != raw.Cursor || page.AtStart != raw.AtStart {
-						t.Fatalf("raw/page cursor or outcome changed: %#v / %#v", raw, page)
-					}
-					expectedCount := 0
-					for _, e := range raw.Entries {
-						if e.Type == protocol.TypeAssistantDelta {
-							expectedCount++
-						}
-					}
-					if len(page.Entries) != expectedCount {
-						t.Fatalf("filtered page contains %d entries, want %d from this raw page", len(page.Entries), expectedCount)
-					}
-					if len(page.Entries) == 0 {
-						emptyPages++
-					}
-					got = append(got, page.Entries...)
-					if page.AtStart {
-						if page.Cursor != "" {
-							t.Fatal("terminal cursor is nonempty")
-						}
-						break
-					}
-					if page.Cursor == "" || page.Cursor == cursor {
-						t.Fatal("nonterminal empty page lost usable cursor")
-					}
-					cursor = page.Cursor
-				}
-				if emptyPages < 4 || len(got) != len(want) {
-					t.Fatalf("walk got %d entries and %d empty pages", len(got), emptyPages)
-				}
-				for i, e := range got {
-					w := want[i]
-					if e.ID != w.ID || e.Type != w.Type || !e.TS.Equal(w.TS) || !bytes.Equal(e.Payload, w.Payload) {
-						t.Fatalf("entry %d changed: %#v", i, e)
-					}
-				}
-			}
-		})
-	}
-}
 
 func TestHistoryProjection_UnknownEmitIsDurableOnly(t *testing.T) {
 	t.Parallel()
@@ -116,10 +35,7 @@ func TestHistoryProjection_UnknownEmitIsDurableOnly(t *testing.T) {
 			if len(events) != 0 || len(bcast.pushes) != 0 || bcast.callIdx != 0 {
 				t.Fatalf("fact entered legacy stream/replay: %d events, %d pushes", len(events), len(bcast.pushes))
 			}
-			page := newHistoryPager(history.New(dir), discardLogger())(testConvID, "", 10)
-			if len(page.Entries) != 0 || !page.AtStart {
-				t.Fatalf("fact entered legacy history: %#v", page)
-			}
+
 		})
 	}
 }
@@ -189,10 +105,6 @@ func TestHistoryProjection_InteractiveMetadata(t *testing.T) {
 				if keys["shown"] != nil || keys["session"] != nil {
 					t.Fatal("metadata leaked into payload")
 				}
-			}
-			page := newHistoryPager(store, discardLogger())(testConvID, "", 10)
-			if len(page.Entries) != 2 || page.Entries[0].ID != 2 {
-				t.Fatalf("hidden legacy event filtered: %#v", page)
 			}
 			want := uint64(1)
 			if tt.shown {

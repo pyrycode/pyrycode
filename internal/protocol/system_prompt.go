@@ -38,7 +38,7 @@ package protocol
 // structurally at the Noise_IK handshake, plus the negotiated interactive
 // capability the handler gates on.
 //
-// UNLIKE RequestHistoryPayload THE ID NEVER BECOMES A PATH COMPONENT. That single
+// THE ID NEVER BECOMES A PATH COMPONENT. That single
 // difference is why a decode failure is TOLERATED rather than rejected: it leaves
 // ConversationID empty, which resolves nothing and is answered with the constant
 // reply below, where an empty path component would have resolved to a directory

@@ -23,8 +23,8 @@ import (
 // The two inbound v2 dispatch surfaces (a verb correctly handled if in EITHER;
 // a verb in NEITHER is the #949 failure mode):
 //
-//  1. Map-dispatched — the V2SessionConfig.Handlers map literal in relay.go,
-//     consulted by dispatch.Route.
+//  1. Map-dispatched — the V2SessionConfig.Handlers map literal and subsequent
+//     entry assignments in startRelayV2, consulted by dispatch.Route.
 //  2. Switch-intercepted — the switch in V2SessionManager.dispatchAppFrame
 //     (internal/relay/v2session.go), which runs before dispatch.Route.
 //
@@ -177,16 +177,7 @@ var inboundTypes = map[string]string{
 	// The live workspace read verb (#2598). Declared and wired in one slice, so it
 	// never sat in excludedTypes; filed here for the reason the retrieval verb
 	// above is — its case tags the frame and hands it to the conn's appFrameWorker.
-	"TypeReadWorkspaceFile": "switch-intercepted",
-	// The conversation-history request verb (#2116), moved up from excludedTypes'
-	// "pending handler (#2116)" when dispatchAppFrame gained its case — the move
-	// that entry named in advance, and mandatory rather than tidy-up: Assertion #2
-	// fails a wired type left sitting in that map. Same filing as the two above
-	// and for the same reason: its case tags the frame and hands it to the conn's
-	// appFrameWorker, where the segment reads and the page marshal run off Run,
-	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
-	// TypeHistoryPage, is outbound-only and stays excluded.
-	"TypeRequestHistory":     "switch-intercepted",
+	"TypeReadWorkspaceFile":  "switch-intercepted",
 	"TypeThreadCatchUp":      "switch-intercepted",
 	"TypeThreadPage":         "switch-intercepted",
 	"TypeThreadReadToolBody": "switch-intercepted",
@@ -216,7 +207,7 @@ var inboundTypes = map[string]string{
 	// change the filing — it is recorded because a future edit that moves this arm
 	// off Run has an emit-path obligation (see handleRequestModelList's header).
 	// Its reply half is TypeModelList, which is outbound-only and stays excluded,
-	// exactly as TypeHistoryPage does for TypeRequestHistory.
+	// as with other correlated replies.
 	"TypeRequestModelList": "switch-intercepted",
 	// The on-demand MCP-status request verb (#2381). Its declaration and only
 	// relay consumer land together, and the switch tags it for the per-connection
@@ -388,20 +379,8 @@ var excludedTypes = map[string]string{
 	// entry is permanent and never moves to inboundTypes.
 	"TypeAttachmentOffered": "push",
 
-	// outbound reply — one backward step of a conversation-history walk (#2113),
-	// the answer to the request_history below. Filed on the same rule as its
-	// neighbours: correlation rides the envelope's in_reply_to, which is literally
-	// the definition this map gives above, and TypeSessionSettings is the shape
-	// copied — an outbound v2 answer to an inbound request verb that named a
-	// conversation and carrying no conversation id of its own. Mandatory from the
-	// moment the constant exists rather than from the moment something emits it
-	// (the producer is #2116): Assertion #3 reports an unclassified constant, not
-	// an unemitted one. Unlike its request half this frame has no inbound leg at
-	// all, so this entry never moves to inboundTypes.
-	"TypeHistoryPage": "reply",
-
 	// The conversation system-prompt read reply (#2152), the answer to the
-	// request_system_prompt below. Filed on the same rule as TypeHistoryPage above
+	// request_system_prompt below. Filed as a correlated reply
 	// and copying the same shape, TypeSessionSettings: an outbound v2 answer to an
 	// inbound request verb that named a conversation, correlated by in_reply_to and
 	// carrying no conversation id of its own. Unlike those two it lands in the SAME
@@ -588,22 +567,6 @@ var excludedTypes = map[string]string{
 	// unemitted one.
 	"TypeQuestionDismissed": "push",
 
-	// pending handler (#2116) — the conversation-history request verb (#2113).
-	// #2113 declares the constant, its payload and its published section; nothing
-	// dispatches it, so inboundTypes would fail Assertion #1, which requires an
-	// inbound type to be wired into the Handlers map or dispatchAppFrame. "push"
-	// is false for a genuinely inbound frame and filing it that way to dodge that
-	// assertion would be a lie to the guard rather than a classification — the
-	// reasoning the two removal notes below preserve for the entries that used to
-	// sit here.
-	//
-	// TypeRequestHistory is NO LONGER HERE. It sat here as "pending handler
-	// (#2116)" while #2113 had declared the constant and nothing dispatched it;
-	// #2116 added the dispatchAppFrame case, so it moved up to inboundTypes as
-	// "switch-intercepted", beside TypeRequestAttachment, which made exactly this
-	// move out of exactly this label. Its reply half is TypeHistoryPage above,
-	// which is outbound-only and never moves.
-
 	// TypeRequestAttachment is NO LONGER HERE. It sat here as "pending handler
 	// (#2054)" while #2052 had declared the constant and nothing dispatched it;
 	// #2054 added the dispatchAppFrame case, so it moved up to inboundTypes as
@@ -627,8 +590,7 @@ var excludedTypes = map[string]string{
 	// same move one step later, in #1897.
 
 	// outbound reply — the minted pairing (#2126), correlated by in_reply_to, so
-	// "reply" is literally the definition this map gives above. TypeHistoryPage's
-	// filing for TypeRequestHistory, and unlike its own request half this entry
+	// unlike its request half this entry
 	// NEVER MOVES: the frame has no inbound leg at all, so no dispatchAppFrame case
 	// will ever exist to move it. Mandatory from the moment the constant exists
 	// rather than from the moment #2127 emits it — Assertion #3 reports an
@@ -640,7 +602,7 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 	t.Parallel()
 
 	allAppTypes := toSet(appTypeConstNames(t, codesPath))
-	mapHandlerTypes := toSet(mapLiteralKeys(t, relayPath, handlersField))
+	mapHandlerTypes := toSet(handlerMapKeys(t, relayPath, "startRelayV2", "sessionConfig", handlersField))
 	switchTypes := toSet(switchCaseSelectors(t, v2sessionPath, dispatchFnName))
 
 	// registeredTypes is the real coverage: the union of both surfaces.
@@ -736,10 +698,9 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 //  3. The surfacer's question arm is fed that same identifier.
 //
 // Together those pin "one registry, minted once, read without retiring, shared by
-// the producer and the reconcile". The extractors below are new rather than calls
-// into mapLiteralKeys: that one matches a field whose value is a composite map
-// literal and runs every key through a protocol.Type* check, and this assignment is
-// a plain selector expression. parseGoFile and relayPath are the reusable parts.
+// the producer and the reconcile". The extractors below inspect selector-valued
+// config fields; handlerMapKeys instead inspects protocol.Type* keys in dispatch
+// maps. parseGoFile and relayPath are the reusable parts.
 //
 // Every extractor Fatals with an "update the guard" message when the shape it
 // expects is absent, following this file's convention — a moved surface must be
@@ -1078,16 +1039,42 @@ func appTypeConstNames(t *testing.T, path string) []string {
 	return names
 }
 
-// mapLiteralKeys returns the constant names used as keys of the composite-literal
-// map assigned to fieldName (Handlers) in the given file. It asserts exactly one
-// such literal and that every key is a protocol.Type* selector — any other shape
-// is a wiring change the guard must be taught about.
-func mapLiteralKeys(t *testing.T, path, fieldName string) []string {
+// handlerMapKeys returns keys from the fieldName map literal and subsequent
+// configName.fieldName entry assignments in funcName. Exactly one literal must
+// exist, and every key must be a protocol.Type* selector. Unrelated receivers
+// and functions cannot supply missing registrations.
+func handlerMapKeys(t *testing.T, path, funcName, configName, fieldName string) []string {
 	t.Helper()
 	file := parseGoFile(t, path)
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == funcName {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatalf("function %q not found in %s — did it move or rename? Update the guard.", funcName, path)
+	}
 	var keys []string
 	found := 0
-	ast.Inspect(file, func(n ast.Node) bool {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok {
+			for _, lhs := range assign.Lhs {
+				index, ok := lhs.(*ast.IndexExpr)
+				if !ok {
+					continue
+				}
+				field, ok := index.X.(*ast.SelectorExpr)
+				if !ok || field.Sel.Name != fieldName {
+					continue
+				}
+				config, ok := field.X.(*ast.Ident)
+				if ok && config.Name == configName {
+					keys = append(keys, protocolTypeSelName(t, path, fieldName, index.Index))
+				}
+			}
+		}
 		kv, ok := n.(*ast.KeyValueExpr)
 		if !ok {
 			return true

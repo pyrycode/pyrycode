@@ -106,12 +106,12 @@ func TestPromptAnswerReceiptsValidation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			page := newHistoryPager(store, discardLogger())(testConvID, "", 1)
-			if (len(page.Entries) == 1) != tt.valid {
-				t.Fatalf("entries=%d valid=%v", len(page.Entries), tt.valid)
+			page, _ := testLegacyReceipts(t, store)
+			if (len(page) == 1) != tt.valid {
+				t.Fatalf("entries=%d valid=%v", len(page), tt.valid)
 			}
 			if tt.valid {
-				e := page.Entries[0]
+				e := page[0]
 				if e.ID != id || !e.TS.Equal(ts) || e.Type != protocol.TypeBanner {
 					t.Fatalf("identity %#v", e)
 				}
@@ -140,114 +140,39 @@ func TestPromptAnswerReceiptsValidation(t *testing.T) {
 	}
 }
 
-func TestPromptAnswerReceiptsPages(t *testing.T) {
-	for _, mode := range []string{"completed-turn", "receipt-only", "mixed"} {
-		for _, visibility := range []string{"absent", "hidden", "shown"} {
-			t.Run(mode+"/"+visibility, func(t *testing.T) {
-				dir := t.TempDir()
-				store := history.New(dir)
-				conv := conversations.ConversationID(testConvID)
-				var shown *bool
-				if visibility != "absent" {
-					v := visibility == "shown"
-					shown = &v
+func TestPromptAnswerReceiptsReadTargets(t *testing.T) {
+	for _, visibility := range []string{"absent", "hidden", "shown"} {
+		t.Run(visibility, func(t *testing.T) {
+			dir := t.TempDir()
+			store := history.New(dir)
+			conv := conversations.ConversationID(testConvID)
+			var shown *bool
+			if visibility != "absent" {
+				v := visibility == "shown"
+				shown = &v
+			}
+			ts := time.Date(2026, 10, 12, 1, 2, 3, 4, time.UTC)
+			if _, err := store.AppendWithMetadata(conv, historyPromptAnswered, testPromptReceiptRaw(t, ts, nil), ts, history.Metadata{Shown: shown}); err != nil {
+				t.Fatal(err)
+			}
+			for _, reader := range []*history.Store{store, history.New(dir)} {
+				entries, _ := testLegacyReceipts(t, reader)
+				if testLegacyCheckpoint(entries, 0, 0, false) != 0 {
+					t.Fatal("receipt established presentation")
 				}
-				ts := time.Date(2026, 10, 12, 1, 2, 3, 4, time.UTC)
-				appendEntry := func(typ string, p any) {
-					t.Helper()
-					raw, err := json.Marshal(p)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if _, err = store.AppendWithMetadata(conv, typ, raw, ts, history.Metadata{Shown: shown}); err != nil {
-						t.Fatal(err)
-					}
+				if testLegacyLatest(entries) != 1 {
+					t.Fatal("receipt did not count toward legacy target")
 				}
-				if mode == "completed-turn" {
-					appendEntry(protocol.TypeToolUse, protocol.ToolUsePayload{ConversationID: testConvID, TurnID: "turn", ToolUseID: "tool", Name: "Bash"})
+				latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conv)
+				want := uint64(1)
+				if visibility == "hidden" {
+					want = 0
 				}
-				appendEntry(historyPromptAnswered, testPromptReceiptRaw(t, ts, nil))
-				if mode == "mixed" {
-					appendEntry(historyPromptAnswered, testPromptReceiptRaw(t, ts, func(f map[string]any) { delete(f, "correlation_id") }))
+				if err != nil || latest != want {
+					t.Fatalf("legacy latest=%d %v", latest, err)
 				}
-				if mode == "completed-turn" {
-					appendEntry(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: testConvID, TurnID: "turn", Text: "private reply"})
-					appendEntry(protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: testConvID, TurnID: "turn", StopReason: "end_turn"})
-				}
-				rawBefore := historyEntries(t, store, testConvID)
-				for _, reader := range []*history.Store{store, history.New(dir)} {
-					for _, limit := range []int{1, 2, 10} {
-						cursor := ""
-						accounted := map[uint64]bool{}
-						for {
-							raw, err := reader.Page(conv, cursor, limit)
-							if err != nil {
-								t.Fatal(err)
-							}
-							page := newHistoryPager(reader, discardLogger())(testConvID, cursor, limit)
-							if page.Cursor != raw.Cursor || page.AtStart != raw.AtStart || len(page.Entries) > len(raw.Entries) {
-								t.Fatal("raw boundary changed")
-							}
-							expected := make([]uint64, 0, len(raw.Entries))
-							for _, e := range raw.Entries {
-								if mode != "mixed" || e.ID != 2 {
-									expected = append(expected, e.ID)
-								}
-							}
-							ids := make([]uint64, 0, len(page.Entries))
-							for _, e := range page.Entries {
-								ids = append(ids, e.ID)
-							}
-							if !reflect.DeepEqual(ids, expected) {
-								t.Fatalf("page IDs=%v, raw projection=%v", ids, expected)
-							}
-							for _, e := range page.Entries {
-								accounted[e.ID] = true
-								if e.Type == protocol.TypeBanner {
-									testPromptReceipt(t, e.Payload)
-								}
-								if !e.TS.Equal(ts) {
-									t.Fatal("timestamp changed")
-								}
-							}
-							if page.AtStart {
-								break
-							}
-							if page.Cursor == "" || page.Cursor == cursor {
-								t.Fatal("cursor did not advance")
-							}
-							cursor = page.Cursor
-						}
-						for _, e := range rawBefore {
-							want := !(mode == "mixed" && e.ID == 2)
-							if accounted[e.ID] != want {
-								t.Fatalf("ID %d accounted=%v want=%v (limit %d)", e.ID, accounted[e.ID], want, limit)
-							}
-						}
-					}
-				}
-				if !reflect.DeepEqual(rawBefore, historyEntries(t, store, testConvID)) {
-					t.Fatal("raw history mutated")
-				}
-				if mode == "receipt-only" {
-					entries := newHistoryPager(store, discardLogger())(testConvID, "", 10).Entries
-					if testLegacyCheckpoint(entries, 0, 0, false) != 0 {
-						t.Fatal("receipt established presentation")
-					}
-					if testLegacyLatest(entries) != 1 {
-						t.Fatal("receipt did not count toward legacy target")
-					}
-					latest, err := (legacyHistoryReader{store}).LatestDisplayableEntryID(conv)
-					want := uint64(1)
-					if visibility == "hidden" {
-						want = 0
-					}
-					if err != nil || latest != want {
-						t.Fatalf("legacy latest=%d %v", latest, err)
-					}
-				}
-			})
-		}
+			}
+		})
 	}
 }
 
@@ -354,13 +279,13 @@ func TestPromptAnswerReceiptsPublication(t *testing.T) {
 				retire()
 				m.ResolveAnswer(id, "allow_once", "", eligibleDevice(t))
 				q.ResolveRefusal(protocol.QuestionRefusedPayload{QuestionBatchID: id}, eligibleDevice(t))
-				page := newHistoryPager(store, discardLogger())(testConvID, "", 10)
+				page, _ := testLegacyReceipts(t, store)
 				events, gap := ring.After(testConvID, 0)
-				if gap || len(events) != 1 || len(page.Entries) != 1 || len(historyEntries(t, store, testConvID)) != 1 {
+				if gap || len(events) != 1 || len(page) != 1 || len(historyEntries(t, store, testConvID)) != 1 {
 					t.Fatal("not exactly one durable/replay fact")
 				}
 				e := events[0]
-				h := page.Entries[0]
+				h := page[0]
 				testPromptReceipt(t, e.Payload)
 				if e.Type != protocol.TypeBanner || e.HistoryEntryID != h.ID || !e.TS.Equal(h.TS) || !bytes.Equal(e.Payload, h.Payload) {
 					t.Fatal("replay/history mismatch")

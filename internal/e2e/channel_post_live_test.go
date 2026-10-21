@@ -228,30 +228,22 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	if p.ExitCode != 0 {
 		t.Fatalf("acceptance failed: %s", p.Stderr)
 	}
-	requestHistory := func(req uint64, held bool) protocol.HistoryPagePayload {
-		t.Helper()
-		seal(protocol.Envelope{ID: req, Type: protocol.TypeRequestHistory, TS: time.Now().UTC(),
-			Payload: mustJSON(t, protocol.RequestHistoryPayload{ConversationID: convID})})
-		for {
-			env, ok := next(time.Now().Add(15 * time.Second))
-			if !ok {
-				t.Fatal("history page absent")
-			}
-			if held && (env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeTurnEnd) {
-				t.Fatalf("output crossed the held boundary: %s", env.Type)
-			}
-			if env.Type == protocol.TypeHistoryPage {
-				var page protocol.HistoryPagePayload
-				if err := json.Unmarshal(env.Payload, &page); err != nil {
-					t.Fatal(err)
-				}
-				return page
-			}
-		}
-	}
 	// The file gate proves the turn cannot finish during this observation window.
 	time.Sleep(350 * time.Millisecond)
-	for _, e := range requestHistory(28111, true).Entries {
+	seal(protocol.Envelope{ID: 28111, Type: protocol.TypeListConversations, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
+	for {
+		env, ok := next(time.Now().Add(15 * time.Second))
+		if !ok {
+			t.Fatal("held-output barrier absent")
+		}
+		if env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeTurnEnd {
+			t.Fatalf("output crossed the held boundary: %s", env.Type)
+		}
+		if env.Type == protocol.TypeConversations && env.InReplyTo != nil && *env.InReplyTo == 28111 {
+			break
+		}
+	}
+	for _, e := range readHistoryEntries(home, convID) {
 		if strings.Contains(string(e.Payload), post) || strings.Contains(string(e.Payload), "channel_post") {
 			t.Fatal("held post entered served history")
 		}
@@ -311,12 +303,11 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 			break
 		}
 	}
-	page := requestHistory(28112, false)
+	page := readHistoryEntries(home, convID)
 	reply.Reset()
 	ended = false
 	var postCompletions int
-	for i := len(page.Entries) - 1; i >= 0; i-- {
-		e := page.Entries[i]
+	for _, e := range page {
 		if e.Type == protocol.TypeTurnEnd {
 			var p map[string]any
 			if err := json.Unmarshal(e.Payload, &p); err != nil {

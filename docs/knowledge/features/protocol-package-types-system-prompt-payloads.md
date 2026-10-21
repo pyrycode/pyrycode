@@ -32,7 +32,7 @@ neither joins `inboundAppTypeSet` (both are v2, intercepted before
 `dispatch.Route`). `cmd/pyry/relay_guard_test.go` files the request
 `switch-intercepted` and the reply `reply` — both from the ticket that adds the
 constant, since the handler lands in the same commit and there is no
-"pending handler" window the way `TypeRequestHistory` had one.
+"pending handler" window (the retired raw-history declaration had one).
 
 ## The tri-state is a pointer-with-`omitempty` pairing, and the test for it has to assert bytes
 

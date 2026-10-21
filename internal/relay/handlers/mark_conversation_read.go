@@ -9,7 +9,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
-	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -25,7 +24,7 @@ const (
 // ConversationReadMarker is the registry surface MarkConversationRead consumes.
 // *conversations.Registry satisfies it structurally. AdvanceReadUpTo applies the
 // clamped, monotonic advance and persists it itself; Get resolves the row before
-// its history is read; WorkspaceLabel fills the record's workspace_label.
+// its shown evidence is read; WorkspaceLabel fills the record's workspace_label.
 type ConversationReadMarker interface {
 	Get(id conversations.ConversationID) (conversations.Conversation, bool)
 	AdvanceReadUpTo(id conversations.ConversationID, upTo, latest uint64, path string) (conversations.Conversation, bool, error)
@@ -33,9 +32,9 @@ type ConversationReadMarker interface {
 }
 
 // MarkConversationRead returns a dispatch.Handler for a mark_conversation_read
-// frame (#2780). It raises the named conversation's host-local read mark to
-// max(held, min(up_to, newest displayable durable history entry id)), so a mark
-// can neither move back nor cover entries that do not exist yet. Every success replies with
+// frame. It raises the named conversation's host-local read mark to
+// max(held, min(up_to, last shown version)). A present zero is authoritative;
+// missing shown evidence refuses even a no-op request. Every success replies with
 // conversation_updated, correlated via in_reply_to and carrying the stored
 // read_up_to. Only an actual advance is also pushed through announce, to every
 // eligible client including the requester; a no-op pushes nothing.
@@ -49,14 +48,10 @@ type ConversationReadMarker interface {
 //
 // SECURITY (security-sensitive label): conversation_id is first used as an
 // exact-match registry key; only an id the registry has proven reaches the
-// history store, which re-validates it before building a path. up_to decodes
-// into a uint64, so encoding/json enforces the wire range. Every refusal sends
-// a static message, and no refusal branch logs a payload field: not the decode
+// shown-version provider. up_to decodes into a uint64, so encoding/json enforces
+// the wire range. Every refusal sends a static message and never logs the decode
 // err (encoding/json can quote input bytes), not an unproven conversation_id.
-func MarkConversationRead(reg ConversationReadMarker, hist historyLatestReader, registryPath string, announce ConversationAnnouncer, logger *slog.Logger) dispatch.Handler {
-	if store, ok := hist.(*history.Store); ok && store == nil {
-		hist = nil
-	}
+func MarkConversationRead(reg ConversationReadMarker, lastShown func(string) (uint64, bool), registryPath string, announce ConversationAnnouncer, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.MarkConversationReadPayload
 		if err := json.Unmarshal(env.Payload, &p); err != nil || p.UpTo == nil {
@@ -77,16 +72,15 @@ func MarkConversationRead(reg ConversationReadMarker, hist historyLatestReader, 
 			return notFound()
 		}
 
-		if hist == nil {
+		if lastShown == nil {
 			return replyError(ctx, c, env, protocol.CodeHistoryUnavailable, msgMarkReadHistoryUnavail, true)
 		}
-		latest, err := hist.LatestDisplayableEntryID(id)
-		if err != nil {
-			logger.Error("relay: mark_conversation_read history read failed",
+		latest, available := lastShown(p.ConversationID)
+		if !available {
+			logger.Warn("relay: mark_conversation_read shown evidence unavailable",
 				"event", "mark_conversation_read.history_unavailable",
 				"conn_id", c.ConnID(),
-				"conversation_id", p.ConversationID,
-				"err", err)
+				"conversation_id", p.ConversationID)
 			return replyError(ctx, c, env, protocol.CodeHistoryUnavailable, msgMarkReadHistoryUnavail, true)
 		}
 

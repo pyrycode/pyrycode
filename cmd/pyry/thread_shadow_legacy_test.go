@@ -80,7 +80,7 @@ func testShadowLegacyPayload(t *testing.T, typ string, raw []byte) string {
 
 func TestThreadShadowLegacy(t *testing.T) {
 	type surface struct {
-		live, replay, page, capabilities []string
+		live, replay, capabilities []string
 	}
 	run := func(mode string) surface {
 		h := history.New(t.TempDir())
@@ -122,7 +122,6 @@ func TestThreadShadowLegacy(t *testing.T) {
 			Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil },
 			StaticPriv: key.Bytes(), Devices: paired, ServerID: testConvIDB, Logger: discardLogger(),
 			KnownConversation: func(id string) bool { _, ok := reg.Get(conversations.ConversationID(id)); return ok },
-			HistoryPage:       newHistoryPager(h, discardLogger()),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -180,34 +179,6 @@ func TestThreadShadowLegacy(t *testing.T) {
 		}
 		if !reflect.DeepEqual(result.replay, retainedLive) {
 			t.Fatal("reconnect differed from retained legacy live frames")
-		}
-		cursor := ""
-		for requestID := uint64(2); ; requestID++ {
-			if requestID > 100 {
-				t.Fatal("history pages did not terminate")
-			}
-			payload, _ := json.Marshal(protocol.RequestHistoryPayload{ConversationID: testConvID, Cursor: cursor, Limit: 2})
-			raw, _ := json.Marshal(protocol.Envelope{ID: requestID, Type: protocol.TypeRequestHistory, TS: time.Now(), Payload: payload})
-			sealed, err := w.phones["phone"].send.Encrypt(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			w.frames <- w.wrap("phone", protocol.TypeNoiseMsg, sealed)
-			_, env := w.read()
-			var page protocol.HistoryPagePayload
-			if env.Type != protocol.TypeHistoryPage || env.InReplyTo == nil || *env.InReplyTo != requestID || json.Unmarshal(env.Payload, &page) != nil || len(page.Entries) == 0 {
-				t.Fatal("history request did not return a legacy page")
-			}
-			for _, entry := range page.Entries {
-				result.page = append(result.page, testShadowLegacyPayload(t, entry.Type, entry.Payload))
-			}
-			if page.AtStart {
-				break
-			}
-			if page.Cursor == "" || page.Cursor == cursor {
-				t.Fatal("history cursor did not advance")
-			}
-			cursor = page.Cursor
 		}
 		if mode == "enabled" {
 			v, _ := h.LatestEntryID(id)

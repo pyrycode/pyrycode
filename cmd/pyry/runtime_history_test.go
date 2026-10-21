@@ -40,9 +40,7 @@ func TestRuntimeHistoryDividerMapping(t *testing.T) {
 			if err := json.Unmarshal(entries[0].Payload, &p); err != nil || p.Cause != string(cause) || p.PreviousSessionID != "old" || p.NewSessionID != "new" || !p.OccurredAt.Equal(fact.OccurredAt) {
 				t.Fatalf("fact: %+v, %v", p, err)
 			}
-			if page := newHistoryPager(store, discardLogger())(testConvID, "", 128); len(page.Entries) != 1 || page.Entries[0].Type != protocol.TypeBanner {
-				t.Fatal("divider missing legacy receipt")
-			}
+
 		})
 	}
 }
@@ -597,14 +595,8 @@ func TestRuntimeHistoryFactsLegacyIsolation(t *testing.T) {
 			if strings.Contains(logs.String(), "secret-thought") || strings.Contains(logs.String(), "private-root-path") {
 				t.Fatalf("content-bearing failure log: %s", logs.String())
 			}
-			if mode == "healthy" {
-				for _, entry := range newHistoryPager(store, log)(testConvID, "", 128).Entries {
-					if !legacyHistoryType(entry.Type) {
-						t.Fatalf("new fact in legacy page: %s", entry.Type)
-					}
-				}
-			} else if mode == "failed" && logs.Len() == 0 {
-				t.Fatal("failed storage not logged")
+			if mode == "failed" && logs.Len() == 0 {
+				t.Fatal("failed storage did not log append failures")
 			}
 		})
 	}

@@ -90,10 +90,7 @@ func quietSystemPromptReply() protocol.SystemPromptPayload {
 //     gate the write half deliberately does not have; see the file header.
 //  2. A PAYLOAD DECODE FAILURE IS TOLERATED, NOT REJECTED, and the reason does NOT
 //     generalise. It leaves ConversationID == "", which names no conversation and
-//     is refused at step 3 without a second reply shape. handleRequestHistory
-//     cannot do this because there the empty id becomes a path component, where
-//     filepath.Join(dir, "") is the log ROOT rather than an error; here it reaches
-//     a registry lookup and nothing else. NEVER echo or log the error —
+//     is refused at step 3 without a second reply shape. NEVER echo or log the error —
 //     encoding/json quotes offending input into its error string and those bytes
 //     are remote-authored.
 //  3. RESOLVE, OR DON'T. Three guards, each deliberate. The empty-id guard keeps
