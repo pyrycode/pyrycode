@@ -24,9 +24,9 @@ import (
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
-// The real queue remains unstarted so no delivery can replace the acceptance.
+// The ordinary queue drain stays unstarted; configured tests can write explicitly.
 // Routing uses the same fake child boundary as the compact transport tests.
-func testQueuedAttachmentWire(t *testing.T, root string, reg *conversations.Registry, beforeAccepted func()) (*threadShadow, *switchWire, *relay.V2SessionManager, *msgqueue.Queue, *lockedBuffer) {
+func testQueuedAttachmentWire(t *testing.T, root string, reg *conversations.Registry, beforeAccepted func(), configure ...func(*msgqueue.Config, *queuedSendHistory)) (*threadShadow, *switchWire, *relay.V2SessionManager, *msgqueue.Queue, *lockedBuffer) {
 	t.Helper()
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
@@ -36,7 +36,7 @@ func testQueuedAttachmentWire(t *testing.T, root string, reg *conversations.Regi
 	sends := testSendHistory(h)
 	sends.logger = logger
 	sends.attachmentName = storedQueuedAttachmentName(root, reg)
-	q, err := msgqueue.New(msgqueue.Config{
+	cfg := msgqueue.Config{
 		Logger: logger,
 		Deliver: func(context.Context, string, []byte) error {
 			t.Error("held delivery ran")
@@ -48,7 +48,11 @@ func testQueuedAttachmentWire(t *testing.T, root string, reg *conversations.Regi
 			}
 			sends.accepted(c, m)
 		},
-	})
+	}
+	for _, setup := range configure {
+		setup(&cfg, sends)
+	}
+	q, err := msgqueue.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +92,7 @@ func testQueuedAttachmentContent(t *testing.T, item protocol.ThreadItem, status 
 	if err := json.Unmarshal(item.Content, &content); err != nil {
 		t.Fatal(err)
 	}
-	if item.Kind != "user_message" || item.Parent != 0 || item.Status != status || item.Active != (status == "queued") ||
+	if item.Kind != "user_message" || item.Parent != 0 || item.Status != status || item.Active != (status == "queued" || status == "written") ||
 		content.Text != "safe accepted text" || !reflect.DeepEqual(content.IDs, ids) || !reflect.DeepEqual(content.Facts, facts) {
 		t.Fatalf("queued attachment content: kind=%s status=%s active=%t text=%q IDs=%v facts=%v; want IDs=%v facts=%v", item.Kind, item.Status, item.Active, content.Text, content.IDs, content.Facts, ids, facts)
 	}
