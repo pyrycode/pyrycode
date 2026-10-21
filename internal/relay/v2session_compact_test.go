@@ -116,6 +116,9 @@ func testCompactReply(t *testing.T, p *testHostedPeer, id uint64, projection str
 			t.Fatalf("frame scope %s: %s", env.Type, env.Payload)
 		}
 		if env.Type != protocol.TypeThreadItems {
+			if env.Type == protocol.TypeError {
+				t.Logf("query %d refusal: %s", id, env.Payload)
+			}
 			return env.Type, protocol.ThreadItemsPayload{}, nil, nil
 		}
 		var r protocol.ThreadItemsPayload
@@ -433,6 +436,7 @@ func TestThreadCompactLiveInFlight(t *testing.T) {
 					if err := p.mgr.FlushPushes(t.Context()); err != nil {
 						t.Fatal(err)
 					}
+					testCompactHostedFence(t, p)
 				} else if err := testCompactLive(t, p, catchUpConversation, 91); err != ErrThreadWithheld {
 					t.Fatalf("complete live during query: %v", err)
 				}
@@ -451,8 +455,8 @@ func TestThreadCompactLiveInFlight(t *testing.T) {
 						t.Fatalf("cancelled re-initialization changed joins: %v", got)
 					}
 					testCompactCatchUp(p, 41, catchUpConversation, 0, "")
-					if typ, _, _, _ := testCompactReply(t, p, 41, ""); typ != protocol.TypeThreadItems {
-						t.Fatalf("retry: %s", typ)
+					if typ, final, _, _ := testCompactReply(t, p, 41, ""); typ != protocol.TypeThreadItems || !final.Final || final.ConversationID != catchUpConversation || final.Epoch != "epoch" || final.Version != 90 || n.Load() != 2 {
+						t.Fatalf("retry: %s final=%+v provider calls=%d", typ, final, n.Load())
 					}
 					if got := testCompactJoins(p); !maps.Equal(got, map[string]threadJoin{catchUpConversation: {"epoch", 90, ""}}) {
 						t.Fatalf("re-initialized join: %v", got)

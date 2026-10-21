@@ -81,3 +81,7 @@ First run the named failure and preceding compact live/negotiation/refusal/reply
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+
+- 2026-10-21: controlled diagnosis confirmed `thread.query_failed` (retryable, request 41), after successful admission and delivery-time cancellation. The first diagnostic attempt waited for provider entry and failed on that invalid assumption: `appFrameWorker` is still awaiting the held refusal delivery. Use the subsequent Run-owned control enqueue as an admission acknowledgment and inspect the matching query token under `hostedMu` instead. Before writer release its context is live; afterward the preceding row cancels it. The diagnostic old success assertion then failed with the correlated refusal in `/tmp/builder-3731/controlled-invalid-boundary.json` (1 executed, 0 passed, 1 failed, 0 skipped). Retain a negative boundary regression separately from the repaired fixture's required successful retry. Both open questions are resolved: the foreign fence is withheld without cancelling the tested query or writing joins, and the diagnostic establishes admission independently of provider execution.
