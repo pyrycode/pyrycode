@@ -7,7 +7,7 @@ Part of [history producers](history-package-producers.md#producers-2114-2115).
 `legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
 from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
 A new history-only type's raw payload is excluded from every connection's legacy
-history, live fan-out and reconnect replay, whether its stored `Shown` is nil,
+live fan-out and reconnect replay, whether its stored `Shown` is nil,
 false or true. Only the validated runtime/startup,
 [queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972),
 [agent/task facts](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
@@ -16,7 +16,7 @@ have a receipt projection.
 Visibility controls content classification for the daemon
 [unread watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
 not permission to reach a transport. Conversely, an eligible legacy event still
-reaches its existing recipients and history pages when `Shown` is false,
+reaches its existing live/replay recipients when `Shown` is false,
 including normal turn ends, info banners and live status readings. This preserves
 [ADR 042's compatibility boundary](../decisions/042-daemon-built-thread.md#compatibility):
 old apps treat unknown history entries as read-mark barriers.
@@ -95,7 +95,7 @@ Agent/task facts also persist in history-only operation. Lifetime mint/marshal
 failures log fixed discriminants; append failures retain the common content-free
 classifier, without supplied call/task IDs, parent, status, prose or storage paths.
 `closeStartupAgentWork` appends before the restart divider without publishing
-live traffic or backfilling replay; its valid endings become receipts when paged.
+live traffic or backfilling replay; its valid endings remain source facts for thread folding.
 
 Queued writers also bypass `emit`: `queuedSendHistory.accepted` and `terminal`
 append before notifying the operator emitter of acceptance/removal/give-up
@@ -106,7 +106,7 @@ checkpoint holes. Shared bytes, durable ID/timestamp and existing recipient,
 access and isolation gates apply on every lane. Receipt notification uses the
 [separate bounded mailbox](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
 to keep queue callbacks independent of peer delivery. `closeStartupSends` stays
-history-only: valid `send_lost` entries appear as paged receipts without startup
+history-only: valid `send_lost` entries remain fold sources without startup
 live traffic or replay backfill.
 
 Prompt answers also bypass `emit`. `recordPromptAnswer` serializes its single
@@ -130,8 +130,9 @@ and [the #3256 live evidence](../../specs/architecture/3256-shared-live-repair-e
 The daemon's [list/read target](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
 uses content classification and the explicit-false veto, independently of receipt
 accounting (#3463). Raw facts, metadata and store watermarks retain their
-contracts. The [pager](history-package.md#reader-2116) retains one bounded raw page's cursor and
-`AtStart`; accounting never authorizes scanning ahead to fill a page.
+contracts. The [raw pager is retired](history-package.md#reader-2116); source
+facts remain available to thread folding, while legacy live/replay receipts
+retain their accounting role.
 
 `TestLegacyRuntimeReceipts_CompletedTurn` uses the real store and `HandleFor`
 normal text/completion with runtime facts disabled as a control; omitting the
@@ -146,8 +147,8 @@ not be the refusal: acceptance/delivery receipts can precede hook execution, so
 an early empty witness does not prove the hook never ran. `awaitBanner` waits
 within its existing deadline for the conversation's `oslcapBlockReason`, then
 checks the `blocked` witness. `hookBannerCheckWindow` joins `history_entry_id`
-and timestamp to raw `Store.Page` entries; legacy pages project these distinct
-facts into indistinguishable empty info banners. It requires exactly one intact
+and timestamp to raw `Store.Page` entries; legacy live/replay projects these
+distinct facts into indistinguishable empty info banners. It requires exactly one intact
 refusal, both sends' `send_accepted`/`send_delivered` receipts and the liveness
 `main_turn_opened` receipt, rejecting missing, duplicate or unexpected banners.
 Each receipt needs all five nonnull payload fields, the empty info payload,
@@ -328,12 +329,12 @@ again:**
   stored allocation stays unchanged.
 - **Prove queued accounting against persisted read confirmation (#3167).**
   `TestQueuedLegacyReceipts_CompletedTurn` removes accepted/delivered IDs to
-  reproduce the displayed-reply hole, then compares repaired page/live/replay
-  checkpoints with correlated list/read persistence on warm/reopened logs.
-  Receipt arrival alone remains a negative control. `TestQueuedLegacyReceipts_Pages`
-  covers all four facts and both drop reasons with repeated bounded raw pages,
-  mixed malformed/unknown holes and receipt-only pages. A correct raw visibility
-  assertion would miss either a filtered ID hole or a legacy read clamp mismatch.
+  reproduce the displayed-reply hole, then compares source projection, live and
+  replay checkpoints with correlated list/read persistence on warm/reopened logs.
+  Receipt arrival alone remains a negative control. `TestQueuedLegacyReceipts_Validation`
+  checks the retained projection's required fields, reasons and durable identity.
+  A correct raw visibility assertion would miss either an accounting hole or
+  a legacy read clamp mismatch; raw endpoint paging tests are retired.
 - **Restart local numbering and report from idle to prove durable attribution.**
   `TestAgentHistory_Isolation` reuses call/task IDs across conversations, sources
   and child incarnations, then replaces the emitter and reopens the real store.
@@ -460,8 +461,12 @@ again:**
   `TestRuntimeHistoryDividerMapping`, `TestRuntimeHistoryActualResetHandoff` and
   `TestRuntimeHistoryResetOutcomeAndNoops` check distinct causes, visibility and
   actual/unknown outcomes. `TestRuntimeHistoryFactsLegacyIsolation` uses healthy,
-  nil and failed storage while checking pages, ring/live eligibility and
+  nil and failed storage while checking source records, ring/live eligibility and
   content-free logs; successful storage alone cannot prove legacy exclusion.
+  In the failed-storage case, require a nonempty log before checking redaction:
+  empty logs contain no secrets but would also hide a silently dropped append.
+  Suppressing the append warning must fail this assertion independently of
+  any content/path canaries (#3715).
 - **Delay both delivery and recording to prove the capture boundary.**
   `TestOperatorDeliveryProvenance_ReceivingSessionRotation` rotates the actual
   resolved session during activation, rebinds the conversation, then rotates

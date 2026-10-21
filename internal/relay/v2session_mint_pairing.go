@@ -18,22 +18,21 @@ import (
 // none of which this package imports; the PairingMinter seam carries the work to
 // cmd/pyry, which holds the daemon's relay URL, server id and static key already.
 // This handler decodes, gates the one remote-authored string, and turns an outcome
-// into a frame — the courier posture handleRequestHistory keeps toward the log.
+// into a frame.
 //
 // WHERE IT RUNS. On the conn's appFrameWorker, off the Run goroutine, reached from
-// appFrameWorker's appFrameMintPairing arm — the fourth frame type to need that
-// route after the two attachment legs and the history request, and the FIRST that
-// WRITES host state: the mint takes the devices.json flock(2), reads the registry,
+// appFrameWorker's appFrameMintPairing arm. The mint takes the devices.json
+// flock(2), reads the registry,
 // appends a record and rewrites the file. Cross-process blocking I/O on the
 // goroutine that owns the send CipherState is exactly the stall #965 removed.
 //
-// ONE EMISSION ROUTE, the history request's rather than the retrieval leg's. The
+// ONE EMISSION ROUTE. The
 // answer is a single envelope rather than a stream, so there is no Push leg: the
 // reply and every reject alike go through forwardToRun, where Run seals them under
 // s.send. Emitting either from this goroutine would be a concurrent Encrypt on the
 // single-owner send CipherState — a nonce reuse.
 //
-// NO BYTE BUDGETING, which is where it diverges from handleRequestHistory. The
+// NO BYTE BUDGETING. The
 // reply is one fixed-shape payload of roughly 400 bytes against the 65519-byte
 // application-envelope cap, and the only contributor to its size that is not
 // fixed-width is the daemon's OWN configured relay URL — operator-authored, and
@@ -116,7 +115,7 @@ var (
 
 // handleMintPairing answers one inbound mint_pairing with a freshly minted pairing
 // for another device or with one coded reject. Intercepted in dispatchAppFrame
-// before dispatch.Route, exactly like handleRequestHistory, and routed to this
+// before dispatch.Route, and routed to this
 // conn's appFrameWorker rather than handled inline on Run (see the file header).
 //
 // It takes the plaintext rather than the already-probed Envelope because the
@@ -127,7 +126,7 @@ var (
 //
 //  1. A nil PairingMint makes the frame INERT — but still CONSUMED, so it no
 //     longer draws dispatch.Route's unknown-type reply. Mirrors the nil
-//     HistoryPage / AttachmentResolve guards and buys the same property: an
+//     AttachmentResolve guard and buys the same property: an
 //     unwired daemon performs zero parsing of remote-authored bytes.
 //  2. A PAYLOAD DECODE FAILURE IS REJECTED, NOT TOLERATED — the answer
 //     protocol.MintPairingPayload's own block assigns here. It covers the

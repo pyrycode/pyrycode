@@ -99,8 +99,8 @@ and provider signatures and reply behavior remain unchanged. Unsolicited content
 replaced by the thread is suppressed on live and connect-reconcile paths.
 `handleNoiseInit` bypasses event-ring replay and `resync` entirely for thread
 connections, including a gap-producing `hello.last_event_id`; supplied current
-live-state reconciliation continues. Legacy peers retain replay/resync and raw
-`request_history`. Supplied live state has independent source-conversation gates,
+live-state reconciliation continues. Legacy peers retain replay/resync; raw
+`request_history` is retired for all peers (#3715). Supplied live state has independent source-conversation gates,
 including for correlated replies and empty clears; see
 [supplied live-state ordering](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering).
 Suppression returns normally so a withheld head cannot strand permitted output.

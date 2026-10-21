@@ -81,8 +81,9 @@ was dropped, not because of anything about startup specifically, but as a side e
 active-conversation gate: no message routed meant no active conversation, which meant every event was
 "not active" and dropped. The fix kept this behaviour rather than special-casing it back in — the frame
 is still a true report about that conversation's own child — which is why four e2e tests that synced on
-the drop this produced had to be reworked to sync on the history entry instead (see [`request_history`'s
-wire contract](../../protocol-mobile.md#mcp_status) for the client-visible shape of this change).
+the drop this produced had to be reworked to sync on the source-history entry instead (see the
+[`mcp_status` wire contract](../../protocol-mobile.md#mcp_status)). Raw-history retrieval is retired;
+current status recovery uses the retained/requested reading paths.
 
 This replaced an earlier design, until #2739: the drain compared the producing session against
 `activeSession()`, the active conversation's bound session, and dropped every other session's event

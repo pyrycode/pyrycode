@@ -81,10 +81,7 @@ func TestSessionTransitionHistory_CapturedProvenance(t *testing.T) {
 					if err != nil || shown != wantShown {
 						t.Fatalf("shown watermark=%d want=%d err=%v", shown, wantShown, err)
 					}
-					page := newHistoryPager(reader, discardLogger())(testConvID, "", 10)
-					if page.Outcome != relay.HistoryPageOK || len(page.Entries) != 1 || !bytes.Equal(page.Entries[0].Payload, env.Payload) {
-						t.Fatalf("legacy page changed: %+v", page)
-					}
+
 				}
 			})
 		}

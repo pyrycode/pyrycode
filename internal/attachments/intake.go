@@ -119,8 +119,7 @@ func NewIntake(instanceDir string) *Intake {
 // completes only if the client re-sends every chunk.
 //
 // THE DESTINATION IS conversationID, AND ITS VALIDATION IS A PRECONDITION, AND IT
-// IS THE CALLER'S — the contract V2SessionConfig.HistoryPage states in the same
-// words for the same reason. conversationID MUST already have passed the daemon's
+// IS THE CALLER'S. conversationID MUST already have passed the daemon's
 // KnownConversation membership check, because it becomes a path component below
 // this method; handleAttachmentChunk is the caller that discharges it, on EVERY
 // chunk rather than only the completing one, so a transfer naming an unusable

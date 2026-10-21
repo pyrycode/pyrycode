@@ -32,8 +32,8 @@ path:
   its own counter, unique daemon-wide since #2022; `nextID` is **not** overloaded.
 - **The ring is the reconnect replay source.** `internal/conversations` holds
   metadata only (id, session history, archive state — no message content).
-  [History](history-package.md) persists a separate per-conversation log, served
-  through `request_history`, rather than driving ring replay. Carrying its
+  [History](history-package.md) persists a separate per-conversation log consumed
+  by thread folding, rather than driving ring replay. The raw wire pager is retired. Carrying its
   original append id in a ring event joins the two without another history write
   or lookup; the ring id remains an independent replay cursor.
 

@@ -301,12 +301,12 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 	raw := historyEntries(t, store, testConvID)
 	events, _ := e.ring.After(testConvID, 0)
 	for _, reader := range []*history.Store{store, history.New(dir)} {
-		page, _ := testLegacySerializedPage(t, reader)
+		page, _ := testLegacyReceipts(t, reader)
 		if len(page) != len(raw) || len(events) != len(raw) || len(bcast.pushes) != len(raw) {
 			t.Fatal("receipt hole or recipient gate changed")
 		}
 		for _, original := range raw {
-			var projected protocol.HistoryEntry
+			var projected history.Entry
 			for _, entry := range page {
 				if entry.ID == original.ID {
 					projected = entry
@@ -335,7 +335,7 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 		if testLegacyCheckpoint(page, 0, 0, false) != 0 {
 			t.Fatal("receipts alone conferred sight")
 		}
-		var hiddenReceipt protocol.HistoryEntry
+		var hiddenReceipt history.Entry
 		for _, entry := range raw {
 			if entry.Type == "background_task_observed" {
 				for _, projected := range page {
@@ -346,13 +346,13 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 			}
 		}
 		hiddenReceipt.ID = 2
-		onlyReceipts := []protocol.HistoryEntry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, hiddenReceipt}
+		onlyReceipts := []history.Entry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, hiddenReceipt}
 		if testLegacyCheckpoint(onlyReceipts, 1, 0, false) != 2 {
 			t.Fatal("hidden tail receipt not nonvisual")
 		}
 	}
 	// Valid receipts close accounting holes; malformed/unknown facts retain barriers.
-	base := []protocol.HistoryEntry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
+	base := []history.Entry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
 	var valid json.RawMessage
 	for _, entry := range raw {
 		if entry.Type == "background_task_observed" {
@@ -364,7 +364,7 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 		receipt, ok := legacyRuntimeReceipt(testConvID, "background_task_observed", payload, &id, historyTS)
 		received := slices.Clone(base)
 		if ok {
-			received = append(received, protocol.HistoryEntry{ID: 2, Type: protocol.TypeBanner, Payload: receipt})
+			received = append(received, history.Entry{ID: 2, Type: protocol.TypeBanner, Payload: receipt})
 		}
 		want := uint64(0)
 		if bytes.Equal(payload, valid) {
