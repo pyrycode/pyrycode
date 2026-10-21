@@ -26,8 +26,7 @@ const (
 	markReadPayloadTag = "INJECTED_MARK_READ_MARKER_3f9"
 )
 
-// fakeLatestHistory is a deterministic historyLatestReader that records which
-// conversations it was asked about.
+// fakeLatestHistory supplies shown evidence and records conversation lookups.
 type fakeLatestHistory struct {
 	mu     sync.Mutex
 	latest uint64
@@ -35,22 +34,17 @@ type fakeLatestHistory struct {
 	asked  []conversations.ConversationID
 }
 
-func (h *fakeLatestHistory) LatestDisplayableEntryID(id conversations.ConversationID) (uint64, error) {
+func (h *fakeLatestHistory) lastShown(id string) (uint64, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.asked = append(h.asked, id)
-	return h.latest, h.err
+	h.asked = append(h.asked, conversations.ConversationID(id))
+	return h.latest, h.err == nil
 }
 
 func (h *fakeLatestHistory) calls() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.asked)
-}
-
-func (h *fakeLatestHistory) lastShown(id string) (uint64, bool) {
-	v, err := h.LatestDisplayableEntryID(conversations.ConversationID(id))
-	return v, err == nil
 }
 
 // newMarkReadReg seeds one muted, promoted row holding the given mark at a

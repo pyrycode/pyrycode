@@ -8,8 +8,8 @@ Split out of [`relay-package.md`](relay-package.md) (parent doc — see there fo
 |---|---|
 | [Push-token registration](relay-package-handlers-register-push-token.md) | Authentication, display safety, dedupe, persistence, logging and tests. |
 | [Message delivery and auto-naming](relay-package-handlers-send-message.md) | Post-ack ordering, reset interception, attachments and sender metadata. |
-| [Conversation read marks](relay-package-handlers-mark-conversation-read.md) | Durable advancement, rollback, history targets and announcement ordering. |
-| [Conversation list history](relay-package-handlers-list-conversations.md) | Required history dependency, typed-nil handling and filtering before lookup. |
+| [Conversation read marks](relay-package-handlers-mark-conversation-read.md) | Durable advancement, rollback, shown-thread authority and announcement ordering. |
+| [Conversation summaries](relay-package-handlers-list-conversations.md) | Registry projection, capability filtering and optional shown-thread evidence. |
 
 ## `SetConversationMuted` reuses `send_message`'s auto-naming push (#2572)
 

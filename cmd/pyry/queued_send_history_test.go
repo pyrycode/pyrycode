@@ -234,12 +234,6 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 				if err != nil || watermark != entries[0].ID {
 					t.Fatalf("watermark %d %v", watermark, err)
 				}
-				for _, reader := range []*history.Store{store, history.New(dir)} {
-					latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-					if err != nil || latest != entries[0].ID {
-						t.Fatalf("hidden drop legacy target=%d,%v", latest, err)
-					}
-				}
 			}
 		})
 	}

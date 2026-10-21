@@ -1149,7 +1149,7 @@ func startRelayV2(
 		// This release's minimum app versions, both unset today (#2578).
 		MinClientVersions: relay.ShippedMinClientVersions(),
 		Handlers: map[string]dispatch.Handler{
-			protocol.TypeListConversations:  handlers.ListConversationsWithAgents(w.convReg, w.sessionHarness, legacyHistoryReader{store: w.hist}),
+			protocol.TypeListConversations:  handlers.ListConversationsWithAgents(w.convReg, w.sessionHarness),
 			protocol.TypeCreateConversation: handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
 			protocol.TypeRenameConversation: handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			// rename_workspace is the workspace-keyed sibling of the line above

@@ -25,16 +25,22 @@ unavailable and retiring views cannot use older certificates. Lookup starts no
 worker, warms no cursor and scans no segments. See
 [certificate eligibility and recovery](thread-package-cache-and-epochs.md#scalar-certificates-and-unloaded-metadata).
 
-Mixed list/read fixtures must allow their watermarks to diverge. Lists still
-use `legacyHistoryReader`; reusing a legacy list expectation for the read clamp
-would let hidden source records remain authoritative despite the provider
-change. `testLegacyListAndMark` retains source/list checks while obtaining the
-read target from real loaded thread evidence. `TestUnreadThreadHiddenTails`
+Lists and read clamping share shown-thread authority, but treat missing evidence
+differently: lists retain the row with an absent shown field; reads refuse
+without advancing the mark. `TestUnreadThreadHiddenTails`
 proves that a completion revision above shown progress cannot raise the clamp,
 and a hidden append invalidating unloaded evidence must refuse even a no-op
 until authority recovers. `TestMarkConversationReadThreadRestart` distinguishes
 a clean certificate from independently known raw progress, including zero,
 without loading a worker or changing another conversation's held mark.
+
+**Wait for consumption before asserting a hidden append has no effect.** A
+read-clamping test can pass against the pre-append snapshot while the new record
+has not reached the fold. `TestConversationReadDisplayableRoundTrip` waits for
+the `Snapshot.Version` returned by `Store.Status` to reach the appended tail
+before confirming that unknown source records and hidden state cannot advance
+the durable mark. Check consumed progress separately from the shown watermark; equality between them is not an
+unread invariant.
 
 Reply-then-push-then-return-the-reply's-error is the same ordering [`SetConversationMuted`](relay-package-handlers.md#setconversationmuted-reuses-send_messages-auto-naming-push-2572) uses, with one difference: the push is conditional on `advanced`, not unconditional. A successful no-op still gets its correlated `conversation_updated` reply carrying the stored mark but saves and pushes nothing. A failed reply cannot suppress an advance's announcement. `threadSummary` independently rechecks shown authority at delivery, replacing or removing only that field while preserving unrelated record fields.
 

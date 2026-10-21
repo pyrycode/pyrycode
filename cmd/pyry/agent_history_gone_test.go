@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -336,7 +335,7 @@ func TestAgentHistory_GoneSealedLifetime(t *testing.T) {
 	}
 }
 
-func TestAgentHistory_GoneReceiptBarriers(t *testing.T) {
+func TestAgentHistory_GoneReceiptValidation(t *testing.T) {
 	t.Parallel()
 	valid, err := json.Marshal(agentHistoryFact{ConversationID: testConvID, LifetimeID: testConvIDB, ToolCallID: "call", TaskID: "task", Status: "gone", OccurredAt: historyTS})
 	if err != nil {
@@ -346,19 +345,15 @@ func TestAgentHistory_GoneReceiptBarriers(t *testing.T) {
 	for _, tt := range []struct {
 		name, typ string
 		raw       json.RawMessage
-		want      uint64
+		want      bool
 	}{
-		{"valid", "background_task_gone", valid, 3},
-		{"malformed", "background_task_gone", json.RawMessage(`{}`), 0},
-		{"unrelated", "unrelated_unknown", valid, 0},
+		{"valid", "background_task_gone", valid, true},
+		{"malformed", "background_task_gone", json.RawMessage(`{}`), false},
+		{"unrelated", "unrelated_unknown", valid, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base := []history.Entry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
-			if receipt, ok := legacyRuntimeReceipt(testConvID, tt.typ, tt.raw, &id, historyTS); ok {
-				base = append(base, history.Entry{ID: id, Type: protocol.TypeBanner, Payload: receipt})
-			}
-			if got := testLegacyCheckpoint(base, 3, 0, false); got != tt.want {
-				t.Fatalf("checkpoint=%d want=%d", got, tt.want)
+			if _, ok := legacyRuntimeReceipt(testConvID, tt.typ, tt.raw, &id, historyTS); ok != tt.want {
+				t.Fatalf("receipt accepted=%t want=%t", ok, tt.want)
 			}
 		})
 	}

@@ -48,9 +48,6 @@ type ConversationSummary struct {
 
 	// ReadUpTo is the stored durable history read mark, including zero.
 	ReadUpTo uint64 `json:"read_up_to"`
-	// LatestEntryID is the newest durable history entry excluding turn_state,
-	// stall, api_retry, compacting, and session_transition, or zero if none exists.
-	LatestEntryID uint64 `json:"latest_entry_id"`
 	// LastShownVersion is raised by adding a shown thread item or appending text
 	// to one, not by every item revision. Nil omits it; a pointer to zero emits 0.
 	LastShownVersion *uint64 `json:"last_shown_version,omitempty"`

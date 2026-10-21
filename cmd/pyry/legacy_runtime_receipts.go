@@ -6,9 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/eventring"
-	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -93,37 +91,5 @@ func publishLegacyHistory(ctx context.Context, bcast interactiveBroadcaster, rin
 			}
 			logger.Debug("relay: interactive history push dropped", "event", "interactive_turn.push_err", "conn_id", c.ConnID, "env_id", *nextID, "conversation_id", convID, "err", err)
 		}
-	}
-}
-
-// legacyHistoryReader supplies the newest visible-content target for both list
-// and read clamping. Receipt eligibility establishes accounting, not visibility.
-// No raw entries, metadata or IDs are changed.
-type legacyHistoryReader struct{ store *history.Store }
-
-func (r legacyHistoryReader) LatestDisplayableEntryID(convID conversations.ConversationID) (uint64, error) {
-	// Preserve nil-store errors and the raw reader's ID/containment validation.
-	latest, err := r.store.LatestEntryID(convID)
-	if err != nil || latest == 0 {
-		return latest, err
-	}
-	cursor := ""
-	for {
-		page, err := r.store.Page(convID, cursor, 128)
-		if err != nil {
-			return 0, err
-		}
-		for _, entry := range page.Entries {
-			// Explicitly hidden entries never qualify. Absent metadata uses the
-			// same payload-aware content policy as current producer metadata;
-			// explicit true cannot promote metadata or unsupported vocabulary.
-			if (entry.Shown == nil || *entry.Shown) && historyEntryShown(entry.Type, entry.Payload) {
-				return entry.ID, nil
-			}
-		}
-		if page.AtStart {
-			return 0, nil
-		}
-		cursor = page.Cursor
 	}
 }

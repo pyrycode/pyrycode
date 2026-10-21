@@ -68,72 +68,55 @@ and advance the raw cursor; filtering creates no second ID space and decodes
 no payloads. Payload fields named `shown` or `session` have no effect on these
 metadata rules.
 
-**The daemon's legacy list field uses the producer's content policy (#3463).**
-`startRelayV2` passes `legacyHistoryReader` to
-`ListConversationsWithAgents`. Its
-`LatestDisplayableEntryID` requires `historyEntryShown(type, payload)` and
-rejects explicit `Shown == false`. Absent metadata uses that same payload-aware
-classification; explicit true cannot promote metadata or unsupported vocabulary.
-Unknown types default to non-content, so adding a hidden type needs no separate
-unread exclusion. See the [producer visibility table](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+**Conversation summaries use shown-thread authority (#3722).**
+`ListConversationsWithAgents` projects registry rows without a history reader.
+At delivery, `V2SessionManager.threadSummary` supplies `last_shown_version` on
+connections that negotiated `thread`, independently for every list row and
+`conversation_updated` reply/push. Usable loaded status or a fully unloaded clean
+certificate at exact consumed V = independently known raw H supplies the reading.
+Missing, rebuilding, unavailable, retiring or stale evidence omits the field;
+known zero emits numeric `0`. Every otherwise eligible row survives, including
+when source history is unavailable. Listing starts no worker, warms no cursor
+and scans no segments. The retired `latest_entry_id` field and legacy content
+scan supply no fallback. See
+[summary eligibility and quiet-retirement recovery](thread-package-cache-and-epochs.md#scalar-certificates-and-unloaded-metadata).
 
-Status/metadata entries such as `turn_state` and `context_usage`, normal successful
-turn endings, non-stopping info banners and restart/sleep dividers do not raise
-the daemon target. A valid `legacyRuntimeReceipt` establishes delivery/checkpoint
-accounting, not visible content. Known raw facts qualify only through the shared
-content classifier and explicit-false veto, independently of whether their legacy
-projection is a nonvisual receipt. Receipt validation and transport eligibility
-remain separate contracts; neither an unread classification nor its exclusion
-certifies safe accounting.
+Unread is `last_shown_version > read_up_to` only with present shown evidence;
+absence means unknown. Non-thread connections omit the reading. Raw entry IDs,
+`Store.LatestDisplayableEntryID` and maximum item revisions cannot establish
+shown-thread progress: hidden/state-only records and completion revisions can
+advance consumed progress without new shown content.
 
-The adapter validates through `Store.LatestEntryID`, then walks newest-first raw
-pages of 128 entries until it finds visible content or `AtStart`. Empty and
-hidden-only histories return `0`. It keeps bounded memory and adds no cache that
-could become stale after append or reopen. Only a zero raw durable cursor can
-short-circuit the scan: the store's metadata-only displayable API has different
-classification semantics. This internal scan remains after retirement of
-`newHistoryPager` and the raw wire endpoint; legacy list target selection is not
-a content-recovery API.
-
-`read_up_to` stays in the original durable ID space, but read clamping uses the
-installed `ThreadLastShownVersion` authority independently of the legacy list
-scan. The registry persists `max(held, min(up_to, last_shown_version))`, never
-lowering a higher held mark, including at authoritative zero. Missing evidence
-refuses even a no-op without mutation or persistence; a hidden append can
-invalidate an unloaded certificate without raising shown progress. Raw cursor
-progress, legacy visibility and maximum item revisions cannot fill that gap.
-Hidden entries retain their durable IDs, raw history and accounting role; no
-metadata or old marks are rewritten. See
+`read_up_to` stays in the original durable ID space. The registry persists
+`max(held, min(up_to, last_shown_version))`, never lowering a higher held mark,
+including at authoritative zero. The read handler uses the installed
+`ThreadLastShownVersion` provider for every client. Missing evidence refuses even
+a no-op with retryable `history.unavailable`, without mutation, persistence or
+announcement. A hidden append can invalidate an unloaded certificate without
+raising shown progress; the held mark survives until ordinary folding/retirement
+restores authority. Hidden entries retain their durable IDs, source metadata and
+accounting role; old marks are never rewritten. See
 [read-mark authority and regression fixtures](relay-package-handlers-mark-conversation-read.md)
 and the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
 
-**Keep receipt accounting and server visibility oracles separate.** A wire or
-checkpoint oracle correctly counts neutral receipts and normal completion frames
-without proving they are new visible content. Reusing that oracle for the server
-watermark would keep the hidden-tail bug green. In the runtime-enabled completed
-reply, IDs 1–6 are message, opening receipt, responding state, assistant delta,
-normal turn end and idle state. Client wire latest is 5 and a presented checkpoint
-can reach 6, while daemon latest and the confirmed mark from zero are 4. With
-runtime facts disabled, those values are wire latest 4, checkpoint 5 and daemon
-latest/confirmed mark 3. Assert accounting, explicit foreground presentation and
-the correlated persisted mark independently; delivery alone grants no sight.
-`TestLegacyRuntimeReceipts_CompletedTurn` retains these distinct expectations
-through real emission, serialized paging and list/read handlers in warm/reopened
-stores. Receipt validation, delivery and overlap checks must survive a corrected
-server-target expectation.
+**Keep receipt validation, raw visibility and unread authority separate.**
+A valid neutral receipt proves transport accounting, not shown content or
+foreground presentation. `TestLegacyRuntimeReceipts_CompletedTurn` retains
+source/live/replay identities, payloads and warm/reopened metadata; receipt
+validators assert acceptance directly. A legacy checkpoint oracle would test
+an independent retired algorithm rather than the daemon's shown-thread authority.
 
-`TestUnreadHiddenTails` covers both reported tails, page-spanning restarts,
-absent visibility, future hidden types, hidden-only logs, older reads, higher
-held marks and subsequent visible content in warm/reopened stores.
-`TestUnreadRestartReconciliation` preserves read/unread results over repeated
-reconciliation. `TestUnreadThreadHiddenTails` compares authenticated legacy and
-thread routes against the shared mark, including completion revisions beyond
-shown content, loaded metadata and eligible unloaded certificates. Hidden
-item/live-state updates advance consumed progress without raising shown progress;
-a hidden append invalidates stale unloaded evidence, and an unavailable reading
-stays unavailable until ordinary loading/folding restores it. Never substitute
-the raw cursor or maximum final item revision for `last_shown_version`; see
-[thread shown-watermark recovery](thread-package-cache-and-epochs.md#cache-and-epochs).
+`TestDaemonThreadListShownAuthority` checks actual correlated list delivery with
+corrupt source segments, certified nonzero/zero and cold unknown rows together.
+Rows and held marks survive repeated negotiated/non-thread lists, without worker
+startup or cold-cursor recovery. `TestUnreadThreadHiddenTails` checks completion
+revisions above shown progress, durable marks, loaded metadata, stale-certificate
+read refusal and recovery after hidden appends. `TestUnreadRestartReconciliation`
+checks repeated startup reconciliation and certified unloaded evidence while
+preserving higher held marks. `TestDaemonThreadOffscreenShownRecovery` requires
+producer-driven recovery after quiet retirement without reopening/catching up
+all listed conversations. These replace legacy list-scan/checkpoint assertions;
+the internal raw-store tests below retain their separate storage contract.
 
 Within the raw store, after `load`, the first filtered lookup walks `listSegments`
 newest-first and each `readSegment`'s entries backwards until a qualifying entry

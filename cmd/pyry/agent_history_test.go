@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
@@ -296,7 +295,7 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 	if len(testGoneEntries(t, store, testConvID)) != 1 {
 		t.Fatal("gone fact missing from compatibility fixture")
 	}
-	// Hidden progress at the tail retains delivery without raising unread.
+	// Hidden progress at the tail retains delivery and durable identity.
 	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskProgress{TaskID: "task"}, source)
 	raw := historyEntries(t, store, testConvID)
 	events, _ := e.ring.After(testConvID, 0)
@@ -328,31 +327,8 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 				}
 			}
 		}
-		latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-		if err != nil || latest != testGoneEntries(t, reader, testConvID)[0].ID || latest >= raw[len(raw)-1].ID {
-			t.Fatalf("unread target=%d %v", latest, err)
-		}
-		if testLegacyCheckpoint(page, 0, 0, false) != 0 {
-			t.Fatal("receipts alone conferred sight")
-		}
-		var hiddenReceipt history.Entry
-		for _, entry := range raw {
-			if entry.Type == "background_task_observed" {
-				for _, projected := range page {
-					if projected.ID == entry.ID {
-						hiddenReceipt = projected
-					}
-				}
-			}
-		}
-		hiddenReceipt.ID = 2
-		onlyReceipts := []history.Entry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, hiddenReceipt}
-		if testLegacyCheckpoint(onlyReceipts, 1, 0, false) != 2 {
-			t.Fatal("hidden tail receipt not nonvisual")
-		}
 	}
-	// Valid receipts close accounting holes; malformed/unknown facts retain barriers.
-	base := []history.Entry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
+	// Only valid facts produce receipts.
 	var valid json.RawMessage
 	for _, entry := range raw {
 		if entry.Type == "background_task_observed" {
@@ -361,17 +337,9 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 	}
 	for _, payload := range []json.RawMessage{valid, json.RawMessage(`{}`), json.RawMessage(`{"conversation_id":"wrong"}`)} {
 		id := uint64(2)
-		receipt, ok := legacyRuntimeReceipt(testConvID, "background_task_observed", payload, &id, historyTS)
-		received := slices.Clone(base)
-		if ok {
-			received = append(received, history.Entry{ID: 2, Type: protocol.TypeBanner, Payload: receipt})
-		}
-		want := uint64(0)
-		if bytes.Equal(payload, valid) {
-			want = 3
-		}
-		if got := testLegacyCheckpoint(received, 3, 0, false); got != want {
-			t.Fatalf("barrier=%d want=%d", got, want)
+		_, ok := legacyRuntimeReceipt(testConvID, "background_task_observed", payload, &id, historyTS)
+		if ok != bytes.Equal(payload, valid) {
+			t.Fatal("receipt validation changed")
 		}
 	}
 	id := uint64(2)
@@ -543,25 +511,6 @@ func TestAgentHistory_ReceiptValidation(t *testing.T) {
 			raw, _ := json.Marshal(p)
 			if _, ok := legacyRuntimeReceipt(testConvID, entry.Type, raw, &entry.ID, entry.TS); ok {
 				t.Fatalf("missing %s in %s certified harmless", field, entry.Type)
-			}
-		}
-		for _, shown := range []bool{false, true} {
-			dir := t.TempDir()
-			isolated := history.New(dir)
-			id, err := isolated.AppendWithMetadata(conversations.ConversationID(testConvID), entry.Type, entry.Payload, entry.TS, history.Metadata{Shown: &shown})
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, reader := range []*history.Store{isolated, history.New(dir)} {
-				want := uint64(0)
-				if shown && historyEntryShown(entry.Type, entry.Payload) {
-					want = id
-				}
-				latest, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID))
-				if err != nil || latest != want {
-					t.Fatalf("content target=%d want %d: %v", latest, want, err)
-				}
-				testLegacyListAndMark(t, reader, id, want, 0)
 			}
 		}
 	}

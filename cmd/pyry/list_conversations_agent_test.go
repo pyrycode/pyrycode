@@ -25,7 +25,7 @@ func TestListConversations_AgentFromRealPool(t *testing.T) {
 	ts := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	reg.Create(conversations.Conversation{ID: "conv-claude", Cwd: "/w", CurrentSessionID: dormantWriteBootID, LastUsedAt: ts})
 	reg.Create(conversations.Conversation{ID: "conv-codex", Cwd: "/w", CurrentSessionID: dormantWriteTargetID, LastUsedAt: ts.Add(time.Second)})
-	h := handlers.ListConversationsWithAgents(reg, sessionHarness(pool), emptyAgentListHistory{})
+	h := handlers.ListConversationsWithAgents(reg, sessionHarness(pool))
 
 	list := func(multiAgent bool) []map[string]json.RawMessage {
 		t.Helper()
@@ -66,11 +66,4 @@ func TestListConversations_AgentFromRealPool(t *testing.T) {
 	if _, ok := incapable[0]["agent"]; ok {
 		t.Error("incapable client's row carries an agent key")
 	}
-}
-
-// emptyAgentListHistory isolates agent wiring from durable history lookup.
-type emptyAgentListHistory struct{}
-
-func (emptyAgentListHistory) LatestDisplayableEntryID(conversations.ConversationID) (uint64, error) {
-	return 0, nil
 }
