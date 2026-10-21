@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/attachments"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
@@ -22,18 +24,24 @@ const (
 )
 
 type queuedSendFact struct {
-	ConversationID  string    `json:"conversation_id"`
-	DeviceID        string    `json:"device_id,omitempty"`
-	MessageID       string    `json:"message_id,omitempty"`
-	QueuedMessageID uint64    `json:"queued_msg_id,omitempty"`
-	Text            string    `json:"text,omitempty"`
-	AttachmentIDs   []string  `json:"attachment_ids,omitempty"`
-	AcceptedAt      time.Time `json:"accepted_at,omitzero"`
-	ClientSentAt    string    `json:"client_sent_at,omitempty"`
-	AcceptedEntryID uint64    `json:"accepted_entry_id,omitempty"`
-	DeliveryEntryID uint64    `json:"delivery_entry_id,omitempty"`
-	OccurredAt      time.Time `json:"occurred_at,omitzero"`
-	Reason          string    `json:"reason,omitempty"`
+	ConversationID  string                 `json:"conversation_id"`
+	DeviceID        string                 `json:"device_id,omitempty"`
+	MessageID       string                 `json:"message_id,omitempty"`
+	QueuedMessageID uint64                 `json:"queued_msg_id,omitempty"`
+	Text            string                 `json:"text,omitempty"`
+	AttachmentIDs   []string               `json:"attachment_ids,omitempty"`
+	Attachments     []queuedAttachmentFact `json:"attachments,omitempty"`
+	AcceptedAt      time.Time              `json:"accepted_at,omitzero"`
+	ClientSentAt    string                 `json:"client_sent_at,omitempty"`
+	AcceptedEntryID uint64                 `json:"accepted_entry_id,omitempty"`
+	DeliveryEntryID uint64                 `json:"delivery_entry_id,omitempty"`
+	OccurredAt      time.Time              `json:"occurred_at,omitzero"`
+	Reason          string                 `json:"reason,omitempty"`
+}
+
+type queuedAttachmentFact struct {
+	AttachmentID string `json:"attachment_id"`
+	Filename     string `json:"filename"`
 }
 
 func queuedSendHistoryType(typ string) bool {
@@ -97,17 +105,34 @@ type queuedSendReference struct {
 // References exist only for this daemon run. A placement may arrive before the
 // acceptance callback, but cannot append or publish until that append completes.
 type queuedSendHistory struct {
-	store    *history.Store
-	logger   *slog.Logger
-	publish  func(operatorMessage)
-	bindItem func(string, uint64, uint64)
-	source   func(conversations.ConversationID) *history.SessionProvenance
-	mu       sync.Mutex
-	refs     map[queuedSendKey]*queuedSendReference
+	store          *history.Store
+	logger         *slog.Logger
+	publish        func(operatorMessage)
+	bindItem       func(string, uint64, uint64)
+	source         func(conversations.ConversationID) *history.SessionProvenance
+	attachmentName func(string, string) (string, bool)
+	mu             sync.Mutex
+	refs           map[queuedSendKey]*queuedSendReference
 }
 
 func newQueuedSendHistory(store *history.Store, logger *slog.Logger, source func(conversations.ConversationID) *history.SessionProvenance) *queuedSendHistory {
 	return &queuedSendHistory{store: store, logger: logger, source: source, refs: make(map[queuedSendKey]*queuedSendReference)}
+}
+
+// storedQueuedAttachmentName resolves display names only within registered
+// conversations. Lookup errors can contain host paths and never leave this seam.
+func storedQueuedAttachmentName(instanceDir string, reg *conversations.Registry) func(string, string) (string, bool) {
+	return func(c, id string) (string, bool) {
+		convID := conversations.ConversationID(c)
+		if _, ok := reg.Get(convID); !ok {
+			return "", false
+		}
+		path, err := attachments.ResolvePath(instanceDir, convID, id)
+		if err != nil {
+			return "", false
+		}
+		return filepath.Base(path), true
+	}
 }
 
 func (h *queuedSendHistory) reference(c string, id uint64) *queuedSendReference {
@@ -148,6 +173,18 @@ func (h *queuedSendHistory) accepted(c string, m msgqueue.QueuedMessage) {
 	source := h.observedSource(c)
 	ref := h.reference(c, m.ID)
 	p := queuedSendFact{ConversationID: c, DeviceID: m.DeviceID, MessageID: m.MessageID, QueuedMessageID: m.ID, Text: m.Text, AttachmentIDs: m.AttachmentIDs, AcceptedAt: m.TS, ClientSentAt: formatClientSentAt(m.ClientSentAt)}
+	if h.attachmentName != nil {
+		seen := make(map[string]bool, len(m.AttachmentIDs))
+		for _, id := range m.AttachmentIDs {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			if name, ok := h.attachmentName(c, id); ok {
+				p.Attachments = append(p.Attachments, queuedAttachmentFact{AttachmentID: id, Filename: name})
+			}
+		}
+	}
 	ref.id = h.append(historySendAccepted, p, m.TS, source)
 	if ref.id != nil && h.bindItem != nil {
 		h.bindItem(c, m.ID, *ref.id)

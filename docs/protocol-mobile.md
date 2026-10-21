@@ -1328,6 +1328,32 @@ live additions/changes, catch-up, pages and reopened history. Legacy acceptances
 omit the handle, including after delivery; clients must not infer one from text,
 order, `message_id`, item ID or the linked delivered message.
 
+New attachment-bearing queued acceptances also expose optional
+`content.attachments` (#3693), with exactly these keys per entry:
+
+```json
+"attachments": [{"attachment_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "filename": "report.txt"}]
+```
+
+`attachment_id` names the stored attachment; `filename` is its stored display
+basename, including upload sanitization. The daemon resolves names only within
+the owning registered conversation. A send-supplied filename, host path or
+composed delivery prompt cannot supply this metadata. The existing
+`content.attachment_ids` remains deduplicated in first-occurrence order;
+`attachments` contains exactly one fact per successfully resolved ID in that
+same order.
+
+If metadata becomes unavailable after send validation, acceptance retains its
+text and all validated IDs, omitting only the unavailable facts. With no resolved
+facts, `attachments` is omitted. This does not relax send validation: invalid or
+missing IDs still refuse the whole send with `attachment.not_found`; malformed
+payload shapes retain `protocol.malformed`.
+Recorded names survive history/thread reopening without another name lookup,
+including when an unresolved acceptance becomes `lost` on daemon restart.
+Legacy ID-only history remains readable with no guessed filenames. These facts
+describe queued acceptance; retention when delivery replaces content is the
+separate [#3694](https://github.com/pyrycode/pyrycode/issues/3694) contract.
+
 Drop and Send now require `kind: user_message`, `status: queued`, `active: true`
 and a valid handle. Target the existing [queue commands](#queue-v2) with the
 thread conversation's `conversation_id` plus `content.queued_msg_id`, never

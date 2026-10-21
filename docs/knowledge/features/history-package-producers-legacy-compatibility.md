@@ -320,6 +320,17 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Change stored metadata to prove acceptance facts are durable (#3693).**
+  `TestQueuedAttachmentWire` renames the stored leaf after acceptance, then
+  reopens history/thread state and compares fresh daemon content with the
+  originally recorded names and normal restart-loss status. Leaving the file
+  unchanged would let an incorrect read-time name lookup pass. Retrieval
+  independently compares stored bytes and the new name. Initialize the named
+  compact subscription with catch-up before checking live acceptance, and read
+  that publication before same-version catch-up can suppress it; see
+  [query/live ordering](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+  Reopened content uses complete catch-up because compact interval certificates
+  are not retained across store reopening.
 - **Keep storage broken through delivery and drop, not only acceptance (#3167).**
   `TestQueuedSendHistoryFailures` repairs storage before user delivery, so it
   cannot prove failed user/outcome appends preserve eligible delivery without
