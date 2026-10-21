@@ -108,11 +108,12 @@ func TestUnreadThreadHiddenTails(t *testing.T) {
 	w, _ := testDaemonThreadQueryWire(t, shadow, func(c *relay.V2SessionConfig) {
 		c.Handlers = make(map[string]dispatch.Handler)
 		c.Handlers[protocol.TypeListConversations] = handlers.ListConversationsWithAgents(shadow.registry, nil, reader)
-		c.Handlers[protocol.TypeMarkConversationRead] = handlers.MarkConversationRead(shadow.registry, reader, path, nil, discardLogger())
+		c.Handlers[protocol.TypeMarkConversationRead] = handlers.MarkConversationRead(shadow.registry, c.ThreadLastShownVersion, path, nil, discardLogger())
 	})
 	w.open("phone", false, protocol.CapabilityThread)
 	w.open("legacy", false)
 	want := uint64(1)
+	held := uint64(0)
 	check := func(present bool) {
 		t.Helper()
 		legacy, err := (legacyHistoryReader{h}).LatestDisplayableEntryID(testConvID)
@@ -144,10 +145,30 @@ func TestUnreadThreadHiddenTails(t *testing.T) {
 		}
 		testDaemonThreadRequest(t, w, "phone", 71, protocol.TypeMarkConversationRead, map[string]any{"conversation_id": testConvID, "up_to": 999})
 		peer, env := w.read()
-		var updated protocol.ConversationUpdatedPayload
-		if json.Unmarshal(env.Payload, &updated) != nil || peer != "phone" || env.Type != protocol.TypeConversationUpdated || updated.ReadUpTo != want {
+		if peer != "phone" || env.InReplyTo == nil || *env.InReplyTo != 71 {
+			t.Fatalf("uncorrelated mark reply: %s %+v", peer, env)
+		}
+		if !present {
+			var refusal protocol.ErrorPayload
+			if json.Unmarshal(env.Payload, &refusal) != nil || env.Type != protocol.TypeError || refusal.Code != protocol.CodeHistoryUnavailable || !refusal.Retryable {
+				t.Fatalf("unavailable evidence reply: %+v", env)
+			}
+			persisted, err := conversations.Load(path)
+			cv, _ := shadow.registry.Get(testConvID)
+			durable, _ := persisted.Get(testConvID)
+			if err != nil || cv.ReadUpTo != held || durable.ReadUpTo != held {
+				t.Fatalf("unavailable evidence changed held mark: memory=%d disk=%d err=%v", cv.ReadUpTo, durable.ReadUpTo, err)
+			}
+			return
+		}
+		var updated struct {
+			protocol.ConversationUpdatedPayload
+			LastShownVersion *uint64 `json:"last_shown_version"`
+		}
+		if json.Unmarshal(env.Payload, &updated) != nil || env.Type != protocol.TypeConversationUpdated || updated.ReadUpTo != want || updated.LastShownVersion == nil || *updated.LastShownVersion != want {
 			t.Fatalf("shared mark reply: %s %+v", peer, env)
 		}
+		held = want
 	}
 	check(true) // Eligible unloaded certificate.
 	put := func(typ, payload string) {

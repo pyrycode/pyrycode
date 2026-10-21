@@ -1080,7 +1080,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `unarchive_conversation` | phone → binary | no | Clears a conversation's durable archived flag (restore, `IsArchived = false`); replies with the reused `conversation_updated` record. |
 | `set_conversation_muted` | phone → binary | no | Sets or clears a conversation's durable mute-notifications flag (`IsMuted`, #2571) via a single payload key, `muted`. **`muted` is required**: it is decoded as a pointer, so an absent key or an explicit `null` is `protocol.malformed` rather than read as `false` — the same trap #2571 flagged for the field's own `omitempty`, now enforced on the write side too. An unknown `conversation_id` is `conversation.not_found`. Both reject cases are non-retryable, static-message and echo none of the payload. Replies with the reused `conversation_updated` record, correlated by `in_reply_to`. **Unlike `archive_conversation`, this write is also fanned out**: the same record is pushed, uncorrelated, to every interactive-capable conn — the requester included, like the [`conversation_updated`](#conversation_updated) auto-naming push — so muting a noisy conversation from one client silences it on every paired client without a `list_conversations` round trip. |
 | `set_conversation_pinned` | phone → binary | no | **Active in the daemon (#3538).** Requires nonempty `conversation_id` and boolean `pinned`; missing/null or non-boolean `pinned` is non-retryable `protocol.malformed`. Empty/unknown IDs return non-retryable `conversation.not_found`. Pinning an unpromoted conversation is non-retryable `conversation.not_promoted`; unpinning remains allowed on any existing row. Success, including a no-op, attempts best-effort persistence and replies with correlated `conversation_updated` before the matching uncorrelated push reaches the requester. Every connected interactive client, including the requester, receives the same stored record; announcement is still attempted if the reply fails. No new capability is needed. See [`set_conversation_pinned`](#set_conversation_pinned). |
-| `mark_conversation_read` | phone → binary | no | Raises a conversation's durable, host-local read mark (`read_up_to`, #2779) toward a requested durable history entry id, `up_to` — clamped to the newest entry and never lowered (#2780). Replies with the reused `conversation_updated` record on every request that names a known conversation, including a no-op; **only an actual advance is also fanned out**, uncorrelated, through the same hook `set_conversation_muted` uses. See [Marking a conversation read](#marking-a-conversation-read). |
+| `mark_conversation_read` | phone → binary | no | Raises a conversation's durable, host-local read mark (`read_up_to`, #2779) toward a requested durable history entry id, `up_to` — clamped to authoritative `last_shown_version` and never lowered. Missing shown evidence returns retryable `history.unavailable`, even for a no-op; known zero is valid. Every success replies with the reused `conversation_updated` record, including a no-op; **only an actual advance is also fanned out**, uncorrelated, through the same hook `set_conversation_muted` uses. See [Marking a conversation read](#marking-a-conversation-read). |
 | `change_workspace` | phone → binary | no | Moves a conversation to a client-chosen workspace folder (updates its `cwd`, confined to `$HOME`); replies with the reused `conversation_updated` record. |
 | `set_system_prompt` | phone → binary | no | Sets or clears a conversation's durable system prompt — the operator-authored text every session it spawns is given, on **either agent** (#2662: a Codex session reads the same composed file and sends it as `developerInstructions`). Replies with the reused `conversation_updated` record, which does **not** carry the value. Takes effect at the conversation's next session start or thread resume, not on a running child. The read half is [`request_system_prompt`](#request_system_prompt), a different type on a different dispatch surface. See [Setting a conversation's system prompt](#setting-a-conversations-system-prompt). |
 | `request_host_system_prompt` | client → daemon | no | Reads the connected daemon's current and default host instructions through authenticated paired-client map dispatch, without a conversation/session or interactive-capability gate. See [Daemon-wide host system prompt](#daemon-wide-host-system-prompt). |
@@ -2357,13 +2357,15 @@ catch-up continuity and does not make an unloaded conversation query-ready.
 | `pinned_at` | RFC3339 host-local pin timestamp or explicit JSON `null` when unpinned; never omitted. An absent field from an older host means unpinned. All list/update projections preserve stored pins, including command-package announcements (#3538); see [`set_conversation_pinned`](#set_conversation_pinned). |
 | `current_session_id` | Always-present stored session binding, including `""` when unbound. A nonempty binding does not prove a running process. |
 | `read_up_to` | Always-present durable host/operator read mark, including zero; shared by paired devices. |
-| `latest_entry_id` | Always-present newest visible-content durable entry ID, zero for empty/hidden-only history; see [content classification and clamping](#marking-a-conversation-read). Hidden metadata and receipt accounting alone do not raise it. It remains independent of the thread watermark. |
+| `latest_entry_id` | Always-present newest visible-content durable entry ID, zero for empty/hidden-only history; see [legacy content classification](#a-history-entry). Hidden metadata and receipt accounting alone do not raise it. It remains independent of the thread watermark. |
 
 Thread unread is **`last_shown_version > read_up_to`** when that authoritative
 reading is available; omission is unavailable metadata, not a numeric zero.
 Projection preserves every other field's presence and value. This contract
-does not change read-mark storage or the existing `mark_conversation_read`
-target/clamp. Non-thread connections retain the legacy unread comparison
+does not change read-mark storage. `mark_conversation_read` uses the same
+authoritative shown-version clamp for every client; see
+[Marking a conversation read](#marking-a-conversation-read).
+Non-thread connections retain the legacy unread comparison
 `latest_entry_id > read_up_to` and existing summary bytes with thread metadata
 omitted.
 
@@ -2401,6 +2403,20 @@ gains no `archived_at` field.
 
 An unpinned update carries `"pinned_at": null` in the same position, including
 when the update reports an unrelated change such as a rename.
+
+For a successful `mark_conversation_read`, `read_up_to` is the stored result of
+`max(stored read_up_to, min(up_to, last_shown_version))`. Available shown evidence
+is required even for a no-op; known zero is valid, while missing evidence returns
+correlated retryable `history.unavailable` without mutation, saving or announcement.
+Every success replies with `in_reply_to`; only an actual advance also produces
+an uncorrelated push, after the reply attempt and even if that attempt fails.
+At delivery, thread connections receive a freshly authoritative
+`last_shown_version`, including numeric `0`, or omit it if evidence has become
+unavailable. This independent projection can omit the field even after the mark
+was successfully persisted. Non-thread connections omit it. Stored `read_up_to`,
+pins, binding fields and other supplied values retain their presence and value.
+See [Marking a conversation read](#marking-a-conversation-read) for refusal and
+rollback semantics.
 
 ### `set_conversation_pinned`
 
@@ -2466,8 +2482,9 @@ support. No new capability negotiation is needed.
 ### Marking a conversation read
 
 `mark_conversation_read` raises the durable, host-local read mark (`read_up_to`,
-#2779) of a conversation toward a durable history entry id the operator has
-read up to (#2780). The mark is **host/operator-scoped, not per-device**: any
+\#2779) of a conversation toward the shown-thread version the operator has
+read up to, in the existing durable history-ID space. The mark is
+**host/operator-scoped, not per-device**: any
 paired client may raise it, and every paired client reads the one stored
 value — this is the write half [`list_conversations`](#list_conversations)
 and [`conversation_updated`](#conversation_updated) previously reported with
@@ -2487,38 +2504,37 @@ Both fields are required:
 | `conversation_id` | string | The target conversation. An unknown id, including an empty string, is `conversation.not_found`. |
 | `up_to` | unsigned 64-bit integer | The durable [history entry id](#a-history-entry) the operator has read up to. Decoded through a `*uint64`, so a missing key or explicit `null` decodes to `nil` and `encoding/json`'s range parsing rejects a negative, fractional, exponent, string, boolean or over-`2^64-1` value — every one of these is `protocol.malformed`. `0` is a valid, meaningful value: an empty conversation's own starting mark. |
 
-**The stored mark becomes `max(held, min(up_to, latest))`**, where `held` is
-the mark already on disk and `latest` is the newest visible conversational-content
-entry, the same target reported as `list_conversations.latest_entry_id` (#3463).
-The daemon shares one payload-aware policy with producer visibility metadata.
-Explicit stored `shown: false` always excludes an entry. Entries without
-visibility metadata use the same content classification as current writes;
-explicit true cannot promote metadata or unknown vocabulary into content.
-Unknown types default to non-content until supported as visible content, so
-adding a hidden type needs no separate unread exclusion.
+**The stored mark becomes
+`max(stored read_up_to, min(up_to, last_shown_version))`.** The daemon uses the
+installed authoritative shown-thread provider shared by summary projection,
+for every client. Its watermark records first public appearance and appended
+shown text. Hidden source records, hidden item/live-state updates and
+completion-only item revisions cannot raise it. Raw history progress, maximum
+item revisions and the legacy list visibility scan cannot substitute for it.
 
-Status/metadata-only entries, including `turn_state` and `context_usage`, normal
-successful `turn_end`, non-stopping info banners and restart/sleep dividers do
-not raise this target. Visible failed/stopped endings, interruption notices and
-loss notices can qualify. A valid legacy receipt establishes accounting, not
-visibility: a known raw content fact can qualify, but its nonvisual receipt
-projection does not itself make a hidden fact unread. Receipt validation and
-raw history retain their separate contracts.
+A present `last_shown_version: 0` is valid authority, including for an empty or
+hidden-only thread. Missing evidence is unavailable, never an assumed zero.
+Usable loaded metadata supplies a reading. Fully unloaded evidence requires a
+valid clean certificate at exact consumed version V = independently known
+current raw progress H. Rebuilding, unavailable and retiring views cannot fall
+back to persisted evidence. After restart, a certificate alone cannot establish
+H, even at zero. The lookup starts no worker, warms no raw cursor and scans no
+history segments; see [thread summary eligibility](#conversations).
 
-Missing/empty and hidden-only histories yield `0`. A request at or below `held`
-changes nothing; a request past `latest` clamps before the `max`. The mark never
-moves backward, including with racing devices, a held mark above the current
-target or a target of zero. It remains persistent and isolated by host and
-conversation, in the original durable ID space rather than a filtered count.
-Reading the newest visible entry clears unread despite later hidden entries;
-reading an older visible entry does not cover newer content. New visible content
-beyond the mark makes `latest_entry_id > read_up_to` again.
+Unavailable authority returns correlated retryable `history.unavailable`
+without changing, persisting or announcing a mark, **even if the request would
+otherwise be a no-op**. A hidden append invalidates unloaded evidence until
+usable loaded metadata or a newly eligible certificate restores authority;
+the held mark survives.
+Offscreen/quiet-retirement summary recovery retains the same eligibility rules.
 
-Reopening history and repeated startup reconciliation preserve both read and
-unread results when only hidden restart entries are added. Restart alone does
-not make a read conversation unread or clear previously unread content. Genuinely
-visible interruption/loss notices may still raise unread. No read marks or old
-history metadata are rewritten.
+With available authority, a request at or below the held mark changes nothing
+and does not save. Oversized requests clamp before the `max`. The mark never
+moves backward, including with racing devices, a held mark above the shown
+watermark or authoritative zero. It remains persistent and isolated by host and
+conversation, in the original durable ID space. Thread unread is
+`last_shown_version > read_up_to` when that reading is available. Hidden restart
+records do not themselves change shown progress or rewrite old marks.
 
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
@@ -2533,7 +2549,9 @@ unchanged for future thread consumers.
 For the completed reply below, IDs are in append order. Normal completion and
 the trailing idle state can extend client accounting without raising the daemon's
 visible-content target. The client wire accounting latest is a separate value
-from `list_conversations.latest_entry_id`.
+from `list_conversations.latest_entry_id`. For these completed-message examples,
+that list target and the shown watermark agree; their equality is not a
+read-clamping contract.
 
 | Runtime facts | Durable sequence | Client wire accounting latest | Presented checkpoint (`up_to`) | Daemon list latest / confirmed `read_up_to` from zero |
 | --- | --- | --- | --- | --- |
@@ -2545,19 +2563,11 @@ overlapping delivery cannot create presentation. The client merges the correlate
 daemon-confirmed mark, rather than assuming the requested checkpoint was persisted.
 Both controls clear `latest_entry_id > read_up_to`.
 
-Thread connections compare authoritative `last_shown_version` with the same
-stored mark. That watermark records first public appearance and appended shown
-text, not raw consumed history progress or the maximum final item revision.
-Hidden item/live-state updates and completion-only revisions do not raise it.
-For histories with completed messages followed by hidden entries, usable loaded
-metadata and eligible unloaded certificates give the same unread result as the
-legacy route.
-A hidden append can still invalidate an unloaded certificate because consumed
-progress no longer matches current raw history; an unavailable reading remains
-omitted, without a raw-progress fallback. See [thread summary eligibility](#conversations).
+`latest_entry_id` retains its legacy list meaning until its separate retirement
+in #3722. The read handler uses shown-thread authority independently.
 
-The registry resolves the conversation **before** its history is read, so an
-unknown or empty id never reaches the history store. The compare, the save and
+The registry resolves the conversation **before** shown evidence is consulted,
+so an unknown or empty id never reaches the provider. The compare, the save and
 a failed save's revert all happen in one locked step, the same precedent the
 conversation↔session rebind sets for a mutate-and-persist that must not be
 observed half-done: a failed save restores the in-memory mark rather than
@@ -2568,7 +2578,7 @@ best-effort-`Save` shape** — a mute flag that fails to persist is merely stale
 until the next successful write, where an unpersisted read mark acknowledged
 as advanced would desync the registry from what every client was just told.
 
-Every request that names a known conversation gets a correlated
+Every successful request gets a correlated
 `conversation_updated` reply carrying the stored `read_up_to` — **including a
 no-op**, so a client always learns the mark actually on disk, not only the
 one it asked for. **Only an actual advance is also pushed**, uncorrelated,
@@ -2585,7 +2595,7 @@ message that echoes no payload byte:
 |---|---|---|
 | `up_to` missing, `null`, or fails the uint64 decode | `protocol.malformed` | no |
 | unknown or empty `conversation_id` | `conversation.not_found` | no |
-| the conversation's history could not be read | `history.unavailable` | yes |
+| shown-thread authority is missing or unavailable, even for a no-op | `history.unavailable` | yes |
 | the advance could not be saved | `read_mark.unavailable` | yes |
 
 A `read_mark.unavailable` reply leaves the held mark exactly where it was
@@ -7986,7 +7996,8 @@ both look like small integers, and a client must not join them.
 **This same durable id space is what `read_up_to` and `latest_entry_id` are stated
 in (#2779).** [`list_conversations`](#list_conversations)'s `conversations` reply
 reports the newest visible conversational-content entry as `latest_entry_id`
-using the shared [list/read content policy](#marking-a-conversation-read).
+using the legacy list content policy below. Read acknowledgements use
+[authoritative shown-thread evidence](#marking-a-conversation-read) independently.
 Explicit `shown: false` vetoes content; absent metadata uses the same payload-aware
 classification as producer metadata, and explicit true cannot promote hidden
 metadata or unknown types. Unknown vocabulary defaults to non-content. Hidden
@@ -8641,7 +8652,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`workspace.not_found`** | no | A [`rename_workspace`](#renaming-a-workspace) whose `path` matches no stored conversation's `cwd` (#2207). Comparison is **byte-exact** and includes archived conversations, so a near-miss — a trailing separator, a trailing space, a case difference — is a miss. **Not `conversation.not_found`**, and the distinction is the point rather than a naming preference: this request names no conversation at all, so the conversation code would send a client looking for a row it never asked about and could not act on. It applies to a **clear as much as to a set** — a `null` label at an unmatched path is refused, not silently accepted. Permanent for the request as sent: the same path fails identically until a conversation exists there, which is not something a retry accomplishes. The message is static and **never echoes the requested path**, which matters more here than on the conversation verbs because a path is a filesystem location on the daemon's host. |
 | **`pairing.not_permitted`** | no | A [`mint_pairing`](#mint_pairing) from a device that does not hold the daemon-side `allow_remote_permissions` flag (#2127). **Nothing is created** — the gate fires before the token is drawn, and the refusal is written to the daemon's audit sink as `denied_unauthorized`. **Not `auth.invalid_token`**, and the distinction is the group's defining decision: a frame reaching this handler has already presented a token the handshake validated, so an auth code would tell a legitimate client its credential was rejected and invite it to re-pair — the one repair that cannot help. The device is authenticated; what it lacks is privilege. **It is not an oracle**: it reports only that the asking device may not mint, a fact that device can already establish by answering any permission [modal](#modal-v2) and being denied, and it is not conditioned on the requested `device_name`, so it cannot probe which labels exist. Permanent for the device as paired — only `pyry pair --allow-remote-permissions` at a shell on the host changes it. |
 | **`pairing.unavailable`** | **yes** | A [`mint_pairing`](#mint_pairing) the host could not complete (#2127): a busy `devices.json` lock, a registry that could not be read or written, or a refusing CSPRNG. **The three causes are merged deliberately** — each can clear without the client changing anything, the repair is identical, and distinguishing them would publish facts about the machine rather than about the request. The underlying error formats an absolute host path and **never reaches the wire**; the message is static. |
-| **`history.unavailable`** | yes, after a backoff | Shared list/read failure: `list_conversations` cannot resolve a retained row's latest content ID, or `mark_conversation_read` cannot obtain its history target, including an unwired store or read failure. List failure refuses the whole reply rather than returning a row with a missing or incorrect target. Messages are static and disclose no host path or raw history error. Back off before retrying. This code does not restore raw history queries. |
+| **`history.unavailable`** | yes, after a backoff | Shared list/read failure: `list_conversations` cannot resolve a retained row's latest content ID, or `mark_conversation_read` cannot obtain authoritative shown-thread evidence, including an unwired provider or unavailable reading, even for a no-op. Known zero is valid authority. List failure refuses the whole reply rather than returning a row with a missing or incorrect target. Messages are static and disclose no host path or raw history error. Back off before retrying. This code does not restore raw history queries. |
 | **`new_session.workspace_refused`** | **no** | A [`new_session`](#new-session-v2) rotation whose conversation had a `change_workspace`-recorded workspace (#1475) that re-confinement refused at the spawn site — deleted, or re-pointed outside `$HOME` since it was recorded (#2443). **The rotation still completed**; only the successor's directory did not move, and this is the one condition under which the otherwise-silent `new_session` sends any reply at all — every inert arm, an accepted workspace, and `installSpawnDir`'s distinct later failure stay silent. Non-retryable: the same stored workspace fails identically until the operator repairs the folder or re-points it with `change_workspace`, which a retry does not accomplish (`workspace.not_found`'s reasoning). Carries the rotated conversation's id in `ErrorPayload.conversation_id`, since a bare frame names none of its own and `in_reply_to` alone cannot say which conversation the daemon rotated. The message is static and names neither the folder nor any other filesystem detail. |
 | **`client.update_required`** | **no** | The app build named by `hello.client_version` is older than this host's minimum for that app (#2578), or — once this build sets any minimum — the version could not be parsed at all. Non-retryable: the same build fails identically, and only an app update repairs it. The minimum travels in `ErrorPayload.min_client_version`, omitted when the version was unparsable (the daemon cannot tell which app's minimum would apply) or when this build sets no minimum for that app. See [Compatibility](#compatibility). |
 

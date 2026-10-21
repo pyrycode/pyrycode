@@ -91,4 +91,14 @@ table row and the section text. Update both when emission lands. Review current 
 counts and their other mentions, using the last correction as a locator. Leave dated
 changelog statements historical.
 
+Inbound-handler coverage must discover registrations deferred until dependencies
+are installed. Extracting only a map literal falsely reports a missing handler
+when `startRelayV2` assigns `sessionConfig.Handlers` after thread authority is
+available. `handlerMapKeys` includes indexed registrations within that function
+and on that configuration; accepting other receivers or functions could instead
+hide a genuinely missing handler. `TestHandlerMapKeys` covers absent, deferred,
+unclassified and unrelated assignments. Keep strict protocol-key parsing,
+exactly-one-literal admission, reverse classification and totality alongside
+`TestEveryInboundV2TypeHasHandler`; dependency ordering is not a coverage exemption.
+
 [Development verification overview](development-verification.md).

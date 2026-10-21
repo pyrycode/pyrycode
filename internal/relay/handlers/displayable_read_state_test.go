@@ -11,6 +11,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
 func TestConversationReadDisplayableRoundTrip(t *testing.T) {
@@ -31,7 +32,7 @@ func TestConversationReadDisplayableRoundTrip(t *testing.T) {
 			hist := history.New(filepath.Dir(path))
 			appendEntry := func(typ string) uint64 {
 				t.Helper()
-				id, err := hist.Append(markReadTargetID, typ, []byte(`{}`), time.Now())
+				id, err := hist.Append(markReadTargetID, typ, []byte(`{"role":"user","text":"request"}`), time.Now())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -39,7 +40,7 @@ func TestConversationReadDisplayableRoundTrip(t *testing.T) {
 			}
 			var latest uint64
 			if tc.content {
-				latest = appendEntry("turn_end")
+				latest = appendEntry("message")
 			}
 			for _, typ := range []string{"turn_state", "stall", "api_retry", "compacting", "session_transition"} {
 				appendEntry(typ)
@@ -48,7 +49,23 @@ func TestConversationReadDisplayableRoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 			ann := &recordingAnnouncer{}
-			h := MarkConversationRead(reg, hist, path, ann.announce, testLogger(t))
+			store := thread.NewStore(hist)
+			t.Cleanup(func() { _ = store.Shutdown() })
+			if err := store.Load(t.Context(), markReadTargetID); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for store.Status(markReadTargetID).State != thread.StateUsable {
+				if time.Now().After(deadline) {
+					t.Fatal("thread not usable")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			shown := func(string) (uint64, bool) {
+				s := store.Status(markReadTargetID)
+				return s.LastShownVersion, s.State == thread.StateUsable
+			}
+			h := MarkConversationRead(reg, shown, path, ann.announce, testLogger(t))
 			env, _ := runMarkRead(t, h, markReadPayload(tc.upTo))
 			var updated protocol.ConversationUpdatedPayload
 			if err := json.Unmarshal(env.Payload, &updated); err != nil {
@@ -90,10 +107,10 @@ func TestConversationReadDisplayableRoundTrip(t *testing.T) {
 			fresh := appendEntry("unknown_future_type")
 			appendEntry("turn_state")
 			list(fresh, true)
-			h = MarkConversationRead(reg, hist, path, ann.announce, testLogger(t))
+			h = MarkConversationRead(reg, shown, path, ann.announce, testLogger(t))
 			runMarkRead(t, h, markReadPayload(fmt.Sprint(fresh)))
-			wantHeld = fresh
-			list(fresh, false)
+			// Unknown source records remain a legacy list barrier, without shown content.
+			list(fresh, true)
 		})
 	}
 }
