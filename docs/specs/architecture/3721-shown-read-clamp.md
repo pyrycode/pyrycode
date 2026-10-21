@@ -81,3 +81,13 @@ Pending documentation stage: `docs/protocol-mobile.md`, **Marking a conversation
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+
+### 2026-10-21 — verifier finding 1: discover deferred handler registration
+
+- Files read: `cmd/pyry/relay_guard_test.go` → `mapLiteralKeys` and `TestEveryInboundV2TypeHasHandler`; `startRelayV2`'s registration diff; `docs/knowledge/features/development-verification.md` and its source-check/testing topics; `docs/knowledge/features/relay-package.md`; the original inbound-handler guard plan for #950.
+- The guard only discovers literal keys, so it misses the read handler installed after thread authority. Replace its extractor with `handlerMapKeys`, scoped to `startRelayV2`, combining the literal with indexed assignments to `sessionConfig.Handlers`. Keep strict protocol-key parsing, exactly-one-literal admission, missing-handler coverage, reverse classification and totality assertions. Production installation order stays unchanged.
+- Add focused source fixtures for literal and deferred registrations, absent registration, and unrelated receiver/function assignments. Reproduce `TestEveryInboundV2TypeHasHandler` failing first, then run it and the extractor scenarios under the Linux race detector; run vet and build separately. Complete gates remain dispatcher-owned.
+- This is the same coverage invariant, with its necessary regression proof: about 130 additional written lines, under 650 cumulative; no exported types, one updated consumer, no new acceptance criterion or lifecycle/reject state. #3715 overlaps only the classification tables in this file; these edits stay local to extraction and its comments.
+- Security re-review: PASS. This repair only parses checked-in source in tests; it adds no runtime trust boundary, credential, file persistence, subprocess, cryptographic, network, logging or concurrency behavior. The original security review and documentation handoff remain applicable.
