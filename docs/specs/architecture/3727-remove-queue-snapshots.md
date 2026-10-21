@@ -127,3 +127,25 @@ Pending documentation stage:
   The early-reply adverse control now inserts a canonical assistant item before
   delivery, retaining the supported ordering assertion. The failed capture is
   retained separately from the repaired run.
+- 2026-10-21 continuation: inventoried open PR #3753 at
+  `3d81db02ae5117f69366b08fde3b19ba750a38ad`; no PR reviews/comments or incoming
+  blockers were present. Reuse the original plan/implementation commits and
+  dispatcher merge. This continuation changes evidence only, approximately
+  140 written lines, zero production files, exports, consumers or reject branches.
+  Historical implementation size and failures remain visible and unchanged.
+  Retain exact commands, raw-report paths/digests and counted outcomes in
+  `internal/e2e/testdata/3727-queue-retirement-evidence.json`. Private raw reports
+  remain outside the disposable worktree at `/tmp/builder-3727-continuation/`.
+  Linux race checks at the recorded source passed 88/88 test events (77 leaves),
+  with zero failures/skips: controls 37, daemon lifecycle/binding 16, daemon
+  projections/attachments 15, queued history 16, recorded placement/FIFO 4.
+  The two originally unadmitted groups now have executed evidence. Both tagged
+  compile-only checks, `go vet ./...` and daemon build passed; compilation ran
+  zero live tests. Earlier results remain historical, not current-head proof.
+  No new defect or implementation change was found. The original documentation
+  handoff and dispatcher-owned complete/live gates remain pending, including
+  counted `TestRealClaude_OrdinaryQueuedPlacement` and
+  `TestRealClaude_SendQueuedNowPlacement`. Other operating systems are outside
+  this Linux ticket's verification scope. Evidence-only additions cannot change
+  command authorization, binding, transport, queue state or concurrency behavior;
+  no security boundary or approval/sizing hold is changed.
