@@ -252,11 +252,22 @@ cannot protect the earlier commit on echo or normal completion: placement can
 reach the producer before acceptance observation and before a delayed `OnDelivered`.
 `queuedSendHistory.beforeDelivery` waits for the synchronous acceptance append
 to finish, including failure, before `operatorMessageHistory` appends the
-existing operator message and its linked delivery fact. Waiting holds no
-observer mutex; acceptance never waits for the stream drain. The operator
-message retains its stream position, timestamp and exactly-once legacy push;
-`delivery_entry_id` points to that delivery-order record. Later confirmation
-acknowledges placement without appending or publishing again.
+operator message and then its linked delivery fact. Waiting holds no observer
+mutex; acceptance never waits for the stream drain. After a successful acceptance
+append, the message itself carries that durable `accepted_entry_id` (#3725).
+The fold can therefore establish permanent delivery identity from the committed
+message before publishing any prefix, even when `ForwardReader.Walk` separates
+message and outcome across chunks or segments. Coalescing callbacks cannot
+provide that guarantee. The later `send_delivered` enriches the same item.
+
+The message retains its stream position, timestamp, receiving provenance and
+exactly-once legacy push; `delivery_entry_id` points to that delivery-order
+record. Durable storage, legacy live publication and replay share the same safe
+message bytes, including the inert acceptance reference. Older messages without
+that field retain their existing outcome-based join behavior; no identity is
+inferred from text, timestamps, app IDs or reusable queue handles. See
+[delivery reference validation and prefixes](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
+Later confirmation acknowledges placement without appending or publishing again.
 
 **Keep receipt notification off the peer fan-out lock (#3167).** Acceptance
 appends and enqueues its receipt before releasing `ready`; placement waits for
@@ -295,9 +306,14 @@ and [ADR 042](../decisions/042-daemon-built-thread.md).
 Storage remains best effort: nil/failed history preserves queue acceptance,
 delivery/removal and eligible legacy push. Nil/failed appends mint no receipt
 identity. Failed acceptance writes release the placement gate without inventing
-an ID or any linked outcome. Delivery linkage additionally requires a successful
-operator-message append. A failed outcome append can leave a durable acceptance
-unresolved. Startup loss with reason `daemon_restart` records missing durable
+an ID, message acceptance reference or linked outcome; a surviving operator
+message remains an ordinary delivery. A failed message append creates no
+`send_delivered`, leaving only the committed acceptance or intermediate written
+fact. A failed `send_delivered` append leaves a committed linked message
+delivered/inactive under its acceptance ID, with no fabricated `outcome` object
+and no wait for a missing companion. `TestAcceptedDeliveryAppendFailures` covers
+all three failures, including delivery after `send_written` with a failed final
+append. Startup loss with reason `daemon_restart` records missing durable
 confirmation or resolution, not proven non-consumption; the existing
 [shutdown/confirmed-write gap](msgqueue-package-lifecycle.md#concurrency-model)
 means it cannot prove the agent never received the bytes. This is no durable
