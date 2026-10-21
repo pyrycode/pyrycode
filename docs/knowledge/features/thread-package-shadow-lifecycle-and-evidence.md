@@ -59,8 +59,8 @@ read `Store.Status` without certificate I/O or copying a baseline; rebuilding
 and unavailable views supply no watermark. Unloaded registered conversations
 use `Store.UnloadedLastShownVersion` only when clean, validated certificate
 progress exactly equals independently known current raw history progress
-(V = H); see [certificate eligibility](thread-package-cache-and-epochs.md#cache-and-epochs). Unregistered or
-removed IDs, stale/invalid evidence and unknown progress supply no watermark.
+(V = H); see [certificate eligibility](thread-package-cache-and-epochs.md#scalar-certificates-and-unloaded-metadata).
+Unregistered or removed IDs, stale/invalid evidence and unknown progress supply no watermark.
 Eligible zero is authoritative, including explicit empty evidence at V = H = 0.
 The lookup starts no worker, traverses/copies no items and writes nothing;
 unloaded reads open at most one certificate and no history segment, regardless
@@ -202,6 +202,37 @@ unload. Reading a newer boundary after held delivery can mark an unpublished
 commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
 this race; reload must still prove the publication range or retire consumers.
 
+Offscreen summary recovery needs a notification as well as valid evidence.
+During `Unload`, `Store.Status` deliberately reports `StateNotLoaded` while the
+retiring worker remains retained inside the Store; unloaded certificate lookup
+rejects that worker. After joining, a racing hidden append can still leave the
+clean certificate behind current raw progress. A list read at either boundary
+correctly omits `last_shown_version`, but without a later producer refresh an
+offscreen row can stay without authoritative unread metadata even after completed
+catch-up and restored eligibility. This sequence is demonstrated by the controlled
+Core regression; the historical Mobile trace establishes missing metadata, not
+that trace's exact internal interleaving.
+
+After each successful quiet unload, `threadShadow.follow` releases its retirement
+gate and calls `refreshThreadSummary`. It builds an ordinary unsolicited
+`conversation_updated` from the current registry row and workspace label for
+eligible authenticated interactive thread peers. `V2SessionManager.threadSummary`
+resolves the watermark through the installed provider at delivery. The refresh
+can still omit an ineligible reading; a racing suffix is automatically reloaded
+and a later successful retirement refresh restores the reading when eligible.
+No chat opening, extra catch-up or read command drives recovery. Stored read
+marks and other summary fields retain their values; non-thread publication is
+unchanged. See the [loaded/retiring/unloaded authority boundary](thread-package-cache-and-epochs.md#scalar-certificates-and-unloaded-metadata).
+
+Refresh admission takes the shadow mutex before the publisher mutex and joins
+the publisher wait group before stop can seal admission. Registry lookup and
+relay delivery run outside those locks and `quietMu`, following both follower
+and publisher cancellation. Failed unloads and missing registry rows emit no
+success refresh. Encoding/push diagnostics carry fixed events without payloads,
+names, paths or raw errors; one failed peer does not prevent healthy fanout.
+Delivery is live-only; reconnect listing remains the recovery path after a
+failed push.
+
 All six authenticated thread reads share `queryDaemonThread`'s temporary
 daemon demand; `threadShadow.queryThread` remains the complete-query wrapper.
 They load cold or idle registered conversations, wait cancelably for a usable
@@ -237,10 +268,17 @@ catch-up even when an idle reload can continue live.
 `TestDaemonThreadDemandIdleReadKeepsConnection` retains the unchanged idle-read
 proof. `TestDaemonThreadIdleAppendKeepsConnections` completes authenticated
 complete and compact catch-up, observes actual idle unload, then appends durable
-history over two cycles. It checks one unsolicited update per projection on the
-original connection IDs and successful later queries from both peers; no new
-handshake or baseline inventory repairs the live state. It uses the real history
-Store, thread Store, shadow follower and session manager, without live Claude.
+history over two cycles. It checks one unsolicited thread item update per
+projection on the original connection IDs and successful later queries from both
+peers; no new handshake or baseline inventory repairs the live state. It uses the
+real history Store, thread Store, shadow follower and session manager, without
+live Claude.
+
+Query and item-publication fixtures must tolerate unsolicited
+`conversation_updated` alongside correlated replies and item deltas. Summary
+notifications carry no item version: counting or decoding them as item changes
+would reject valid retirement recovery. Keep exact item counts, original
+connection ownership and the separate successful query completion marker intact.
 
 `dropRingOnConversationDelete` retains the registry's single removal observer
 for explicit deletion and sweep, including with the relay disabled. It preserves
@@ -431,6 +469,32 @@ captured output/cursors and retirement before replacement.
 `TestDaemonThreadLastShownCertificates` covers certificate eligibility and
 warm/cold progress; `TestDaemonThreadLastShownLifecycle` checks hidden append
 invalidation and restoration after load/fold and joined unload.
+
+`TestDaemonThreadOffscreenShownRecovery` exercises fresh daemon-created A/B,
+actual send/history and assistant/completion producers, installed thread
+providers and authenticated relay projection. The phone completes A catch-up
+with its separate success marker, then reads the list during a barrier-controlled
+retirement. Diagnostics distinguish registry membership, readiness, query demand,
+retirement and raw/certificate eligibility. The proof then checks joined stale
+V/H, automatic suffix reload and a producer refresh restoring A's shown > read
+without another catch-up/read/open. B remains not unread, both stored read marks
+stay zero and stored summary fields survive. Hidden entries and completion-only
+revisions leave the shown boundary unchanged. `TestDaemonThreadSummaryRefreshLifecycle`
+covers stopped/removed/cancelled refreshes, peer filtering and fanout past a failed
+push with content-free diagnostics. The controlled failing-before and passing-after
+Linux race evidence is retained in the [repair plan](../../specs/architecture/3710-offscreen-shown-watermark.md)
+and [PR review](https://github.com/pyrycode/pyrycode/pull/3713).
+
+Mobile acceptance remains pending in [Mobile #2246](https://github.com/pyrycode/pyrycode-mobile/issues/2246).
+Core producer proof and the Core live-Claude gate cannot replace the entire
+unchanged `InteractiveStreamE2ETest.interactiveTurn_attentionDot_followsARealTurn`
+through managed Linux/Android live/capture admission against the repaired daemon.
+That capture must preserve A Unread/B Idle and retain counted results, Mobile/Core
+revisions, APK/binary hashes and negotiated route/host/conversation/connection
+ownership receipts. Historical failures remain failed; pending, skipped or zero
+execution is not a pass. Other operating systems are outside this ticket's
+verification scope.
+
 `TestDaemonThreadLastShownIO` observes the installed callback's actual file
 operations on Linux. Adjacent identical inotify open events coalesce, so an
 open-only watch can accept two reads as one. `IN_CLOSE_NOWRITE` separates the
