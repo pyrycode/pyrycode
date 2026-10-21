@@ -581,6 +581,9 @@ func TestDaemonThreadIdleCommit(t *testing.T) {
 	}
 	p.retire = func(context.Context, string) error { retired.Add(1); return nil }
 	p.push = func(ctx context.Context, _ string, e protocol.Envelope) error {
+		if e.Type == protocol.TypeConversationUpdated {
+			return ctx.Err()
+		}
 		first.Do(func() {
 			close(entered)
 			select {
