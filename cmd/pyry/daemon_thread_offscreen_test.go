@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,11 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 		}
 	}
 	a, b := conversations.ConversationID(ids[0]), conversations.ConversationID(ids[1])
+	pinned := time.Now().UTC()
+	label := "Workspace A"
+	reg.Update(a, func(c *conversations.Conversation) { c.IsMuted, c.PinnedAt = true, &pinned })
+	storedA, _ := reg.Get(a)
+	reg.SetWorkspaceLabel(storedA.Cwd, &label)
 
 	// A hidden producer may append after the follower's quiet-boundary capture.
 	// Hold that tail chunk through cancellation to expose real Store retirement.
@@ -134,6 +140,9 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 		}
 		rows := map[string]protocol.ConversationSummary{}
 		for _, row := range p.Conversations {
+			if row.Agent != protocol.AgentClaude {
+				t.Fatal("list lost negotiated multi-agent ownership")
+			}
 			rows[row.ID] = row
 		}
 		if len(rows) != 2 || rows[string(b)].ReadUpTo != 0 || rows[string(b)].LastShownVersion != nil && *rows[string(b)].LastShownVersion > 0 {
@@ -172,8 +181,8 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 			t.Fatal("catch-up captured the wrong boundary")
 		}
 		for _, item := range part.Items {
-			sawUser = sawUser || item.Kind == "user_message"
-			sawAssistant = sawAssistant || item.Kind == "assistant_message" && !item.Active && item.Rev > shown
+			sawUser = sawUser || item.Kind == "user_message" && item.Summary == "ping"
+			sawAssistant = sawAssistant || item.Kind == "assistant_message" && item.Shown && item.Status == "done" && item.Summary == "pong" && !item.Active && item.Rev > shown
 		}
 		if part.Final {
 			if len(part.Items) != 0 || !sawUser || !sawAssistant {
@@ -204,8 +213,20 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 	}
 	unblockTail()
 	awaitSwitchPublication(t, joined.entered)
+	dir, err := h.LogDir(a)
+	if err != nil {
+		t.Fatal("joined history directory unavailable")
+	}
+	certificate, err := os.ReadFile(filepath.Join(dir, "thread-certificate.json"))
+	var evidence struct {
+		Version, LastShownVersion uint64
+		Clean                     bool
+	}
+	if err != nil || json.Unmarshal(certificate, &evidence) != nil || !evidence.Clean || evidence.Version != raw || evidence.LastShownVersion != shown {
+		t.Fatal("joined retirement did not persist its clean consumed boundary")
+	}
 	_, eligible = store.UnloadedLastShownVersion(a)
-	t.Logf("joined: state=%d consumed=%d raw=%d certificate_eligible=%t", store.Status(a).State, s.consumed(a), high, eligible)
+	t.Logf("joined: state=%d consumed=%d raw=%d certificate_clean=%t certificate_version=%d certificate_eligible=%t", store.Status(a).State, s.consumed(a), high, evidence.Clean, evidence.Version, eligible)
 	if eligible || s.consumed(a) >= high {
 		t.Fatal("retirement certificate ignored a racing hidden append")
 	}
@@ -228,10 +249,15 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 			continue
 		}
 		stored, _ := reg.Get(a)
-		if *p.LastShownVersion != shown || *p.LastShownVersion <= p.ReadUpTo || p.ReadUpTo != 0 || p.Cwd != stored.Cwd || p.Name == nil || *p.Name != *stored.Name || p.LastUsedAt != stored.LastUsedAt || p.IsArchived != stored.IsArchived || p.IsMuted != stored.IsMuted {
+		if *p.LastShownVersion != shown || *p.LastShownVersion <= p.ReadUpTo || p.ReadUpTo != 0 || p.Cwd != stored.Cwd || p.Name == nil || *p.Name != *stored.Name || !p.LastUsedAt.Equal(stored.LastUsedAt) || p.IsArchived != stored.IsArchived || p.IsMuted != stored.IsMuted || p.IsPromoted != stored.IsPromoted || p.PinnedAt == nil || !p.PinnedAt.Equal(pinned) || p.WorkspaceLabel == nil || *p.WorkspaceLabel != label {
 			t.Fatal("refresh lost authoritative watermark or stored summary fields")
 		}
 		break
+	}
+	recovered, eligible := store.UnloadedLastShownVersion(a)
+	t.Logf("recovered: state=%d consumed=%d raw=%d certificate_eligible=%t shown=%d", store.Status(a).State, s.consumed(a), high, eligible, recovered)
+	if !eligible || recovered != shown || store.Status(a).State != thread.StateNotLoaded || s.consumed(a) != high {
+		t.Fatal("refresh did not follow authoritative joined recovery")
 	}
 	rows := list("phone", 14)
 	if rows[string(a)].LastShownVersion == nil || *rows[string(a)].LastShownVersion != shown {

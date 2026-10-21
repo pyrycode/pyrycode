@@ -75,10 +75,13 @@ func TestDaemonThreadIdleAppendKeepsConnections(t *testing.T) {
 		frames := testCompactRead(t, w, mgr, "phone", "legacy")
 		seen := map[string]int{}
 		for _, frame := range frames {
-			seen[frame.peer]++
 			if frame.env.InReplyTo != nil {
 				t.Fatal("live update became a catch-up reply")
 			}
+			if frame.env.Type == protocol.TypeConversationUpdated {
+				continue // Retirement also refreshes conversation-list metadata.
+			}
+			seen[frame.peer]++
 			if frame.peer == "phone" {
 				var p protocol.ThreadItemAddedPayload
 				if frame.env.Type != protocol.TypeThreadItemAdded || json.Unmarshal(frame.env.Payload, &p) != nil || p.Version != version || p.Item.ID != version || string(p.Item.Content) != `{"role":"user","text":"durable idle append"}` {

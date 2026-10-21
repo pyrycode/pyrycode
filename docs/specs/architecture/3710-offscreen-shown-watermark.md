@@ -10,6 +10,7 @@
 - `cmd/pyry/conversation.go` → `conversationCreator`: fresh daemon conversation creation and stored summary fields.
 - `cmd/pyry/interactive_turn_v2.go` → `HandleFor`, `emit`: actual assistant/completion/history producers.
 - `cmd/pyry/daemon_thread_queries_test.go`, `daemon_live_relay_test.go`, `thread_shadow_test.go`: authenticated fixture, completion marker, joined cleanup and retirement barriers.
+- `cmd/pyry/daemon_thread_idle_append_test.go` → `TestDaemonThreadIdleAppendKeepsConnections`: preserve exact item-update counts while allowing summary refreshes beside them.
 - `docs/knowledge/features/thread-package.md`, `thread-package-cache-and-epochs.md` § Scalar certificates and unloaded metadata: unknown H and retiring workers must remain absent.
 - `docs/knowledge/features/relay-package.md`: sealed per-connection projection and content-free diagnostics.
 - `docs/knowledge/features/development-verification.md`: producer proof and controlled failing-before checks.
@@ -35,7 +36,7 @@ The existing per-conversation follower initiates refresh after joined retirement
 | Quiet retirement while a later hidden fact is pending; temporary absence | `TestDaemonThreadOffscreenShownRecovery` |
 | Joined retirement with stale V/H, reload under the same conversation ID, second retirement and restored summary | `TestDaemonThreadOffscreenShownRecovery` |
 | Removed registry membership, authoritative zero, loaded/rebuilding/unavailable and invalid/cold certificate readings | existing `TestDaemonThreadLastShown*`, `TestUnloadedLastShownVersionGuards` and relay projection tests |
-| Publisher cancellation and repeated stop | existing publisher shutdown coverage plus helper cancellation guards |
+| Publisher cancellation during refresh, stopped publisher, removal and one failed peer | `TestDaemonThreadSummaryRefreshLifecycle` |
 
 ## Error handling
 Retirement failure retains its existing diagnostic and emits no success refresh. Missing registry rows emit nothing. Marshal/push failures get content-free diagnostics and preserve live-only delivery behavior; reconnect listing remains the recovery path. No client read mark is changed.
@@ -67,3 +68,9 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+- 2026-10-21: Keep the refresh helper in `cmd/pyry/daemon_thread_summary.go` beside the existing publisher; `follow` calls it after releasing the retirement gate. The controlled regression demonstrates a retiring worker, then joined stale V/H evidence, then automatic suffix reload and clean retirement. The new notification leaves provider/projection guards untouched. Strengthen stored-field checks with a non-default mute, pin and workspace label, and compare serialized times with `Time.Equal`.
+- Failing-before source: regression commit `21676cce` on plan `fe0787a0`, with no producer repair. Managed Linux race result: 1 executed, 0 passed, 1 failed, 0 skipped; missing `conversation_updated` after real recovery. Diagnostics establish registered=true, no query demand, retirement=true, known raw progress and rejected certificate, followed by joined consumed progress below H. Initial test-vet attempt executed zero tests due to two incorrect log format verbs; fixed before the behavioral baseline.
+- 2026-10-21: `TestDaemonThreadDemandIdleReadKeepsConnection` exposed the query fixture's assumption that every received frame is correlated. Teach `testDaemonThreadReply` to tolerate only unsolicited `conversation_updated` beside queries, retaining envelope bounds and every correlated reply/completion assertion. The producer regression checks the notification itself. Add `TestDaemonThreadSummaryRefreshLifecycle` for stopped/removed/cancelled refreshes, peer filtering, fan-out after a failed push and content-free diagnostics.
+- `TestDaemonThreadIdleAppendKeepsConnections` similarly counts thread item updates separately from unsolicited retirement summary metadata; its exact content/update-count and original-connection assertions remain intact.
