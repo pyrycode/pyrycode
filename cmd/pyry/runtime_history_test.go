@@ -595,7 +595,9 @@ func TestRuntimeHistoryFactsLegacyIsolation(t *testing.T) {
 			if strings.Contains(logs.String(), "secret-thought") || strings.Contains(logs.String(), "private-root-path") {
 				t.Fatalf("content-bearing failure log: %s", logs.String())
 			}
-
+			if mode == "failed" && logs.Len() == 0 {
+				t.Fatal("failed storage did not log append failures")
+			}
 		})
 	}
 }
