@@ -184,6 +184,10 @@ func TestAcceptedDeliveryLiveRefusal(t *testing.T) {
 			testAcceptedDeliveryReplay(t, dir, current)
 			peer = "replacement-phone"
 			frames = nil
+			if _, err := h.Append(testConvID, "padding", json.RawMessage(`{}`), historyTS); err != nil {
+				t.Fatal(err)
+			}
+			testShadowWait(t, func() bool { return store.Status(testConvID).Version == 6 })
 			p.publish(t.Context(), testConvID, w)
 			if len(frames) != 0 {
 				t.Fatal("historical refusal replayed live to replacement")
@@ -242,6 +246,17 @@ func testAcceptedDeliveryReplay(t *testing.T, dir string, want thread.Snapshot) 
 	catch, err := store.CatchUp(t.Context(), testConvID, "", 0, 20)
 	if err != nil || catch.ResetRequired || len(catch.Items) != len(want.Items) {
 		t.Fatalf("replacement catch-up: %+v %v", catch, err)
+	}
+	for _, item := range want.Items {
+		found := false
+		for _, got := range catch.Items {
+			if reflect.DeepEqual(got, item) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("catch-up lost committed item content")
+		}
 	}
 	// Read the real segment bytes as well as the replayed rows.
 	if _, err := os.Stat(filepath.Join(dir, "conversations", testConvID, "history")); err != nil {
