@@ -68,9 +68,9 @@ and advance the raw cursor; filtering creates no second ID space and decodes
 no payloads. Payload fields named `shown` or `session` have no effect on these
 metadata rules.
 
-**Daemon list and read clamping share the producer's content policy (#3463).**
-`startRelayV2` passes the same `legacyHistoryReader` to
-`ListConversationsWithAgents` and `MarkConversationRead`. Its
+**The daemon's legacy list field uses the producer's content policy (#3463).**
+`startRelayV2` passes `legacyHistoryReader` to
+`ListConversationsWithAgents`. Its
 `LatestDisplayableEntryID` requires `historyEntryShown(type, payload)` and
 rejects explicit `Shown == false`. Absent metadata uses that same payload-aware
 classification; explicit true cannot promote metadata or unsupported vocabulary.
@@ -92,19 +92,20 @@ hidden-only histories return `0`. It keeps bounded memory and adds no cache that
 could become stale after append or reopen. Only a zero raw durable cursor can
 short-circuit the scan: the store's metadata-only displayable API has different
 classification semantics. This internal scan remains after retirement of
-`newHistoryPager` and the raw wire endpoint; list/read target selection is not
+`newHistoryPager` and the raw wire endpoint; legacy list target selection is not
 a content-recovery API.
 
-`read_up_to` stays in the original durable ID space. The registry persists
-`max(held, min(up_to, latest))`; a higher held mark is never lowered, including
-when latest is zero. Reading the newest visible entry clears
-`latest_entry_id > read_up_to` despite hidden tails; reading an older entry
-leaves newer content unread. New visible content beyond the mark raises unread
-again. Reopening and repeated startup reconciliation preserve both read and
-unread results when only hidden restart dividers are added. Visible interruption
-or loss notices can still raise the target. Hidden entries retain their durable
-IDs, raw history and accounting role; no metadata or old marks are rewritten.
-See the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
+`read_up_to` stays in the original durable ID space, but read clamping uses the
+installed `ThreadLastShownVersion` authority independently of the legacy list
+scan. The registry persists `max(held, min(up_to, last_shown_version))`, never
+lowering a higher held mark, including at authoritative zero. Missing evidence
+refuses even a no-op without mutation or persistence; a hidden append can
+invalidate an unloaded certificate without raising shown progress. Raw cursor
+progress, legacy visibility and maximum item revisions cannot fill that gap.
+Hidden entries retain their durable IDs, raw history and accounting role; no
+metadata or old marks are rewritten. See
+[read-mark authority and regression fixtures](relay-package-handlers-mark-conversation-read.md)
+and the [wire contract](../../protocol-mobile.md#marking-a-conversation-read).
 
 **Keep receipt accounting and server visibility oracles separate.** A wire or
 checkpoint oracle correctly counts neutral receipts and normal completion frames
