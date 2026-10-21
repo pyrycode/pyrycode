@@ -166,6 +166,31 @@ the reported time was parsed. Reported time uses UTC RFC 3339 with nanosecond
 precision. Optional absent values are omitted. Composed delivery bytes, echoed
 prompts and host attachment paths never enter these facts.
 
+`queuedSendHistory.accepted` also records optional `attachments`, whose entries
+contain exactly `attachment_id` and `filename` (#3693). Before queue startup,
+`runSupervisor` installs `storedQueuedAttachmentName`: it requires registered
+conversation membership before `attachments.ResolvePath`, then retains only
+`filepath.Base` of the stored path. The stored, sanitized basename is authoritative;
+send-supplied names and the in-flight upload registry cannot supply durable facts.
+See [stored-path resolution](attachments-package-directory-resolution-and-creation.md)
+and the [full thread item contract](../../protocol-mobile.md#full-thread-item).
+
+Keep the safe projection's `attachment_ids` unchanged; send intake already
+deduplicates them in first-occurrence order. Resolve each distinct ID once in
+that order, recording one fact for each successful lookup. An unavailable name
+after validation omits only its fact, preserving accepted text and all IDs;
+no resolved facts omits `attachments`. Lookup errors can carry host paths, so
+the resolver discards them without diagnostics. Neither filenames nor paths,
+send content or composed prompts belong in operational logs. Invalid/missing
+IDs still refuse the send before acceptance, and malformed payload shapes keep
+their existing refusal.
+
+Capture names at acceptance rather than on history reads: reopened thread
+content and startup loss retain the recorded facts even if the stored leaf
+later changes. Older ID-only facts remain unchanged without inferred filenames.
+Delivery content replacement retention belongs to
+[#3694](https://github.com/pyrycode/pyrycode/issues/3694).
+
 The production `suggestionEnqueuer.EnqueueIdentified` forwards the authenticated
 identity and invalidates suggestions only after successful enqueue. Rejected
 enqueue writes nothing. Legacy callers and adapters remain usable with absent
