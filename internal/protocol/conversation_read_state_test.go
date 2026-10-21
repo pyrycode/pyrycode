@@ -13,9 +13,9 @@ func TestConversationReadStateSerialization(t *testing.T) {
 			value any
 			want  map[string]uint64
 		}{
-			{"list", ConversationSummary{ReadUpTo: n, LatestEntryID: n + 1}, map[string]uint64{"read_up_to": n, "latest_entry_id": n + 1}},
+			{"list", ConversationSummary{ReadUpTo: n}, map[string]uint64{"read_up_to": n}},
 			{"update", ConversationUpdatedPayload{ReadUpTo: n}, map[string]uint64{"read_up_to": n}},
-			{"list zeros", ConversationSummary{}, map[string]uint64{"read_up_to": 0, "latest_entry_id": 0}},
+			{"list zeros", ConversationSummary{}, map[string]uint64{"read_up_to": 0}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				raw, err := json.Marshal(tc.value)
@@ -25,6 +25,9 @@ func TestConversationReadStateSerialization(t *testing.T) {
 				var fields map[string]json.RawMessage
 				if err := json.Unmarshal(raw, &fields); err != nil {
 					t.Fatal(err)
+				}
+				if _, exists := fields["latest_entry_id"]; exists {
+					t.Fatalf("retired watermark serialized: %s", raw)
 				}
 				for key, want := range tc.want {
 					var got uint64

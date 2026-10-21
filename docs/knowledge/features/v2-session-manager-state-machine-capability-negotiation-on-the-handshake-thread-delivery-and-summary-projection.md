@@ -316,7 +316,7 @@ and [hosted lane ownership](v2-session-manager-concurrency-hosted-discovery-and-
 
 **Project fields without round-tripping a partial DTO.** `conversation_updated`
 has supplied fields that `ConversationUpdatedPayload` does not represent,
-including binding and legacy watermark fields. Rebuilding the row through that
+including a supplied stored session binding. Rebuilding the row through that
 DTO would silently discard those fields and introduce absent zero/null fields.
 `agentTaggedForConn` and `threadSummary` therefore use `replaceObjectField` to
 edit only the projected fields, preserving unrelated encoded values and
@@ -327,8 +327,10 @@ replay; unchanged legacy replies retain their original bytes.
 and every pushed or replied `conversation_updated`. Usable zero emits numeric
 `0`; missing/rebuilding/unavailable state removes even a stale supplied value.
 Item revisions and partial recovery cannot substitute for that reading. Thread
-unread is `last_shown_version > read_up_to`; stored binding, durable read mark
-and legacy watermark keep their meanings and presence. Non-thread delivery
+unread is `last_shown_version > read_up_to` only with present evidence; absence
+means unknown. Stored binding and durable read mark keep their meanings and
+presence. Lists retain eligible rows without legacy history scans; the retired
+`latest_entry_id` field supplies no fallback. Non-thread delivery
 strips the reading and envelope session metadata and omits clear frames entirely.
 `TestV2Session_ThreadSummaries` checks distinct readings, zero/unavailable,
 legacy literal bytes and unrelated field presence, including the combination

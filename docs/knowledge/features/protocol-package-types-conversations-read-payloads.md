@@ -18,7 +18,6 @@ type ConversationSummary struct {
     IsMuted        bool      `json:"is_muted"` // no omitempty (#2571): mirrors IsArchived; see write-payloads doc for the direct-marshal test this field needed.
     PinnedAt       *time.Time `json:"pinned_at"` // no omitempty: timestamp or explicit null, including unpinned rows.
     ReadUpTo       uint64    `json:"read_up_to"` // no omitempty (#2779): the stored durable read mark, including 0.
-    LatestEntryID  uint64    `json:"latest_entry_id"` // no omitempty: newest displayable durable entry id, 0 if none; exclusions below.
     LastShownVersion *uint64 `json:"last_shown_version,omitempty"` // declared thread watermark; nil omits, pointer to zero emits 0.
     ArchivedAt     *time.Time `json:"archived_at"` // *time.Time + no omitempty (#2698): always serialized; null for an active row and for one archived before this field existed.
     Cwd            string    `json:"cwd"`
@@ -52,32 +51,19 @@ const (
 - **Other required fields are non-pointer, no `omitempty`.** `ID` / `Cwd` are required `string`; `IsPromoted` is required `bool` (fixture covers both `true` and `false`). Validation that `IsPromoted == true` implies `Name != nil`, ID uniqueness, ordering invariants — all dispatcher / registry concerns.
 - **`IsArchived` (#880) is a durable flag, not a filter.** `ListConversations` lists unfiltered, so an archived row carries every other field — including `WorkspaceLabel` (#2208) — exactly like an active one; archiving a conversation does not un-name its workspace's folder.
 - **`IsMuted` (#2571) mirrors `IsArchived`: durable, unfiltered, read from the stored conversation by `ListConversations`'s only producer, `false` by default since no write verb shipped with this ticket.** Unlike `IsArchived`, proving it stays on the wire needed a new kind of test — see the bool-zero-value note in [`protocol-package-types-conversations-write-payloads.md`](protocol-package-types-conversations-write-payloads.md), which applies here too since `TestIsMuted_AlwaysSerialized` covers both structs in one test.
-- **`ReadUpTo` and `LatestEntryID` are the legacy unread pair: `latest_entry_id > read_up_to`.**
-  `ReadUpTo` is `Conversation.ReadUpTo` copied verbatim — the host operator's
-  durable read mark, shared by every paired client and device. `LatestEntryID`
-  is resolved per row, after `multi_agent` filtering, through
-  `historyLatestReader.LatestDisplayableEntryID(conv.ID)` (`legacyHistoryReader` over `*history.Store` in
-  production). The daemon target is the newest visible conversational content
-  in the original durable ID space. The reader shares `historyEntryShown` with
-  producer metadata and vetoes explicit `Shown == false`; absent metadata uses
-  the same payload-aware classification, while explicit true cannot promote
-  metadata or unknown types. Unknown vocabulary defaults to non-content.
-  Hidden statuses, context usage, successful turn endings, nonvisual info banners
-  and restart/sleep dividers do not raise it; valid receipts provide accounting
-  without establishing content visibility. Missing/empty or hidden-only logs
-  yield `0`; see [visible-content clamping](../../protocol-mobile.md#marking-a-conversation-read).
-  [`MarkConversationRead`](relay-package-handlers-mark-conversation-read.md#markconversationread-cannot-copy-setconversationmuteds-best-effort-save-2780)
-  uses the same target for `max(held, min(up_to, latest))`. Reading the newest
-  visible entry clears unread despite hidden tails; reading an older entry leaves
-  newer content unread. Higher held marks never decrease, even at latest zero.
-  Reopening and hidden-only restart reconciliation preserve the read/unread
-  result; genuinely visible interruption/loss notices can raise it. Hidden entries
-  retain their IDs and receipt accounting contract; see
-  [history watermarks](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
-  Both fields are `uint64` without `omitempty`: clients read explicit zero,
-  rather than interpreting a missing key as unknown. A lookup failure on any
-  surviving row fails the whole correlated reply with retryable
-  `history.unavailable`; see [the list handler](relay-package-handlers-list-conversations.md#listconversations-gains-a-third-required-parameter-the-history-dependency-is-not-optional-2779).
+- **`ReadUpTo` is durable; `LastShownVersion` supplies optional unread evidence.**
+  `ReadUpTo` copies the host operator's stored `Conversation.ReadUpTo` verbatim,
+  shared by every paired client/device and always serialized including `0`.
+  With present shown evidence, unread is `last_shown_version > read_up_to`;
+  absence means unknown, never zero. Lists retain every otherwise eligible row
+  without scanning legacy history or refusing for unavailable shown evidence.
+  `latest_entry_id` is retired (#3722). The
+  [read handler](relay-package-handlers-mark-conversation-read.md) uses the same
+  authority for `max(held, min(up_to, last_shown_version))`, preserving higher
+  held marks even at known zero. Unavailable evidence refuses even a no-op
+  without changing memory or disk. See
+  [summary projection](relay-package-handlers-list-conversations.md#registry-projection-and-shown-thread-authority)
+  and [durable history/read marks](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
 - **`PinnedAt` uses `*time.Time` without `omitempty` on both list and update DTOs.**
   Nil must serialize as explicit `null` so an unpin can clear a client's cached
   stamp; decoding an absent key from an older host also means unpinned.
@@ -98,25 +84,26 @@ const (
   to zero emits numeric `0`; a plain `uint64` with `omitempty` would lose that
   known-zero state. `TestConversationLastShownVersion` marshals the decoded DTO
   back into its envelope and checks absent/zero/nonzero alongside distinct
-  `read_up_to` and `latest_entry_id` values and a stored session binding.
+  `read_up_to` values and a stored session binding; retired `latest_entry_id`
+  must be absent.
   Relay projection uses only `ThreadLastShownVersion` for each row and each
   `conversation_updated` push/reply: usable zero is present, while missing,
   rebuilding or unavailable readings remove even supplied stale metadata.
   Non-thread connections always omit the key. Thread unread is
-  `last_shown_version > read_up_to`; this changes neither read-mark storage nor
-  the legacy watermark, and `CurrentSessionID` remains the stored binding.
-  Projection adds no absent binding/watermark fields to `conversation_updated`.
+  `last_shown_version > read_up_to` only with present evidence; absent evidence
+  remains unknown. `CurrentSessionID` remains the stored binding, and projection
+  adds no absent binding fields to `conversation_updated`.
   Production installs the fold-backed provider through `installDaemonThreadRelay`;
   usable loaded status and eligible unloaded clean certificates can supply a
   reading, including authoritative zero. Hidden appends invalidate stale unloaded
   certificates by advancing raw progress without raising shown progress. Missing,
   rebuilding or unavailable evidence stays omitted; raw consumed progress never
-  substitutes for the shown watermark. Client thread catch-up/pages and reconnect
-  history initialization remain #2963. See
+  substitutes for the shown watermark. Each open conversation initializes
+  through explicit thread catch-up; listing does not initiate that recovery. See
   [relay projection](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection)
   and [the summary contract](../../protocol-mobile.md#conversations).
 - **`WorkspaceLabel` (#2208) is resolved per row from that row's own `Cwd`, never inherited.** It belongs to the workspace, not the conversation — N rows sharing one `Cwd` carry one label — and is filled by `internal/relay/handlers.ListConversations` via a `ConversationLister.WorkspaceLabel(cwd string) (string, bool)` read method, widened onto the narrow interface for this handler alone. Presence comes from that method's second return, never from `label != ""`: the registry keeps a stored empty label distinct from an absent one (see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `WorkspaceLabel`), and deriving the pointer from the string would collapse the two into the same `null`.
-- **`Agent` (#2643) is gated by `multi_agent`, independently of the thread watermark.** It names the agent running the conversation's bound session — `AgentClaude` or `AgentCodex`, a closed two-value wire vocabulary — and is `""` (so `omitempty` drops the key) unless the requesting conn negotiated `protocol.CapabilityMultiAgent`. For a negotiating client the value is never empty: `internal/relay/handlers.AgentOf` (exported for a second caller in #2644, see below) reads the session's harness through a `SessionHarnessFunc` (built over `sessions.Pool.HarnessFor`, #2629) and falls back to `AgentClaude` for a conversation with no bound session, a nil reader, or a session id the pool doesn't hold — fail-open, so a harness miss still shows the row rather than hiding it. **For a non-negotiating client the row is not merely unlabelled — a `conversations` reply omits every row whose agent is `AgentCodex` entirely**, so the list such a client sees is byte-identical to the one it saw before Codex conversations existed; that filtering, not just the empty `agent` key, is what "detection only" does not cover for this capability (see [handshake payloads](protocol-package-handshake-control-payloads.md)). `ListConversations(reg, hist)` is a thin wrapper over `ListConversationsWithAgents(reg, nil, hist)`, so a caller with no session pool gets the agent-blind reply without a `SessionHarnessFunc` to supply; the filtered history reader is required in both forms; a nil `harnessFor` makes `AgentOf` read every row as `AgentClaude`, which is exactly the pre-#2643 shape. See [`dispatch-package.md`](dispatch-package.md) for where the negotiated decision is carried per-conn (`Conn.MultiAgent()`), and [ADR 039](../decisions/039-capability-belongs-to-agent-and-model-together.md) for the general "resolve the session's own agent through `Pool.HarnessFor` first" pattern this handler follows. #2644 reuses the identical resolution rule to withhold *pushed* frames (not just this reply) about a Codex conversation from a non-negotiating conn — see [Capability negotiation on the handshake](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md).
+- **`Agent` (#2643) is gated by `multi_agent`, independently of the thread watermark.** It names the agent running the conversation's bound session — `AgentClaude` or `AgentCodex`, a closed two-value wire vocabulary — and is `""` (so `omitempty` drops the key) unless the requesting conn negotiated `protocol.CapabilityMultiAgent`. For a negotiating client the value is never empty: `internal/relay/handlers.AgentOf` (exported for a second caller in #2644, see below) reads the session's harness through a `SessionHarnessFunc` (built over `sessions.Pool.HarnessFor`, #2629) and falls back to `AgentClaude` for a conversation with no bound session, a nil reader, or a session id the pool doesn't hold — fail-open, so a harness miss still shows the row rather than hiding it. **For a non-negotiating client the row is not merely unlabelled — a `conversations` reply omits every row whose agent is `AgentCodex` entirely**, so the list such a client sees is byte-identical to the one it saw before Codex conversations existed; that filtering, not just the empty `agent` key, is what "detection only" does not cover for this capability (see [handshake payloads](protocol-package-handshake-control-payloads.md)). `ListConversations(reg)` is a thin wrapper over `ListConversationsWithAgents(reg, nil)`, so a caller with no session pool gets the agent-blind reply without a `SessionHarnessFunc` to supply; a nil `harnessFor` makes `AgentOf` read every row as `AgentClaude`, which is exactly the pre-#2643 shape. See [`dispatch-package.md`](dispatch-package.md) for where the negotiated decision is carried per-conn (`Conn.MultiAgent()`), and [ADR 039](../decisions/039-capability-belongs-to-agent-and-model-together.md) for the general "resolve the session's own agent through `Pool.HarnessFor` first" pattern this handler follows. #2644 reuses the identical resolution rule to withhold *pushed* frames (not just this reply) about a Codex conversation from a non-negotiating conn — see [Capability negotiation on the handshake](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md).
 - **Typed fixture round trips require the complete serialized DTO shape.**
   `TestConversationsPayload_RoundTrip` marshals the decoded `ConversationsPayload`
   into `Envelope.Payload` before re-encoding the envelope. Its fixture includes

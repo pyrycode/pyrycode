@@ -88,7 +88,7 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 	var cfg relay.V2SessionConfig
 	w, mgr := testDaemonThreadQueryWire(t, s, func(c *relay.V2SessionConfig) {
 		c.Handlers = map[string]dispatch.Handler{
-			protocol.TypeListConversations: handlers.ListConversationsWithAgents(reg, nil, legacyHistoryReader{h}),
+			protocol.TypeListConversations: handlers.ListConversationsWithAgents(reg, nil),
 			protocol.TypeSendMessage:       handlers.SendMessage(testCompactSend{}, q, nil, reg, path, nil, nil, discardLogger()),
 		}
 		cfg = *c

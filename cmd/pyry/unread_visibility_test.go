@@ -16,86 +16,48 @@ import (
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
-func TestUnreadHiddenTails(t *testing.T) {
-	t.Parallel()
-	for _, tail := range []string{"context_usage", "restarts", "future_hidden"} {
-		for _, metadata := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/metadata=%t", tail, metadata), func(t *testing.T) {
-				dir := t.TempDir()
-				h := history.New(dir)
-				put := func(typ, payload string) uint64 {
-					t.Helper()
-					m := history.Metadata{}
-					if metadata {
-						m = historyVisibilityMetadata(typ, json.RawMessage(payload))
-					}
-					id, err := h.AppendWithMetadata(testConvID, typ, json.RawMessage(payload), historyTS, m)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return id
-				}
-				check := func(t *testing.T, latest uint64) {
-					t.Helper()
-					for _, reader := range []*history.Store{h, history.New(dir)} {
-						for _, held := range []uint64{0, latest, 999} {
-							testLegacyListAndMark(t, reader, latest, latest, held)
-						}
-					}
-				}
-				put("context_usage", `{}`)
-				t.Run("hidden-only", func(t *testing.T) { check(t, 0) })
-				first := put("message", `{"role":"user","text":"request"}`)
-				latest := put("assistant_delta", `{"text":"reply"}`)
-				put("turn_end", `{"stop_reason":"end_turn"}`)
-				put("context_usage", `{}`)
-				if tail == "restarts" {
-					for i := 0; i < 130; i++ {
-						put("session_divider", fmt.Sprintf(`{"conversation_id":%q,"cause":"daemon_restart","occurred_at":%q}`, testConvID, historyTS.Format(time.RFC3339Nano)))
-					}
-				}
-				if tail == "future_hidden" {
-					put("future_hidden", `{}`)
-				}
-				t.Run("hidden-tail", func(t *testing.T) { check(t, latest) })
-				// Reading an older visible entry must leave the newer reply unread.
-				for _, reader := range []*history.Store{h, history.New(dir)} {
-					testLegacyListAndMark(t, reader, first, latest, 0)
-				}
-				read := latest
-				latest = put("message", `{"role":"user","text":"next"}`)
-				for _, reader := range []*history.Store{h, history.New(dir)} {
-					testLegacyListAndMark(t, reader, read, latest, read)
-				}
-				check(t, latest)
-			})
-		}
-	}
-}
-
 func TestUnreadRestartReconciliation(t *testing.T) {
 	t.Parallel()
 	for _, held := range []uint64{0, 1, 99} {
 		t.Run(fmt.Sprint(held), func(t *testing.T) {
 			dir := t.TempDir()
 			h := history.New(dir)
-			if _, err := h.Append(testConvID, "message", json.RawMessage(`{"text":"completed"}`), historyTS); err != nil {
+			if _, err := h.Append(testConvID, "message", json.RawMessage(`{"role":"user","text":"completed"}`), historyTS); err != nil {
 				t.Fatal(err)
 			}
-			reg, err := conversations.Load(filepath.Join(dir, "conversations.json"))
+			path := filepath.Join(dir, "conversations.json")
+			reg, err := conversations.Load(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			reg.Create(conversations.Conversation{ID: testConvID, ReadUpTo: held})
+			if err := reg.Save(path); err != nil {
+				t.Fatal(err)
+			}
 			for i := 0; i < 3; i++ {
 				h = history.New(dir)
 				reconcileStartupHistory(h, reg, discardLogger(), historyTS.Add(time.Duration(i)*time.Second))
-				latest, err := (legacyHistoryReader{h}).LatestDisplayableEntryID(testConvID)
+				store := thread.NewStore(h)
+				t.Cleanup(func() { _ = store.Shutdown() })
+				if err := store.Load(t.Context(), testConvID); err != nil {
+					t.Fatal(err)
+				}
+				testShadowWait(t, func() bool { return store.Status(testConvID).State == thread.StateUsable })
+				latest := store.Status(testConvID).LastShownVersion
+				reg, err = conversations.Load(path)
+				if err != nil {
+					t.Fatal(err)
+				}
 				cv, _ := reg.Get(testConvID)
-				if err != nil || latest != 1 || cv.ReadUpTo != held || (latest > cv.ReadUpTo) != (held == 0) {
+				if latest != 1 || cv.ReadUpTo != held || (latest > cv.ReadUpTo) != (held == 0) {
 					t.Fatalf("restart %d: latest=%d read=%d err=%v", i, latest, cv.ReadUpTo, err)
 				}
-				testLegacyListAndMark(t, h, 1, 1, held)
+				if err := store.Unload(testConvID); err != nil {
+					t.Fatal(err)
+				}
+				if shown, ok := store.UnloadedLastShownVersion(testConvID); !ok || shown != 1 {
+					t.Fatalf("restart certificate = %d/%t", shown, ok)
+				}
 			}
 		})
 	}
@@ -103,11 +65,10 @@ func TestUnreadRestartReconciliation(t *testing.T) {
 
 func TestUnreadThreadHiddenTails(t *testing.T) {
 	cfg, h, store, shadow, _, _ := testThreadWatermark(t, false)
-	reader := legacyHistoryReader{h}
 	path := filepath.Join(t.TempDir(), "conversations.json")
 	w, _ := testDaemonThreadQueryWire(t, shadow, func(c *relay.V2SessionConfig) {
 		c.Handlers = make(map[string]dispatch.Handler)
-		c.Handlers[protocol.TypeListConversations] = handlers.ListConversationsWithAgents(shadow.registry, nil, reader)
+		c.Handlers[protocol.TypeListConversations] = handlers.ListConversationsWithAgents(shadow.registry, nil)
 		c.Handlers[protocol.TypeMarkConversationRead] = handlers.MarkConversationRead(shadow.registry, c.ThreadLastShownVersion, path, nil, discardLogger())
 	})
 	w.open("phone", false, protocol.CapabilityThread)
@@ -116,17 +77,9 @@ func TestUnreadThreadHiddenTails(t *testing.T) {
 	held := uint64(0)
 	check := func(present bool) {
 		t.Helper()
-		legacy, err := (legacyHistoryReader{h}).LatestDisplayableEntryID(testConvID)
 		shown, ok := cfg.ThreadLastShownVersion(testConvID)
-		if err != nil || legacy != want || ok != present || present && shown != legacy {
-			t.Fatalf("legacy=%d thread=%d/%t want present=%t err=%v", legacy, shown, ok, present, err)
-		}
-		if present {
-			for _, held := range []uint64{0, want} {
-				if (legacy > held) != (shown > held) {
-					t.Fatal("routes disagree against shared mark")
-				}
-			}
+		if ok != present || present && shown != want {
+			t.Fatalf("shown=%d/%t want=%d/%t", shown, ok, want, present)
 		}
 		for _, peer := range []string{"phone", "legacy"} {
 			testDaemonThreadRequest(t, w, peer, 70, protocol.TypeListConversations, struct{}{})
@@ -136,10 +89,10 @@ func TestUnreadThreadHiddenTails(t *testing.T) {
 				t.Fatalf("list reply: %s %+v", gotPeer, env)
 			}
 			row := rows.Conversations[0]
-			if row.LatestEntryID != want || (row.LastShownVersion != nil) != (peer == "phone" && present) {
+			if row.ReadUpTo != held || (row.LastShownVersion != nil) != (peer == "phone" && present) {
 				t.Fatalf("route %s: %+v", peer, row)
 			}
-			if row.LastShownVersion != nil && (*row.LastShownVersion != want || (*row.LastShownVersion > row.ReadUpTo) != (row.LatestEntryID > row.ReadUpTo)) {
+			if row.LastShownVersion != nil && (*row.LastShownVersion != want || (*row.LastShownVersion > row.ReadUpTo) != (want > held)) {
 				t.Fatalf("unread route mismatch: %+v", row)
 			}
 		}

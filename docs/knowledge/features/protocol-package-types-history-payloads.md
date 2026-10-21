@@ -25,7 +25,9 @@ Noise dispatch, repeated requests, an independent peer and request-data canaries
 
 The endpoint-only `history.invalid_request`, `history.invalid_page_size` and
 `history.invalid_cursor` codes were removed. `CodeHistoryUnavailable` remains:
-list/read handlers still need the shared retryable `history.unavailable` refusal.
+the read handler still needs retryable `history.unavailable` when authoritative
+shown evidence is missing, even for a no-op. Lists retain eligible rows with
+unknown shown evidence omitted; they no longer refuse for unavailable history.
 Removing a wire endpoint does not imply that every similarly named error is
 endpoint-exclusive; check production consumers before deleting it.
 

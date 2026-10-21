@@ -112,8 +112,8 @@ func TestV2Session_ThreadNegotiation(t *testing.T) {
 
 func TestV2Session_ThreadSummaries(t *testing.T) {
 	t.Parallel()
-	const supplied = `{"id":"zero","name":null,"current_session_id":"stored","read_up_to":9,"latest_entry_id":83,"extra":false,"last_shown_version":999}`
-	const legacy = `{"id":"zero","name":null,"current_session_id":"stored","read_up_to":9,"latest_entry_id":83,"extra":false}`
+	const supplied = `{"id":"zero","name":null,"current_session_id":"stored","read_up_to":9,"extra":false,"last_shown_version":999}`
+	const legacy = `{"id":"zero","name":null,"current_session_id":"stored","read_up_to":9,"extra":false}`
 	const rows = `{"conversations":[` + supplied + `,{"id":"other","read_up_to":4},{"id":"unavailable","last_shown_version":999}],"extra":null}`
 	for _, caps := range [][]string{{"interactive"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
 		t.Run(strings.Join(caps, "-"), func(t *testing.T) {

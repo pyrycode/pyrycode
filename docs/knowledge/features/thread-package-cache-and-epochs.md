@@ -49,6 +49,14 @@ replaces or removes supplied `last_shown_version` at delivery for both
 so temporary absence cannot retain an older supplied value. Lookup starts no
 worker, warms no cursor, reads no segments and writes nothing.
 
+Listing retains every otherwise eligible row when that reading is absent;
+`last_shown_version` is the only unread evidence alongside durable `read_up_to`.
+Its absence means unknown, while present numeric zero is authoritative. Only
+connections that negotiated `thread` receive it. No legacy history scan gates
+the list. `TestDaemonThreadListShownAuthority` checks certified nonzero, certified
+zero and cold unknown rows together even with corrupt source segments, without
+starting workers, warming unknown progress or changing held marks.
+
 For unloaded unread metadata, `Store.UnloadedLastShownVersion` holds the store
 lock and rejects a closed store or any worker, including one still retiring.
 It obtains H from `history.Store.CachedLatestEntryID`, which never warms a cold
@@ -80,6 +88,14 @@ retirement restoring it. This preserves both V < H and V > H rejection and does
 not raise the shown watermark for hidden entries or completion-only revisions.
 See [offscreen summary recovery](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
 for the producer sequence and pending Mobile acceptance.
+
+`TestDaemonThreadOffscreenShownRecovery` holds a real retiring worker and then
+its joined return across a hidden append. It requires temporary absence followed
+by an unsolicited authoritative summary after producer-driven suffix recovery,
+without a new open, catch-up or read request. It also checks the untouched
+conversation and stored labels, pins, mute state and read marks. A test that
+opens every listed conversation would hide a missing retirement refresh and
+defeat metadata-only listing.
 
 `entryChecksum` hashes the stored entry at V with SHA-256. Its ordered input is
 ID, type byte length, type bytes, timestamp Unix seconds, timestamp nanoseconds,

@@ -111,25 +111,12 @@ func TestHistoryProjection_InteractiveMetadata(t *testing.T) {
 				want = 2
 			}
 			for _, reader := range []*history.Store{store, history.New(dir)} {
-				if n, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(conversations.ConversationID(testConvID)); err != nil || n != want {
-					t.Fatalf("daemon content target=%d,%v want %d", n, err, want)
-				}
 				n, err := reader.LatestDisplayableEntryID(conversations.ConversationID(testConvID))
 				if err != nil || n != want {
 					t.Fatalf("unread watermark=%d,%v want %d", n, err, want)
 				}
 				if old := historyEntries(t, reader, testConvID)[0]; old.Shown != nil {
 					t.Fatal("old entry reclassified")
-				}
-			}
-			oldDir := t.TempDir()
-			old := history.New(oldDir)
-			if _, err := old.Append(testConvID, tt.typ, json.RawMessage(tt.raw), historyTS); err != nil {
-				t.Fatal(err)
-			}
-			for _, reader := range []*history.Store{old, history.New(oldDir)} {
-				if n, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(testConvID); err != nil || (n == 1) != tt.shown {
-					t.Fatalf("absent-metadata target=%d,%v want shown=%t", n, err, tt.shown)
 				}
 			}
 		})

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
-	"slices"
 	"testing"
 	"time"
 
@@ -40,48 +39,9 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 	testQueuedReceiptIdentity(t, store, bcast, ring)
 	raw := historyEntries(t, store, testConvID)
 	for _, reader := range []*history.Store{store, history.New(dir)} {
-		entries, _ := testLegacyReceipts(t, reader)
-		var presented uint64
-		var old []history.Entry
-		for _, entry := range entries {
-			if entry.Type == protocol.TypeAssistantDelta {
-				presented = entry.ID
-			}
-			if entry.ID != raw[0].ID && entry.ID != raw[2].ID {
-				old = append(old, entry)
-			}
-		}
-		if testLegacyCheckpoint(old, presented, 0, false) != 0 {
-			t.Fatal("omitted queued IDs did not reproduce reply hole")
-		}
-		checkpoint := testLegacyCheckpoint(entries, presented, 0, false)
-		if checkpoint == 0 {
-			t.Fatalf("queued receipt hole blocks displayed reply: %+v", entries)
-		}
-		if testLegacyCheckpoint(append(slices.Clone(entries), entries...), 0, 0, false) != 0 {
-			t.Fatal("arrival supplied sight")
-		}
-		versions := map[string][]history.Entry{"phone": nil, "peer": nil, "replay": nil}
-		for _, push := range bcast.pushes {
-			versions[push.connID] = append(versions[push.connID], history.Entry{ID: *push.env.HistoryEntryID, Type: push.env.Type, Payload: push.env.Payload, TS: push.env.TS})
-		}
-		events, _ := ring.After(testConvID, 0)
-		for _, event := range events {
-			versions["replay"] = append(versions["replay"], history.Entry{ID: event.HistoryEntryID, Type: event.Type, Payload: event.Payload, TS: event.TS})
-		}
-		for name, version := range versions {
-			overlap := append(slices.Clone(entries), version...)
-			if testLegacyCheckpoint(overlap, presented, 0, false) != checkpoint || testLegacyCheckpoint(version, 0, 0, false) != 0 {
-				t.Fatalf("%s overlap changed checkpoint/sight", name)
-			}
-		}
-		if latest, err := reader.LatestDisplayableEntryID(conversations.ConversationID(testConvID)); err != nil || latest != presented {
-			t.Fatalf("raw displayable target=%d,%v", latest, err)
-		}
 		if latest, err := reader.LatestEntryID(conversations.ConversationID(testConvID)); err != nil || latest != raw[len(raw)-1].ID {
 			t.Fatalf("raw durable target=%d,%v", latest, err)
 		}
-		testLegacyListAndMark(t, reader, checkpoint, presented, 0)
 		if !reflect.DeepEqual(historyEntries(t, reader, testConvID), raw) {
 			t.Fatal("raw facts/metadata changed")
 		}
@@ -198,9 +158,6 @@ func TestQueuedLegacyReceipts_Startup(t *testing.T) {
 		page, _ := testLegacyReceipts(t, reader)
 		if len(page) != 2 || page[0].Type != protocol.TypeBanner {
 			t.Fatal("loss receipt absent")
-		}
-		if testLegacyCheckpoint(page, 0, 0, false) != 0 {
-			t.Fatal("startup receipts granted sight")
 		}
 	}
 }

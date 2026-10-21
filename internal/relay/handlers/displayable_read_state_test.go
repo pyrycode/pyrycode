@@ -87,11 +87,10 @@ func TestConversationReadDisplayableRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			hist = history.New(filepath.Dir(path))
-			list := func(wantLatest uint64, unread bool) {
+			list := func() {
 				t.Helper()
 				c, recv := newListConvConn(t)
-				if err := ListConversations(reg, hist)(context.Background(), c, makeListConversationsRequest(t, 91)); err != nil {
+				if err := ListConversations(reg)(context.Background(), c, makeListConversationsRequest(t, 91)); err != nil {
 					t.Fatal(err)
 				}
 				env, rows := decodeConversationsResponse(t, recv())
@@ -99,18 +98,25 @@ func TestConversationReadDisplayableRoundTrip(t *testing.T) {
 					t.Fatalf("list reply = %+v, %+v", env, rows)
 				}
 				row := rows.Conversations[0]
-				if row.ReadUpTo != wantHeld || row.LatestEntryID != wantLatest || (row.LatestEntryID > row.ReadUpTo) != unread {
-					t.Fatalf("list row = %+v; want held %d, latest %d, unread %v", row, wantHeld, wantLatest, unread)
+				if row.ReadUpTo != wantHeld || row.LastShownVersion != nil {
+					t.Fatalf("list row = %+v; want durable mark %d and unprojected shown evidence", row, wantHeld)
 				}
 			}
-			list(latest, false)
+			list()
 			fresh := appendEntry("unknown_future_type")
-			appendEntry("turn_state")
-			list(fresh, true)
+			tail := appendEntry("turn_state")
+			deadline = time.Now().Add(5 * time.Second)
+			for store.Status(markReadTargetID).Version != tail {
+				if time.Now().After(deadline) {
+					t.Fatal("thread did not consume hidden tail")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			list()
 			h = MarkConversationRead(reg, shown, path, ann.announce, testLogger(t))
 			runMarkRead(t, h, markReadPayload(fmt.Sprint(fresh)))
-			// Unknown source records remain a legacy list barrier, without shown content.
-			list(fresh, true)
+			// Unknown source records cannot advance the durable shown-thread read mark.
+			list()
 		})
 	}
 }
