@@ -119,15 +119,13 @@ var (
 //     refused at step 4 without a third code. This is where the verb departs from
 //     handleMCPStatusRequest, which answers protocol.malformed: that handler's
 //     vocabulary already carried the code, and this verb's is deliberately two codes.
-//     handleRequestHistory cannot do this at all, because there the empty id becomes a
-//     path component where filepath.Join(dir, "") is the log ROOT rather than an
-//     error; here it reaches a registry lookup and nothing else. NEVER echo or log the
-//     error — encoding/json quotes offending input into its error string.
+//     NEVER echo or log the error — encoding/json quotes offending input into
+//     its error string.
 //  4. MEMBERSHIP SEPARATES THE TWO REFUSAL ARMS. KnownConversation answers "is this
 //     conversation ours", so a false here is the permanent conversation.not_found and
 //     a seam refusal PAST it is the retryable context_usage.unavailable. A nil
 //     membership seam refuses everything, the only fail-safe reading. Membership
-//     rather than a session router, for HistoryPage's stated reason: a router
+//     rather than a session router, because a router
 //     additionally refuses a known conversation with no bound session, and the seam
 //     below already refuses that case on its own terms.
 //  5. RESOLVE, COMMA-OK HONOURED. The payload is read only on true. Writing

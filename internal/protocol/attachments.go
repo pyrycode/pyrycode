@@ -150,7 +150,7 @@ const (
 //     MEANINGFUL ON THE UPLOAD LEG ONLY (#2142). Outbound it is emitted empty and
 //     a receiver ignores it: a retrieval chunk is correlated by InReplyTo to a
 //     RequestAttachmentPayload that already named the conversation, which is the
-//     same reason AttachmentStoredPayload and HistoryPagePayload carry none.
+//     same reason AttachmentStoredPayload carries none.
 //     Inbound it is a LOOKUP KEY VALIDATED AGAINST THE DAEMON'S REGISTRY BEFORE
 //     IT BECOMES A PATH COMPONENT, never a value trusted as sent, and NAMING A
 //     CONVERSATION IS NOT AUTHORIZATION — RequestAttachmentPayload's block

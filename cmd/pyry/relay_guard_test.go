@@ -177,16 +177,7 @@ var inboundTypes = map[string]string{
 	// The live workspace read verb (#2598). Declared and wired in one slice, so it
 	// never sat in excludedTypes; filed here for the reason the retrieval verb
 	// above is — its case tags the frame and hands it to the conn's appFrameWorker.
-	"TypeReadWorkspaceFile": "switch-intercepted",
-	// The conversation-history request verb (#2116), moved up from excludedTypes'
-	// "pending handler (#2116)" when dispatchAppFrame gained its case — the move
-	// that entry named in advance, and mandatory rather than tidy-up: Assertion #2
-	// fails a wired type left sitting in that map. Same filing as the two above
-	// and for the same reason: its case tags the frame and hands it to the conn's
-	// appFrameWorker, where the segment reads and the page marshal run off Run,
-	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
-	// TypeHistoryPage, is outbound-only and stays excluded.
-	"TypeRequestHistory":     "switch-intercepted",
+	"TypeReadWorkspaceFile":  "switch-intercepted",
 	"TypeThreadCatchUp":      "switch-intercepted",
 	"TypeThreadPage":         "switch-intercepted",
 	"TypeThreadReadToolBody": "switch-intercepted",
@@ -216,7 +207,7 @@ var inboundTypes = map[string]string{
 	// change the filing — it is recorded because a future edit that moves this arm
 	// off Run has an emit-path obligation (see handleRequestModelList's header).
 	// Its reply half is TypeModelList, which is outbound-only and stays excluded,
-	// exactly as TypeHistoryPage does for TypeRequestHistory.
+	// as with other correlated replies.
 	"TypeRequestModelList": "switch-intercepted",
 	// The on-demand MCP-status request verb (#2381). Its declaration and only
 	// relay consumer land together, and the switch tags it for the per-connection
@@ -388,20 +379,8 @@ var excludedTypes = map[string]string{
 	// entry is permanent and never moves to inboundTypes.
 	"TypeAttachmentOffered": "push",
 
-	// outbound reply — one backward step of a conversation-history walk (#2113),
-	// the answer to the request_history below. Filed on the same rule as its
-	// neighbours: correlation rides the envelope's in_reply_to, which is literally
-	// the definition this map gives above, and TypeSessionSettings is the shape
-	// copied — an outbound v2 answer to an inbound request verb that named a
-	// conversation and carrying no conversation id of its own. Mandatory from the
-	// moment the constant exists rather than from the moment something emits it
-	// (the producer is #2116): Assertion #3 reports an unclassified constant, not
-	// an unemitted one. Unlike its request half this frame has no inbound leg at
-	// all, so this entry never moves to inboundTypes.
-	"TypeHistoryPage": "reply",
-
 	// The conversation system-prompt read reply (#2152), the answer to the
-	// request_system_prompt below. Filed on the same rule as TypeHistoryPage above
+	// request_system_prompt below. Filed as a correlated reply
 	// and copying the same shape, TypeSessionSettings: an outbound v2 answer to an
 	// inbound request verb that named a conversation, correlated by in_reply_to and
 	// carrying no conversation id of its own. Unlike those two it lands in the SAME
@@ -588,22 +567,6 @@ var excludedTypes = map[string]string{
 	// unemitted one.
 	"TypeQuestionDismissed": "push",
 
-	// pending handler (#2116) — the conversation-history request verb (#2113).
-	// #2113 declares the constant, its payload and its published section; nothing
-	// dispatches it, so inboundTypes would fail Assertion #1, which requires an
-	// inbound type to be wired into the Handlers map or dispatchAppFrame. "push"
-	// is false for a genuinely inbound frame and filing it that way to dodge that
-	// assertion would be a lie to the guard rather than a classification — the
-	// reasoning the two removal notes below preserve for the entries that used to
-	// sit here.
-	//
-	// TypeRequestHistory is NO LONGER HERE. It sat here as "pending handler
-	// (#2116)" while #2113 had declared the constant and nothing dispatched it;
-	// #2116 added the dispatchAppFrame case, so it moved up to inboundTypes as
-	// "switch-intercepted", beside TypeRequestAttachment, which made exactly this
-	// move out of exactly this label. Its reply half is TypeHistoryPage above,
-	// which is outbound-only and never moves.
-
 	// TypeRequestAttachment is NO LONGER HERE. It sat here as "pending handler
 	// (#2054)" while #2052 had declared the constant and nothing dispatched it;
 	// #2054 added the dispatchAppFrame case, so it moved up to inboundTypes as
@@ -627,8 +590,7 @@ var excludedTypes = map[string]string{
 	// same move one step later, in #1897.
 
 	// outbound reply — the minted pairing (#2126), correlated by in_reply_to, so
-	// "reply" is literally the definition this map gives above. TypeHistoryPage's
-	// filing for TypeRequestHistory, and unlike its own request half this entry
+	// unlike its request half this entry
 	// NEVER MOVES: the frame has no inbound leg at all, so no dispatchAppFrame case
 	// will ever exist to move it. Mandatory from the moment the constant exists
 	// rather than from the moment #2127 emits it — Assertion #3 reports an

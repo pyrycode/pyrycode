@@ -480,11 +480,7 @@ func testThreadQueryRequestedScope(t *testing.T, page bool) {
 			t.Error("active cursor substituted")
 		}
 		return thread.QueryResult{}, nil
-	}, func(c *V2SessionConfig) {
-		c.HistoryPage = func(id, cursor string, limit int) HistoryPageResult {
-			return HistoryPageResult{Cursor: "raw", AtStart: true}
-		}
-	})
+	}, nil)
 	ring := eventring.New(eventring.MaxEventsPerConversation)
 	appendRingEvents(ring, catchUpConversation, protocol.TypeAssistantDelta, 1)
 	p.mgr.SetReplaySource(ring, func() string { return "22222222-2222-4222-8222-222222222222" })
@@ -526,13 +522,8 @@ func testThreadQueryRequestedScope(t *testing.T, page bool) {
 				t.Fatal("legacy lost resync")
 			}
 		}
-		q.request(70, protocol.TypeRequestHistory, fmt.Sprintf(`{"conversation_id":%q}`, catchUpConversation))
-		e, _ := q.next()
-		if e.Type != protocol.TypeHistoryPage {
-			t.Fatalf("history/replay: %s", e.Type)
-		}
 		if calls.Load() != 0 {
-			t.Fatal("handshake/history queried thread")
+			t.Fatal("handshake queried thread")
 		}
 	}
 	p.request(39, protocol.TypeListConversations, `{}`)

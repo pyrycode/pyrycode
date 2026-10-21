@@ -138,7 +138,7 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone2.Close() })
 	send2, recv2 := driveHandshakeToOpenDaemonInteractiveResuming(t, phone2, pub, pair.Token, &cursor)
-	seal2, next2 := sealedConnDriver(t, phone2, "returning phone", send2, recv2)
+	_, next2 := sealedConnDriver(t, phone2, "returning phone", send2, recv2)
 	var deltas []protocol.Envelope
 	var completion protocol.Envelope
 	var turn string
@@ -177,29 +177,18 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 	if len(deltas) < 2 || joined.String() != text {
 		t.Fatal("chunked replay changed text")
 	}
-	seal2(protocol.Envelope{ID: 28092, Type: protocol.TypeRequestHistory, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.RequestHistoryPayload{ConversationID: convID})})
-	for {
-		env, ok := next2(time.Now().Add(10 * time.Second))
-		if !ok {
-			t.Fatal("served history absent")
-		}
-		if env.Type != protocol.TypeHistoryPage {
-			continue
-		}
-		var page protocol.HistoryPagePayload
-		if err := json.Unmarshal(env.Payload, &page); err != nil {
-			t.Fatal(err)
-		}
-		var recorded []protocol.HistoryEntry
-		for i := len(page.Entries) - 1; i >= 0; i-- {
+	{
+		page := readHistoryEntries(home, convID)
+		var recorded []historyEntry
+		for i := 0; i < len(page); i++ {
 			var identity struct {
 				TurnID string `json:"turn_id"`
 			}
-			if err := json.Unmarshal(page.Entries[i].Payload, &identity); err != nil {
+			if err := json.Unmarshal(page[i].Payload, &identity); err != nil {
 				t.Fatal(err)
 			}
 			if identity.TurnID == turn {
-				recorded = append(recorded, page.Entries[i])
+				recorded = append(recorded, page[i])
 			}
 		}
 		if len(recorded) != len(deltas)+1 {
@@ -211,7 +200,6 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 			}
 		}
 		assertHostPostEnd(t, recorded[len(deltas)].Payload, convID, turn)
-		break
 	}
 	quiet, quietCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer quietCancel()

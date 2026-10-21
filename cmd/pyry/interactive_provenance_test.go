@@ -260,12 +260,6 @@ func TestInteractiveProvenanceCompatibility(t *testing.T) {
 	if entries[0].Session != nil || entries[2].Session != nil || entries[1].Session == nil || *entries[1].Session != source {
 		t.Fatalf("legacy/captured/absent provenance = %v", entries)
 	}
-	pager := newHistoryPager(store, discardLogger())(testConvID, "", 128)
-	for i, entry := range pager.Entries {
-		if string(entry.Payload) != string(entries[len(entries)-1-i].Payload) {
-			t.Fatal("legacy pager changed payload")
-		}
-	}
 	for _, tc := range []struct {
 		name, conv string
 		store      *history.Store

@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
@@ -25,7 +24,7 @@ import (
 // testLegacyCheckpoint mirrors mobile ThreadReadEvidence.checkpoint's receipt
 // barriers. A presented content version is supplied explicitly; receiving pages
 // alone cannot supply one. The known decoder arms are limited to this fixture.
-func testLegacyCheckpoint(entries []protocol.HistoryEntry, presented, confirmed uint64, unidentified bool) uint64 {
+func testLegacyCheckpoint(entries []history.Entry, presented, confirmed uint64, unidentified bool) uint64 {
 	if unidentified || presented == 0 {
 		return 0
 	}
@@ -97,7 +96,7 @@ func testLegacyCheckpoint(entries []protocol.HistoryEntry, presented, confirmed 
 
 // testLegacyLatest mirrors mobile contributesToUnreadWatermark on received wire
 // entries. Keep this independent of the daemon's eligibility/visibility helpers.
-func testLegacyLatest(entries []protocol.HistoryEntry) uint64 {
+func testLegacyLatest(entries []history.Entry) uint64 {
 	var latest uint64
 	for _, entry := range entries {
 		switch entry.Type {
@@ -109,21 +108,35 @@ func testLegacyLatest(entries []protocol.HistoryEntry) uint64 {
 	return latest
 }
 
-func testLegacySerializedPage(t *testing.T, store *history.Store) ([]protocol.HistoryEntry, []byte) {
+// testLegacyReceipts serializes the retained live receipt projection of source
+// facts for identity and read-mark assertions. It has no paging or wire-page API.
+func testLegacyReceipts(t *testing.T, store *history.Store) ([]history.Entry, []byte) {
 	t.Helper()
-	page := newHistoryPager(store, discardLogger())(testConvID, "", 128)
-	if !page.AtStart || page.Cursor != "" {
-		t.Fatal("expected terminal page")
+	var entries []history.Entry
+	var wire []byte
+	for _, e := range historyEntries(t, store, testConvID) {
+		typ, payload := e.Type, e.Payload
+		if !legacyHistoryType(typ) {
+			var ok bool
+			payload, ok = legacyRuntimeReceipt(testConvID, typ, payload, &e.ID, e.TS)
+			if !ok {
+				continue
+			}
+			typ = protocol.TypeBanner
+		}
+		encoded, err := json.Marshal(protocol.Envelope{Type: typ, Payload: payload, TS: e.TS, HistoryEntryID: &e.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded protocol.Envelope
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, history.Entry{ID: *decoded.HistoryEntryID, Type: decoded.Type, Payload: decoded.Payload, TS: decoded.TS})
+		wire = append(wire, encoded...)
 	}
-	wire, err := json.Marshal(protocol.HistoryPagePayload{Entries: page.Entries, Cursor: page.Cursor, AtStart: page.AtStart})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded protocol.HistoryPagePayload
-	if err := json.Unmarshal(wire, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	return decoded.Entries, wire
+	slices.Reverse(entries)
+	return entries, wire
 }
 
 func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
@@ -145,8 +158,8 @@ func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
 				wantLatest, wantCheckpoint, wantRaw = 5, 6, 4
 			}
 			rawEntries := historyEntries(t, store, testConvID)
-			entries, wire := testLegacySerializedPage(t, store)
-			versions := map[string][]protocol.HistoryEntry{"history": entries, "phone": nil, "peer": nil, "replay": nil}
+			entries, wire := testLegacyReceipts(t, store)
+			versions := map[string][]history.Entry{"history": entries, "phone": nil, "peer": nil, "replay": nil}
 			addEnvelope := func(name string, env protocol.Envelope) {
 				encoded, err := json.Marshal(env)
 				if err != nil {
@@ -156,7 +169,7 @@ func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
 				if err := json.Unmarshal(encoded, &decoded); err != nil || decoded.HistoryEntryID == nil {
 					t.Fatalf("missing serialized identity: %s / %v", encoded, err)
 				}
-				versions[name] = append(versions[name], protocol.HistoryEntry{ID: *decoded.HistoryEntryID, Type: decoded.Type, Payload: decoded.Payload, TS: decoded.TS})
+				versions[name] = append(versions[name], history.Entry{ID: *decoded.HistoryEntryID, Type: decoded.Type, Payload: decoded.Payload, TS: decoded.TS})
 			}
 			for _, push := range bcast.pushes {
 				if push.connID == "legacy" {
@@ -225,101 +238,16 @@ func testRuntimeFact(t *testing.T, typ, convID string) json.RawMessage {
 	return raw
 }
 
-func TestLegacyRuntimeReceipts_BoundedPages(t *testing.T) {
-	t.Parallel()
-	for _, mixed := range []bool{false, true} {
-		t.Run(fmt.Sprint(mixed), func(t *testing.T) {
-			dir := t.TempDir()
-			store := history.New(dir)
-			id := conversations.ConversationID(testConvID)
-			types := []string{historyTurnOpened, historyToolInterrupted, historyTurnInterrupted, historySessionDivider}
-			for i := 0; i < 12; i++ {
-				typ := types[i%4]
-				raw := testRuntimeFact(t, typ, testConvID)
-				if mixed && i%3 == 1 {
-					typ = protocol.TypeMessage
-					raw = json.RawMessage(`{"text":"content"}`)
-				}
-				shown := i%2 == 0
-				visibility := &shown
-				if i%3 == 0 {
-					visibility = nil
-				}
-				if _, err := store.AppendWithMetadata(id, typ, raw, historyTS.Add(time.Duration(i)*time.Second), history.Metadata{Shown: visibility}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for _, reader := range []*history.Store{store, history.New(dir)} {
-				if !mixed {
-					if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != 11 {
-						t.Fatalf("all-runtime watermark=%d,%v", got, err)
-					}
-				}
-				cursor := ""
-				var delivered []protocol.HistoryEntry
-				for step := 0; step < 8; step++ {
-					raw, err := reader.Page(id, cursor, 3)
-					if err != nil {
-						t.Fatal(err)
-					}
-					page := newHistoryPager(reader, discardLogger())(testConvID, cursor, 3)
-					if page.Cursor != raw.Cursor || page.AtStart != raw.AtStart || len(page.Entries) != len(raw.Entries) {
-						t.Fatalf("bounded page mismatch: %+v / %+v", page, raw)
-					}
-					for i, entry := range page.Entries {
-						original := raw.Entries[i]
-						if entry.ID != original.ID || !entry.TS.Equal(original.TS) {
-							t.Fatal("receipt identity changed")
-						}
-						if original.Type == protocol.TypeMessage {
-							if !bytes.Equal(entry.Payload, original.Payload) {
-								t.Fatal("content rewritten")
-							}
-							continue
-						}
-						var banner protocol.BannerPayload
-						if json.Unmarshal(entry.Payload, &banner) != nil || entry.Type != protocol.TypeBanner || banner != (protocol.BannerPayload{ConversationID: testConvID, Level: "info"}) {
-							t.Fatalf("receipt=%+v", entry)
-						}
-						var keys map[string]json.RawMessage
-						_ = json.Unmarshal(entry.Payload, &keys)
-						if len(keys) != 5 || keys["text"] == nil || keys["truncated"] == nil || keys["stops_turn"] == nil {
-							t.Fatalf("required fields: %s", entry.Payload)
-						}
-					}
-					// Re-requesting the same raw cursor produces exactly the same receipts.
-					again := newHistoryPager(reader, discardLogger())(testConvID, cursor, 3)
-					if !reflect.DeepEqual(page, again) {
-						t.Fatal("repeated page changed")
-					}
-					delivered = append(delivered, page.Entries...)
-					if page.AtStart {
-						break
-					}
-					cursor = page.Cursor
-				}
-				if len(delivered) != 12 {
-					t.Fatalf("walk delivered %d entries", len(delivered))
-				}
-				overlap := append(slices.Clone(delivered), delivered...)
-				if testLegacyCheckpoint(overlap, 0, 0, false) != 0 {
-					t.Fatal("receipt delivery granted presentation")
-				}
-			}
-		})
-	}
-}
-
 func TestLegacyRuntimeReceipts_Barriers(t *testing.T) {
 	t.Parallel()
-	base := []protocol.HistoryEntry{{ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
-	receipt := protocol.HistoryEntry{ID: 2, Type: protocol.TypeBanner, Payload: json.RawMessage(`{"conversation_id":"c","level":"info","text":"","truncated":false,"stops_turn":false}`)}
+	base := []history.Entry{{ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
+	receipt := history.Entry{ID: 2, Type: protocol.TypeBanner, Payload: json.RawMessage(`{"conversation_id":"c","level":"info","text":"","truncated":false,"stops_turn":false}`)}
 	malformed, unknown, missing := receipt, receipt, receipt
 	malformed.Payload = json.RawMessage(`{"conversation_id":"c","level":"info"}`)
 	unknown.Type, missing.ID = "unknown_fact", 0
 	tests := []struct {
 		name         string
-		middle       *protocol.HistoryEntry
+		middle       *history.Entry
 		unidentified bool
 		want         uint64
 	}{
@@ -337,15 +265,7 @@ func TestLegacyRuntimeReceipts_Barriers(t *testing.T) {
 			}
 		})
 	}
-	store := history.New(t.TempDir())
-	for _, typ := range []string{historyTurnOpened, historyToolInterrupted, historyTurnInterrupted, historySessionDivider, "unknown_fact"} {
-		if _, err := store.Append(conversations.ConversationID(testConvID), typ, json.RawMessage(`{}`), historyTS); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if page := newHistoryPager(store, discardLogger())(testConvID, "", 128); len(page.Entries) != 0 || !page.AtStart {
-		t.Fatalf("invalid facts certified harmless: %+v", page)
-	}
+
 }
 
 func TestLegacyRuntimeReceipts_LiveReplay(t *testing.T) {
@@ -365,15 +285,15 @@ func TestLegacyRuntimeReceipts_LiveReplay(t *testing.T) {
 	tr.hist = store
 	tr.runtimeSink = sink
 	tr.broadcast(ctx, sessions.SessionTransition{ConversationID: testConvID, PreviousID: "old", NewID: "new", Cause: sessions.CauseOperatorReset, OccurredAt: historyTS})
-	page := newHistoryPager(store, discardLogger())(testConvID, "", 128)
+	page, _ := testLegacyReceipts(t, store)
 	raw := historyEntries(t, store, testConvID)
 	events, _ := e.ring.After(testConvID, 0)
 	if len(events) != len(raw) || len(bcast.pushes) != 2*len(raw) {
 		t.Fatalf("append/live/replay counts=%d/%d/%d", len(raw), len(bcast.pushes), len(events))
 	}
 	for _, original := range raw {
-		var projected protocol.HistoryEntry
-		for _, entry := range page.Entries {
+		var projected history.Entry
+		for _, entry := range page {
 			if entry.ID == original.ID {
 				projected = entry
 			}
@@ -400,11 +320,11 @@ func TestLegacyRuntimeReceipts_LiveReplay(t *testing.T) {
 		t.Fatal("receipt crossed conversation")
 	}
 	// Joining history with overlapping replay must preserve the checkpoint.
-	joined := slices.Clone(page.Entries)
+	joined := slices.Clone(page)
 	for _, event := range events {
-		joined = append(joined, protocol.HistoryEntry{ID: event.HistoryEntryID, Type: event.Type, Payload: event.Payload, TS: event.TS})
+		joined = append(joined, history.Entry{ID: event.HistoryEntryID, Type: event.Type, Payload: event.Payload, TS: event.TS})
 	}
-	if got, want := testLegacyCheckpoint(joined, 3, 0, false), testLegacyCheckpoint(page.Entries, 3, 0, false); got != want {
+	if got, want := testLegacyCheckpoint(joined, 3, 0, false), testLegacyCheckpoint(page, 3, 0, false); got != want {
 		t.Fatalf("overlap changed checkpoint %d/%d", got, want)
 	}
 }
@@ -613,11 +533,11 @@ func TestLegacyRuntimeReceipts_StartupDivider(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcileStartupHistory(store, reg, discardLogger(), historyTS)
-	page := newHistoryPager(history.New(root), discardLogger())(testConvID, "", 128)
-	if len(page.Entries) != 2 || page.Entries[0].ID != 2 || page.Entries[0].Type != protocol.TypeBanner {
+	page, _ := testLegacyReceipts(t, history.New(root))
+	if len(page) != 2 || page[0].ID != 2 || page[0].Type != protocol.TypeBanner {
 		t.Fatalf("startup divider receipt=%+v", page)
 	}
-	if got := testLegacyCheckpoint(page.Entries, 1, 0, false); got != 2 {
+	if got := testLegacyCheckpoint(page, 1, 0, false); got != 2 {
 		t.Fatalf("startup checkpoint=%d", got)
 	}
 }
@@ -668,7 +588,7 @@ func TestLegacyRuntimeReceipts_WireTargets(t *testing.T) {
 						if got, err := (legacyHistoryReader{reader}).LatestDisplayableEntryID(id); err != nil || got != want {
 							t.Fatalf("legacy target=%d,%v want %d", got, err, want)
 						}
-						entries, _ := testLegacySerializedPage(t, reader)
+						entries, _ := testLegacyReceipts(t, reader)
 						if unsupported {
 							if len(entries) != 0 {
 								t.Fatal("unsupported entry certified as receipt")
@@ -716,7 +636,7 @@ func TestLegacyRuntimeReceipts_CompletionTails(t *testing.T) {
 			if len(raw) != 6 || raw[4].Type != protocol.TypeTurnEnd || raw[4].Shown == nil || *raw[4].Shown != ending.shown {
 				t.Fatalf("completion raw visibility=%+v", raw)
 			}
-			entries, _ := testLegacySerializedPage(t, store)
+			entries, _ := testLegacyReceipts(t, store)
 			wantBeforeCompletion := uint64(6)
 			if ending.shown {
 				wantBeforeCompletion = 4
@@ -740,7 +660,7 @@ func TestLegacyRuntimeReceipts_CompletionTails(t *testing.T) {
 				t.Run(tail.name, func(t *testing.T) {
 					tail.append()
 					for _, reader := range []*history.Store{store, history.New(dir)} {
-						entries, _ := testLegacySerializedPage(t, reader)
+						entries, _ := testLegacyReceipts(t, reader)
 						if got := testLegacyLatest(entries); got != tail.latest {
 							t.Fatalf("client latest=%d want %d", got, tail.latest)
 						}

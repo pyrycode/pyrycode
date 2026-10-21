@@ -83,3 +83,8 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+
+- 2026-10-21: Compilation found `nextHistoryReply` and `mustMarshal` also serve pairing/session tests. Preserve them in `v2session_appframe_helpers_test.go`, rename the former `nextAppReply`, and remove the pager-specific helpers. Fake-e2e mixed tests retain direct source-log comparisons using the existing `readHistoryEntries`; no replacement raw endpoint is introduced. Remove the three endpoint-only history error constants while retaining `CodeHistoryUnavailable` for list/read consumers.
+- 2026-10-21: Preserve the shared `assertWireKeys` helper in `wire_keys_test.go`. The held channel-post test uses a correlated `list_conversations` reply as its observation barrier before release, plus source-log assertions; a timed-out fakephone read closes its socket and cannot be used as a continuing observation window.

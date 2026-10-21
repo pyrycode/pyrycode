@@ -211,7 +211,7 @@ type V2SessionConfig struct {
 	Handlers map[string]dispatch.Handler
 
 	// KnownConversation reports whether conversationID names a conversation this
-	// daemon hosts. The handlers for request_snapshot, request_history,
+	// daemon hosts. The handlers for request_snapshot,
 	// request_attachment, attachment_chunk, read_workspace_file,
 	// request_model_list, request_context_usage, mcp_status_request and the MCP
 	// actuation verbs consult it before calling their seam and refuse an unknown
@@ -247,21 +247,6 @@ type V2SessionConfig struct {
 	// return a slice it owns and never write through its argument. Optional: nil
 	// delivers every pushed model_list unchanged.
 	MergedModelOptions func(claude []protocol.ModelOption) []protocol.ModelOption
-
-	// HistoryPage serves one backward step of a conversation-history walk over
-	// the daemon's durable log, for an inbound request_history.
-	// handleRequestHistory is its sole caller, on the conn's appFrameWorker,
-	// which is why it may read files; it still stalls that conn's later frames,
-	// so it MUST return in bounded time. Optional: nil consumes the frame inertly,
-	// with no reply and no byte of the payload parsed.
-	//
-	// conversationID has already passed KnownConversation; the caller owes that,
-	// because the id becomes a path component below this seam. cursor is passed
-	// through unparsed: the wire declares it opaque, history.parseCursor is its
-	// only validator, and nothing in internal/relay may decode, log or branch on
-	// it. limit arrives positive and capped at maxHistoryPageEntries; never size a
-	// buffer from it (see HistoryPageResult.Entries).
-	HistoryPage HistoryPager
 
 	// RunConfigFor reports the named conversation's run configuration as one
 	// RunConfig describing one session. It is the legacy run-configuration source
