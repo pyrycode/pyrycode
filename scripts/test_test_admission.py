@@ -15,6 +15,34 @@ WRAPPER = Path(__file__).with_name("test-admission.py")
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_wait_reports_survive_redirected_output_and_end_before_test_execution(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # The helper protocol is dispatcher-owned. This fixture exposes
+            # exactly when admission calls it, independently of printed output.
+            agents = root / 'agents'
+            helper = agents / 'dispatcher/scripts/test-wait.py'
+            helper.parent.mkdir(parents=True)
+            helper.write_text("from pathlib import Path\nimport os\nclass AdmissionWait:\n def heartbeat(self): Path(os.environ['PYRY_TEST_WAIT_DIRECTORY'], 'waiting').touch()\n def finish(self): Path(os.environ['PYRY_TEST_WAIT_DIRECTORY'], 'acquired').touch()\n")
+            env = dict(os.environ, AGENTS_REPO_PATH=str(agents), PYRY_TEST_WAIT_DIRECTORY=str(root), PYRY_TEST_ADMISSION_LOCK=str(root / 'hold'))
+            with (root / 'hold').open('w') as locked, (root / 'output').open('w') as output:
+                fcntl.flock(locked, fcntl.LOCK_EX)
+                code = "import os; from pathlib import Path; assert Path(os.environ['PYRY_TEST_WAIT_DIRECTORY'], 'acquired').exists()"
+                waiter = subprocess.Popen([sys.executable, str(WRAPPER), '--', sys.executable, '-c', code], env=env, stdout=output, stderr=output)
+                try:
+                    deadline = time.monotonic() + 3
+                    while not (root / 'waiting').exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue((root / 'waiting').exists())
+                    self.assertFalse((root / 'acquired').exists())
+                    fcntl.flock(locked, fcntl.LOCK_UN)
+                    self.assertEqual(waiter.wait(timeout=5), 0)
+                finally:
+                    if waiter.poll() is None:
+                        waiter.kill()
+                        waiter.wait(timeout=5)
+
     def test_darwin_signal_to_exited_group_is_allowed_only_without_live_members(self):
         spec = importlib.util.spec_from_file_location("admission", WRAPPER)
         module = importlib.util.module_from_spec(spec)
