@@ -11,7 +11,8 @@ at a receiving-child echo or normal answering-turn completion (with Send now's
 carried-close grace for no-echo completion); Codex/no-stream delivery commits at
 write confirmation (see [Producers](history-package-producers.md#producers-2114-2115)).
 The raw wire pager is retired (#3715); source storage still feeds
-[`internal/thread`](thread-package.md) and list/read watermarks. Spec:
+[`internal/thread`](thread-package.md), whose shown evidence supplies summary/read
+authority. Spec:
 [`specs/architecture/2112-conversation-history-log.md`](../../specs/architecture/2112-conversation-history-log.md).
 
 ## Topic map
@@ -21,7 +22,7 @@ The raw wire pager is retired (#3715); source storage still feeds
 | [Shape](history-package-shape.md) | Entry and metadata contracts, selective lookup and its byte-bounded cache, explicit conversation sync, paging bounds, durable ID allocation and forward replay/tailing. |
 | [A cleanup on a failed write is not the guarantee it looks like](history-package-failed-write-recovery.md) | Write rollback and read tolerance after fresh or active segment failures. |
 | [Producers (#2114, #2115)](history-package-producers.md) | Map of captured provenance, runtime/startup closure, agent/task attribution and reported endings, visibility, receipts and producer verification. |
-| [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, displayable unread watermarks and lazy recovery. |
+| [`LatestEntryID` shares `Append`'s cursor instead of a second counter (#2779)](history-package-watermarks.md) | Raw durable cursors, internal visibility watermarks and shown-thread summary/read authority. |
 
 ## Why not claude's transcripts
 
@@ -174,8 +175,8 @@ The remote raw pager and `newHistoryPager` adapter are removed (#3715).
 Content recovery uses [Thread query messages](../../protocol-mobile.md#thread-query-messages)
 and the publisher Store; raw `history.Entry` records remain the fold source.
 `Store.Page`, forward walks/tailing and watermark APIs remain internal storage
-operations. Legacy live/replay receipt projection and list/read content policy
-also remain; see [producer eligibility and verification](history-package-producers-legacy-compatibility.md).
+operations. Legacy live/replay receipt projection also remains; see
+[producer eligibility and verification](history-package-producers-legacy-compatibility.md).
 
 Storage cursors describe the returned range. Never truncate a returned page and
 retain its old cursor: that cursor points before the oldest returned entry, so
@@ -191,8 +192,9 @@ These storage rules do not restore the retired wire protocol.
 `unknown_version` or `read`, without logging the underlying error's absolute
 filesystem paths. Keep `TestHistoryPageFailure_NamesEverySentinel` even though
 the remote pager is gone. `not_contained` distinguishes a confinement refusal
-from ordinary I/O for the operator; public list/read failures still use the
-shared retryable `history.unavailable` contract.
+from ordinary I/O for the operator; public read refusal uses retryable
+`history.unavailable` when authoritative shown evidence is missing. Lists retain
+rows with unknown shown evidence omitted.
 
 ## Files
 
@@ -214,11 +216,10 @@ internal/history/
 - [attachments-package-directory-resolution-and-creation.md](attachments-package-directory-resolution-and-creation.md) —
   the root-as-argument style, the resolve-and-compare-for-equality containment
   check, and the 0o700/0o600 modes this package copies verbatim.
-- [relay-package-handlers.md](relay-package-handlers.md) § `ListConversations` —
-  `LatestDisplayableEntryID`'s consumers: the `historyLatestReader` interface
-  satisfied by the daemon's legacy view for list and mark-read, and lookup-failure
-  wire behavior. [Watermarks](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
-  distinguishes that view from the raw store API.
+- [Conversation summaries](relay-package-handlers-list-conversations.md) —
+  registry projection and optional shown evidence without legacy history scans.
+  [Watermarks](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
+  distinguishes shown-thread authority from the internal raw-store APIs.
 - [`conversations-package.md`](conversations-package.md) § `ReadUpTo` — the
   durable read mark stated in this package's same per-conversation id space,
   landed in the same ticket (#2779).

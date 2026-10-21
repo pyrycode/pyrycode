@@ -242,9 +242,9 @@ requires `accepted_at`; outcomes require `occurred_at`, `accepted_entry_id` and
 the exact reason in the table, with `delivery_entry_id` also required for
 delivery. Sender/message fields remain optional. Malformed/unknown facts stay
 holes. Receipts carry no send text, attachments, sender fields or raw facts and
-confer no sight or lifecycle changes. The shared legacy list/read target counts
-valid receipts even for hidden removal/give-up; raw visibility, provenance,
-watermarks and ID allocation remain unchanged. See
+confer no sight or lifecycle changes. Receipt acceptance supplies no shown-thread
+or read-mark authority, including for hidden removal/give-up. Raw visibility,
+provenance, internal watermarks and ID allocation retain their contracts. See
 [legacy validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 **Gate placement itself on acceptance completion.** Queue callback ordering
@@ -491,8 +491,6 @@ checks that retirement cannot erase captured ownership;
 answers. Bounded-projection and storage tests cover escaping, unchanged child
 answers and content-free failures. `TestPromptAnswerReceiptsValidation` exercises
 all decision pairs and rejected fields through the retained receipt projection.
-`TestPromptAnswerReceiptsReadTargets` checks receipt accounting versus presentation
-and list/read targets across visibility states and reopened stores.
 `TestPromptAnswerReceiptsPublication` compares projected source/live/replay bytes
 and identity with and without clients, including rebinding and duplicate attempts;
 `TestPromptAnswerReceiptsConcurrent` checks serialized order under concurrent

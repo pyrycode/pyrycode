@@ -13,10 +13,10 @@ false or true. Only the validated runtime/startup,
 [agent/task facts](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
 and [remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973)
 have a receipt projection.
-Visibility controls content classification for the daemon
-[unread watermark](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954),
-not permission to reach a transport. Conversely, an eligible legacy event still
-reaches its existing live/replay recipients when `Shown` is false,
+Stored visibility feeds thread folding and the internal history APIs; it does
+not grant permission to reach a transport. Summary/read authority comes from
+[shown-thread evidence](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
+Conversely, an eligible legacy event still reaches its existing live/replay recipients when `Shown` is false,
 including normal turn ends, info banners and live status readings. This preserves
 [ADR 042's compatibility boundary](../decisions/042-daemon-built-thread.md#compatibility):
 old apps treat unknown history entries as read-mark barriers.
@@ -127,17 +127,19 @@ named real-Claude acceptance requires separate counted full-gate evidence. See
 [prompt-answer serialization and validation](history-package-producers.md#resolved-remote-prompt-answers-2973)
 and [the #3256 live evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#revisions).
 
-The daemon's [list/read target](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
-uses content classification and the explicit-false veto, independently of receipt
-accounting (#3463). Raw facts, metadata and store watermarks retain their
+The daemon's [summary/read authority](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
+uses shown-thread evidence independently of receipt accounting. Raw facts,
+producer visibility metadata and internal store watermarks retain their
 contracts. The [raw pager is retired](history-package.md#reader-2116); source
 facts remain available to thread folding, while legacy live/replay receipts
 retain their accounting role.
 
 `TestLegacyRuntimeReceipts_CompletedTurn` uses the real store and `HandleFor`
-normal text/completion with runtime facts disabled as a control; omitting the
-enabled opening ID leaves a checkpoint hole despite presenting the reply.
-`TestLegacyRuntimeReceipts_LiveReplay` checks shared identity and overlap.
+normal text/completion with runtime facts disabled as a control; it compares
+source projection, direct recipients and replay by original identity and bytes,
+then verifies raw entries and metadata survive reopening.
+`TestLegacyRuntimeReceipts_LiveReplay` checks shared source/live/replay identity
+and conversation isolation.
 An exact live banner count includes these receipts: retain every banner and
 validate expected receipts separately from refusals rather than ignoring info
 banners, which would hide duplicate receipts. `TestInteractiveStreamHookBlockedBannerReachesTheClient`
@@ -177,9 +179,9 @@ recipient gates keep their original meaning.
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
 | Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; receipt accounting does not make hidden openings or restart/sleep dividers unread. |
-| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; receipts provide accounting, while only shown content qualifies for daemon latest; they confer no foreground presentation. |
-| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. Raw payloads stay off legacy transports; receipts provide accounting without sight; hidden drops do not raise daemon latest. Running facts share page/live/replay identities; startup loss is page-only. |
-| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Raw payloads stay off legacy transports; validated five-field nonvisual receipts preserve accounting with identical page/live/replay bytes and original durable ID/timestamp. Daemon latest follows the raw fact's content classification and explicit-false veto. Invalid facts remain holes; receipts confer no presentation or read-mark authority. Open prompts remain live-only. |
+| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; receipts provide accounting independently of shown-thread authority and confer no foreground presentation. |
+| [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. Raw payloads stay off legacy transports; receipts provide accounting without sight; hidden drops do not themselves raise shown progress. Running facts share page/live/replay identities; startup loss is page-only. |
+| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Raw payloads stay off legacy transports; validated five-field nonvisual receipts preserve accounting with identical page/live/replay bytes and original durable ID/timestamp. Shown-thread authority is resolved from the fold, independently of receipt acceptance. Invalid facts remain holes; receipts confer no presentation or read-mark authority. Open prompts remain live-only. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -188,17 +190,14 @@ to known terminal words would silently hide future completion facts. Conditional
 legacy payloads that fail decoding conservatively classify as shown; classification
 does not rewrite or reject their payloads.
 
-**The daemon uses this same policy for producer metadata and unread (#3463).**
-`legacyHistoryReader.LatestDisplayableEntryID` calls `historyEntryShown` on the
-stored type/payload and vetoes explicit `Shown == false`. Entries without
-metadata use the same classification as current writes; explicit true cannot
-promote hidden metadata or an unknown type. Unknown types default to non-content,
-so a new hidden type requires no separate unread exclusion. Receipt validation
-establishes accounting only: a hidden fact cannot raise unread merely because it
-has a valid banner projection. Known content facts can qualify independently of
-that projection. Raw pages retain every entry and its original ID; the store's
-metadata-only watermark semantics and stored metadata are unchanged. See the
-[shared list/read target and separate test oracles](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
+**Producer classification is not a summary watermark lookup.**
+`historyEntryShown` supplies `Metadata.Shown` for new source writes.
+`historyVisibilityMetadata` and raw store APIs remain internal contracts;
+summary delivery and read clamping use `ThreadLastShownVersion` instead of
+rescanning source payloads. Receipt validation establishes accounting only,
+independently of stored visibility. A valid banner projection cannot establish
+shown content, a read checkpoint or foreground presentation. See
+[shown-thread authority and separate test oracles](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
 
 **Carry the append result, not a second lookup or another counter (#2861).**
 `appendConversationHistory` returns the successful `Store.AppendWithMetadata`
@@ -338,14 +337,13 @@ again:**
   then blocks storage through delivery and removal; the existing user still
   reaches live/replay without durable identity, no outcome receipt appears and
   stored allocation stays unchanged.
-- **Prove queued accounting against persisted read confirmation (#3167).**
-  `TestQueuedLegacyReceipts_CompletedTurn` removes accepted/delivered IDs to
-  reproduce the displayed-reply hole, then compares source projection, live and
-  replay checkpoints with correlated list/read persistence on warm/reopened logs.
-  Receipt arrival alone remains a negative control. `TestQueuedLegacyReceipts_Validation`
-  checks the retained projection's required fields, reasons and durable identity.
-  A correct raw visibility assertion would miss either an accounting hole or
-  a legacy read clamp mismatch; raw endpoint paging tests are retired.
+- **Compare receipt identity on every surviving delivery lane.**
+  `TestQueuedLegacyReceipts_CompletedTurn` compares source projection, live and
+  replay bytes, original durable identities and warm/reopened raw entries.
+  `TestQueuedLegacyReceipts_Validation` checks required fields, reasons and
+  durable identity directly. A correct raw visibility assertion would miss an
+  omitted or malformed receipt; shown-thread read-clamping proofs belong to
+  the [read handler](relay-package-handlers-mark-conversation-read.md).
 - **Restart local numbering and report from idle to prove durable attribution.**
   `TestAgentHistory_Isolation` reuses call/task IDs across conversations, sources
   and child incarnations, then replaces the emitter and reopens the real store.
@@ -414,14 +412,12 @@ again:**
   corresponding identity and rejects receipts without a successful durable ID.
 - **Validate every receipt shape independently of raw visibility.**
   `TestAgentHistory_ReceiptValidation` removes each fact's required fields and
-  checks warm/reopened legacy readers with both `Shown` values.
-  `TestAgentHistory_LegacyCompatibility` uses the independent checkpoint/latest
-  fixtures, comparing page/live/replay identity and bytes as well as malformed
-  barriers and receipt-only sight. Raw visibility checks alone would miss
-  broken unread accounting or accidental foreground presentation.
-  `TestAgentHistory_GoneReceiptBarriers` rejects malformed gone facts, incorrect
-  gone statuses, unrelated unknown types and absent storage identities; a valid
-  receipt bridges its own durable checkpoint hole only.
+  asserts receipt refusal directly. `TestAgentHistory_LegacyCompatibility`
+  compares source/live/replay identities and bytes, including after reopening,
+  and directly checks valid versus malformed/unrelated facts and absent storage
+  identities. `TestAgentHistory_GoneReceiptValidation` checks gone-fact acceptance
+  without a retired checkpoint oracle. Raw visibility alone would miss broken
+  receipt delivery; receipt acceptance alone cannot prove unread authority.
 - **Probe both approval locks during receipt delivery.**
   `promptReceiptBroadcaster.Push` snapshots the registry while holding the bridge
   mutex, releases it, then uses `Lookup` to acquire the registry mutex. This
@@ -506,13 +502,13 @@ again:**
   agent rotations and switches, continues the survivor in its same phase, and
   compares live phases, reconnect snapshots and raw lifecycle provenance.
   Correct text attribution alone would miss a false conversation idle.
-- **Check actual writes, transport and unread recovery together.**
+- **Check actual writes, transport and raw visibility recovery together.**
   `TestHistoryProjection_InteractiveMetadata` drives `emit` across the full
   classification, comparing raw metadata with unchanged wire/ring payloads,
   identities and recipient gates. `TestHistoryProjection_OtherProducerMetadata`
   drives clear/idle transitions, operator text and channel delivery. Both verify
-  unread watermarks in warm and reopened stores; the interactive cases also
-  preserve an older entry's absent visibility. A classifier-only test would
+  internal metadata-aware watermarks in warm and reopened stores; the interactive
+  cases also preserve an older entry's absent visibility. A classifier-only test would
   miss a writer still using `Append`, and a correct raw metadata assertion alone
   would miss hidden eligible events disappearing from legacy delivery.
 - **Recovery must not fill in missing provenance.**
