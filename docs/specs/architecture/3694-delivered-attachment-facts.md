@@ -72,3 +72,7 @@ None. Acceptance provides filename authority; delivered safe text and attachment
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+
+- 2026-10-21: The first wire regression also observed a legitimate producer-gap retirement when the legacy delivery message became public before its outcome. `daemonThreadPublisher.publish` in `cmd/pyry/daemon_thread_relay.go` requires reset after such suppression. Keep that contract: publish acceptance/written boundaries before querying them, then idle-unload and load the linked delivery pair together under the shadow coordination lock. This adds a clean idle reload under the same acceptance identity to `TestDeliveredAttachmentWire`; its later fresh daemon reopen remains separate. Use the queue's fake child write seam and actual `queuedSendHistory.written`/`delivered` producers for lifecycle facts. Production design and sizing remain unchanged.

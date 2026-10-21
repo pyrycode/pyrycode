@@ -124,8 +124,8 @@ func (f *Fold) sendFact(e history.Entry) (bool, error) {
 }
 
 // deliveredSendContent uses safe receiving content while retaining recorded
-// acceptance sender identity, times and queue handle. A terminal handle is
-// historical data; only a queued active item supplies a queue action target.
+// acceptance attachment facts, sender identity, times and queue handle. A terminal
+// handle is historical data; only a queued active item supplies a queue action target.
 // These fields never establish a history join.
 func deliveredSendContent(accepted, delivered json.RawMessage) json.RawMessage {
 	var sender struct {
@@ -134,15 +134,40 @@ func deliveredSendContent(accepted, delivered json.RawMessage) json.RawMessage {
 		AcceptedAt      json.RawMessage `json:"accepted_at"`
 		ClientSentAt    json.RawMessage `json:"client_sent_at"`
 		QueuedMessageID json.RawMessage `json:"queued_msg_id"`
+		AttachmentIDs   []string        `json:"attachment_ids"`
+		Attachments     json.RawMessage `json:"attachments"`
 	}
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(accepted, &sender) // Both objects were validated on ingestion.
 	_ = json.Unmarshal(delivered, &fields)
-	// A legacy acceptance cannot acquire a handle from its delivered message.
+	// Acceptance alone supplies attachment names and queue handles.
 	for key := range fields {
-		if strings.EqualFold(key, "queued_msg_id") {
+		if strings.EqualFold(key, "queued_msg_id") || strings.EqualFold(key, "attachments") {
 			delete(fields, key)
 		}
+	}
+	var facts []json.RawMessage
+	_ = json.Unmarshal(sender.Attachments, &facts) // Missing or non-array metadata adds no facts.
+	acceptedIDs := make(map[string]bool, len(sender.AttachmentIDs))
+	for _, id := range sender.AttachmentIDs {
+		acceptedIDs[id] = true
+	}
+	type attachmentFact struct {
+		AttachmentID string `json:"attachment_id"`
+		Filename     string `json:"filename"`
+	}
+	var attachments []attachmentFact
+	for _, raw := range facts {
+		var fact attachmentFact
+		if json.Unmarshal(raw, &fact) != nil || fact.AttachmentID == "" || !acceptedIDs[fact.AttachmentID] ||
+			fact.Filename == "" || fact.Filename == "." || fact.Filename == ".." ||
+			strings.ContainsAny(fact.Filename, `/\`) || (len(fact.Filename) >= 2 && fact.Filename[1] == ':') {
+			continue
+		}
+		attachments = append(attachments, fact)
+	}
+	if len(attachments) > 0 {
+		fields["attachments"], _ = json.Marshal(attachments) // Only strings in a fixed display shape.
 	}
 	for key, value := range map[string]json.RawMessage{
 		"device_id": sender.DeviceID, "message_id": sender.MessageID,
