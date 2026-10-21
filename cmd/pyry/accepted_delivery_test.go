@@ -265,9 +265,10 @@ func testAcceptedDeliveryReplay(t *testing.T, dir string, want thread.Snapshot) 
 }
 
 func TestAcceptedDeliveryAppendFailures(t *testing.T) {
-	for _, failed := range []string{"acceptance", "message", "outcome"} {
+	for _, failed := range []string{"acceptance", "message", "outcome", "written_outcome"} {
 		t.Run(failed, func(t *testing.T) {
-			h := history.New(t.TempDir())
+			dir := t.TempDir()
+			h := history.New(dir)
 			blocked := filepath.Join(t.TempDir(), "blocked")
 			if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
 				t.Fatal(err)
@@ -280,7 +281,10 @@ func TestAcceptedDeliveryAppendFailures(t *testing.T) {
 			}
 			sends.accepted(testConvID, m)
 			sends.store = h
-			if failed == "outcome" {
+			if failed == "written_outcome" {
+				sends.written(testConvID, m)
+			}
+			if failed == "outcome" || failed == "written_outcome" {
 				sends.store = bad
 			}
 			if failed == "message" {
@@ -320,6 +324,11 @@ func TestAcceptedDeliveryAppendFailures(t *testing.T) {
 				if len(entries) != 2 || items[0].ID != 1 || items[0].Order != 2 || items[0].Status != "delivered" || items[0].Active {
 					t.Fatal("committed delivery prefix lost identity")
 				}
+			case "written_outcome":
+				if len(entries) != 3 || entries[1].Type != historySendWritten || items[0].ID != 1 || items[0].Order != 3 || items[0].Rev != 3 || items[0].Status != "delivered" || items[0].Active {
+					t.Fatal("written delivery prefix lost identity")
+				}
+				testAcceptedDeliveryReplay(t, dir, thread.Snapshot{Version: 3, Items: items})
 			}
 		})
 	}

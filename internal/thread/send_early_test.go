@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -8,6 +9,56 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/history"
 )
+
+func TestSendWrittenDeliveryPrefixes(t *testing.T) {
+	t.Parallel()
+	entries := []history.Entry{
+		testAcceptance(1, "phone"),
+		testSendOutcome(2, "send_written", `,"accepted_entry_id":1`, "written"),
+		testEntry(3, "message", `{"conversation_id":"a","role":"user","text":"delivered","accepted_entry_id":1}`),
+		testSendOutcome(4, "send_delivered", `,"accepted_entry_id":1,"delivery_entry_id":3`, "delivered"),
+	}
+	inline := New("a")
+	reference, source := testReferenceFold(entries)
+	var retained Observation
+	var saved []byte
+	for i, entry := range entries {
+		source.chunk = entries[i : i+1]
+		want, err := inline.FeedChanges(source.chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := reference.FeedChanges(source.chunk)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("prefix %d differs: source=%+v inline=%+v err=%v", entry.ID, got, want, err)
+		}
+		source.remember(source.chunk)
+		source.chunk = nil
+		replayed := New("a")
+		testFeed(t, replayed, entries[:i+1]...)
+		rendered, err := reference.Render()
+		if err != nil || !reflect.DeepEqual(rendered, replayed.Items()) {
+			t.Fatalf("prefix %d replay differs: %v", entry.ID, err)
+		}
+		if entry.ID == 2 {
+			retained = got
+			saved, _ = json.Marshal(retained)
+		}
+		if entry.ID == 3 {
+			item := testSendItem(t, inline, 1, 3, 3, "delivered", false, true)
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(item.Content, &fields); err != nil || fields["outcome"] != nil {
+				t.Fatalf("message-only prefix retained an intermediate outcome: %s %v", item.Content, err)
+			}
+		}
+		if saved != nil {
+			if after, _ := json.Marshal(retained); string(after) != string(saved) {
+				t.Fatal("retained written observation changed")
+			}
+		}
+	}
+	testSendItem(t, inline, 1, 3, 4, "delivered", false, true)
+}
 
 func TestSendEarlyDelivery(t *testing.T) {
 	t.Parallel()

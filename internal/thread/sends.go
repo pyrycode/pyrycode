@@ -2,6 +2,7 @@ package thread
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 	"time"
 
@@ -167,6 +168,9 @@ func (f *Fold) deliverSend(index, delivery int, legacy bool) error {
 	f.countPublicWork(1)
 	if r := f.recipes[item.ID]; r.creating != 0 {
 		r.delivery = message.ID
+		// Delivery replaces the intermediate written outcome in both fold modes.
+		r.fields = maps.Clone(r.fields)
+		delete(r.fields, "outcome")
 		f.recipes[item.ID] = r
 	} else {
 		f.countIngestion(len(item.Content) + len(message.Content))
