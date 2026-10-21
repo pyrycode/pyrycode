@@ -451,7 +451,7 @@ func (p ContextUsagePayload) MarshalJSON() ([]byte, error) {
 // NAMING A CONVERSATION IS NOT AUTHORIZATION — authorization is pairing, enforced
 // structurally at the Noise_IK handshake.
 //
-// LIKE RequestModelListPayload AND UNLIKE RequestHistoryPayload, THE ID NEVER
+// LIKE RequestModelListPayload, THE ID NEVER
 // BECOMES A PATH COMPONENT. That single difference is why a decode failure of this
 // payload is TOLERATED rather than rejected: it leaves ConversationID empty, which
 // reaches only a registry membership check and is refused there, where an empty path

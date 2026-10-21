@@ -353,9 +353,9 @@ func TestAgentHistory_GoneReceiptBarriers(t *testing.T) {
 		{"unrelated", "unrelated_unknown", valid, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			base := []protocol.HistoryEntry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
+			base := []history.Entry{{ID: 1, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}, {ID: 3, Type: protocol.TypeMessage, Payload: json.RawMessage(`{}`)}}
 			if receipt, ok := legacyRuntimeReceipt(testConvID, tt.typ, tt.raw, &id, historyTS); ok {
-				base = append(base, protocol.HistoryEntry{ID: id, Type: protocol.TypeBanner, Payload: receipt})
+				base = append(base, history.Entry{ID: id, Type: protocol.TypeBanner, Payload: receipt})
 			}
 			if got := testLegacyCheckpoint(base, 3, 0, false); got != tt.want {
 				t.Fatalf("checkpoint=%d want=%d", got, tt.want)

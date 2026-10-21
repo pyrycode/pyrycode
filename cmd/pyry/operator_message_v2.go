@@ -82,8 +82,7 @@ func (e *operatorMessageEmitterV2) notifyReceipt(m operatorMessage) {
 // operatorMessageNotify builds the push hand-off newOperatorMessageHistory calls
 // on each confirmed delivery: a non-blocking send that drops on a full channel
 // with a content-free warning, so a slow or absent relay leg never holds up
-// delivery. A dropped push is still in the durable log, where request_history
-// finds it.
+// delivery. A dropped push remains in source history for thread recovery.
 func operatorMessageNotify(ch chan<- operatorMessage, logger *slog.Logger) func(operatorMessage) {
 	return func(m operatorMessage) {
 		select {

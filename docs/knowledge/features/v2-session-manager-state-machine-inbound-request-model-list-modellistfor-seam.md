@@ -4,9 +4,7 @@
 in `dispatchAppFrame`'s discriminator switch **before** `dispatch.Route`, and
 answered **inline on the `Run` dispatch goroutine** — the
 [`request_session_settings`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md)
-shape, not
-[`request_history`](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md)'s
-off-`Run` worker handoff, because answering here is a registry lookup, a
+shape, because answering here is a registry lookup, a
 bounded deep copy of at most ten model rows and one small marshal — it neither
 hashes, reads a file, nor budgets a page against the envelope cap, so it needs
 neither an `appFrameJob` kind nor a worker route. It closes the third gap in
@@ -36,8 +34,8 @@ worth one file to avoid.
    `_ = json.Unmarshal(env.Payload, &p)` leaves `ConversationID == ""` on any
    decode failure, which reaches only a registry membership check at step 3.
    That is safe here for a reason specific to this verb:
-   `handleRequestHistory` cannot tolerate the same failure because there the
-   empty id becomes a path component (`filepath.Join(dir, "")` is the log
+   a filesystem consumer cannot tolerate the same failure if the empty id
+   becomes a path component (`filepath.Join(dir, "")` is the log
    **root**, not an error). Reading the tolerant posture as package-wide
    rather than per-verb is exactly how a log-root traversal gets written —
    check what the id becomes downstream before copying the posture, not just
@@ -46,9 +44,8 @@ worth one file to avoid.
    *is this conversation ours*; a false is the permanent
    `conversation.not_found`, not logging the requested id (membership
    answering false is precisely the case where it may be an arbitrary client
-   string). Membership rather than a session router, for the reason
-   `HistoryPager`'s block already gives: a router additionally refuses a
-   known conversation with **no bound session**, which is exactly the
+   string). Use membership rather than a session router: a router additionally
+   refuses a known conversation with **no bound session**, which is exactly the
    conversation this verb exists to serve.
 4. **Resolve once, comma-ok honoured.** A thread connection selects an installed
    `ModelListReadingFor` and passes the negotiated `multiAgent` value. Otherwise
@@ -107,13 +104,13 @@ No goroutine is spawned. The handler runs synchronously on the manager's
 single `Run` dispatch goroutine. The legacy path replies through `forwardEnvelope`;
 the supplied path queues via `pushLiveReply`, leaving ordering and sealing on
 `Run`. The legacy path uses `forwardEnvelope` rather than
-`request_history`'s `forwardToRun`, because this handler never leaves `Run`.
+the worker-side `forwardToRun`, because this handler never leaves `Run`.
 This distinction is load-bearing rather than stylistic:
 the send `CipherState` is single-owner, so sealing from any goroutine but
 `Run` would be a concurrent `Encrypt` — a nonce reuse, a real break rather
 than a race annoyance. **A future edit that moves this arm to
-`enqueueAppFrame`** (as `request_history` did, for work this verb does not
-do) **must switch the emit to `forwardToRun` in the same change** — named in
+`enqueueAppFrame`** for blocking work **must switch the emit to `forwardToRun`
+in the same change** — named in
 the handler file's header as a constraint on future edits, not a fact that
 happens to be true today.
 
@@ -246,7 +243,6 @@ exists (RED first). Two things worth carrying forward:
 
 ## Related
 
-- [Inbound `request_history` (#2116)](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md) — the reject-envelope shape this ticket copies (`TypeError`, `in_reply_to`, one code constant, one merge-vs-split error-code decision), and the off-`Run` worker handoff this verb deliberately does not need.
 - [Inbound `request_session_settings`](v2-session-manager-state-machine-inbound-request-session-settings-the-rea.md) — the dispatch/capability shape this ticket copies (inline on `Run`, `!s.interactive` first, tolerated decode, `forwardEnvelope`), and the all-zero-reply posture this ticket deliberately does **not** copy.
 - [Connect-time model-list reconcile (#1863)](v2-session-manager-state-machine-connect-time-model-list-reconcile-retain.md) — `RetainedModelLists`, the enumerate-all sibling seam; `resolveBoundModelList` and its #2124 daemon-wide fallback, which this seam reaches through the same resolver, unforked.
 - [Model-list payload](protocol-package-model-list-payload.md) — `ModelListPayload` / `ModelOption`, unchanged by this ticket, and `RequestModelListPayload`, the new one-field request shape.

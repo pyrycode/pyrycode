@@ -61,7 +61,7 @@ attribution without minting missing IDs. See
 and [agent recovery](history-package-producers-runtime-lifecycle.md#recover-agenttask-work-and-original-identities-3032).
 
 Gone and ended-with-session facts have explicit raw `shown: true`. Their raw
-payloads stay excluded from legacy history pages, live delivery and replay.
+payloads stay excluded from legacy live delivery and replay.
 After successful storage, #3026's
 validated nonvisual receipt retains the original durable ID and timestamp;
 \#3029 counts it toward the legacy unread target independently of raw visibility.
@@ -166,6 +166,31 @@ the reported time was parsed. Reported time uses UTC RFC 3339 with nanosecond
 precision. Optional absent values are omitted. Composed delivery bytes, echoed
 prompts and host attachment paths never enter these facts.
 
+`queuedSendHistory.accepted` also records optional `attachments`, whose entries
+contain exactly `attachment_id` and `filename` (#3693). Before queue startup,
+`runSupervisor` installs `storedQueuedAttachmentName`: it requires registered
+conversation membership before `attachments.ResolvePath`, then retains only
+`filepath.Base` of the stored path. The stored, sanitized basename is authoritative;
+send-supplied names and the in-flight upload registry cannot supply durable facts.
+See [stored-path resolution](attachments-package-directory-resolution-and-creation.md)
+and the [full thread item contract](../../protocol-mobile.md#full-thread-item).
+
+Keep the safe projection's `attachment_ids` unchanged; send intake already
+deduplicates them in first-occurrence order. Resolve each distinct ID once in
+that order, recording one fact for each successful lookup. An unavailable name
+after validation omits only its fact, preserving accepted text and all IDs;
+no resolved facts omits `attachments`. Lookup errors can carry host paths, so
+the resolver discards them without diagnostics. Neither filenames nor paths,
+send content or composed prompts belong in operational logs. Invalid/missing
+IDs still refuse the send before acceptance, and malformed payload shapes keep
+their existing refusal.
+
+Capture names at acceptance rather than on history reads: reopened thread
+content and startup loss retain the recorded facts even if the stored leaf
+later changes. Older ID-only facts remain unchanged without inferred filenames.
+Delivery content replacement retention belongs to
+[#3694](https://github.com/pyrycode/pyrycode/issues/3694).
+
 The production `suggestionEnqueuer.EnqueueIdentified` forwards the authenticated
 identity and invalidates suggestions only after successful enqueue. Rejected
 enqueue writes nothing. Legacy callers and adapters remain usable with absent
@@ -261,7 +286,7 @@ entry IDs against durable delivery/drop/loss facts; old operator messages
 without acceptances stay untouched. Failed/incomplete reads or malformed send
 facts infer no loss for that conversation. `closeStartupSends` appends losses
 without re-enqueueing, live publication or replay backfill. Valid losses become
-receipts when paged. A successfully recorded loss resolves the acceptance on
+fold sources after raw-query retirement. A successfully recorded loss resolves the acceptance on
 subsequent starts; a failed loss write remains eligible for another startup
 attempt. See
 [the queue durability boundary](msgqueue-package.md#durability-boundary-in-scope-vs-out)
@@ -432,11 +457,10 @@ actual daemon source and Claude version. See
 History, live publication and reconnect replay use identical receipt bytes and
 the original durable ID/timestamp, without another append. Valid receipts count
 toward legacy latest regardless of absent/false/true visibility, but confer no
-presentation, prompt actuation or read-mark advancement. `newHistoryPager`
-retains one bounded raw page's limit, cursor and `AtStart` without scanning ahead.
-Raw history, metadata and authoritative thread behavior remain unchanged; see
+presentation, prompt actuation or read-mark advancement. The raw pager is
+retired; source history, metadata and authoritative thread behavior remain. See
 [visibility versus transport eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
-and [the durable join](../../protocol-mobile.md#joining-a-page-to-the-live-stream).
+and [the durable join](../../protocol-mobile.md#legacy-receipt-identity).
 Mobile [#2098](https://github.com/pyrycode/pyrycode-mobile/issues/2098) owns the
 pending live notification gate; deterministic daemon accounting does not prove
 background completion, FCM delivery or notification preview privacy.
@@ -450,13 +474,13 @@ checks that retirement cannot erase captured ownership;
 `TestPromptAnswerHistoryUnauthenticatedCancel` prevents invented operator
 answers. Bounded-projection and storage tests cover escaping, unchanged child
 answers and content-free failures. `TestPromptAnswerReceiptsValidation` exercises
-all decision pairs and rejected fields through the real pager;
-`TestPromptAnswerReceiptsPages` pins projected original IDs and each raw page's
-bounds for completed turns, receipt-only and mixed valid/invalid logs, every
-visibility state and reopened stores. `TestPromptAnswerReceiptsPublication`
-compares exact page/live/replay bytes and identity with and without clients,
-including rebinding and duplicate attempts; `TestPromptAnswerReceiptsConcurrent`
-checks serialized order under concurrent duplicate answers.
+all decision pairs and rejected fields through the retained receipt projection.
+`TestPromptAnswerReceiptsReadTargets` checks receipt accounting versus presentation
+and list/read targets across visibility states and reopened stores.
+`TestPromptAnswerReceiptsPublication` compares projected source/live/replay bytes
+and identity with and without clients, including rebinding and duplicate attempts;
+`TestPromptAnswerReceiptsConcurrent` checks serialized order under concurrent
+duplicate answers. These tests retain receipt behavior without a raw wire pager.
 `TestInteractiveStreamStdioModalAllow`,
 `TestInteractiveStreamStdioPermissionDeny`, `TestInteractiveStreamQuestionAnswer`
 and `TestInteractiveStreamQuestionRefusal` assert the raw durable fact after

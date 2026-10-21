@@ -8,8 +8,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
-	"github.com/pyrycode/pyrycode/internal/protocol"
-	"github.com/pyrycode/pyrycode/internal/relay"
 )
 
 // appendConversationHistory records one marshalled event with explicit visibility.
@@ -43,63 +41,6 @@ func appendConversationHistory(store *history.Store, logger *slog.Logger, event,
 		return nil
 	}
 	return &id
-}
-
-// newHistoryPager serves the legacy projection of exactly one bounded raw page.
-// It preserves the opaque cursor and AtStart even when filtering removes every
-// entry: consumers terminate on AtStart, not on an empty entry list.
-//
-// A nil store returns HistoryPageUnavailable; unlike a nil pager seam, this is
-// an active verb with a retryable failure. Store validates cursors unchanged.
-// Invalid cursors are client faults; other errors become generic unavailable
-// outcomes. Only content-free discriminants reach logs, never errors containing
-// filesystem paths, payloads or cursors.
-func newHistoryPager(store *history.Store, logger *slog.Logger) relay.HistoryPager {
-	return func(convID, cursor string, limit int) relay.HistoryPageResult {
-		if store == nil {
-			return relay.HistoryPageResult{Outcome: relay.HistoryPageUnavailable}
-		}
-		// cursor is passed through UNPARSED: history.parseCursor is the only
-		// validator anywhere and nothing above internal/history may decode one.
-		page, err := store.Page(conversations.ConversationID(convID), cursor, limit)
-		if err != nil {
-			if errors.Is(err, history.ErrInvalidCursor) {
-				return relay.HistoryPageResult{Outcome: relay.HistoryPageBadCursor}
-			}
-			// The conversation id is canonical here — the relay's membership gate
-			// established that before calling — so logging it is the shape-validated
-			// case § Conversation history permits. The cursor is NOT logged on any
-			// arm and is not in scope for this line.
-			logger.Warn("relay: conversation-history page failed",
-				"event", "history_page.read_err",
-				"conversation_id", convID,
-				"reason", historyPageFailure(err))
-			return relay.HistoryPageResult{Outcome: relay.HistoryPageUnavailable}
-		}
-		// SIZED FROM WHAT THE LOG RETURNED, NEVER FROM limit. make(..., 0, limit)
-		// reads as ordinary Go and would pin capacity chosen by a remote caller —
-		// the rule protocol.RequestHistoryPayload.Limit states in as many words.
-		entries := make([]protocol.HistoryEntry, 0, len(page.Entries))
-		for _, e := range page.Entries {
-			typ, payload := e.Type, e.Payload
-			if !legacyHistoryType(typ) {
-				var ok bool
-				payload, ok = legacyRuntimeReceipt(convID, typ, payload, &e.ID, e.TS)
-				if !ok {
-					continue
-				}
-				typ = protocol.TypeBanner
-			}
-			entries = append(entries, protocol.HistoryEntry{
-				ID: e.ID, Type: typ, Payload: payload, TS: e.TS,
-			})
-		}
-		return relay.HistoryPageResult{
-			Entries: entries,
-			Cursor:  page.Cursor,
-			AtStart: page.AtStart,
-		}
-	}
 }
 
 // historyPageFailure maps a Page error onto a content-free discriminant, the

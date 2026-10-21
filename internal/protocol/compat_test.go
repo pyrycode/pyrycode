@@ -219,16 +219,8 @@ func TestIsKnownAppType(t *testing.T) {
 		// above the rejection is the structural bar against a v1 client sending a
 		// read_workspace_file into dispatch.Route.
 		{"read_workspace_file-rejected", TypeReadWorkspaceFile, false, ErrUnknownType},
-		// the v2-only conversation-history pair. The request is an inbound control
-		// type an old phone never sends, so as on the request_attachment row above
-		// the rejection's load-bearing half is the inbound one — it is the
-		// structural bar against a v1 client sending a request_history into
-		// dispatch.Route. The page is outbound-only, so there the load-bearing half
-		// is the other one: an old phone never receives it.
-		{"request_history-rejected", TypeRequestHistory, false, ErrUnknownType},
-		{"history_page-rejected", TypeHistoryPage, false, ErrUnknownType},
-		// the v2-only pairing-mint pair. Same two halves as the history pair
-		// above — the request is inbound and the reply outbound-only — but here
+		// the v2-only pairing-mint pair. The request is inbound and the reply
+		// outbound-only; here
 		// the inbound rejection is not merely load-bearing, it is the SECURITY
 		// PROPERTY this pair's declaring ticket ships. mint_pairing's reply is a
 		// bearer credential, so IsKnownAppType refusing the verb is the structural
@@ -413,10 +405,6 @@ var v2OnlyTypes = map[string]bool{
 	TypeRequestAttachment: true,
 	// v2 live workspace read verb (inbound control).
 	TypeReadWorkspaceFile: true,
-	// v2 conversation-history vocabulary: the request verb (inbound control) and
-	// the page it is answered with (outbound reply).
-	TypeRequestHistory: true,
-	TypeHistoryPage:    true,
 	// v2 on-demand model-list request verb (inbound control). Its ANSWER is
 	// TypeModelList above, unchanged — this verb mints no second outbound shape.
 	TypeRequestModelList: true,
@@ -566,8 +554,6 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestAttachment,
 		// v2 live workspace read verb (inbound control).
 		TypeReadWorkspaceFile,
-		// v2 conversation-history vocabulary.
-		TypeRequestHistory, TypeHistoryPage,
 		// v2 on-demand model-list request verb (inbound control).
 		TypeRequestModelList,
 		// v2 conversation system-prompt read pair.

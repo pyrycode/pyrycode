@@ -62,8 +62,6 @@ const (
 	appFrameAttachmentChunk
 	// appFrameAttachmentRequest is the inbound retrieval request (#2054).
 	appFrameAttachmentRequest
-	// appFrameHistoryRequest is the inbound conversation-history request (#2116).
-	appFrameHistoryRequest
 	// appFrameMintPairing is the inbound pairing-mint request (#2127) — the first
 	// member of this set whose handler WRITES host state rather than reading it.
 	appFrameMintPairing
@@ -166,17 +164,10 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// The live workspace read (#2598), the retrieval arm's twin:
 				// chunks through Push, rejects through forwardToRun.
 				m.handleReadWorkspaceFile(ctx, s, job.plaintext)
-			case appFrameHistoryRequest:
-				// The conversation-history path (#2116), here because it reads log
-				// segments off disk. UNLIKE the two arms above it has only ONE
-				// emission route: a page is a single envelope rather than a stream,
-				// so both the page and every reject leave through forwardToRun and
-				// nothing on this path ever touches s.send.
-				m.handleRequestHistory(ctx, s, job.plaintext)
 			case appFrameMintPairing:
 				// The pairing-mint path (#2127), here because it takes the
 				// devices.json flock(2) and rewrites the file. Its single emission
-				// route is the history arm's — one envelope, reply and rejects alike
+				// route carries one envelope, reply and rejects alike
 				// through forwardToRun — and the FIFO shape of this worker is what
 				// bounds a conn to one mint in flight, which is why no per-verb
 				// concurrency limit exists for a verb that writes.

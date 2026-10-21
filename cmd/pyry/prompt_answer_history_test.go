@@ -158,11 +158,7 @@ func TestPromptAnswerHistoryPermission(t *testing.T) {
 						if err != nil || watermark != 1 {
 							t.Fatalf("shown watermark=%d %v", watermark, err)
 						}
-						page := newHistoryPager(reader, logger)(testConvID, "", 1)
-						raw, err := reader.Page(conversations.ConversationID(testConvID), "", 1)
-						if err != nil || len(page.Entries) != 1 || page.Cursor != raw.Cursor || page.AtStart != raw.AtStart {
-							t.Fatalf("legacy page=%#v", page)
-						}
+
 					}
 					if legacyHistoryType(e.Type) {
 						t.Fatal("legacy type admitted")

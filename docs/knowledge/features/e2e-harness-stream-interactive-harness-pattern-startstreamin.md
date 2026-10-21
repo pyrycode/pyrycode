@@ -114,23 +114,21 @@ independently of the later model result.
 
 `fakephone.Client.ReceiveBytes` closes its WebSocket on timeout. An absence
 window on that connection therefore cannot also serve later live assertions.
-For a file-gated turn, request a served-history page and consume frames through
-that response while checking for forbidden post output. The response supplies
-an observation barrier while keeping the phone usable after releasing the
-fake-Claude file gate. `TestChannelPost_E2E_HeldUntilRealCompletion` uses this
-shape to observe durable acceptance while delivery is held. See
+For a file-gated turn, send a supported correlated request and consume frames
+through its reply while checking for forbidden post output. A
+`list_conversations` reply supplies that observation barrier while keeping the
+phone usable after the fake-Claude file gate is released.
+`TestChannelPost_E2E_HeldUntilRealCompletion` uses this shape; the retired raw
+history request cannot provide a barrier. See
 [channel-post holding](control-plane-channel-post-live-delivery.md).
 
-After release, assert the expected post is present exactly once in served history
-as well as matching its live payload after completion. Checking payload/order
-only inside a matching-ID branch stays green when the history page omits the
-post altogether.
-
-An escaped maximum-size post may span several served history pages because the
-page has its own byte bound. Follow cursors before treating absent chunks as a
-missing record. A multi-chunk fixture that fits one page proves served-history
-shape; a separate maximum-size unit proof checks full byte reconstruction and
-envelope bounds. See [channel-post chunking](control-plane-channel-post-live-delivery.md#chunking-and-envelope-bounds).
+After release, assert the post appears exactly once in the durable source log
+and that its live payload matches after completion. Direct source reads prove
+producer persistence without recreating a raw wire pager; thread-query tests own
+client content recovery. Checking payload/order only inside a matching-ID branch
+stays green when the post is omitted altogether. A separate maximum-size unit
+proof checks complete chunk reconstruction and envelope bounds; see
+[channel-post chunking](control-plane-channel-post-live-delivery.md#chunking-and-envelope-bounds).
 
 ### Observing an absent-device wake
 

@@ -123,7 +123,7 @@ func TestMintPairing_PermittedMintIsAnswered(t *testing.T) {
 	sess, logBuf := startMintConn(t, minter)
 
 	sendMintPairing(t, sess, mpTestEnvID, mintPayload("Kitchen iPad"))
-	reply := nextHistoryReply(t, sess, 0)
+	reply := nextAppReply(t, sess, 0)
 
 	if reply.Type != protocol.TypePairingMinted {
 		t.Fatalf("reply type = %q, want %q", reply.Type, protocol.TypePairingMinted)
@@ -187,7 +187,7 @@ func TestMintPairing_UnwiredSeamIsInertButConsuming(t *testing.T) {
 	// screen and the snapshot itself answers a coded error, so "the first sealed
 	// frame is an error" proves nothing. What proves inertness is that the first frame
 	// off this conn answers the SNAPSHOT's envelope id rather than the mint's.
-	reply := nextHistoryReply(t, sess, 0)
+	reply := nextAppReply(t, sess, 0)
 	if reply.Type == protocol.TypePairingMinted {
 		t.Fatal("an unwired daemon minted a pairing; the frame must be inert")
 	}
@@ -293,7 +293,7 @@ func TestMintPairing_Rejects(t *testing.T) {
 			sess, logBuf := startMintConn(t, minter)
 
 			sendMintPairing(t, sess, mpTestEnvID, tc.payload)
-			reply := nextHistoryReply(t, sess, 0)
+			reply := nextAppReply(t, sess, 0)
 
 			if reply.Type != protocol.TypeError {
 				t.Fatalf("reply type = %q, want %q", reply.Type, protocol.TypeError)
@@ -353,7 +353,7 @@ func TestMintPairing_EmptyLabelReachesTheSeam(t *testing.T) {
 	// The absent-key form, not the explicit empty string: both decode to the same
 	// zero value, and this is the one a client that never sets the field sends.
 	sendMintPairing(t, sess, mpTestEnvID, `{}`)
-	reply := nextHistoryReply(t, sess, 0)
+	reply := nextAppReply(t, sess, 0)
 
 	if reply.Type != protocol.TypePairingMinted {
 		t.Fatalf("reply type = %q, want %q — an unnamed device is not a refusal", reply.Type, protocol.TypePairingMinted)

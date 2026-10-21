@@ -1,4 +1,4 @@
-# Error codes (35)
+# Error codes
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -26,9 +26,6 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeAttachmentStorageFailed` | `attachment.storage_failed` |
 | `CodeAttachmentNotFound` | `attachment.not_found` |
 | `CodeAttachmentStreamAborted` | `attachment.stream_aborted` |
-| `CodeHistoryInvalidRequest` | `history.invalid_request` |
-| `CodeHistoryInvalidPageSize` | `history.invalid_page_size` |
-| `CodeHistoryInvalidCursor` | `history.invalid_cursor` |
 | `CodeHistoryUnavailable` | `history.unavailable` |
 | `CodeModelListUnavailable` | `model_list.unavailable` |
 | `CodeMCPStatusUnavailable` | `mcp_status.unavailable` |
@@ -39,6 +36,11 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeContextUsageUnavailable` | `context_usage.unavailable` |
 | `CodeNewSessionWorkspaceRefused` | `new_session.workspace_refused` |
 | `CodeClientUpdateRequired` | `client.update_required` |
+
+`CodeHistoryUnavailable` remains the shared retryable list/read failure for
+`ListConversationsWithAgents` and `MarkConversationRead`. The raw history
+endpoint and its three `CodeHistoryInvalid*` constants are retired; see
+[history payload retirement](protocol-package-types-history-payloads.md).
 
 **`CodeSessionChildCrashing` (#2724) is `session_error`'s first non-terminal code, and it does not replace `CodeSessionBlocked` — the two are siblings on the same frame type.** `TypeSessionError` was minted (#1007) and wired (#1008) as a strictly terminal give-up notice: msgqueue gives up on a conversation's queued head after two minutes and the daemon can say nothing sooner. #2724 adds a second, independent producer — a per-conversation crash-episode detector in `internal/streamsup` ([Supervise loop (`Run`)](streamsup-package-supervise-loop-run.md)) — that fires within seconds of a claude child failing to stay up at startup, before msgqueue's window even closes. Reusing `TypeSessionError` rather than minting a new frame type keeps the client's dispatch on `code`, not on type; `SessionErrorPayload.Code` is documented as "which, not whether terminal" from this ticket on, and `giveUpNotice` (the internal hand-off value both producers feed) gained its own `code` field so the broadcaster stamps whichever code its producer chose instead of a single fixed constant. See [Crash episode notification — `Config.OnCrashLoop`](streamsup-package-crash-episode-notification-oncrashloop.md) for the detector and the cmd/pyry wiring.
 

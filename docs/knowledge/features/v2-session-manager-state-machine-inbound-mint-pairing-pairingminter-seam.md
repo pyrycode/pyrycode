@@ -3,9 +3,8 @@
 `mint_pairing` is a v2 **control** envelope (phone → binary), intercepted in
 `dispatchAppFrame`'s discriminator switch **before** `dispatch.Route`, and
 routed to the conn's `appFrameWorker` rather than handled inline on `Run` —
-the same reason [`request_history`](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md)
-and [`request_attachment`](v2-session-manager-state-machine-inbound-request-attachment-attachmentresolve.md)
-are: answering it takes the `devices.json` file lock and rewrites the file.
+the same reason [`request_attachment`](v2-session-manager-state-machine-inbound-request-attachment-attachmentresolve.md)
+is: answering it takes the `devices.json` file lock and rewrites the file.
 It serves the wire contract [#2126 declared](protocol-package-types-pairing-payloads.md)
 — a paired client holding the remote-permissions flag can mint a pairing for
 a second device without a shell on the daemon's host. `security-sensitive`.
@@ -194,7 +193,7 @@ by convention but has a second, less obvious remote writer already wired in.
 - [`internal/audit`](audit-package.md) — the mint's audit record, and
   `ModalID` left empty as the first of three callers with nothing to put
   there.
-- [Inbound `request_history` (#2116)](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md) —
-  the outcome-discriminant seam shape this one copies.
+- [Raw history query retirement](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md) —
+  the older pager is gone; this independently used outcome-discriminant seam remains.
 - [Concurrency](v2-session-manager-concurrency.md) — the `appFrameKind`
   widening this ticket's dispatch case reuses.

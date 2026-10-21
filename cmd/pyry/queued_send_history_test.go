@@ -93,9 +93,7 @@ func TestSuggestionEnqueuerIdentity(t *testing.T) {
 			t.Fatal("delivery leaked")
 		}
 	}
-	if page := newHistoryPager(store, discardLogger())(testConvID, "", 100); len(page.Entries) != 3 {
-		t.Fatalf("legacy receipts: %+v", page)
-	}
+
 }
 
 type testQueuedSendRetryWriter struct{}

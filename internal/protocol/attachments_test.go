@@ -115,7 +115,7 @@ func TestAttachmentChunkPayload_Upload_RoundTrip(t *testing.T) {
 // rather than stated in prose (#2142). The field is meaningful on the upload leg
 // only: a retrieval chunk is correlated by in_reply_to to a request_attachment
 // that already named the conversation, so the client knows it and the daemon
-// echoes nothing — the same reason attachment_stored and history_page carry no
+// echoes nothing — the same reason attachment_stored carries no
 // conversation_id either. The tie above is what makes the emptiness checkable
 // rather than merely asserted: envelope 91 IS request_attachment.json, whose
 // payload names 9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4, so a reader can see the

@@ -1143,14 +1143,6 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// envelope per chunk. The worker routes it to handleReadWorkspaceFile.
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameWorkspaceFileRead})
 			return
-		case protocol.TypeRequestHistory:
-			// The third arm to run off Run (#2116), for the same reason as the two
-			// above rather than a new one: answering this frame opens log segments
-			// off disk, decodes them and marshals a page of up to the
-			// application-envelope cap. Tags and falls through to the same
-			// non-blocking enqueue; the worker routes it to handleRequestHistory.
-			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameHistoryRequest})
-			return
 		case protocol.TypeMintPairing:
 			// The fourth arm to run off Run (#2127), and the first WRITE verb among
 			// them. Answering this frame takes the devices.json flock(2), reads the
