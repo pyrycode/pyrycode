@@ -24,7 +24,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
-// The real queue remains unstarted so no delivery can replace the acceptance.
+// The ordinary queue drain stays unstarted; configured tests can write explicitly.
 // Routing uses the same fake child boundary as the compact transport tests.
 func testQueuedAttachmentWire(t *testing.T, root string, reg *conversations.Registry, beforeAccepted func(), configure ...func(*msgqueue.Config, *queuedSendHistory)) (*threadShadow, *switchWire, *relay.V2SessionManager, *msgqueue.Queue, *lockedBuffer) {
 	t.Helper()
