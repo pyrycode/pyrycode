@@ -280,6 +280,16 @@ notifications carry no item version: counting or decoding them as item changes
 would reject valid retirement recovery. Keep exact item counts, original
 connection ownership and the separate successful query completion marker intact.
 
+Legacy delivery fixtures must also account for public-row suppression. Publishing
+an unlinked delivery message before its `send_delivered` outcome can require a
+producer-gap reset when the outcome claims that row. To isolate attachment
+retention, `TestDeliveredAttachmentWire` publishes acceptance/written boundaries,
+then loads the linked legacy message/outcome pair together across a clean idle
+unload under shadow coordination. This preserves reset behavior and the original
+acceptance identity; the later fresh-daemon reopening separately proves durable
+names and bytes. New messages with an explicit acceptance reference use the
+[message-time join](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
+
 `dropRingOnConversationDelete` retains the registry's single removal observer
 for explicit deletion and sweep, including with the relay disabled. It preserves
 ring/reply-suggestion cleanup, tombstones the ID, joins shadow coordination and

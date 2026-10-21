@@ -414,6 +414,14 @@ that already-unloaded record untouched.
 Choose the revision against the current merged rules: concurrent semantic changes
 can otherwise select the same revision. A missing-field cache regression can
 still pass because replayed content differs, concealing that collision.
+After merging another semantics change, update the regression's minimum-rule
+assertion and prior-rule fixtures to the merged baseline too. A fixture testing
+only an older revision can stay green if production reuses the merged rule
+number, leaving obsolete caches eligible. The
+[attachment-retention review](https://github.com/pyrycode/pyrycode/pull/3730)
+found this gap in `TestStoreAttachmentCacheRules`. Matching version, checksum
+and watermark must be retained in both scalar
+certificate and checkpoint fixtures so epoch rotation proves rule rejection.
 `TestStoreQueueHandleCacheRules` also supplies old-rule caches with matching
 version, checksum and watermark and requires a new epoch, proving rule
 incompatibility independently of evidence mismatch. Accepted-send handle

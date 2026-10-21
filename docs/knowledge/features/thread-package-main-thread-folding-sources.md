@@ -177,7 +177,7 @@ Equal app IDs across devices still create distinct acceptance items.
 
 Delivery keeps the acceptance ID/kind. At render time, `renderShared` applies
 `deliveredSendContent` to the acceptance and delivery entries, starting content
-from the linked message's safe delivered text, attachments and client metadata,
+from the linked message's safe delivered text, attachment IDs and client metadata,
 then enriches it with a committed matching outcome when present. This preserves
 legacy JSON encoding and unknown fields. Recorded acceptance `device_id`, `message_id`,
 `accepted_at` and `client_sent_at` override
@@ -186,6 +186,28 @@ decodes those sender fields in JSON order with case-insensitive matching before
 merging. Selecting them by map iteration would make duplicate case variants
 nondeterministic; the last matching recorded value wins. It removes delivered
 case variants when replacing a field, keeping one canonical sender key.
+
+Attachment names have acceptance-owned presence as well as value (#3694).
+`deliveredSendContent` removes every delivered `attachments` case variant, then
+projects only usable recorded acceptance facts: string `attachment_id` and
+`filename`, with the ID in the acceptance's `attachment_ids` and a nonempty
+basename excluding `.`, `..`, slash, backslash and drive prefixes. Entries are
+decoded independently so one malformed fact cannot discard usable neighbors or
+the accepted send. Only the two display fields survive; exact strings and
+relative array order are retained. Missing, null, non-array or wholly unusable
+metadata omits `attachments`; delivery supplies no fallback, and IDs or host
+paths never supply invented names. Both inline delivery and
+`renderSharedLookup` use this helper, preserving the same contract after source
+cache eviction and reopening. See the
+[full thread item contract](../../protocol-mobile.md#full-thread-item).
+
+History owns these display names independently of current attachment storage.
+`TestDeliveredAttachmentWire` renames stored files before reopening, then checks
+the original acceptance facts through full/compact catch-up and pages while
+authenticated retrieval returns identical bytes with the current storage names.
+A byte-only retrieval assertion would miss lost or forged thread filenames.
+`TestSendAttachmentFacts` checks independent filtering, conflicting delivery
+names, recorded order and inline/source-backed agreement through repeat outcomes.
 
 The queue handle has acceptance-owned presence as well as value.
 `deliveredSendContent` removes every delivered `queued_msg_id` case variant
