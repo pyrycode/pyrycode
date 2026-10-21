@@ -23,8 +23,8 @@ import (
 // The two inbound v2 dispatch surfaces (a verb correctly handled if in EITHER;
 // a verb in NEITHER is the #949 failure mode):
 //
-//  1. Map-dispatched — the V2SessionConfig.Handlers map literal in relay.go,
-//     consulted by dispatch.Route.
+//  1. Map-dispatched — the V2SessionConfig.Handlers map literal and subsequent
+//     entry assignments in startRelayV2, consulted by dispatch.Route.
 //  2. Switch-intercepted — the switch in V2SessionManager.dispatchAppFrame
 //     (internal/relay/v2session.go), which runs before dispatch.Route.
 //
@@ -602,7 +602,7 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 	t.Parallel()
 
 	allAppTypes := toSet(appTypeConstNames(t, codesPath))
-	mapHandlerTypes := toSet(mapLiteralKeys(t, relayPath, handlersField))
+	mapHandlerTypes := toSet(handlerMapKeys(t, relayPath, "startRelayV2", "sessionConfig", handlersField))
 	switchTypes := toSet(switchCaseSelectors(t, v2sessionPath, dispatchFnName))
 
 	// registeredTypes is the real coverage: the union of both surfaces.
@@ -698,10 +698,9 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 //  3. The surfacer's question arm is fed that same identifier.
 //
 // Together those pin "one registry, minted once, read without retiring, shared by
-// the producer and the reconcile". The extractors below are new rather than calls
-// into mapLiteralKeys: that one matches a field whose value is a composite map
-// literal and runs every key through a protocol.Type* check, and this assignment is
-// a plain selector expression. parseGoFile and relayPath are the reusable parts.
+// the producer and the reconcile". The extractors below inspect selector-valued
+// config fields; handlerMapKeys instead inspects protocol.Type* keys in dispatch
+// maps. parseGoFile and relayPath are the reusable parts.
 //
 // Every extractor Fatals with an "update the guard" message when the shape it
 // expects is absent, following this file's convention — a moved surface must be
@@ -1040,16 +1039,42 @@ func appTypeConstNames(t *testing.T, path string) []string {
 	return names
 }
 
-// mapLiteralKeys returns the constant names used as keys of the composite-literal
-// map assigned to fieldName (Handlers) in the given file. It asserts exactly one
-// such literal and that every key is a protocol.Type* selector — any other shape
-// is a wiring change the guard must be taught about.
-func mapLiteralKeys(t *testing.T, path, fieldName string) []string {
+// handlerMapKeys returns keys from the fieldName map literal and subsequent
+// configName.fieldName entry assignments in funcName. Exactly one literal must
+// exist, and every key must be a protocol.Type* selector. Unrelated receivers
+// and functions cannot supply missing registrations.
+func handlerMapKeys(t *testing.T, path, funcName, configName, fieldName string) []string {
 	t.Helper()
 	file := parseGoFile(t, path)
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == funcName {
+			fn = fd
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatalf("function %q not found in %s — did it move or rename? Update the guard.", funcName, path)
+	}
 	var keys []string
 	found := 0
-	ast.Inspect(file, func(n ast.Node) bool {
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if assign, ok := n.(*ast.AssignStmt); ok {
+			for _, lhs := range assign.Lhs {
+				index, ok := lhs.(*ast.IndexExpr)
+				if !ok {
+					continue
+				}
+				field, ok := index.X.(*ast.SelectorExpr)
+				if !ok || field.Sel.Name != fieldName {
+					continue
+				}
+				config, ok := field.X.(*ast.Ident)
+				if ok && config.Name == configName {
+					keys = append(keys, protocolTypeSelName(t, path, fieldName, index.Index))
+				}
+			}
+		}
 		kv, ok := n.(*ast.KeyValueExpr)
 		if !ok {
 			return true

@@ -78,7 +78,7 @@ func TestConversationPinProjections(t *testing.T) {
 					h = SetConversationMuted(reg, path, nil, logger)
 					suffix = `,"muted":false`
 				case "read":
-					h = MarkConversationRead(reg, &fakeLatestHistory{latest: 7}, path, func(p protocol.ConversationUpdatedPayload) {
+					h = MarkConversationRead(reg, (&fakeLatestHistory{latest: 7}).lastShown, path, func(p protocol.ConversationUpdatedPayload) {
 						if pinned && (p.PinnedAt == nil || !p.PinnedAt.Equal(at)) {
 							t.Error("read announcement lost pin")
 						}
