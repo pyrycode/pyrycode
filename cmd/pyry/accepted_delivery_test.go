@@ -183,7 +183,27 @@ func TestAcceptedDeliveryLiveRefusal(t *testing.T) {
 
 func testAcceptedDeliveryReplay(t *testing.T, dir string, want thread.Snapshot) {
 	t.Helper()
-	h := history.New(dir)
+	// Reopen the durable log in an independent instance; two cache owners must
+	// never share derived checkpoint files while the original worker is live.
+	reopened := t.TempDir()
+	logDir := filepath.Join("conversations", testConvID, "history")
+	if err := os.MkdirAll(filepath.Join(reopened, logDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	segments, err := filepath.Glob(filepath.Join(dir, logDir, "*.jsonl"))
+	if err != nil || len(segments) == 0 {
+		t.Fatalf("history segments: %v %v", segments, err)
+	}
+	for _, segment := range segments {
+		raw, err := os.ReadFile(segment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(reopened, logDir, filepath.Base(segment)), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := history.New(reopened)
 	reader, err := h.Forward(testConvID, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -215,5 +235,66 @@ func testAcceptedDeliveryReplay(t *testing.T, dir string, want thread.Snapshot) 
 	// Read the real segment bytes as well as the replayed rows.
 	if _, err := os.Stat(filepath.Join(dir, "conversations", testConvID, "history")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAcceptedDeliveryAppendFailures(t *testing.T) {
+	for _, failed := range []string{"acceptance", "message", "outcome"} {
+		t.Run(failed, func(t *testing.T) {
+			h := history.New(t.TempDir())
+			blocked := filepath.Join(t.TempDir(), "blocked")
+			if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			bad := history.New(blocked)
+			sends := testSendHistory(h)
+			m := msgqueue.QueuedMessage{ID: 7, Text: "safe", TS: historyTS}
+			if failed == "acceptance" {
+				sends.store = bad
+			}
+			sends.accepted(testConvID, m)
+			sends.store = h
+			if failed == "outcome" {
+				sends.store = bad
+			}
+			if failed == "message" {
+				m.Text = strings.Repeat("x", int(history.MaxSegmentBytes)+1)
+			}
+			done := make(chan struct{})
+			go func() { operatorMessageHistory(h, nil, nil, discardLogger(), sends)(testConvID, m); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("missing append companion stalled producer")
+			}
+			entries := historyEntries(t, h, testConvID)
+			f := thread.New(testConvID)
+			if err := f.Feed(entries); err != nil {
+				t.Fatal(err)
+			}
+			items := f.Items()
+			if len(items) != 1 {
+				t.Fatalf("surviving facts: %+v", items)
+			}
+			var content map[string]json.RawMessage
+			_ = json.Unmarshal(items[0].Content, &content)
+			if content["outcome"] != nil {
+				t.Fatal("failed append fabricated outcome")
+			}
+			switch failed {
+			case "acceptance":
+				if len(entries) != 1 || entries[0].Type != "message" || content["accepted_entry_id"] != nil {
+					t.Fatal("failed acceptance fabricated reference")
+				}
+			case "message":
+				if len(entries) != 1 || items[0].Status != "queued" || !items[0].Active {
+					t.Fatal("failed message fabricated delivery")
+				}
+			case "outcome":
+				if len(entries) != 2 || items[0].ID != 1 || items[0].Order != 2 || items[0].Status != "delivered" || items[0].Active {
+					t.Fatal("committed delivery prefix lost identity")
+				}
+			}
+		})
 	}
 }
