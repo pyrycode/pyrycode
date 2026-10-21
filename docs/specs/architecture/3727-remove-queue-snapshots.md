@@ -110,3 +110,20 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-21
+
+## Revisions
+
+- 2026-10-21: Queue observation uses one canonical item accumulator for explicit
+  catch-up, additions, patches and appends. Delivery checks bind the accepted
+  item ID because a terminal queue handle is no longer an action target. The source
+  guard `TestQueueSnapshotsRetired` prevents either publication arm or protocol
+  registration returning for any capability; command/lifecycle race tests and
+  the held-daemon integration test prove retained behavior. Retained broadcast
+  helpers moved out of the deleted snapshot test file. Shadow Legacy filtering
+  preserves all other captured JSON bytes, history and provenance.
+- 2026-10-21: The ordinary recorded scenario demonstrated that live `turn_state`
+  can arrive before a canonical delivery update. Placement therefore compares
+  canonical user/tool/assistant items; live phase is not a content ordering key.
+  The early-reply adverse control now inserts a canonical assistant item before
+  delivery, retaining the supported ordering assertion. The failed capture is
+  retained separately from the repaired run.

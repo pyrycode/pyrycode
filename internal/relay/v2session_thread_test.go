@@ -220,7 +220,7 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 
 func TestV2Session_ThreadDelivery(t *testing.T) {
 	t.Parallel()
-	replaced := []string{"assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end", "session_transition", "message", "background_task_started", "background_task_updated", "background_task_roster", "queue_state", "banner", "compaction_boundary", "model_refusal_fallback", "model_refusal_no_fallback", "unrecognized_message"}
+	replaced := []string{"assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end", "session_transition", "message", "background_task_started", "background_task_updated", "background_task_roster", "banner", "compaction_boundary", "model_refusal_fallback", "model_refusal_no_fallback", "unrecognized_message"}
 	progress := []string{"turn_state", "tool_progress", "background_task_progress", "thinking_progress", "api_retry", "compacting"}
 	for _, caps := range [][]string{{"interactive"}, {"thread"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
 		t.Run(strings.Join(caps, "-"), func(t *testing.T) {

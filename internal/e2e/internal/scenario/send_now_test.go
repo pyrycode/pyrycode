@@ -12,14 +12,14 @@ import (
 )
 
 func TestSendNowPlacementControls(t *testing.T) {
-	for _, name := range []string{"valid", "foreign-frames", "subagent-frames", "early-end", "result-before-queue", "zero-queue-id", "missing-result", "foreign-result", "user-before-result", "user-after-text", "duplicate-user", "wrong-user-text", "missing-marker", "foreign-end", "late-extra-end", "late-duplicate-user", "nonempty-queue", "unrecognized"} {
+	for _, name := range []string{"valid", "delivery-enrichment", "foreign-frames", "subagent-frames", "early-end", "result-before-queue", "zero-queue-id", "missing-result", "foreign-result", "user-before-result", "user-after-text", "duplicate-user", "wrong-user-text", "missing-marker", "foreign-end", "late-extra-end", "late-duplicate-user", "nonempty-queue", "unrecognized"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSendNowPlacementHelperProcess$", "-test.v")
 			cmd.Env = append(os.Environ(), "PYRY_SEND_NOW_CONTROL="+name)
 			out, err := cmd.CombinedOutput()
-			valid := name == "valid" || name == "foreign-frames" || name == "subagent-frames"
+			valid := name == "valid" || name == "delivery-enrichment" || name == "foreign-frames" || name == "subagent-frames"
 			if ctx.Err() != nil || (err == nil) != valid {
 				t.Fatalf("placement evidence acceptance err=%v output=%s", err, out)
 			}
@@ -40,22 +40,27 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 		return protocol.Envelope{Type: kind, Payload: raw}
 	}
 	use := frame(protocol.TypeToolUse, protocol.ToolUsePayload{ConversationID: "conv", Name: "Bash", ToolUseID: "bash"})
-	item := protocol.QueuedItem{QueuedMsgID: 7, Text: SendNowQueuedText}
-	queued := frame(protocol.TypeQueueState, protocol.QueueStatePayload{ConversationID: "conv", Queued: []protocol.QueuedItem{item}})
+	queued := queueThreadFrame(t, "conv", SendNowQueuedText, 7, "queued")
 	result := frame(protocol.TypeToolResult, protocol.ToolResultPayload{ConversationID: "conv", ToolUseID: "bash"})
-	user := frame(protocol.TypeMessage, protocol.MessagePayload{ConversationID: "conv", Role: "user", Text: SendNowQueuedText})
+	user := queueThreadFrame(t, "conv", SendNowQueuedText, 0, "delivered")
 	delta := frame(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: "conv", Text: SendNowMarker})
 	end := frame(protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: "conv"})
-	empty := frame(protocol.TypeQueueState, protocol.QueueStatePayload{ConversationID: "conv"})
+	empty := queueThreadFrame(t, "conv", SendNowQueuedText, 0, "delivered")
 	frames := []protocol.Envelope{use, queued, result, user, delta, end, empty}
 	switch name {
+	case "delivery-enrichment":
+		var p protocol.ThreadItemAddedPayload
+		if err := json.Unmarshal(empty.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.Item.Rev = 90
+		frames[6] = frame(protocol.TypeThreadItemAdded, p)
 	case "early-end":
 		frames[0] = end
 	case "result-before-queue":
 		frames = []protocol.Envelope{use, result, queued, user, delta, end, empty}
 	case "zero-queue-id":
-		item.QueuedMsgID = 0
-		frames[1] = frame(protocol.TypeQueueState, protocol.QueueStatePayload{ConversationID: "conv", Queued: []protocol.QueuedItem{item}})
+		frames[1] = queueThreadFrame(t, "conv", SendNowQueuedText, 0, "queued")
 	case "missing-result":
 		frames = []protocol.Envelope{use, queued, user, delta, end, empty}
 	case "foreign-result":
@@ -65,9 +70,9 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 	case "user-after-text":
 		frames[3], frames[4] = delta, user
 	case "duplicate-user":
-		frames = []protocol.Envelope{use, queued, result, user, user, delta, end, empty}
+		frames = []protocol.Envelope{use, queued, result, user, frame(protocol.TypeMessage, protocol.MessagePayload{ConversationID: "conv", Role: "user", Text: SendNowQueuedText}), delta, end, empty}
 	case "wrong-user-text":
-		frames[3] = frame(protocol.TypeMessage, protocol.MessagePayload{ConversationID: "conv", Role: "user", Text: SendNowQueuedText + " altered"})
+		frames[3] = queueThreadFrame(t, "conv", SendNowQueuedText+" altered", 0, "delivered")
 	case "missing-marker":
 		frames[4] = frame(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: "conv", Text: "unrelated reply"})
 	case "foreign-end":
@@ -75,9 +80,14 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 	case "late-extra-end":
 		frames = append(frames, end)
 	case "late-duplicate-user":
-		frames = append(frames, user)
+		frames = append(frames, frame(protocol.TypeMessage, protocol.MessagePayload{ConversationID: "conv", Role: "user", Text: SendNowQueuedText}))
 	case "nonempty-queue":
-		frames[6] = queued
+		var p protocol.ThreadItemAddedPayload
+		if err := json.Unmarshal(queued.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.Item.Rev = 90
+		frames[6] = frame(protocol.TypeThreadItemAdded, p)
 	case "unrecognized":
 		frames = append(frames, frame(protocol.TypeUnrecognizedMessage, struct{}{}))
 	case "foreign-frames":
@@ -87,6 +97,13 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 	}
 	sends := 0
 	wire := Wire{Send: func(kind string, payload any) uint64 {
+		if kind == protocol.TypeThreadCatchUp {
+			id := uint64(100)
+			env := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Final: true})
+			env.InReplyTo = &id
+			frames = append([]protocol.Envelope{env}, frames...)
+			return 100
+		}
 		sends++
 		switch sends {
 		case 1, 2:
@@ -100,7 +117,7 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 			}
 		case 3:
 			p, ok := payload.(protocol.SendQueuedNowPayload)
-			if kind != protocol.TypeSendQueuedNow || !ok || p.ConversationID != "conv" || p.QueuedMsgID != 7 {
+			if kind != protocol.TypeSendQueuedNow || !ok || p.ConversationID != "conv" || p.QueuedMsgID != 7 || string(p.AcceptedItemID) != "70" {
 				t.Fatal("send-now did not use the surfaced queued identity")
 			}
 		default:

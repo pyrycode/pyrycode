@@ -67,9 +67,9 @@ func buildHelloEarlyInteractiveResuming(t *testing.T, token string, lastEventID 
 // (relay_v2_daemon_test.go) with a capability-advertising hello. It also asserts
 // the hello_ack early data echoes the interactive grant, pinning the precondition
 // that this conn is on the structured-stream path (the grant phone A relies on).
-func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client, pubKey []byte, token string) (*noise.CipherState, *noise.CipherState) {
+func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, caps ...string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
-	return driveHandshakeToOpenDaemonInteractiveResuming(t, phone, pubKey, token, nil)
+	return driveHandshakeToOpenDaemonInteractiveResuming(t, phone, pubKey, token, nil, caps...)
 }
 
 // driveHandshakeToOpenDaemonInteractiveResuming is
@@ -82,13 +82,33 @@ func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client
 //
 // A sibling rather than a widened signature: nine specs call the delegating helper
 // above and this ticket must not fan out into them.
-func driveHandshakeToOpenDaemonInteractiveResuming(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, lastEventID *uint64) (*noise.CipherState, *noise.CipherState) {
+func driveHandshakeToOpenDaemonInteractiveResuming(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, lastEventID *uint64, caps ...string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
 	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloEarlyInteractiveResuming(t, token, lastEventID))
+	early := buildHelloEarlyInteractiveResuming(t, token, lastEventID)
+	if len(caps) > 0 {
+		var env protocol.Envelope
+		var hello protocol.HelloClientPayload
+		if err := json.Unmarshal(early, &env); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(env.Payload, &hello); err != nil {
+			t.Fatal(err)
+		}
+		hello.Capabilities = append(hello.Capabilities, caps...)
+		env.Payload, err = json.Marshal(hello)
+		if err != nil {
+			t.Fatal(err)
+		}
+		early, err = json.Marshal(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	initMsg, err := initiator.WriteInit(early)
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -122,6 +142,11 @@ func driveHandshakeToOpenDaemonInteractiveResuming(t *testing.T, phone *fakephon
 	}
 	if !slices.Contains(ack.Capabilities, protocol.CapabilityInteractive) {
 		t.Fatalf("daemon did not grant interactive (hello_ack capabilities=%v); test precondition unmet", ack.Capabilities)
+	}
+	for _, cap := range caps {
+		if !slices.Contains(ack.Capabilities, cap) {
+			t.Fatalf("daemon did not grant %s", cap)
+		}
 	}
 	return initSend, initRecv
 }

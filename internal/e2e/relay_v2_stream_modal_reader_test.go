@@ -185,7 +185,7 @@ func TestStreamModalReaderDeadline(t *testing.T) {
 		if got != deadline {
 			t.Fatal("absolute deadline changed")
 		}
-		return protocol.Envelope{Type: protocol.TypeQueueState}, true
+		return protocol.Envelope{Type: protocol.TypeTurnState}, true
 	}
 	if r.waitDismissed(deadline, "absent") {
 		t.Fatal("missing dismissal passed despite unrelated buffered frames")

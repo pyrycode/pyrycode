@@ -28,11 +28,17 @@ const (
 
 // QueuePlacementFrame is one recorded envelope for the driving conversation.
 type QueuePlacementFrame struct {
-	Kind      string // tool_use, tool_result, delta, user_message, turn_end, queue_state, unrecognized
-	ToolName  string
-	ToolUseID string
-	Text      string
-	Queued    []protocol.QueuedItem
+	Kind             string // tool_use, tool_result, delta, user_message, turn_end, queued_item, unrecognized
+	ToolName         string
+	ToolUseID        string
+	Text             string
+	QueuedID, ItemID uint64
+	RequestID        uint64
+	MessageID        string
+	Status           string
+	Active, Shown    bool
+	Order            uint64
+	SentNow          bool
 }
 
 // SendNowPlacement preserves the live queue/action and complete arrival-order
@@ -42,16 +48,16 @@ func SendNowPlacement(t *testing.T, w Wire, convID, prompt string, turnBudget, s
 	t.Helper()
 	queuedText := SendNowQueuedText
 
+	reader := newQueuePlacementReader(t, w, convID)
 	var log []QueuePlacementFrame
 	// next reads one envelope, records it if it concerns convID, and returns the
 	// recorded frame (kind "" for anything else). ok=false on the deadline.
 	next := func(deadline time.Time) (QueuePlacementFrame, bool) {
 		t.Helper()
-		env := w.Next(deadline)
-		if env.Type == "" {
+		f, ok := reader.next(deadline)
+		if !ok {
 			return QueuePlacementFrame{}, false
 		}
-		f := ClassifyQueuePlacementFrame(t, env, convID)
 		if f.Kind != "" {
 			log = append(log, f)
 		}
@@ -80,27 +86,23 @@ func SendNowPlacement(t *testing.T, w Wire, convID, prompt string, turnBudget, s
 
 	// 3. Queue the marker message behind the busy turn and read its queued id.
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "m-3", Text: queuedText})
-	var queuedID uint64
+	var queuedID, acceptedID uint64
 	deadline = time.Now().Add(30 * time.Second)
 	for queuedID == 0 {
 		f, ok := next(deadline)
 		if !ok {
-			t.Fatalf("no queue_state listing the marker message within 30s; the send was not queued")
+			t.Fatalf("no queued thread item carrying the marker message within 30s; the send was not queued")
 		}
 		if f.Kind == "tool_result" && f.ToolUseID == bashID {
 			t.Fatalf("the Bash call finished before the message was queued; the send-now would land after it and prove nothing")
 		}
-		if f.Kind == "queue_state" {
-			for _, item := range f.Queued {
-				if item.Text == queuedText {
-					queuedID = item.QueuedMsgID
-				}
-			}
+		if f.Kind == "queued_item" && f.Text == queuedText {
+			queuedID, acceptedID = f.QueuedID, f.ItemID
 		}
 	}
 
 	// 4. Send it now, while the Bash call is still running.
-	w.Send(protocol.TypeSendQueuedNow, protocol.SendQueuedNowPayload{ConversationID: convID, QueuedMsgID: queuedID})
+	w.Send(protocol.TypeSendQueuedNow, protocol.SendQueuedNowPayload{ConversationID: convID, QueuedMsgID: queuedID, AcceptedItemID: json.RawMessage(fmt.Sprint(acceptedID))})
 	t.Logf("send_queued_now for queued id %d sent", queuedID)
 
 	// 5. Collect until the turn ends, then settle for late frames.
@@ -123,7 +125,7 @@ func SendNowPlacement(t *testing.T, w Wire, convID, prompt string, turnBudget, s
 	toolResultIdx, finalTextIdx, turnEnds := -1, -1, 0
 	var userIdx []int
 	var finalText strings.Builder
-	var lastQueue []protocol.QueuedItem
+	terminal := false
 	for i, f := range log {
 		switch f.Kind {
 		case "tool_result":
@@ -146,8 +148,11 @@ func SendNowPlacement(t *testing.T, w Wire, convID, prompt string, turnBudget, s
 			}
 		case "turn_end":
 			turnEnds++
-		case "queue_state":
-			lastQueue = f.Queued
+		}
+		if f.ItemID == acceptedID {
+			terminal = f.Status == "delivered"
+		}
+		switch f.Kind {
 		case "unrecognized":
 			t.Errorf("an unrecognized_message reached the phone at log position %d; a replayed user echo leaked past the parser", i)
 		}
@@ -171,8 +176,8 @@ func SendNowPlacement(t *testing.T, w Wire, convID, prompt string, turnBudget, s
 		t.Errorf("user message push at log position %d, want after the Bash tool_result (%d) and before the final assistant text (%d)",
 			userIdx[0], toolResultIdx, finalTextIdx)
 	}
-	if len(lastQueue) != 0 {
-		t.Errorf("last queue_state for %q lists %d entries, want none: %+v", convID, len(lastQueue), lastQueue)
+	if !terminal {
+		t.Error("queued item never became delivered")
 	}
 }
 
@@ -213,19 +218,13 @@ func ClassifyQueuePlacementFrame(t *testing.T, env protocol.Envelope, convID str
 		var p protocol.MessagePayload
 		decode(&p)
 		if p.ConversationID == convID && p.Role == "user" {
-			return QueuePlacementFrame{Kind: "user_message", Text: p.Text}
+			return QueuePlacementFrame{Kind: "user_message", Text: p.Text, QueuedID: p.QueuedMsgID, SentNow: p.SentNow}
 		}
 	case protocol.TypeTurnEnd:
 		var p protocol.TurnEndPayload
 		decode(&p)
 		if p.ConversationID == convID {
 			return QueuePlacementFrame{Kind: "turn_end"}
-		}
-	case protocol.TypeQueueState:
-		var p protocol.QueueStatePayload
-		decode(&p)
-		if p.ConversationID == convID {
-			return QueuePlacementFrame{Kind: "queue_state", Queued: p.Queued}
 		}
 	}
 	return QueuePlacementFrame{}

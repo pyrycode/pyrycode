@@ -629,20 +629,9 @@ const (
 	TypeModalDismissed = "modal_dismissed" // binary → phone, outbound v2 modal-resolution event
 )
 
-// Mobile Protocol v2 queued-backlog frames (docs/protocol-mobile.md § Queue). A
-// message sent while claude is busy waits in internal/msgqueue. queue_state is the
-// wire form of msgqueue.Snapshot; dequeue_message drives msgqueue.Remove, and
-// send_queued_now drives msgqueue.SendNow, writing the entry into the running
-// turn instead of dropping it. The two inbound verbs are intercepted by
-// dispatchAppFrame. Unlike modal_answer they are ungated for any paired phone
-// (ADR 025 § Security model); queued_msg_id is a per-conversation counter, not a
-// security primitive.
-//
-// MUST NOT be added to inboundAppTypeSet: all three are in v2OnlyTypes.
-// relay_guard_test.go files the inbound two as switch-intercepted and queue_state
-// as push.
+// Queue controls operate on conversation-scoped queued IDs. Optional accepted-item
+// binding prevents commands addressing a reused queue ID after restart.
 const (
-	TypeQueueState     = "queue_state"     // binary → phone, outbound v2 queued-backlog snapshot
 	TypeDequeueMessage = "dequeue_message" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 	TypeSendQueuedNow  = "send_queued_now" // phone → binary, inbound v2 control (intercepted pre-dispatch.Route)
 )

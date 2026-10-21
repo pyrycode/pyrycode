@@ -34,7 +34,7 @@ type operatorMessage struct {
 // decouples unplaced queue confirmations from Run. Placed Claude messages
 // call broadcast synchronously from the stream drain; mu serializes both paths.
 //
-// Unlike queue_state the event joins the #647 replay ring, so a conn that
+// The event joins the replay ring, so a connection that
 // reconnects with an earlier last_event_id gets the message ahead of the reply it
 // started. The ring is born in the relay leg, long after the queue, so it reaches
 // Run as a parameter at start rather than as a field set at construction. The
@@ -58,7 +58,7 @@ type operatorMessageEmitterV2 struct {
 }
 
 // newOperatorMessageEmitterV2 builds the emitter over the channel the
-// OnDelivered seam sends into. Like queueChanges, the channel exists before
+// OnDelivered seam sends into. The channel exists before
 // msgqueue.New; Run is started by the relay leg.
 func newOperatorMessageEmitterV2(in <-chan operatorMessage, logger *slog.Logger) *operatorMessageEmitterV2 {
 	return &operatorMessageEmitterV2{in: in, logger: logger, wake: make(chan struct{}, 1)}

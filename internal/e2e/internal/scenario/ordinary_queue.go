@@ -1,7 +1,6 @@
 package scenario
 
 import (
-	"encoding/json"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"testing"
 	"time"
@@ -17,15 +16,15 @@ type OrdinaryQueueConfig struct {
 
 func OrdinaryQueuePlacement(t *testing.T, w Wire, c OrdinaryQueueConfig) {
 	t.Helper()
+	reader := newQueuePlacementReader(t, w, c.ConversationID)
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "ordinary-start", Text: c.Prompt})
 	deadline := time.Now().Add(c.Budget)
 	var bashID string
 	for {
-		env := w.Next(deadline)
-		if env.Type == "" {
+		f, ok := reader.next(deadline)
+		if !ok {
 			t.Fatal("no running Bash turn")
 		}
-		f := ClassifyQueuePlacementFrame(t, env, c.ConversationID)
 		if f.Kind == "turn_end" {
 			t.Fatal("turn ended before Bash started")
 		}
@@ -35,25 +34,21 @@ func OrdinaryQueuePlacement(t *testing.T, w Wire, c OrdinaryQueueConfig) {
 		}
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "ordinary-queued", Text: OrdinaryQueuedText})
-	var queuedID uint64
+	var queuedID, acceptedID uint64
 	var ends, users int
 	var replyStarted, checkpointed, bashFinished bool
 	deadline = time.Now().Add(2 * c.Budget)
 	for ends < 2 {
-		env := w.Next(deadline)
-		if env.Type == "" {
+		f, ok := reader.next(deadline)
+		if !ok {
 			t.Fatal("queued reply did not end")
 		}
-		f := ClassifyQueuePlacementFrame(t, env, c.ConversationID)
 		if f.Kind == "tool_result" && f.ToolUseID == bashID {
 			bashFinished = true
 		}
-		if f.Kind == "queue_state" {
-			for _, item := range f.Queued {
-				if item.Text == OrdinaryQueuedText {
-					queuedID = item.QueuedMsgID
-				}
-			}
+		if f.Kind == "queued_item" && f.Text == OrdinaryQueuedText {
+			queuedID = f.QueuedID
+			acceptedID = f.ItemID
 			if c.Checkpoint != nil && !checkpointed && queuedID != 0 {
 				if ends != 0 || bashFinished {
 					t.Fatal("queue observation followed the held turn's completion")
@@ -68,23 +63,12 @@ func OrdinaryQueuePlacement(t *testing.T, w Wire, c OrdinaryQueueConfig) {
 		}
 		if f.Kind == "user_message" && f.Text == OrdinaryQueuedText {
 			users++
-			var p protocol.MessagePayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid ordinary user push")
-			}
-			if ends != 1 || replyStarted || p.QueuedMsgID == 0 || p.QueuedMsgID != queuedID || p.SentNow {
+			if ends != 1 || replyStarted || f.ItemID == 0 || f.ItemID != acceptedID || f.SentNow {
 				t.Fatal("ordinary queued message misplaced")
 			}
 		}
 		if ends == 1 {
 			interactive := f.Kind == "delta" || f.Kind == "tool_use" || f.Kind == "tool_result"
-			if env.Type == protocol.TypeTurnState {
-				var p protocol.TurnStatePayload
-				if json.Unmarshal(env.Payload, &p) != nil {
-					t.Fatal("invalid ordinary reply state")
-				}
-				interactive = p.ConversationID == c.ConversationID && p.State != "idle"
-			}
 			if interactive {
 				replyStarted = true
 				if users != 1 {

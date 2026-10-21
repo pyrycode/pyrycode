@@ -398,7 +398,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 		}
 	}
 	// Withheld families still reach the simultaneous legacy recipient unchanged.
-	families := []string{protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeMessage, protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster, protocol.TypeQueueState, protocol.TypeBanner, protocol.TypeCompactionBoundary, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeUnrecognizedMessage}
+	families := []string{protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeMessage, protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster, protocol.TypeBanner, protocol.TypeCompactionBoundary, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeUnrecognizedMessage}
 	for _, typ := range families {
 		e := protocol.Envelope{ID: 80, Type: typ, TS: time.Unix(1, 0).UTC(), Payload: json.RawMessage(`{"conversation_id":"` + testConvID + `"}`)}
 		for _, peer := range []string{"phone", "legacy", "again"} {

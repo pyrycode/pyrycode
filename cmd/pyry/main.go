@@ -560,15 +560,9 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// stops spawning drains, joins the in-flight ones, and returns. The in-memory
 	// backlog survives a claude child respawn but not a daemon-process restart
 	// (resync covers it) — the same loss boundary as the event ring.
-	// queueChanges is the hand-off channel from msgqueue's OnChange seam to the
-	// queue_state producer (#722). It is created BEFORE msgqueue.New so OnChange
-	// can send to it, and shared with newQueueStateEmitterV2 below — this breaks
-	// the chicken-and-egg (OnChange is a Config field set at New, before startRelay
-	// builds the broadcaster) without any late-bound field.
-	queueChanges := make(chan string, queueStateQueueSize)
 	// giveUps is the parallel hand-off channel from msgqueue's OnGiveUp seam
 	// (#1000) to the session_error producer (#1008), created BEFORE msgqueue.New
-	// for the same chicken-and-egg reason as queueChanges and shared with
+	// before its relay consumer exists, and shared with
 	// newSessionErrorEmitterV2 below. Setting OnGiveUp here flips #1000's seam from
 	// nil (disabled) to live: a persistent-delivery give-up now surfaces as a
 	// typed, client-visible session_error frame instead of a silently dropped head.
@@ -598,7 +592,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// had just appended. So this is the single mint, shared by every producer.
 	//
 	// It is the fourth value in this block built BEFORE msgqueue.New, for the same
-	// chicken-and-egg reason as queueChanges, giveUps and approvalParked: #2115's
+	// construction-order reason as giveUps and approvalParked: #2115's
 	// producer hangs off the queue's OnDelivered seam, a Config field set at New,
 	// and the store used to be minted a frame further down where that literal
 	// could not see it. Moving it costs nothing and touches no filesystem — the
@@ -630,7 +624,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	postDelivery.bind(turnBusy)
 	// operatorMessages is the hand-off from the history producer below to the
 	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
-	// for queueChanges' reason. The ring that push appends to is born in the relay
+	// before its relay consumer exists. The ring that push appends to is born in the relay
 	// leg, which hands it to the emitter's Run at start.
 	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
 	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
@@ -674,7 +668,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// further than newInboundDeliver's WriteUserTurn — see channelCarry on why the
 		// "clients see no change" property is structural here rather than a filter.
 		Deliver:    postDelivery.beforeInbound(postCarry.carryPending(approvalParked.markApprovalHolds(replySugg.trackDelivery(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout, sendNowPlace))))),
-		OnChange:   queueStateNotify(queueChanges, logger),
 		OnGiveUp:   blocked,
 		OnAccepted: sends.accepted,
 		OnTerminal: sends.terminal,
@@ -727,18 +720,12 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		}
 	}()
 
-	// The queue_state producer (#722): on each backlog change it snapshots the
-	// changed conversation and fans a queue_state envelope to interactive phones.
-	// Built here (so queue.Snapshot is bound) but its Run goroutine starts inside
-	// startRelayV2, where the broadcaster exists.
-	qse := newQueueStateEmitterV2(queueChanges, queue.Snapshot, logger)
-
 	// The session_error producer (#1008): on each msgqueue give-up it fans a typed
 	// session_error envelope (terminal CodeSessionBlocked) to interactive phones,
 	// so a wedged session surfaces instead of leaving a queued turn that silently
 	// never runs. Built here (channel shared with the OnGiveUp seam) but its Run
 	// goroutine starts inside startRelayV2, where the broadcaster exists — same
-	// shape as qse. It holds no queue reference, so it cannot reach queued text.
+	// channel hand-off. It holds no queue reference, so it cannot reach queued text.
 	see := newSessionErrorEmitterV2(giveUps, logger)
 
 	// The resetting producer (#2478): as a conversation reset runs, it fans the
@@ -746,7 +733,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// phones, so the pause an operator is watching has a name and says whether a
 	// handoff note was made. Built here because the activeSessionStarter literal below
 	// is its caller; it holds NO broadcaster yet, and startRelayV2 attaches the relay
-	// leg's one. Unlike qse and see it starts no Run goroutine — its caller is the
+	// leg's one. Unlike see it starts no Run goroutine — its caller is the
 	// reset tail, which already runs off the dispatch goroutine, so it emits
 	// synchronously and cannot drop or reorder an edge.
 	resetting := newResettingEmitterV2(ctx, logger)
@@ -873,7 +860,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 				return out
 			})
 		},
-		qse:          qse,
 		sessionErr:   see,
 		resetting:    resetting,
 		debugBundler: debugBundler,

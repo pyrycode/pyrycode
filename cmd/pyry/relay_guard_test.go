@@ -421,7 +421,6 @@ var excludedTypes = map[string]string{
 	"TypeSessionTransition":   "push",
 	"TypeModalShown":          "push",
 	"TypeModalDismissed":      "push",
-	"TypeQueueState":          "push",
 	"TypeDebugBundleChunk":    "push",
 	"TypeDebugBundleDone":     "push",
 	"TypeSessionError":        "push",
@@ -676,11 +675,8 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 // enumerates an empty store — silently, on every client, caught by no test.
 //
 // It is a first-of-its-kind guard rather than a copy of a working one: none of the
-// three sibling seams is pinned at its assignment today. Grepping the twin field
-// names suggests otherwise and should not be believed — TestOutstandingQueues_*
-// and TestRetainedModelLists_* exercise the adapter functions outstandingQueues
-// and retainedModelLists directly, and every one of them stays green if the
-// matching line is deleted from the V2SessionConfig literal.
+// other sibling seams is pinned at its assignment today. Adapter tests alone
+// stay green if the matching V2SessionConfig assignment is deleted.
 //
 // Bare presence is not enough, which is why three facts are tied together rather
 // than one asserted. A gate that only checks the field appears as a key stays

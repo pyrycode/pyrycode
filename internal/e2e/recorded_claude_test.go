@@ -253,7 +253,11 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = phone.Close() })
-	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, pairing.Token)
+	var queueCaps []string
+	if scenario == "ordinary-queue-placement" || scenario == "send-now-placement" {
+		queueCaps = []string{protocol.CapabilityThread}
+	}
+	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, pairing.Token, queueCaps...)
 	sequence := uint64(100)
 	transmit := func(kind string, payload any) uint64 {
 		t.Helper()

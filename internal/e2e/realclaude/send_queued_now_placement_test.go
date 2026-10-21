@@ -31,7 +31,7 @@ import (
 
 func TestRealClaude_SendQueuedNowPlacement(t *testing.T) {
 	runParallel(t)
-	h, convID := startStreamRunningTurnHarness(t)
+	h, convID := startStreamRunningTurnHarness(t, protocol.CapabilityThread)
 	sequence := uint64(1)
 	wire := scenariohelpers.Wire{
 		Send: func(kind string, payload any) uint64 {
@@ -48,7 +48,7 @@ func TestRealClaude_SendQueuedNowPlacement(t *testing.T) {
 }
 
 // sendQueuedNow seals a send_queued_now control envelope for convID's queued
-// entry id. The daemon sends no reply; the queue_state and the stream show the
+// entry id. The daemon sends no reply; the thread item and stream show the
 // outcome. It mirrors the fake-claude suite's dequeue_message send.
 func sendQueuedNow(t *testing.T, h *perConvHarness, convID string, id uint64) {
 	t.Helper()

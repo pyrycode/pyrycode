@@ -130,7 +130,7 @@ func TestInteractiveStreamRunningTurn(t *testing.T) {
 // spawnBootstrapDaemon (--dangerously-skip-permissions) so the Bash loop runs
 // with no modal to block it. This is the reusable seam #1176 composes. Skips
 // cleanly when claude / creds are absent.
-func startStreamRunningTurnHarness(t *testing.T) (*perConvHarness, string) {
+func startStreamRunningTurnHarness(t *testing.T, caps ...string) (*perConvHarness, string) {
 	t.Helper()
 	// Parallel only through runParallel; see liveHome.
 	claudeBin, home := daemonProviderEnvironment(t)
@@ -190,7 +190,7 @@ func startStreamRunningTurnHarness(t *testing.T) (*perConvHarness, string) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 
-	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	initSend, initRecv := driveHandshake(t, phone, pubKey, payload.Token, append([]string{protocol.CapabilityInteractive}, caps...)...)
 	t.Cleanup(func() { finishDaemonRecording(t) })
 	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir}, runningTurnConvID
 }

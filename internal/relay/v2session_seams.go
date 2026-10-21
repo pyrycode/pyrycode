@@ -18,7 +18,7 @@ import (
 // optional and its doc states what the zero value does. Per-seam design notes
 // live in docs/knowledge/features/v2-session-manager*.md.
 //
-// Connect-time reconcile seams (OutstandingModals, OutstandingQueues,
+// Connect-time reconcile seams (OutstandingModals,
 // RetainedModelLists, OutstandingQuestions, RetainedSlashCommandLists,
 // RetainedBackgroundTaskRosters, RunningTurnPhases, ReplySuggestions) share one
 // contract, the Mode B rule of docs/protocol-mobile.md § Reconnect / Backfill
@@ -589,12 +589,6 @@ type V2SessionConfig struct {
 	// answerable exactly once, through the registry's one-shot Resolve, which this
 	// path never calls. Production wires modalbridge.Registry.Snapshot.
 	OutstandingModals func() []protocol.ModalShownPayload
-
-	// OutstandingQueues returns one queue_state payload per conversation with a
-	// non-empty backlog, for connect-time reconcile (see the type doc).
-	// queue_state is full state, so re-sending it is idempotent. It mints no id
-	// and dequeues nothing. Production wires cmd/pyry's outstandingQueues adapter.
-	OutstandingQueues func() []protocol.QueueStatePayload
 
 	// RetainedModelLists returns one model_list payload per session holding a
 	// retained list, for connect-time reconcile (see the type doc). model_list is

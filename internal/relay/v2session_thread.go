@@ -54,7 +54,7 @@ func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) b
 	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult,
 		protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition,
 		protocol.TypeMessage, protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated,
-		protocol.TypeBackgroundTaskRoster, protocol.TypeQueueState, protocol.TypeBanner,
+		protocol.TypeBackgroundTaskRoster, protocol.TypeBanner,
 		protocol.TypeCompactionBoundary, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeUnrecognizedMessage:
 		return true
 	}

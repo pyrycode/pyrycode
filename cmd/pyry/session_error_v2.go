@@ -16,7 +16,7 @@ import (
 // failure per head (#1000's GiveUpAfter bound) — so 16 is effectively
 // unreachable short of a simultaneous mass-wedge burst (N conversations all
 // crossing the bound at once). Drop-on-full bounds memory while never stalling
-// the drain (GiveUpFunc's MUST-NOT-BLOCK contract). Unlike queue_state a dropped
+// the drain (GiveUpFunc's MUST-NOT-BLOCK contract). A dropped
 // give-up is NOT recovered by re-reading state (the reason is a one-shot edge),
 // but the depth makes overflow unreachable and blocking would stall the drain's
 // exit->respawn.
@@ -24,10 +24,8 @@ const sessionErrorQueueSize = 16
 
 // giveUpNotice is the hand-off value the two session_error producers send to the
 // emitter's Run goroutine: msgqueue's OnGiveUp seam (sessionErrorNotify) and the
-// runners' crash-episode hook (childCrashingNotify, #2724). Unlike queue_state —
-// whose channel carries a bare convID because the consumer re-reads current state
-// via Snapshot — the reason is a one-shot edge value that cannot be recovered by
-// re-reading queue state (AC-4), so it rides the channel alongside the id. code is
+// runners' crash-episode hook (childCrashingNotify). The reason is a one-shot
+// edge value carried alongside the conversation ID. code is
 // the wire code the producer chose; each producer sets its own constant, and
 // neither takes it from its caller. Same struct-channel shape as
 // sessionTransitionEmitterV2.in.
@@ -103,7 +101,7 @@ func newSessionErrorEmitterV2(in <-chan giveUpNotice, logger *slog.Logger) *sess
 // blocks, satisfying GiveUpFunc's MUST-NOT-BLOCK contract on the drain path, and
 // is safe for concurrent invocation (a channel send is concurrency-safe). It
 // captures the channel, not the emitter, so the emitter is never read off the
-// constructing goroutine. Unlike queue_state a dropped give-up is NOT recovered
+// constructing goroutine. A dropped give-up is not recovered
 // (the reason is a one-shot edge, not re-derivable from queue state) — but the
 // buffer makes overflow unreachable short of a simultaneous mass-wedge, and
 // blocking would stall the drain's exit->respawn.
