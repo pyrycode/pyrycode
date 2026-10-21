@@ -1177,11 +1177,7 @@ func startRelayV2(
 			// out, through the same hook send_message's auto-naming uses.
 			protocol.TypeSetConversationMuted:  handlers.SetConversationMuted(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
 			protocol.TypeSetConversationPinned: handlers.SetConversationPinned(w.convReg, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
-			// mark_conversation_read (#2780) likewise takes no session surface. It
-			// clamps to w.hist's newest entry and fans out only an actual advance,
-			// through the same hook.
-			protocol.TypeMarkConversationRead: handlers.MarkConversationRead(w.convReg, legacyHistoryReader{store: w.hist}, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger),
-			protocol.TypeChangeWorkspace:      handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
 			// set_system_prompt takes no session surface (#2151): the value's route
 			// to a running child is the registry, re-read at the pool's own spawn
 			// funnel by #2150's refreshSystemPrompt. Wiring a pool or runner in here
@@ -1508,6 +1504,8 @@ func startRelayV2(
 	}
 	installDaemonLiveRelay(&sessionConfig, w, liveContextUsage)
 	installDaemonThreadRelay(&sessionConfig, w.shadow)
+	// Read marks share the installed summary authority, including its absent-evidence refusal.
+	sessionConfig.Handlers[protocol.TypeMarkConversationRead] = handlers.MarkConversationRead(w.convReg, sessionConfig.ThreadLastShownVersion, resolveConversationsRegistryPath(w.instanceName), announceConversationHook, logger)
 	mgr, detachApps, err := newDaemonAppsManager(ctx, sessionConfig, w.appRegistry, w.appOwner)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)

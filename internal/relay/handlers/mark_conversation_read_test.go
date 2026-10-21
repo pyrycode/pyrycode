@@ -16,7 +16,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
-	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -47,6 +46,11 @@ func (h *fakeLatestHistory) calls() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.asked)
+}
+
+func (h *fakeLatestHistory) lastShown(id string) (uint64, bool) {
+	v, err := h.LatestDisplayableEntryID(conversations.ConversationID(id))
+	return v, err == nil
 }
 
 // newMarkReadReg seeds one muted, promoted row holding the given mark at a
@@ -126,13 +130,15 @@ func TestMarkConversationRead_Success(t *testing.T) {
 		{"equal is no-op", 6, 10, "6", 6, false},
 		{"lower is no-op", 6, 10, "0", 6, false},
 		{"empty conversation stays at zero", 0, 0, "5", 0, false},
+		{"higher held mark", 20, 10, "99", 20, false},
+		{"zero cannot lower held mark", 20, 0, "99", 20, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			reg, path := newMarkReadReg(t, tc.held)
 			ann := &recordingAnnouncer{}
-			h := MarkConversationRead(reg, &fakeLatestHistory{latest: tc.latest}, path, ann.announce, testLogger(t))
+			h := MarkConversationRead(reg, (&fakeLatestHistory{latest: tc.latest}).lastShown, path, ann.announce, testLogger(t))
 
 			env, _ := runMarkRead(t, h, markReadPayload(tc.upTo))
 			if env.Type != protocol.TypeConversationUpdated {
@@ -204,7 +210,7 @@ func TestMarkConversationRead_Rejects(t *testing.T) {
 			hist := &fakeLatestHistory{latest: 10}
 			ann := &recordingAnnouncer{}
 
-			env, frame := runMarkRead(t, MarkConversationRead(reg, hist, path, ann.announce, logger), tc.payload)
+			env, frame := runMarkRead(t, MarkConversationRead(reg, hist.lastShown, path, ann.announce, logger), tc.payload)
 			if env.Type != protocol.TypeError {
 				t.Fatalf("Type = %q", env.Type)
 			}
@@ -224,26 +230,26 @@ func TestMarkConversationRead_Rejects(t *testing.T) {
 	}
 }
 
-// TestMarkConversationRead_HistoryUnavailable covers a failed history read and
-// an absent (nil or typed-nil) store: retryable history.unavailable, no change.
+// TestMarkConversationRead_HistoryUnavailable requires evidence even for no-ops.
 func TestMarkConversationRead_HistoryUnavailable(t *testing.T) {
 	t.Parallel()
-	cases := map[string]historyLatestReader{
-		"read error": &fakeLatestHistory{err: errors.New("segment corrupt")},
-		"nil":        nil,
-		"typed nil":  (*history.Store)(nil),
+	cases := map[string]func(string) (uint64, bool){
+		"unavailable": func(string) (uint64, bool) { return 999, false },
+		"nil":         nil,
 	}
-	for name, hist := range cases {
+	for name, shown := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			reg, path := newMarkReadReg(t, 2)
 			ann := &recordingAnnouncer{}
-			env, _ := runMarkRead(t, MarkConversationRead(reg, hist, path, ann.announce, testLogger(t)), markReadPayload("5"))
-			if p := assertErrorPayload(t, env, protocol.CodeHistoryUnavailable, msgMarkReadHistoryUnavail); !p.Retryable {
-				t.Error("Retryable = false, want true")
-			}
-			if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) || storedMark(t, reg) != 2 || len(ann.records()) != 0 {
-				t.Errorf("history failure changed state: stat %v, mark %d", err, storedMark(t, reg))
+			for _, request := range []string{"5", "2", "0"} {
+				env, _ := runMarkRead(t, MarkConversationRead(reg, shown, path, ann.announce, testLogger(t)), markReadPayload(request))
+				if p := assertErrorPayload(t, env, protocol.CodeHistoryUnavailable, msgMarkReadHistoryUnavail); !p.Retryable {
+					t.Error("Retryable = false, want true")
+				}
+				if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) || storedMark(t, reg) != 2 || len(ann.records()) != 0 {
+					t.Errorf("history failure changed state: stat %v, mark %d", err, storedMark(t, reg))
+				}
 			}
 		})
 	}
@@ -261,7 +267,7 @@ func TestMarkConversationRead_SaveFailureThenRetry(t *testing.T) {
 	}
 	path := filepath.Join(blocker, "conversations.json") // parent is a regular file
 	ann := &recordingAnnouncer{}
-	h := MarkConversationRead(reg, &fakeLatestHistory{latest: 10}, path, ann.announce, testLogger(t))
+	h := MarkConversationRead(reg, (&fakeLatestHistory{latest: 10}).lastShown, path, ann.announce, testLogger(t))
 
 	env, _ := runMarkRead(t, h, markReadPayload("7"))
 	if p := assertErrorPayload(t, env, protocol.CodeReadMarkUnavailable, msgMarkReadSaveUnavailable); !p.Retryable {
@@ -296,7 +302,7 @@ func TestMarkConversationRead_ReplyFailureStillPushes(t *testing.T) {
 	t.Parallel()
 	reg, path := newMarkReadReg(t, 2)
 	ann := &recordingAnnouncer{}
-	h := MarkConversationRead(reg, &fakeLatestHistory{latest: 10}, path, ann.announce, testLogger(t))
+	h := MarkConversationRead(reg, (&fakeLatestHistory{latest: 10}).lastShown, path, ann.announce, testLogger(t))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c := dispatch.NewTestConn(markReadConnID, make(chan protocol.RoutingEnvelope), nil)

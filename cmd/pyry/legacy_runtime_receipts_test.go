@@ -19,6 +19,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/thread"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -538,10 +539,24 @@ func testLegacyListAndMark(t *testing.T, store *history.Store, checkpoint, lates
 		}
 	}
 	assertList(held)
-	mark := handlers.MarkConversationRead(reg, reader, path, nil, discardLogger())
+	threadStore := thread.NewStore(store)
+	t.Cleanup(func() { _ = threadStore.Shutdown() })
+	if err := threadStore.Load(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	testShadowWait(t, func() bool { return threadStore.Status(id).State == thread.StateUsable })
+	shadow := newThreadShadow(store, reg, threadStore, discardLogger())
+	t.Cleanup(shadow.cancel)
+	cfg := relay.V2SessionConfig{}
+	installDaemonThreadRelay(&cfg, shadow)
+	shown, ok := cfg.ThreadLastShownVersion(testConvID)
+	if !ok {
+		t.Fatal("missing loaded thread evidence")
+	}
+	mark := handlers.MarkConversationRead(reg, cfg.ThreadLastShownVersion, path, nil, discardLogger())
 	want := held
 	for i, upTo := range []uint64{checkpoint, 0, checkpoint, checkpoint + 100} {
-		want = max(want, min(upTo, latest))
+		want = max(want, min(upTo, shown))
 		env := invoke(mark, protocol.TypeMarkConversationRead, json.RawMessage(fmt.Sprintf(`{"conversation_id":"%s","up_to":%d}`, testConvID, upTo)), uint64(20+i))
 		var updated protocol.ConversationUpdatedPayload
 		if err := json.Unmarshal(env.Payload, &updated); err != nil {
@@ -559,7 +574,7 @@ func testLegacyListAndMark(t *testing.T, store *history.Store, checkpoint, lates
 		if cv.ReadUpTo != want || other.ReadUpTo != 2 {
 			t.Fatalf("persisted mark/isolation=%d/%d", cv.ReadUpTo, other.ReadUpTo)
 		}
-		mark = handlers.MarkConversationRead(reg, reader, path, nil, discardLogger())
+		mark = handlers.MarkConversationRead(reg, cfg.ThreadLastShownVersion, path, nil, discardLogger())
 		assertList(want)
 	}
 	host, err := conversations.Load(filepath.Join(t.TempDir(), "conversations.json"))
