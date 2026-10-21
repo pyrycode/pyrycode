@@ -48,7 +48,7 @@ func TestAcceptedDeliveryLiveRefusal(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			if err := store.Load(t.Context(), testConvID); err != nil {
+			if err := store.Load(context.Background(), testConvID); err != nil {
 				t.Fatal(err)
 			}
 			testShadowWait(t, func() bool { return store.Status(testConvID).Version == 1 })
@@ -168,6 +168,17 @@ func TestAcceptedDeliveryLiveRefusal(t *testing.T) {
 				segments, _ := filepath.Glob(filepath.Join(dir, "conversations", testConvID, "history", "*.jsonl"))
 				if len(segments) < 2 {
 					t.Fatal("reader segment cut missing")
+				}
+				reader, err := h.Forward(testConvID, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var ends []uint64
+				if err := reader.Walk(t.Context(), 5, func(entries []history.Entry) error { ends = append(ends, entries[len(entries)-1].ID); return nil }); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(ends, []uint64{3, 5}) {
+					t.Fatalf("message/outcome reader chunks: %v", ends)
 				}
 			}
 			testAcceptedDeliveryReplay(t, dir, current)

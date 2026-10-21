@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -38,6 +39,37 @@ func TestSendEarlyDelivery(t *testing.T) {
 		t.Fatal("retained prefix changed")
 	}
 	testMainReplay(t, []history.Entry{accept, message, outcome})
+	entries := []history.Entry{accept, message, outcome}
+	reference, source := testReferenceFold(entries)
+	inline := New("a")
+	for i, e := range entries {
+		source.chunk = entries[i : i+1]
+		want, err := inline.FeedChanges([]history.Entry{e})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := reference.FeedChanges([]history.Entry{e})
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("source prefix %d: %+v %+v %v", e.ID, got, want, err)
+		}
+		source.remember(source.chunk)
+		source.chunk = nil
+	}
+}
+
+func TestSendEarlyDeliverySourceFailure(t *testing.T) {
+	entries := []history.Entry{testAcceptance(1, "phone"), testEntry(2, "message", `{"conversation_id":"a","role":"user","text":"delivered","accepted_entry_id":1}`)}
+	f, source := testReferenceFold(entries)
+	source.chunk = entries[:1]
+	testFeed(t, f, entries[0])
+	source.chunk = nil
+	source.lookup = func([]uint64) ([]history.Entry, error) { return nil, errors.New("unavailable") }
+	if err := f.Feed(entries[1:]); err == nil {
+		t.Fatal("missing source accepted")
+	}
+	if f.items[0].Status != "queued" || f.recipes[1].delivery != 0 || f.messages[2] < 0 {
+		t.Fatal("failed validation claimed ownership")
+	}
 }
 
 func TestSendEarlyDeliveryReferences(t *testing.T) {
