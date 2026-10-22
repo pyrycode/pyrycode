@@ -584,16 +584,6 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// model-list reconcile last.
 	m.reconcileQuestions(ctx, s)
 
-	// Connect-time queue reconcile (#878): re-send the current queue_state for each
-	// non-empty conversation to this conn — the queue twin of the modal reconcile
-	// above — so a phone that connected/reconnected between backlog changes sees
-	// current queue truth instead of the stale/empty view #722's push-on-change
-	// leaves. No-op for a non-interactive conn or an unwired seam. Ordering relative
-	// to reconcileModals and replayMissed is immaterial (distinct payload types);
-	// placed after the modal reconcile to surface the time-sensitive permission
-	// prompt ahead of the backlog.
-	m.reconcileQueues(ctx, s)
-
 	// Connect-time model-list reconcile (#1863): send the retained model_list for
 	// each session holding one to this conn — the third Mode B instance alongside
 	// the two reconciles above — so a client attaching later can populate its model

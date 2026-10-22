@@ -18,6 +18,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -106,7 +107,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = phone.Close() })
-	send, recv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
+	send, recv := driveHandshake(t, phone, pubKey, payload.Token, protocol.CapabilityInteractive, protocol.CapabilityThread)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(gate + ".ready"); err == nil {
@@ -124,18 +125,36 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 		}
 	}
 	heldText := "Without using tools, reply briefly about retained session recovery. marker=held-2859"
-	sealSendMessage(t, phone, send, 2, liveConvID, "held-2859", heldText)
 	state := &sessionErrorObservation{}
+	next := scenario.QueuePlacementFrames(t, scenario.Wire{
+		Send: func(kind string, payload any) uint64 {
+			sealEnvelope(t, phone, send, protocol.Envelope{ID: 100, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+			return 100
+		},
+		Next: func(until time.Time) protocol.Envelope {
+			env := readSessionErrorEnvelope(t, phone, recv, until)
+			state.observe(t, env)
+			return env
+		},
+	}, liveConvID)
+	observe := func(until time.Time) {
+		f, ok := next(until)
+		if !ok {
+			t.Fatal("missing recovery thread evidence")
+		}
+		state.observePlacement(t, f)
+	}
+	sealSendMessage(t, phone, send, 2, liveConvID, "held-2859", heldText)
 	deadline = time.Now().Add(20 * time.Second)
 	for !state.queuedHeld {
-		state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
+		observe(deadline)
 	}
 	if err := os.WriteFile(gate, []byte("exit"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(30 * time.Second)
 	for !state.crashing {
-		state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
+		observe(deadline)
 	}
 	if !drop && (!state.queuedHeld || state.empty || state.delivered != "" || state.blocked) {
 		t.Fatalf("child_crashing did not retain undelivered head: %+v", state)
@@ -148,7 +167,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 		// Allow activation retries around the 3s give-up, well below the default.
 		deadline = time.Now().Add(30 * time.Second)
 		for !state.blocked || !state.empty {
-			state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
+			observe(deadline)
 		}
 		if state.delivered != "" {
 			t.Fatal("dropped head was delivered")
@@ -164,7 +183,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	}
 	deadline = time.Now().Add(2 * time.Minute)
 	for !state.completed || state.delivered != expectedID || !state.empty {
-		state.observe(t, readSessionErrorEnvelope(t, phone, recv, deadline))
+		observe(deadline)
 		if state.delivered != "" && state.delivered != expectedID {
 			t.Fatalf("unexpected/replayed delivery: %q", state.delivered)
 		}
@@ -269,10 +288,39 @@ type sessionErrorObservation struct {
 	delivered                                              string
 }
 
+func (s *sessionErrorObservation) observePlacement(t *testing.T, f scenario.QueuePlacementFrame) {
+	t.Helper()
+	if f.MessageID == "held-2859" {
+		s.queuedHeld = s.queuedHeld || f.Status == "queued"
+		s.empty = f.Status == "delivered" || f.Status == "dropped"
+	}
+	if f.Kind == "user_message" {
+		if s.delivered != "" {
+			t.Fatal("multiple recovery deliveries")
+		}
+		s.delivered, s.empty = f.MessageID, true
+	}
+	if f.Kind == "delta" {
+		s.delta = true
+	}
+	if (f.Kind == "idle" || f.Kind == "turn_end") && s.delta {
+		s.completed = true
+	}
+}
+
 func (s *sessionErrorObservation) observe(t *testing.T, env protocol.Envelope) {
 	t.Helper()
 	switch env.Type {
 	case protocol.TypeSessionError:
+		if env.SessionStateCleared {
+			var conv string
+			var payload map[string]json.RawMessage
+			if json.Unmarshal(env.ConversationID, &conv) != nil || conv != liveConvID ||
+				json.Unmarshal(env.Payload, &payload) != nil || payload == nil || len(payload) != 0 {
+				t.Fatal("invalid session-error clear")
+			}
+			return
+		}
 		var p protocol.SessionErrorPayload
 		decodeSessionErrorPayload(t, env, &p)
 		if p.ConversationID != liveConvID {
@@ -285,23 +333,6 @@ func (s *sessionErrorObservation) observe(t *testing.T, env protocol.Envelope) {
 			s.blocked = true
 		default:
 			t.Fatalf("unexpected session-error code: %s", p.Code)
-		}
-	case protocol.TypeQueueState:
-		var p protocol.QueueStatePayload
-		decodeSessionErrorPayload(t, env, &p)
-		if p.ConversationID != liveConvID {
-			return
-		}
-		s.empty = len(p.Queued) == 0
-		s.queuedHeld = len(p.Queued) == 1 && p.Queued[0].MessageID == "held-2859"
-	case protocol.TypeMessage:
-		var p protocol.MessagePayload
-		decodeSessionErrorPayload(t, env, &p)
-		if p.ConversationID == liveConvID && p.Role == "user" {
-			if s.delivered != "" {
-				t.Fatal("multiple user deliveries during one recovery")
-			}
-			s.delivered = p.MessageID
 		}
 	case protocol.TypeAssistantDelta:
 		var p protocol.AssistantDeltaPayload

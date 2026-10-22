@@ -31,13 +31,13 @@ import (
 // THE BROADCASTER IS LATE-BOUND, which is the one thing this does not inherit from
 // that emitter. The fan-out surface exists only inside startRelayV2, and the
 // activeSessionStarter literal that reaches this producer is built in main.go before
-// it — the chicken-and-egg qse and sessionErr solve by taking bcast as a Run
+// it; sessionErr takes the broadcaster as a Run
 // parameter. With no Run there is no parameter to take, so the emitter is pre-built
 // and the broadcaster is published into it from the relay leg, the shape
 // approvalParkedReport already uses.
 //
 // NO REPLAY RING AND NO DURABLE HISTORY. resetting is ephemeral status like
-// queue_state and session_error, not a session boundary: there is no
+// session_error, not a session boundary: there is no
 // appendConversationHistory counterpart, no connect-time reconcile, and EventID
 // stays nil. A phone that connects mid-reset learns nothing about it, which is the
 // right answer — the falling edge is seconds away, and a rising edge replayed after

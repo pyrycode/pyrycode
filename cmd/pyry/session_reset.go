@@ -529,12 +529,8 @@ func (r *conversationReset) baseContext() context.Context {
 	return r.base
 }
 
-// dropBacklog empties convID's queue so nothing is delivered into the wrap-up turn
-// and the emptied queue_state reaches clients (AC 5).
-//
-// NO SECOND PUBLISH IS NEEDED: Queue.Remove already fires the change notify that
-// republishes queue_state, so the frame the operator sees is the queue's own
-// record of what happened rather than a claim this file makes alongside it.
+// dropBacklog empties convID's queue so nothing is delivered into the wrap-up
+// turn. Queue lifecycle callbacks record the dropped items for thread recovery.
 //
 // A REFUSAL IS TOLERATED, and it is the right answer rather than a gap. Remove
 // declines the head while it is committing — past the idle gate and being written

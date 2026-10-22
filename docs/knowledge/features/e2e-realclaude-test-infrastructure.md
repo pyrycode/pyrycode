@@ -141,6 +141,34 @@ binary itself as that override. Globally setting `PYRY_E2E_BIN=os.Args[0]` made
 real-daemon callers recursively re-execute the suite, so fake selection is an
 explicit per-call choice. `TestClaudeBinaryAvailable` checks real Claude on PATH.
 
+Queue placement scenarios use `queuePlacementReader` to accumulate explicit
+catch-up and live additions, patches and text appends by item ID/revision.
+Compare canonical user/tool/assistant content order: live `turn_state` can arrive
+before the delivery item update, so treating phase as a content-order oracle
+rejects valid placement. An early-reply adverse control must insert actual
+canonical assistant content. Preserve held-Bash checkpoints, conversation
+isolation, accepted-item binding and the late-frame settle window.
+
+`SendNowPlacement` must check the entire final canonical set for active queued
+user items as well as delivery of the selected acceptance. Checking only that
+acceptance lets a distinct queued ID survive unnoticed. `TestSendNowPlacementControls`
+therefore covers distinct queued items from initial catch-up, live addition and
+patch, plus valid clearing; requeueing only the selected identity misses this
+failure. See [queue identity and recovery](../../protocol-mobile.md#queue-v2).
+
+Recovery observers distinguish a `session_state_cleared` session-error envelope
+from an error reading: validate the envelope's conversation and require payload
+`{}` before accepting the clear. Reading its payload as `SessionErrorPayload`
+invents an empty conversation and rejects valid recovery. `sessionErrorObservation.observePlacement`
+owns delivery counting; counting the raw envelope as well as its canonical
+placement would count one delivery twice. Reject actual duplicate canonical
+deliveries and foreign/nonempty clears, as `TestSessionErrorObservationControls` exercises.
+
+Deleting snapshot-specific test files can also delete shared broadcast helpers
+used by other emitters. Keep those helpers in shared test files and compile both
+`e2e` and `e2e_realclaude` packages after removal; the untagged gate cannot see
+missing helpers in tagged tests.
+
 Same-runner session-error recovery. An external driver can hold an isolated
 daemon's Claude in a crash loop and release it through a local selection file.
 Build the daemon from the repository root with:

@@ -3,9 +3,9 @@
 `send_queued_now` is `dequeue_message`'s twin in authority and shape — a v2
 **control** envelope (phone → binary, payload `{conversation_id,
 queued_msg_id, accepted_item_id?}`), ungated beyond paired authentication and the
-`interactive` capability, no reply. Connections without `thread` observe the
-`queue_state` change and live delivered `message`; thread connections observe
-accepted-item updates, with unsolicited and connect-time `queue_state` withheld.
+`interactive` capability, no reply. Connections without `thread` retain the
+live delivered `message`; thread connections observe accepted-item updates.
+Outbound `queue_state` is retired for every app (#3727).
 It writes the named queued message
 into the conversation's **running** turn instead of dropping it. See
 [`docs/protocol-mobile.md` § `send_queued_now`](../../protocol-mobile.md#send_queued_now)

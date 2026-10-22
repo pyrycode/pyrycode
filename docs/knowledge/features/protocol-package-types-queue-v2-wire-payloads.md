@@ -1,34 +1,20 @@
 # Queue v2 wire payloads (#720)
 
-The wire vocabulary for the **queued-message backlog** over the encrypted mobile
-wire (`docs/protocol-mobile.md` § Queue; epic #597 Phase 3, [ADR 025]). A phone
-that types while `claude` is busy has its turn buffered in `internal/msgqueue`
-(#704, extended #719); the phone can **view** the backlog (`queue_state`, daemon →
-phone, the wire form of `msgqueue.Snapshot(convID)`) and **cancel** an entry
-(`dequeue_message`, phone → daemon, driving `msgqueue.Remove(convID, id)`). Three
-new exported types in `messaging.go` (a queue snapshot is daemon **state**, not a
-turn-stream event, so `messaging.go` not `interactive.go`; it already houses the
-`time.Time` + nested-array precedents), mapping to two `Type*` constants.
-`queue_state` is an outbound binary → phone event; `dequeue_message` is an
-**inbound phone → binary control** envelope the v2 session manager intercepts at
-`v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the
-`ModalAnswerPayload` / `RequestSnapshotPayload` precedent — **no `dispatch.Route`
-handler**). **Wire shape only** — the emit-on-change/fan-out producer is #722, the
-intercept/resolve-convID/remove handler is #723.
+Queue controls remain inbound phone → daemon envelopes, intercepted by
+`dispatchAppFrame` before `dispatch.Route`. `dequeue_message` removes a waiting
+entry; `send_queued_now` writes it into a running Claude turn. Queue commands
+retain paired authentication, the `interactive` capability and optional
+current-run acceptance binding. See [Queue (v2)](../../protocol-mobile.md#queue-v2).
+
+Outbound `queue_state`, `TypeQueueState`, `QueueStatePayload`, `QueuedItem`,
+the snapshot fixture and positive snapshot tests are retired for every app
+(#3727). Engine `Snapshot`/`SnapshotAll` remain source APIs, not wire DTOs.
+Apps negotiate `thread`, explicitly catch up each open conversation and apply
+live item updates. A queued active acceptance exposes `content.queued_msg_id`
+and `item.id`; terminal items retain their handle only as historical data.
+No handshake snapshot or connect-time thread inventory replaces the old frame.
 
 ```go
-type QueuedItem struct { // one element of QueueStatePayload.Queued
-    QueuedMsgID uint64    `json:"queued_msg_id"` // plain per-conversation counter (≥1), NOT a nonce
-    MessageID   string    `json:"message_id"`    // #2092: client-chosen, from the send_message that produced this item — relayed verbatim, "" when absent, never minted by the daemon
-    Text        string    `json:"text"`          // untrusted, phone-originated transit content
-    TS          time.Time `json:"ts"`            // enqueue time, RFC3339Nano
-}
-
-type QueueStatePayload struct { // binary → phone; wire form of msgqueue.Snapshot(convID)
-    ConversationID string       `json:"conversation_id"` // daemon's own resolved id (#722), never attacker-derived
-    Queued         []QueuedItem `json:"queued"`          // ordered FIFO/enqueue order (the options []ModalOption precedent)
-}
-
 type DequeueMessagePayload struct { // phone → binary, inbound control (intercepted pre-dispatch.Route, no handler)
     ConversationID string `json:"conversation_id"` // untrusted phone input; #723 resolves to an authorized conversation
     QueuedMsgID    uint64 `json:"queued_msg_id"`   // the id to remove (msgqueue.Remove(convID, id))
@@ -51,63 +37,25 @@ type SendQueuedNowPayload struct { // phone → binary; writes into the running 
   payload decode error before acting. `TestQueueActionItemBindingWire` pins the
   literal wire key and omission/null preservation for both DTOs; see
   [protocol boundary tests](development-verification-protocol-boundaries.md#protocol-boundaries).
-- **`queued_msg_id` is a plain `uint64` per-conversation counter (≥ 1), NOT a
-  nonce.** It matches `msgqueue.QueuedMessage.ID` exactly so the producer maps
-  `QueuedMessage.ID → QueuedMsgID` with no translation. The mobile client (#429)
-  must decode it as a JSON **integer**, not a string. This is the discriminator
-  from #701's `modal_id` (an unguessable nonce) — there is no secrecy property, so
-  this slice is **unlabelled** (see below).
-- **`message_id` (#2092) correlates a queued item with the client's own
-  optimistic echo of the `send_message` that produced it — nothing else reads
-  it.** Text and position are not keys (identical text is legal; the backlog
-  mis-aligns by one the moment a middle item is dequeued), so this field is the
-  only correlation the client has. **Field position is deliberate**: it sits
-  immediately after `QueuedMsgID`, mirroring the order `send_message`'s enqueue
-  log line already prints the two ids in, and because `roundTripEnvelope`
-  re-marshals the payload struct while `canonical` (`messaging_test.go`) is
-  `json.Compact` with no key sorting, struct-field order **is** the wire byte
-  order the fixture pins — not just field presence. Both commands resolve
-  `conversation_id` + `queued_msg_id`, optionally guarded by the daemon's
-  current-run acceptance `accepted_item_id`; `message_id` addresses,
-  authorizes, matches and dedupes nothing.
-- **`queued` ordering + empty-backlog `[]` vs `null`.** Array order is canonical
-  FIFO/enqueue order (the `Options []ModalOption` precedent). `[]QueuedItem(nil)`
-  marshals to `"queued":null`, a non-nil empty slice to `[]`; the leaf type cannot
-  force non-nil, so the contract is only "`queued` always present". The docs
-  **recommend** the producer (#722) emit `[]` (not `null`) for an empty backlog so
-  the mobile decoder keeps `queued` a plain array — not enforced here; both
-  round-trip.
-- **`TS` is `time.Time` (RFC3339Nano on the wire)** per the envelope timestamp
-  rule; marshal strips the monotonic clock so tests compare with `.Equal`, never
-  `==` / `reflect.DeepEqual`. Same discipline as `Envelope.TS` /
-  `SessionTransitionPayload.OccurredAt`.
-- **Unlabelled (`security-sensitive`: no) — mirrors #656, not #701.** Dequeuing is
-  **ungated** for any paired phone (ADR 025 § Security model); only answering a
-  permission-class modal is gated. No nonce, no per-device gate. `Text`,
-  `MessageID` (#2092), and the inbound `ConversationID` are **untrusted,
-  phone-originated** content (never log `Text` or `MessageID`; resolve
-  `ConversationID` to an authorized conversation before acting) — but the slice
-  stores/inspects none of them; that discipline lives in the `security-sensitive`
-  siblings #722/#723/#721. `MessageID` is deliberately echoed back to **every**
-  paired device (unlike a gated nonce, it carries no capability), so a client
-  must merge it only against echoes it minted itself, never against a store
-  shared across devices — a colliding id must not let one device attribute
-  another's queued message to itself. An item whose `message_id` matches no
-  local echo renders as a plain queued row and is never dropped.
-- **No `turnevent`/`turnbridge` neutral hop.** Queue backlog is daemon state, not a
-  turn-stream event, so the producer builds the `protocol.*Payload` directly from
-  engine state and the inbound frame is decoded at `dispatchAppFrame` — neither
-  direction routes through `turnevent`/`turnbridge` (that path is reserved for
-  tui-driver turn-stream events). See [codebase/720.md](../codebase/720.md) for the
-  mechanism rationale and the two-opposite-direction-sums note.
+- **`queued_msg_id` is a positive `uint64` per-conversation, per-daemon-run
+  handle, not a nonce.** Preserve it as an exact JSON integer. It matches the
+  queue's `QueuedMessage.ID`; never infer it from text, order, `message_id` or
+  history ID. Include accepted thread `item.id` as `accepted_item_id` to guard
+  against a stale handle targeting another entry after restart.
+- **Correlation is separate from command identity.** A client `message_id` may
+  be empty or repeated across devices. Both commands select conversation plus
+  queue handle, optionally guarded by the daemon-recorded acceptance item ID;
+  `message_id` provides no authorization or deduplication. See
+  [safe queue projections](msgqueue-package-api.md#exported-surface).
+- **Payload types do not authorize operations.** The relay rejects payload
+  decode errors and malformed bindings before queue mutation. Omission retains
+  the legacy unbound operation; present-invalid data never falls back. A matching
+  binding preserves the existing committing-head protection and lifecycle
+  ordering. Neither command has a dedicated reply; observe accepted-item updates.
 
-`TestQueueStatePayload_RoundTrip` (`messaging_test.go`) asserts `len(Queued)==2` +
-positional `QueuedMsgID`/`MessageID`/`Text` + per-item `TS` via `.Equal`, then
-byte-equal round-trips via `roundTripEnvelope` — one fixture item carries a real
-`MessageID`, the other `""`, doubling as the no-`omitempty` pin (#2092: with
-`omitempty` the empty-string item's key would vanish on re-marshal and the byte
-comparison would redden). `TestDequeueMessagePayload_RoundTrip` covers
-the inbound control; table-driven `TestDequeueMessagePayload_Malformed` pins the
-AC's "rejected cleanly (error, no panic)". Two fixtures (`queue_state.json` with
-N=2 items, `dequeue_message.json`) authored in **struct-field order**. See
+`TestQueueActionItemBindingWire` pins omission versus explicit `null` for both
+commands. `TestDequeueMessagePayload_RoundTrip` and
+`TestDequeueMessagePayload_Malformed` retain command serialization coverage;
+`TestQueueSnapshotsRetired` prevents the retired vocabulary and either snapshot
+publication arm from returning. The original snapshot design is historical in
 [codebase/720.md](../codebase/720.md).

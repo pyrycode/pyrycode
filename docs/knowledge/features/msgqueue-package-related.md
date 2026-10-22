@@ -24,24 +24,17 @@ Part of [`internal/msgqueue`](msgqueue-package.md).
   `cmd/pyry` constructor, `newInboundDeliver` delivery seam, the `Route`/`resolve`
   split (the drain re-resolves without stamping the #687 cursor), and the
   enqueue-and-ack contract change in `send_message`.
-- **Consumers:** **#722 landed the `queue_state` producer** ([codebase/722.md](../codebase/722.md))
-  — `cmd/pyry`'s `queueStateEmitterV2` hooks `OnChange`, re-reads via `Snapshot`, and
-  fans a per-conversation `queue_state` to interactive phones (the first live consumer
-  of `OnChange` + the read side of `Snapshot`). **#723 landed the `dequeue_message`
-  handler** ([codebase/723.md](../codebase/723.md)) — `internal/relay`'s
-  `handleDequeueMessage` (via the consumer-declared `QueueRemover` seam) calls `Remove`
-  on an interactive phone's inbound control frame, and its successful-removal `notify`
-  drives the #722 producer to refresh `queue_state` (the **first live consumer of
-  `Remove`**; the in-flight-head/unknown-id `false` no-op is what makes a hostile or
-  stale id a safe no-op). Both #722/#723 split from the original #705 reporting/removal
-  slice. **[#869](../codebase/869.md) landed the deferred inbound bound**: a
-  per-conversation `MaxQueuedPerConversation` cap (default 100) at `Enqueue`,
-  reject-never-drop, mapped by `send_message` to a retryable `server.binary_busy`
-  reply. **[#878](../codebase/878.md) landed the connect-time reconcile enumeration
-  seam**: `SnapshotAll` (every non-empty conversation's backlog in one lock hold),
-  consumed by `cmd/pyry`'s `outstandingQueues` adapter and, through it,
-  `internal/relay`'s `OutstandingQueues` seam — see
-  [`v2-session-manager.md` § Connect-time queue reconcile](v2-session-manager.md#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues).
+- **Consumers:** `handleDequeueMessage` and `handleSendQueuedNow` retain the
+  `QueueRemover`/`QueueSender` seams and optional acceptance binding; conversation
+  reset uses `Snapshot` plus `Remove` to drop waiting backlog. Accepted/delivered/
+  terminal observers retain durable history and thread publication. The former
+  change-time `queueStateEmitterV2` and reconnect `outstandingQueues` adapter are
+  retired for all apps (#3727); `SnapshotAll` and optional `OnChange` remain
+  engine APIs. See [queue introspection](msgqueue-package-api.md#introspection-removal-and-change-notification-719)
+  and [app recovery](../../protocol-mobile.md#queue-v2).
+  **[#869](../codebase/869.md) landed the inbound bound**:
+  `MaxQueuedPerConversation` (default 100) rejects rather than dropping entries;
+  `send_message` maps rejection to retryable `server.binary_busy`.
   **[#1000](../codebase/1000.md) landed the persistent-failure give-up bound**: a
   per-head elapsed deadline (`GiveUpAfter`, default 2m) that abandons a
   persistently-failing head instead of retrying it forever, plus an `OnGiveUp`

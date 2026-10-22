@@ -71,12 +71,6 @@ func testShadowPairWith(t *testing.T, children []testShadowFact) (shadowHistory,
 		switch fact.typ {
 		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeMessage, protocol.TypeTurnEnd:
 			e.Legacy = append(e.Legacy, protocol.Envelope{Type: fact.typ, Payload: raw})
-		case "send_accepted":
-			queued, err := json.Marshal(protocol.QueueStatePayload{ConversationID: h.Conversation, Queued: []protocol.QueuedItem{{MessageID: "shadow-queued", Text: payload["text"].(string)}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			e.Legacy = append(e.Legacy, protocol.Envelope{Type: protocol.TypeQueueState, Payload: queued})
 		case "session_divider":
 			e.Legacy = append(e.Legacy, protocol.Envelope{Type: protocol.TypeSessionTransition, Payload: raw})
 		}
@@ -147,7 +141,7 @@ func TestThreadShadowPairRejectsUserContent(t *testing.T) {
 }
 
 func TestThreadShadowPairRejectsUserLegacyMismatch(t *testing.T) {
-	for _, typ := range []string{protocol.TypeMessage, protocol.TypeQueueState} {
+	for _, typ := range []string{protocol.TypeMessage} {
 		t.Run(typ, func(t *testing.T) {
 			h, e := testShadowUserPair(t)
 			for i := range e.Legacy {

@@ -201,7 +201,7 @@ type relayWiring struct {
 	// router resolves the bound session for the send_message handler.
 	router handlers.SessionRouter
 	// queue is the live inbound message queue: send_message enqueues, and the
-	// dequeue handler / queue_state reconcile read and mutate it.
+	// dequeue and send-now handlers mutate it.
 	queue *msgqueue.Queue
 	// active tracks the active-conversation cursor the interactive turn and modal
 	// streams follow.
@@ -238,19 +238,16 @@ type relayWiring struct {
 	// nil in foreground/v1 ⇒ no resolver is installed and no session names a
 	// client, which is the pre-#2148 text byte for byte.
 	setClientIdentity func(enum func(context.Context) []relay.ActiveConn)
-	// qse is the pre-built queue_state emitter (#722) whose Run goroutine
-	// startRelayV2 starts over the v2 manager.
-	qse *queueStateEmitterV2
 	// operatorMessages is the pre-built live push of the operator's own delivered
-	// message (#2699), fed from the msgqueue OnDelivered seam for qse's reason. Its
+	// message (#2699), fed from the msgqueue OnDelivered seam before the relay broadcaster exists. Its
 	// Run also takes the replay ring, which this leg creates.
 	operatorMessages *operatorMessageEmitterV2
 	// sessionErr is the pre-built session_error emitter (#1008) whose Run goroutine
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
-	// the msgqueue OnGiveUp seam) for the same chicken-and-egg reason as qse.
+	// the msgqueue OnGiveUp seam) before the relay broadcaster exists.
 	sessionErr *sessionErrorEmitterV2
 	// resetting is the pre-built conversation-reset producer (#2478). Pre-built for a
-	// DIFFERENT chicken-and-egg than qse and sessionErr's: its caller is the
+	// resetting emitter's lifecycle differs from sessionErr's: its caller is the
 	// activeSessionStarter literal, built in the composition root above this leg. It
 	// starts no Run goroutine, so it takes no bcast parameter — startRelayV2 attaches
 	// the broadcaster into it instead.
@@ -383,11 +380,7 @@ type relayWiring struct {
 	// #1863's V2SessionConfig.RetainedModelLists). Built at main.go over the
 	// conversations registry and *sessions.Pool for the SAME reason runSettings
 	// above is: the internal/sessions dependency stays at the composition root.
-	// OutstandingQueues below is built inline in startRelayV2 only because this
-	// file imports internal/msgqueue; it deliberately does not import
-	// internal/sessions, so the queue precedent does not apply here. The value is
-	// already primitive to internal/relay (protocol is imported both sides), so it
-	// crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒ no reconcile.
+	// The primitive protocol values cross into V2SessionConfig unwrapped.
 	retainedModelLists func(multiAgent bool) []protocol.ModelListPayload
 	// retainedSlashCommandLists enumerates the daemon's currently-retained
 	// slash-command inventories as marshal-ready slash_command_list payloads — one
@@ -1299,14 +1292,6 @@ func startRelayV2(
 		// below consumes, so enumerate-current-truth reflects live control state.
 		// A pure read: it mints no nonce and re-arms no timer.
 		OutstandingModals: modalReg.Snapshot,
-		// Connect-time queue reconcile source (#878): enumerates the daemon's
-		// per-conversation inbound backlogs as marshal-ready queue_state payloads so
-		// a phone that connects/reconnects between backlog changes is unicast the
-		// current queue_state for each non-empty conversation on open. queue is the
-		// same live daemon queue the #722 on-change producer snapshots and the
-		// dequeue handler (QueueRemover below) mutates, so enumerate-current-truth
-		// reflects live backlog state. A pure read: it mints no id and dequeues nothing.
-		OutstandingQueues: outstandingQueues(w.queue),
 		// Connect-time model-list reconcile source (#1867): enumerates the model menu
 		// each conversation's bound session retained from its child's initialize reply
 		// (#1839/#1840) as marshal-ready model_list payloads, so a client that attaches
@@ -1455,11 +1440,7 @@ func startRelayV2(
 		// RestartFreshes into --session-id <newID> with NO /clear.
 		SessionStarter: w.activeSessionStarter,
 		AgentSwitcher:  w.agentSwitcher,
-		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
-		// frame removes a not-yet-drained queued message by id from the live
-		// daemon queue; the OnChange seam Remove fires drives the #722 producer to
-		// push an updated queue_state. The concrete *msgqueue.Queue (built at
-		// main.go) satisfies QueueRemover via Remove(string, uint64) bool.
+		// Queue controls retain acceptance binding and durable lifecycle callbacks.
 		QueueRemover: w.queue,
 		// Inbound send_queued_now seam (#2729): writes a queued message into the
 		// running claude turn through msgqueue.SendNow.
@@ -1811,16 +1792,6 @@ func startRelayV2(
 		w.setClientIdentity(mgr.ActiveConns)
 	}
 
-	// Wire the queue_state producer (#722): start the pre-built emitter's Run
-	// goroutine over mgr, fanning a queue_state envelope to capability-gated
-	// interactive phones whenever a conversation's inbound backlog changes
-	// (enqueue, drain-advance, or remove). Like the session-transition producer it
-	// has NO w.streamSink dependency — it consumes msgqueue changes — so it is wired
-	// unconditionally whenever the v2 manager exists. The capability filter
-	// (ActiveConns → Interactive) is the delivery gate: with no interactive phone
-	// connected, the fan-out reaches nobody.
-	streamQueueStateCleanup := startQueueStateStreamV2(ctx, w.qse, mgr)
-
 	// Install both post hooks before runSupervisor starts its consumer. The
 	// same ring is registered with SetReplaySource above; durable history was
 	// already successfully recorded by channelDelivery before either hook runs.
@@ -1834,14 +1805,14 @@ func startRelayV2(
 
 	// Wire the operator-message push (#2699): each confirmed delivery's `message`
 	// envelope, the bytes the durable log stores, goes to every interactive conn
-	// and into the replay ring. Unconditional like queue_state; with no sink the
+	// and into the replay ring. With no stream sink the
 	// ring is nil and the push carries no event_id.
 	streamOperatorMessageCleanup := startOperatorMessageStreamV2(ctx, w.operatorMessages, mgr, replayRing)
 
 	// Wire the session_error producer (#1008): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a typed session_error frame to capability-gated
 	// interactive phones whenever the message queue gives up delivering a
-	// conversation's head (#1000's OnGiveUp seam). Like the queue_state producer it
+	// conversation's head (#1000's OnGiveUp seam). It
 	// has NO w.streamSink dependency — it consumes msgqueue give-ups — so it is wired
 	// unconditionally whenever the v2 manager exists.
 	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
@@ -1865,7 +1836,7 @@ func startRelayV2(
 	return func() {
 		detachApps()
 		// Stop the producers — the structured turn stream's drain, the
-		// session-transition producer, the queue_state producer, and the session_error
+		// session-transition producer and the session_error
 		// producer — before waiting on the manager so no fan-out races a winding-down
 		// manager. Each cleanup waits for its goroutine on ctx-cancel (already
 		// cancelled by the time drain runs). Then wait for the manager's Run to exit
@@ -1874,7 +1845,6 @@ func startRelayV2(
 			streamDrainCleanup()
 		}
 		streamTransitionsCleanup()
-		streamQueueStateCleanup()
 		streamOperatorMessageCleanup()
 		streamSessionErrCleanup()
 		streamClaudeUsageCleanup()

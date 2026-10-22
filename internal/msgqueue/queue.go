@@ -121,10 +121,7 @@ type ChangeFunc func(convID string)
 // that NEVER contains the queued message text. It MUST NOT block and MUST be
 // safe for concurrent invocation. nil disables notification.
 //
-// A later ticket routes this seam to a typed, client-visible error frame over
-// the v2 wire exactly as OnChange routes to the queue_state producer; until then
-// it ships disabled (nil), so the bound + head-drop + clean exit are the only
-// production-visible effect — the give-up is real even when unobserved.
+// The daemon uses this seam for a typed session error when delivery gives up.
 type GiveUpFunc func(convID, reason string)
 
 // DeliveredFunc is the injected delivered-notification seam (#2115). It mirrors
@@ -246,7 +243,7 @@ type Config struct {
 // the same provenance argument applies: they return to the trust domain that
 // authored them, which is not licence to project the delivery payload. Only the
 // lifecycle/delivery projections set the field; Snapshot and SnapshotAll
-// leave it nil, since queue_state does not carry it.
+// leave it nil; lifecycle observers carry the attachment facts.
 //
 // DeviceName, ClientVersion and ClientSentAt (#2704) say who sent the message
 // and when the client says it was tapped, captured by the handler at enqueue so
@@ -441,8 +438,7 @@ func (q *Queue) Enqueue(convID, text string) uint64 {
 // differ, and is Enqueue in every other respect — same id contract, same
 // non-blocking append, same per-conversation cap and same 0-on-reject sentinel.
 //
-// text is what a client reads back through Snapshot/SnapshotAll (and so through
-// queue_state, on both the enqueue push and the connect-time reconcile);
+// text is the safe source projection returned by Snapshot/SnapshotAll;
 // delivery is what the drain hands to DeliverFunc, and therefore what reaches
 // claude's stdin. The one caller passing two different strings is the
 // send_message handler composing a prompt that names an attachment's on-host
@@ -522,7 +518,7 @@ func (q *Queue) EnqueueIdentified(convID, messageID, text, delivery string, atta
 	// Cap the backlog at the single insertion point (#869). len(c.items) is the
 	// whole in-memory backlog INCLUDING the in-flight (draining) head — exactly
 	// what Snapshot reports and the memory-DoS surface — so the cap, Snapshot,
-	// and queue_state all agree on "backlog size". At capacity, reject with a
+	// and delivery all agree on "backlog size". At capacity, reject with a
 	// pure early return: no id bump (a rejected message consumes no id, keeping
 	// accepted ids dense), no append, no notify (no backlog change), no drain
 	// spawn. Reject, never drop: the already-queued messages keep draining in
@@ -556,7 +552,7 @@ func (q *Queue) EnqueueIdentified(convID, messageID, text, delivery string, atta
 }
 
 // Snapshot returns convID's not-yet-confirmed-delivered backlog as an ordered
-// copy (the data queue_state reports). An unknown conversation yields an empty
+// copy for queue introspection. An unknown conversation yields an empty
 // snapshot, not an error. The returned slice is freshly allocated and the
 // elements are value copies, so a caller cannot mutate engine state through it.
 //
@@ -585,16 +581,13 @@ func (q *Queue) Snapshot(convID string) []QueuedMessage {
 // Each value is a freshly allocated slice of value copies (identical semantics to
 // Snapshot, including the in-flight head), so a caller cannot mutate engine state
 // through it. A pure read: it mints no id and dequeues nothing. The empty
-// (non-nil) map means no conversation holds a backlog. It is the connect-time
-// queue reconcile's enumeration seam (#878) — Snapshot reads one named
-// conversation, but convs is private, so enumerating the non-empty ones needs
-// this read.
+// (non-nil) map means no conversation holds a backlog.
 //
 // The whole read runs under q.mu, so the returned set is a single consistent
 // instant with no window between enumerating the conversations and reading each
 // one. A drained-but-retained convQueue (advanceLocked/shrinkLocked leaves the
 // entry with items == nil) is skipped, so an empty conversation contributes no
-// map entry and therefore no queue_state re-send.
+// map entry.
 func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -695,7 +688,7 @@ func (q *Queue) remove(convID string, id, itemID uint64) bool {
 // SendNow writes the queued message id into convID's running turn through the
 // SendNow seam instead of waiting for the drain, and returns true iff it was
 // delivered (#2729). On success the message has left the backlog, OnChange fires
-// for the queue_state without it, and OnDelivered fires once with SentNow set.
+// after removal, and OnDelivered fires once with SentNow set.
 //
 // It is a no-op returning false, with the backlog unchanged, for a nil seam, an
 // unknown conversation, an unknown or already-delivered id, and the head while its
@@ -1118,9 +1111,7 @@ func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Du
 		"elapsed", elapsed,
 		"err", err)
 
-	// notify fires because the backlog shrank (the dropped head), keeping the
-	// wired queue_state view correct; notifyGiveUp carries the give-up event to
-	// its (currently nil) consumer. Both fire strictly after q.mu is released.
+	// Notify lifecycle and change observers only after releasing q.mu.
 	if observe {
 		q.notifyTerminal(convID, head)
 	}

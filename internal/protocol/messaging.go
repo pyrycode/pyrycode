@@ -203,7 +203,7 @@ type MessagePayload struct {
 	ClientVersion  string   `json:"client_version,omitempty"`
 	ClientSentAt   string   `json:"client_sent_at,omitempty"`
 	// QueuedMsgID names the delivered queue entry within ConversationID, matching
-	// QueuedItem. Zero omits it for messages without a queue entry, including
+	// the accepted send's source fact. Zero omits it without a queue entry, including
 	// assistant messages. MessageID is client-chosen and need not be unique.
 	QueuedMsgID uint64 `json:"queued_msg_id,omitempty"`
 	// SentNow identifies a queued message delivered into a running turn. Clients
@@ -279,7 +279,7 @@ type ModalOption struct {
 // conversation — a modal carrying conversation A's tool title/input summary is
 // scoped to conns following A and never rendered by a conn viewing B. It is
 // daemon-derived, not attacker-derived, and joins the client-side scoping model
-// TurnStatePayload/QueueStatePayload already use. Declared first (leading, no
+// TurnStatePayload already use. Declared first (leading, no
 // omitempty), mirroring those sibling payloads. The INBOUND anti-forgery model
 // is unchanged: ModalAnswerPayload/ModalCancelPayload carry NO conversation_id,
 // and an answer is authorized by resolving its ModalID server-side against the
@@ -366,58 +366,6 @@ type ModalDismissedPayload struct {
 	ModalID string `json:"modal_id"`
 	Outcome string `json:"outcome"`
 	Source  string `json:"source"`
-}
-
-// Queue v2 wire payloads (epic #597 Phase 3, docs/protocol-mobile.md § Queue).
-// These describe the queued-message backlog the daemon reports to the phone and
-// the phone's request to cancel one entry. This is wire vocabulary only: pure
-// structs and their (de)serialization. The emission on queue change, the
-// resolution of conversation_id to an authorized conversation, and the
-// msgqueue.Remove call all live in the producer (#722) / handler (#723), NOT
-// here.
-//
-// No field carries omitempty: every field is always present on the wire so the
-// testdata fixtures pin the full shape. Note that []QueuedItem(nil) marshals to
-// JSON null while a non-nil empty slice marshals to []; the leaf type cannot
-// force non-nil, so an empty backlog's [] vs null rendering is the producer's
-// (#722) call (recommended: emit []) — both round-trip here.
-
-// QueuedItem is one element of QueueStatePayload.Queued — the wire form of
-// msgqueue.QueuedMessage (the producer #722 maps QueuedMessage.ID → QueuedMsgID).
-// Named for its role in the array (the ModalOption precedent), not after the
-// engine type, to keep it wire-scoped.
-//
-// TWO fields are untrusted, client-originated transit content, not one: Text and
-// MessageID (see the producer/handler #722/#723 for the never-log discipline).
-// The two ids sit adjacent but their provenance is opposite, and nothing in the
-// type says so — QueuedMsgID is the daemon's own per-conversation counter, while
-// MessageID is a string the client chose. Do not read them as a matched pair.
-//
-// MessageID (#2092) is the message_id from the send_message that produced this
-// item, relayed byte-for-byte: never trimmed, lower-cased or re-encoded, "" when
-// the client sent none, and never minted by the daemon. It exists so a client can
-// merge this row with the optimistic echo it drew when the operator hit send —
-// in interactive mode no user-message event is streamed, so that echo is the
-// client's only record of its own message. It addresses nothing: dequeue_message
-// still resolves conversation_id + queued_msg_id, and no code path reads this to
-// route, authorize, match or dedupe. queue_state fans out to EVERY interactive
-// connection, so a client sees ids it never minted and must merge only against
-// echoes it minted itself — uniqueness across devices is enforced nowhere.
-type QueuedItem struct {
-	QueuedMsgID uint64    `json:"queued_msg_id"`
-	MessageID   string    `json:"message_id"`
-	Text        string    `json:"text"`
-	TS          time.Time `json:"ts"`
-}
-
-// QueueStatePayload is the body of an Envelope whose Type == TypeQueueState
-// (docs/protocol-mobile.md § Queue). Binary → phone direction; the wire form of
-// msgqueue.Snapshot(convID). Queued is ordered (FIFO/enqueue order, the
-// options []ModalOption precedent). ConversationID is the daemon's own resolved
-// id (#722), never attacker-derived.
-type QueueStatePayload struct {
-	ConversationID string       `json:"conversation_id"`
-	Queued         []QueuedItem `json:"queued"`
 }
 
 // DequeueMessagePayload is the body of an Envelope whose Type ==
@@ -508,11 +456,10 @@ type InterruptPayload struct {
 // the never-log discipline for Message is theirs.
 //
 // ConversationID is the routing key — a plain string with no omitempty,
-// mirroring the sibling interactive payloads (QueueStatePayload,
-// SessionTransitionPayload) — so the phone attaches the error to the correct
+// mirroring the sibling interactive payloads (SessionTransitionPayload) — so the phone attaches the error to the correct
 // session. It is the daemon's own resolved id (set by #1008 from the OnGiveUp
 // conversation_id), never attacker-derived — same posture as
-// QueueStatePayload.ConversationID.
+// SessionTransitionPayload.ConversationID.
 //
 // Code is the wire code, CodeSessionBlocked or CodeSessionChildCrashing; a plain
 // string over a closed wire set, not a named enum (leaf-data convention,

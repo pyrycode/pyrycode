@@ -143,9 +143,6 @@ func TestIsKnownAppType(t *testing.T) {
 		{"modal_answer-rejected", TypeModalAnswer, false, ErrUnknownType},
 		{"modal_cancel-rejected", TypeModalCancel, false, ErrUnknownType},
 		{"modal_dismissed-rejected", TypeModalDismissed, false, ErrUnknownType},
-		// the v2-only queue vocabulary: outbound queue_state an old phone never
-		// receives, and inbound dequeue_message control that is never a v1 type.
-		{"queue_state-rejected", TypeQueueState, false, ErrUnknownType},
 		{"dequeue_message-rejected", TypeDequeueMessage, false, ErrUnknownType},
 		{"send_queued_now-rejected", TypeSendQueuedNow, false, ErrUnknownType},
 		// the v2-only interrupt control: an inbound control type an old phone
@@ -339,7 +336,6 @@ var v2OnlyTypes = map[string]bool{
 	TypeModalCancel:    true,
 	TypeModalDismissed: true,
 	// v2 queue vocabulary.
-	TypeQueueState:     true,
 	TypeDequeueMessage: true,
 	TypeSendQueuedNow:  true,
 	// v2 interrupt control.
@@ -495,7 +491,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 modal vocabulary.
 		TypeModalShown, TypeModalAnswer, TypeModalCancel, TypeModalDismissed,
 		// v2 queue vocabulary.
-		TypeQueueState, TypeDequeueMessage, TypeSendQueuedNow,
+		TypeDequeueMessage, TypeSendQueuedNow,
 		// v2 interrupt control.
 		TypeInterrupt,
 		TypeStopBackgroundTask,

@@ -43,21 +43,22 @@ func TestOrdinaryQueueControlHelperProcess(t *testing.T) {
 	checkpointed := 0
 	observed := false
 	queue := func(owner, text string, id uint64) protocol.Envelope {
-		return frame(protocol.TypeQueueState, protocol.QueueStatePayload{ConversationID: owner, Queued: []protocol.QueuedItem{{QueuedMsgID: id, Text: text}}})
+		return queueThreadFrame(t, owner, text, id, "queued")
 	}
 	end := frame(protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: "conv", StopReason: "end_turn"})
 	w := Wire{Next: func(deadline time.Time) protocol.Envelope {
 		if len(rows) > 0 {
 			env := rows[0]
 			rows = rows[1:]
-			if env.Type == protocol.TypeQueueState {
-				var p protocol.QueueStatePayload
+			if env.Type == protocol.TypeThreadItemAdded {
+				var p protocol.ThreadItemAddedPayload
 				_ = json.Unmarshal(env.Payload, &p)
-				for _, item := range p.Queued {
-					if p.ConversationID == "conv" && item.Text == OrdinaryQueuedText && item.QueuedMsgID != 0 {
-						observed = true
-					}
+				var content struct {
+					Text string `json:"text"`
+					ID   uint64 `json:"queued_msg_id"`
 				}
+				_ = json.Unmarshal(p.Item.Content, &content)
+				observed = p.ConversationID == "conv" && content.Text == OrdinaryQueuedText && content.ID != 0
 			}
 			return env
 		}
@@ -66,6 +67,13 @@ func TestOrdinaryQueueControlHelperProcess(t *testing.T) {
 		}
 		return protocol.Envelope{}
 	}, Send: func(kind string, p any) uint64 {
+		if kind == protocol.TypeThreadCatchUp {
+			id := uint64(100)
+			env := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Final: true})
+			env.InReplyTo = &id
+			rows = append([]protocol.Envelope{env}, rows...)
+			return 100
+		}
 		sequence++
 		message, ok := p.(protocol.SendMessagePayload)
 		if !ok || kind != protocol.TypeSendMessage || message.ConversationID != "conv" {
@@ -106,15 +114,19 @@ func TestOrdinaryQueueControlHelperProcess(t *testing.T) {
 				rows = append(rows, queue("other", text, id))
 			}
 			rows = append(rows, queue(owner, text, id))
-			push := protocol.MessagePayload{ConversationID: "conv", Role: "user", Text: OrdinaryQueuedText, QueuedMsgID: 9}
+			user := queueThreadFrame(t, "conv", OrdinaryQueuedText, 0, "delivered")
+			var push protocol.ThreadItemAddedPayload
+			if err := json.Unmarshal(user.Payload, &push); err != nil {
+				t.Fatal(err)
+			}
 			if name == "wrong-push-id" {
-				push.QueuedMsgID = 10
+				push.Item.ID = 71
 			}
 			if name == "sent-now" {
-				push.SentNow = true
+				push.Item.Content = json.RawMessage(`{"text":"` + OrdinaryQueuedText + `","sent_now":true}`)
 			}
-			user := frame(protocol.TypeMessage, push)
-			reply := frame(protocol.TypeTurnState, protocol.TurnStatePayload{ConversationID: "conv", State: "responding"})
+			user = frame(protocol.TypeThreadItemAdded, push)
+			reply := frame(protocol.TypeThreadItemAdded, protocol.ThreadItemAddedPayload{ConversationID: "conv", Item: protocol.ThreadItem{ID: 100, Rev: 100, Order: 100, Kind: "assistant_message", Status: "running", Active: true, Shown: true, Content: json.RawMessage(`{"text":"reply"}`)}})
 			if name == "early-push" {
 				rows = append(rows, user)
 			}
@@ -126,7 +138,8 @@ func TestOrdinaryQueueControlHelperProcess(t *testing.T) {
 				rows = append(rows, user)
 			}
 			if name == "duplicate-push" {
-				rows = append(rows, user)
+				push.Item.ID = 71
+				rows = append(rows, frame(protocol.TypeThreadItemAdded, push))
 			}
 			if name != "no-reply" && name != "early-reply" {
 				rows = append(rows, reply)

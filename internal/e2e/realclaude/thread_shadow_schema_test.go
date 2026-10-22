@@ -109,8 +109,8 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	var legacyText strings.Builder
 	var agentCall string
 	var childText strings.Builder
-	var legacyQueued, legacyDelivered string
-	tool, result, queued, delivered, closed := false, false, false, false, false
+	var legacyDelivered string
+	tool, result, delivered, closed := false, false, false, false
 	for _, env := range e.Legacy {
 		var p struct {
 			ConversationID  string `json:"conversation_id"`
@@ -151,22 +151,11 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 				delivered = true
 				legacyDelivered = p.Text
 			}
-		case protocol.TypeQueueState:
-			var state protocol.QueueStatePayload
-			if json.Unmarshal(env.Payload, &state) != nil {
-				return errors.New("invalid legacy queue observation")
-			}
-			for _, msg := range state.Queued {
-				if msg.MessageID == "shadow-queued" && strings.Contains(msg.Text, "SHADOW_QUEUED") {
-					queued = true
-					legacyQueued = msg.Text
-				}
-			}
 		case protocol.TypeSessionTransition:
 			closed = true
 		}
 	}
-	if !tool || !result || !queued || !delivered || !closed || agentCall == "" || !strings.Contains(childText.String(), "SHADOW_CHILD") || !strings.Contains(legacyText.String(), "SHADOW_BEFORE") || !strings.Contains(legacyText.String(), "SHADOW_AFTER") || !strings.Contains(legacyText.String(), "SHADOW_REPLY") {
+	if !tool || !result || !delivered || !closed || agentCall == "" || !strings.Contains(childText.String(), "SHADOW_CHILD") || !strings.Contains(legacyText.String(), "SHADOW_BEFORE") || !strings.Contains(legacyText.String(), "SHADOW_AFTER") || !strings.Contains(legacyText.String(), "SHADOW_REPLY") {
 		return errors.New("required legacy scenario absent")
 	}
 	var accepted, delivery, outcome, end, divider uint64
@@ -216,7 +205,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 		DeviceID string `json:"device_id"`
 	}
 	var message protocol.MessagePayload
-	if json.Unmarshal(h.Entries[accepted-1].Payload, &acceptance) != nil || acceptance.DeviceID == "" || acceptance.Text != legacyQueued ||
+	if json.Unmarshal(h.Entries[accepted-1].Payload, &acceptance) != nil || acceptance.DeviceID == "" || !strings.Contains(acceptance.Text, "SHADOW_QUEUED") ||
 		h.Entries[delivery-1].Type != protocol.TypeMessage || json.Unmarshal(h.Entries[delivery-1].Payload, &message) != nil ||
 		message.Role != "user" || message.MessageID != "shadow-queued" || message.Text != legacyDelivered {
 		return errors.New("raw acceptance or delivery differs from observed legacy user text")

@@ -1,0 +1,210 @@
+package scenario
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/pyrycode/pyrycode/internal/protocol"
+)
+
+// queuePlacementReader keeps canonical items across catch-up and live patches.
+// Foreign conversations never alter its revision or identity state.
+type queuePlacementReader struct {
+	t       *testing.T
+	w       Wire
+	conv    string
+	items   map[uint64]protocol.ThreadItem
+	pending []protocol.ThreadItem
+}
+
+func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementReader {
+	t.Helper()
+	request := w.Send(protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: conv, Limit: 100})
+	r := &queuePlacementReader{t: t, w: w, conv: conv, items: map[uint64]protocol.ThreadItem{}}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		env := w.Next(deadline)
+		if env.Type == "" || env.Type == protocol.TypeError || env.Type == "queue_state" {
+			t.Fatal("initial thread catch-up failed")
+		}
+		if env.Type != protocol.TypeThreadItems || env.InReplyTo == nil || *env.InReplyTo != request {
+			continue
+		}
+		var p protocol.ThreadItemsPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.ConversationID != conv {
+			t.Fatal("foreign initial catch-up")
+		}
+		for _, item := range p.Items {
+			r.items[item.ID] = item
+		}
+		if p.Final {
+			return r
+		}
+	}
+}
+
+// QueuePlacementFrames observes explicit catch-up followed by canonical updates.
+func QueuePlacementFrames(t *testing.T, w Wire, conv string) func(time.Time) (QueuePlacementFrame, bool) {
+	return newQueuePlacementReader(t, w, conv).next
+}
+
+func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bool) {
+	r.t.Helper()
+	for {
+		if len(r.pending) > 0 {
+			item := r.pending[0]
+			r.pending = r.pending[1:]
+			old := r.items[item.ID]
+			if old.Rev >= item.Rev {
+				continue
+			}
+			r.items[item.ID] = item
+			var content struct {
+				Text      string `json:"text"`
+				Name      string `json:"name"`
+				ToolUseID string `json:"tool_use_id"`
+				QueuedID  uint64 `json:"queued_msg_id"`
+				SentNow   bool   `json:"sent_now"`
+				MessageID string `json:"message_id"`
+			}
+			if err := json.Unmarshal(item.Content, &content); err != nil {
+				r.t.Fatal(err)
+			}
+			f := QueuePlacementFrame{Text: content.Text, ToolName: content.Name, ToolUseID: content.ToolUseID, QueuedID: content.QueuedID, ItemID: item.ID, Status: item.Status, SentNow: content.SentNow, MessageID: content.MessageID}
+			f.Active, f.Shown, f.Order = item.Active, item.Shown, item.Order
+			if item.Parent != 0 {
+				continue
+			}
+			switch item.Kind {
+			case "user_message":
+				if item.Status == "queued" && item.Active && item.Order == 0 && content.QueuedID != 0 {
+					f.Kind = "queued_item"
+				}
+				if item.Status == "delivered" && old.Status != "delivered" && !item.Active && item.Order != 0 {
+					f.Kind = "user_message"
+				}
+			case "tool_call":
+				if old.ID == 0 {
+					f.Kind = "tool_use"
+				} else if old.Active && !item.Active {
+					f.Kind = "tool_result"
+				}
+			case "assistant_message":
+				var before struct {
+					Text string `json:"text"`
+				}
+				_ = json.Unmarshal(old.Content, &before)
+				f.Text = strings.TrimPrefix(content.Text, before.Text)
+				if strings.TrimSpace(f.Text) != "" {
+					f.Kind = "delta"
+				}
+			case "turn_end":
+				if old.ID == 0 {
+					f.Kind = "turn_end"
+				}
+			}
+			if f.Kind != "" || item.Kind == "user_message" {
+				return f, true
+			}
+			continue
+		}
+		env := r.w.Next(deadline)
+		if env.Type == "" {
+			return QueuePlacementFrame{}, false
+		}
+		decode := func(v any) {
+			if err := json.Unmarshal(env.Payload, v); err != nil {
+				r.t.Fatal(err)
+			}
+		}
+		switch env.Type {
+		case "queue_state":
+			r.t.Fatal("retired queue snapshot reached the app")
+		case protocol.TypeThreadItems:
+			var p protocol.ThreadItemsPayload
+			decode(&p)
+			if p.ConversationID == r.conv {
+				r.pending = append(r.pending, p.Items...)
+			}
+		case protocol.TypeThreadItemAdded:
+			var p protocol.ThreadItemAddedPayload
+			decode(&p)
+			if p.ConversationID == r.conv {
+				r.pending = append(r.pending, p.Item)
+			}
+		case protocol.TypeThreadItemChanged:
+			var p protocol.ThreadItemChangedPayload
+			decode(&p)
+			if p.ConversationID != r.conv {
+				continue
+			}
+			item := r.items[p.ItemID]
+			if item.Rev != p.BaseRev {
+				r.t.Fatal("thread patch revision gap")
+			}
+			raw, err := json.Marshal(item)
+			if err != nil {
+				r.t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				r.t.Fatal(err)
+			}
+			for k, v := range p.Changes {
+				fields[k] = v
+			}
+			raw, err = json.Marshal(fields)
+			if err != nil {
+				r.t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &item); err != nil {
+				r.t.Fatal(err)
+			}
+			item.Rev = p.Rev
+			r.pending = append(r.pending, item)
+		case protocol.TypeThreadTextAppend:
+			var p protocol.ThreadTextAppendPayload
+			decode(&p)
+			if p.ConversationID != r.conv {
+				continue
+			}
+			item := r.items[p.ItemID]
+			if item.Rev != p.BaseRev {
+				r.t.Fatal("thread append revision gap")
+			}
+			var content map[string]json.RawMessage
+			if err := json.Unmarshal(item.Content, &content); err != nil {
+				r.t.Fatal(err)
+			}
+			var text string
+			if err := json.Unmarshal(content["text"], &text); err != nil {
+				r.t.Fatal(err)
+			}
+			content["text"], _ = json.Marshal(text + p.Text)
+			item.Content, _ = json.Marshal(content)
+			item.Rev = p.Rev
+			r.pending = append(r.pending, item)
+		default:
+			f := ClassifyQueuePlacementFrame(r.t, env, r.conv)
+			if env.Type == protocol.TypeAck && env.InReplyTo != nil {
+				f.Kind, f.RequestID = "ack", *env.InReplyTo
+			}
+			if env.Type == protocol.TypeTurnState {
+				var p protocol.TurnStatePayload
+				decode(&p)
+				if p.ConversationID == r.conv && p.State != "idle" {
+					f.Kind = "reply_state"
+				}
+				if p.ConversationID == r.conv && p.State == "idle" {
+					f.Kind = "idle"
+				}
+			}
+			return f, true
+		}
+	}
+}

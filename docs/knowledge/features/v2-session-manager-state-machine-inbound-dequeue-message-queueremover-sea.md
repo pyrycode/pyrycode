@@ -7,9 +7,8 @@ discriminator switch **before** `dispatch.Route` (the `interrupt` / `modal_cance
 `request_snapshot` boundary) — there is **no** `dispatch.Route` handler. It lets a
 phone with an interactive session **cancel a queued `send_message` before it drains**
 to claude: the daemon removes the named, not-yet-drained message from the live
-`msgqueue` backlog. Connections without `thread` observe the existing change-driven
-`queue_state`; thread connections observe accepted-item updates and receive no
-unsolicited or connect-time `queue_state`.
+`msgqueue` backlog. Apps observe accepted-item thread updates after explicit
+catch-up. Outbound `queue_state` is retired for every connection (#3727).
 **`security-sensitive`**: an inbound handler mutating daemon queue state from an
 untrusted phone frame (mirror of `send_message`), and the **second** inbound frame
 whose authorization *is* the `interactive` capability (after #707; spec-stage
@@ -29,9 +28,8 @@ security review, verdict PASS). See [`codebase/723.md`](../codebase/723.md).
   **single Run dispatch goroutine**, so the `s.interactive` read is lock-free under
   the package's single-owner invariant. The signature takes **`(s, env)` — no `ctx`**
   — the documented `handleInterrupt` deviation from the `(ctx, s, env)` siblings:
-  `Remove` takes no context, there is no `forwardEnvelope`, and `queue_state`
-  convergence is decoupled onto the #722 emitter goroutine, so the handler owns no
-  cancellable work. Order is **load-bearing — capability gate first**:
+  `Remove` takes no context and the handler sends no `forwardEnvelope`;
+  lifecycle/history observers own accepted-item convergence. Order is **load-bearing — capability gate first**:
   1. **`if !s.interactive` → return** (no `Remove`, no mutation, no panic). The
      inbound capability gate (AC-3 negative path). `s.interactive` is
      server-authoritative (#626) — never the phone's raw advertisement. Still a
@@ -64,10 +62,9 @@ security review, verdict PASS). See [`codebase/723.md`](../codebase/723.md).
 **`false` is success of a valid request, not an error (AC-2):** unknown-id,
 already-delivered, and the committing head are treated identically — a
 quiet no-op, never an error reply (`msgqueue.Remove` already encodes all four cases).
-**AC-4 convergence is automatic, never re-emitted:** the handler emits nothing;
-`Remove`'s `notify` fires the `OnChange` seam on a successful removal, and the #722
-`queueStateEmitterV2` (the **sole** `queue_state` emitter) pushes the updated snapshot
-to interactive phones without `thread`. **No `KnownConversation`/`Route` membership gate** —
+**Convergence follows lifecycle facts:** the handler emits nothing; successful
+removal retains optional `OnChange` notification and the terminal observers
+that feed accepted-item thread updates. No queue snapshot is published. **No `KnownConversation`/`Route` membership gate** —
 `dequeue_message` only mutates the named conversation's own existing backlog and
 returns nothing, so the deterministic `convID`-scoping is self-validating; adding a
 stochastic membership check would defend an unobserved failure mode and risk a

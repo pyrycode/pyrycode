@@ -69,8 +69,7 @@ to bridge.
   landing (mechanism first, wired later). Split from #1001 into wire vocabulary
   (#1007 — `TypeSessionError`/`CodeSessionBlocked`/`SessionErrorPayload`, shipped
   unwired) and its blocked-by-#1007 producer sibling (#1008, shipped), which set
-  `OnGiveUp` to a live `session_error` producer (`cmd/pyry/session_error_v2.go`)
-  exactly as `OnChange` routes to the `queue_state` producer — a persistent
+  `OnGiveUp` to a live `session_error` producer (`cmd/pyry/session_error_v2.go`) — a persistent
   delivery failure now surfaces as a typed, client-visible frame instead of a
   silently dropped head.
 

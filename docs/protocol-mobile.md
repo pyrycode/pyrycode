@@ -1140,7 +1140,6 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`modal_answer`** | phone → binary | no | **New in v2.** Inbound control — phone answers a modal. See [Modal](#modal-v2). |
 | **`modal_cancel`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a modal. See [Modal](#modal-v2). |
 | **`modal_dismissed`** | binary → phone | no | **New in v2.** Modal resolution notice. See [Modal](#modal-v2). |
-| **`queue_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). Queued-message backlog snapshot (#597 Phase 3). See [Queue](#queue-v2). |
 | **`dequeue_message`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a queued message. See [Queue](#queue-v2). |
 | **`send_queued_now`** | phone → binary | no | **New in v2** (#2729). Inbound control — phone writes a queued message into the running turn instead of waiting for idle. See [Queue](#queue-v2). |
 | **`interrupt`** | phone → binary | no | **New in v2.** Inbound control — phone interrupts the running turn (remote Esc). Interactive-capability-gated; exempt from the permission gate. See [Interrupt](#interrupt-v2). |
@@ -1246,7 +1245,7 @@ For thread connections, the relay suppresses these replaced **unsolicited**
 types across live forwarding, reconnect replay and existing connect reconciliation:
 `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `turn_end`,
 `session_transition`, `message`, `background_task_started`,
-`background_task_updated`, `background_task_roster`, `queue_state`, `banner`
+`background_task_updated`, `background_task_roster`, `banner`
 (including legacy synthetic runtime notices), `compaction_boundary`,
 `model_refusal_fallback`, `model_refusal_no_fallback` and `unrecognized_message`.
 Transient live state remains deliverable, including `turn_state`, `tool_progress`,
@@ -6297,9 +6296,25 @@ The operator declined to choose, so the batch resolves with no selection. It is 
 
 ### Queue (v2)
 
-A phone that types while claude is busy has its turn buffered in the daemon's queued-message backlog (#597 Phase 3, `internal/msgqueue`). `queue_state` (view) lets the phone see that backlog, `dequeue_message` (cancel) lets it drop an entry it no longer wants, and `send_queued_now` (#2729, accelerate) lets it write an entry into the running turn instead of waiting for idle. Like answering in the [Modal](#modal-v2) cluster since **#2605**, **viewing, dequeuing and sending-now are all ungated for any paired (authenticated) phone on an interactive connection** (ADR 025 [Security model](#security-model)): there is no privileged per-device gate and no nonce; `queued_msg_id` is a plain per-conversation counter. Both commands require `conversation_id` and `queued_msg_id`; `accepted_item_id` is optional and omitted when unset. The `queue_state` fields are always present; the delivered [`message`](#application-message-types) field described below is optional.
+A phone that types while Claude is busy has its turn buffered in the daemon's
+in-memory FIFO backlog (`internal/msgqueue`). Apps observe accepted sends through
+[thread items](#full-thread-item). `dequeue_message` cancels a waiting entry and
+`send_queued_now` writes it into the running turn instead of waiting for idle.
+Both commands remain available to any paired, authenticated phone on an
+interactive connection; there is no per-device permission gate or nonce.
+Both require `conversation_id` and `queued_msg_id`; `accepted_item_id` is optional
+and omitted when unset.
 
-Accepted thread `user_message` items also expose the genuine handle before
+Outbound `queue_state` is retired for every app (#3727), including connections
+without `thread`. There is no change-time snapshot, connect/reconnect snapshot
+or empty-backlog frame to await. Negotiate `thread` and explicitly request
+[`thread_catch_up`](#thread-query-messages) for each open conversation, then apply
+live additions and revision-checked changes by item identity. Handshake alone
+publishes no thread inventory. Queued items have no delivery order; canonical
+delivery assigns order. Live `turn_state` can precede the corresponding item
+update and must not place conversation content.
+
+Accepted thread `user_message` items expose the genuine handle before
 delivery as `content.queued_msg_id` (#3324), a JSON integer in
 `1..18446744073709551615` (positive uint64). Preserve the full integer exactly.
 Use the thread conversation's `conversation_id` plus that handle for Drop
@@ -6349,41 +6364,24 @@ delivery/outcome ordering; a successful Send now still invalidates suggestions.
 Client adoption is owned by [Mobile #1986](https://github.com/pyrycode/pyrycode-mobile/issues/1986)
 and [Desktop #1906](https://github.com/pyrycode/pyrycode-desktop/issues/1906).
 
-On connections that negotiated `thread`, unsolicited `queue_state`, including
-connect-time reconciliation, remains withheld. The legacy change-driven and
-connect-time snapshots below apply to interactive connections without `thread`.
-Thread clients recover accepted items through explicit catch-up and observe
-their subsequent thread updates.
+#### Queue observation and delivery identity
 
-#### `queue_state`
+Recover missed acceptance, delivery, drop and restart-loss revisions with explicit
+thread catch-up from the last completed checkpoint. Rebuild current queued state
+from every `user_message` item with `status: queued` and `active: true`, including
+catch-up and subsequent additions/changes. Delivery of one accepted identity does
+not prove that another queued item is absent. A terminal item retains its handle
+as history and is no longer an action target.
 
-Direction **binary → phone** (outbound v2 queued-backlog snapshot; not in `v1TypeSet` — an old phone never receives it).
+Client `message_id` remains correlation metadata, never a queue selector or
+permission. It need not be unique across devices; only merge an optimistic echo
+with the client's own send identity. Other devices' accepted items remain visible.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `conversation_id` | string | The conversation this backlog belongs to. The daemon's own resolved id (#722), never attacker-derived. |
-| `queued` | array | Ordered backlog (FIFO/enqueue order) of `{queued_msg_id, message_id, text, ts}`. **Always present**; the producer (#722) emits `[]` (not `null`) for an empty backlog so the mobile decoder keeps `queued` a plain array. Each element: `queued_msg_id` (integer, stable per-conversation counter ≥ 1), `message_id` (string, see below), `text` (string, the queued message), `ts` (RFC3339Nano, enqueue time). |
-
-**`message_id` (#2092)** is the id the client minted on the [`send_message`](#send_message) that produced this item, **relayed verbatim** — byte-for-byte what the client sent, never trimmed, lower-cased or re-encoded. It is `""` when the client sent none (a legal value: the field is non-omitempty and the daemon validates nothing about it), and the daemon **never mints one**. It exists so a client can recognise a queued item as one of its own sent messages: a client posts an optimistic echo the moment the operator hits send, before the daemon confirms delivery with a user `message` push, and without a shared key the client draws the same message twice, once as a delivered bubble and once as a queued row. Worse, dropping the queued message then removes only the queued row, leaving the echo reading as a message claude received when it never did.
-
-`message_id` **addresses nothing**. [`dequeue_message`](#dequeue_message) resolves `conversation_id` + `queued_msg_id`, optionally guarded by `accepted_item_id`, and no queue command uses `message_id` to route, authorize, match or dedupe. It is a correlation key for the client, not an identifier on the wire — uniqueness is enforced nowhere, and two items may legally carry the same one.
-
-**Delivered entry identity (#2819).** A delivered user `message` carries optional integer `queued_msg_id` (unsigned 64-bit, ≥ 1), copied from the same queue entry shown in `queue_state`. Use `conversation_id` plus `queued_msg_id` to associate a delivery with its queued entry: two entries sharing `message_id` still have distinct queue ids. Ordinary and Send now deliveries preserve that id in byte-identical live and stored payloads. Zero/no-entry messages, including assistant messages, omit the field; decoding and re-encoding a legacy payload does not add it. Older daemons omit it, so clients retain their current inference as fallback when it is absent. This field names the entry; its presence is an identity claim, not proof of timing on Codex or the no-echo path. Placement follows the delivery path below.
+**Delivered entry identity (#2819).** A delivered user `message` carries optional integer `queued_msg_id` (unsigned 64-bit, ≥ 1), copied from the delivered queue entry. Use `conversation_id` plus `queued_msg_id` to associate a delivery with its queued entry: two entries sharing `message_id` still have distinct queue ids. Ordinary and Send now deliveries preserve that id in byte-identical live and stored payloads. Zero/no-entry messages, including assistant messages, omit the field; decoding and re-encoding a legacy payload does not add it. Older daemons omit it, so clients retain their current inference as fallback when it is absent. This field names the entry; its presence is an identity claim, not proof of timing on Codex or the no-echo path. Placement follows the delivery path below.
 
 **Ordinary delivery placement (#2820).** On the interactive Claude stream, an echoed ordinary queued delivery opens its answering turn: exactly one user `message` and history entry appear after the preceding turn's `turn_end`, when there is one, and before the answering turn's first interactive frame, including `turn_state`, assistant or tool output. History order and timestamps, live arrival order and reconnect replay/event-ID order agree. The push retains `queued_msg_id`; even identical payloads or repeated `message_id` values keep distinct queue identities at their respective echoes. Interleaved ordinary and Send now deliveries match their own echoes in actual write order within the conversation; an echo from another conversation cannot place them here. No new wire event or `turn_id` field is added.
 
 Placement waits for a successful write, never for the queue's later delivery callback. Withholding that callback until after the echo or after the answering turn ends cannot delay, move or repeat the entry. A confirmed ordinary delivery with no echo commits exactly once by the answering turn becoming idle; a late echo or callback adds nothing. This fallback does not establish that the user message precedes the reply. Failed or dropped-before-write attempts create no delivered entry; a successful retry records once. **Codex/no-stream delivery retains commit-at-write timing**, with the same queue identity, rather than Claude echo placement.
-
-**Emission (#722).** The daemon pushes a `queue_state` for a conversation whenever that conversation's backlog **changes** — a message is enqueued (a phone `send_message` buffered while claude is busy), drains to claude (the FIFO head delivered), or is removed before draining (`dequeue_message`). An empty backlog emits `queued: []` so the phone can clear its view. Each push carries **only** the changed conversation's items: the producer snapshots the single conversation named by the change and never bundles another conversation's queued text into the same payload (the `conversation_id` and `queued` are derived from one id, so they cannot desync).
-
-`queue_state` fans **only** to connections that negotiated the `interactive` capability; a non-interactive connection never receives it (the same gate as the rest of the structured stream). The fan-out reaches *every* interactive connection, each payload stamped with its own `conversation_id` — there is no per-connection conversation binding, so a phone attributes each `queue_state` by id (consistent with the [Security model](#security-model): a user's paired devices are one trust domain).
-
-**Multi-device rule for `message_id`.** Because the fan-out reaches every interactive connection, a client routinely sees items carrying `message_id`s **it never minted** — another paired device's. Two consequences, both required:
-
-- An item whose `message_id` matches no local echo renders as a **plain queued row** and is **never dropped**. It is a real queued message belonging to another device; hiding it would misrepresent the backlog.
-- A client merges an item **only against echoes it minted itself**, never against a store shared across devices. `message_id` is client-chosen and uniqueness across devices is enforced nowhere, so a colliding id must not let one device attribute another device's queued message to its own echo.
-
-`queue_state` is **not** part of the #647 reconnect-replay ring (`EventID` nil). Instead, on (re)connect the daemon reconciles current queue truth by **unicasting a `queue_state` snapshot for every non-empty backlog** (#878) — a current-state snapshot, not ring replay. Because `queue_state` is already snapshot-shaped full state (`queued: []` clears a view), this connect-time re-send is idempotent by construction; it **complements** the change-driven push above (change-time push + connect-time reconcile), and the phone match-and-replaces each backlog by `conversation_id` plus `queued_msg_id` (see [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)).
 
 #### `dequeue_message`
 
@@ -6392,7 +6390,7 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation to dequeue from. Untrusted phone input — the handler (#723) resolves it to an authorized conversation. |
-| `queued_msg_id` | integer | Positive uint64 id to remove, from a `queue_state` entry or a queued active thread item's `content.queued_msg_id`. |
+| `queued_msg_id` | integer | Positive uint64 id to remove, from a queued active thread item's `content.queued_msg_id`. |
 | `accepted_item_id` | integer | **Optional; clients should always include it.** JSON integer in `1..9007199254740991`, from the accepted thread item's `item.id`. Guards the required conversation and queue handle against the daemon's current-run acceptance; invalid values, missing/unfinished/failed acceptance records or mismatches silently no-op as defined above. Omission retains legacy behavior and restart-reuse risk. |
 
 #### `send_queued_now`
@@ -6402,10 +6400,10 @@ Direction **phone → binary** (inbound v2 control; #2729). Intercepted by the v
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | The conversation holding the message. Untrusted phone input — the handler resolves it to an authorized conversation. |
-| `queued_msg_id` | integer | Positive uint64 id to write now, from a `queue_state` entry or a queued active thread item's `content.queued_msg_id`. |
+| `queued_msg_id` | integer | Positive uint64 id to write now, from a queued active thread item's `content.queued_msg_id`. |
 | `accepted_item_id` | integer | **Optional; clients should always include it.** JSON integer in `1..9007199254740991`, from the accepted thread item's `item.id`. Guards the required conversation and queue handle against the daemon's current-run acceptance; invalid values, missing/unfinished/failed acceptance records or mismatches silently no-op as defined above. Omission retains legacy behavior and restart-reuse risk. |
 
-It asks the daemon to write the named queued message into that conversation's **currently running** turn instead of waiting for the ordinary drain to reach idle. There is no dedicated reply: on connections without `thread`, the entry drops out of the next [`queue_state`](#queue_state) push and the live delivered `message` push fires too. Thread connections observe the accepted item's updates through the thread protocol; unsolicited and connect-time `queue_state` remain withheld.
+It asks the daemon to write the named queued message into that conversation's **currently running** turn instead of waiting for the ordinary drain to reach idle. There is no dedicated reply. Thread connections observe the accepted item's delivery/status updates; connections without `thread` retain the live delivered `message` push. Neither path emits a queue snapshot.
 
 The delivered user `message` and its history entry carry optional boolean `sent_now: true` for this delivery path. Ordinary queued delivery omits it. The daemon derives the flag from the completed queue operation, never from client message content. A client uses it to distinguish Send now from ordinary queued delivery. Since #2820, echoed ordinary Claude delivery uses the delivered push position as the answering turn's opening line; a late queue callback cannot relocate it. Send now uses its own delivered push position where Claude read it. On older daemons whose ordinary confirmation can arrive after the reply, clients retain their current inference for an already settled own echo; Codex/no-stream and no-echo fallback timing also lack the echoed ordinary opening guarantee. Queue removal alone cannot distinguish these cases. Older daemons omit `sent_now` for both paths; clients requiring the distinction need a daemon that emits it.
 
@@ -6570,7 +6568,7 @@ A named `conversation_id` that the daemon cannot act on is **inert** — no rest
 
 `new_session` is **gated on the `interactive` capability**: a non-interactive connection's `new_session` is inert, whether it names a conversation or not — naming one is not a way around the gate. It is **exempt from the per-device permission gate** ([#702](#security-model)) because starting a fresh session in one's own paired session is a normal paired-phone action, not a tool-permission decision. Any interactive paired phone can restart any conversation it can name; that is the same trust domain the [Security model](#security-model) already states for paired devices, and it is **not a widening** — a device could already route a `send_message` to any conversation to move the cursor there and then send a bare `new_session`. What the field removes is that two-frame dance, which only a *benign* client was unable to perform.
 
-**A previously used conversation runs a wrap-up turn before rotation, including when dormant (#2477, #2905).** The daemon drops the conversation's queued backlog first, removing queued messages and publishing the resulting empty [`queue_state`](#queue-v2). If the predecessor has no live child, the daemon resumes its existing session identity and waits until the wrap-up prompt can be delivered. This applies both to a retained dormant runner and to a persisted binding absent from the pool after daemon restart. Reset can be the first action after restart; no wake-up user message is required. Named and cursor resets behave alike for used conversations. Never-used named conversations remain inert, and resetting a named conversation neither rotates another conversation nor moves the active cursor. Existing binding validation and workspace confinement remain in force.
+**A previously used conversation runs a wrap-up turn before rotation, including when dormant (#2477, #2905).** The daemon drops the conversation's queued backlog first, removing waiting messages through the queue's existing lifecycle observers; apps observe the accepted items' terminal thread updates, with no empty queue snapshot. If the predecessor has no live child, the daemon resumes its existing session identity and waits until the wrap-up prompt can be delivered. This applies both to a retained dormant runner and to a persisted binding absent from the pool after daemon restart. Reset can be the first action after restart; no wake-up user message is required. Named and cursor resets behave alike for used conversations. Never-used named conversations remain inert, and resetting a named conversation neither rotates another conversation nor moves the active cursor. Existing binding validation and workspace confinement remain in force.
 
 The outgoing `claude` receives the daemon's fixed wrap-up prompt as an ordinary user turn. Resume, delivery readiness, idle wait and reply capture share one daemon-cancelled deadline capped at **90 seconds**, including any shorter test override. A usable completed reply is stored before rotation and replaces an older note in the successor's actual appended system prompt. For a conversation no client is currently looking at, the wrap-up turn does not stream anywhere, the same as any other background turn; the stored note is not announced in a protocol frame. Activation/readiness failure, idle timeout, delivery/completion failure, an unusable reply, disabled notes or note-persistence failure still leads to the existing rotation and completion path. A terminally failed turn is a failure even with partial assistant text; that text never replaces the older note.
 
@@ -8632,15 +8630,20 @@ bulk-backfill endpoint to use after a `resync`.
 
 **Mode B — legacy control state → current-state snapshot (the reconcile-on-connect rule).** For connections without `thread`, control state reconnects by *re-asserting current truth*, replaying no past events:
 
-- **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877), the current queued backlog (#878), every still-outstanding clarifying-question batch (#1979/#1980), the retained slash-command menus (#2006/#2007), the retained background-task rosters (#2078/#2079), the retained model menus (#1863/#1867, widened by #2124), and the current phase of a running turn (#2712) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, a `queue_state` snapshot is unicast for every non-empty backlog, a `question_shown` is unicast for every outstanding batch, each carrying the original `question_batch_id`, a [`slash_command_list`](#slash_command_list) is unicast for every conversation whose bound session currently holds one, a [`background_task_roster`](#background_task_roster) is unicast for every conversation whose bound session has reported one, a [`model_list`](#model_list) is unicast for **every conversation the registry carries** whenever any model vocabulary is retained at all — the one member of this list whose coverage is not per-conversation, because the vocabulary is machine- and account-scoped rather than conversation-scoped (see § [`model_list`](#model_list)) — and a [`turn_state`](#turn_state) is unicast for **every conversation with a turn currently running**, carrying that turn's current `thinking` or `responding` phase; a conversation that is idle gets nothing. The exactly-once end-to-end behaviour is exercised in #829/#903/#904, the slash-command menu's late-connect delivery in #2009, and the background-task roster's in #2080.
-- **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `conversation_id` plus the per-message `queued_msg_id` for the queue backlog; `question_batch_id` for a question batch; `conversation_id` for a slash-command menu; `conversation_id` for a background-task roster; `conversation_id` for a model menu; `conversation_id` for a turn phase — so the same connect-time re-assertion is safe to apply every time:
-  - a re-delivered `modal_shown` for a **known** `modal_id` **updates the existing modal in place** and **never double-shows**; likewise a re-sent `queue_state` for a known `conversation_id` **replaces** that backlog view rather than appending, a re-sent `question_shown` for a known `question_batch_id` **replaces that batch in place**, a re-sent `slash_command_list` for a known `conversation_id` **replaces that menu in place**, a re-sent `background_task_roster` for a known `conversation_id` **replaces that roster in place**, a re-sent `model_list` for a known `conversation_id` **replaces that model menu in place**, and a re-sent `turn_state` for a known `conversation_id` **replaces that conversation's phase in place** — it is snapshot-shaped full state, so replacing is the same rule the live lane already asks for;
+- **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877), every still-outstanding clarifying-question batch (#1979/#1980), the retained slash-command menus (#2006/#2007), the retained background-task rosters (#2078/#2079), the retained model menus (#1863/#1867, widened by #2124), and the current phase of a running turn (#2712) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, a `question_shown` is unicast for every outstanding batch, each carrying the original `question_batch_id`, a [`slash_command_list`](#slash_command_list) is unicast for every conversation whose bound session currently holds one, a [`background_task_roster`](#background_task_roster) is unicast for every conversation whose bound session has reported one, a [`model_list`](#model_list) is unicast for **every conversation the registry carries** whenever any model vocabulary is retained at all — the one member of this list whose coverage is not per-conversation, because the vocabulary is machine- and account-scoped rather than conversation-scoped (see § [`model_list`](#model_list)) — and a [`turn_state`](#turn_state) is unicast for **every conversation with a turn currently running**, carrying that turn's current `thinking` or `responding` phase; a conversation that is idle gets nothing. The modal reconnect behavior is exercised in #829/#903, the slash-command menu's late-connect delivery in #2009, and the background-task roster's in #2080.
+- **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `question_batch_id` for a question batch; `conversation_id` for a slash-command menu; `conversation_id` for a background-task roster; `conversation_id` for a model menu; `conversation_id` for a turn phase — so the same connect-time re-assertion is safe to apply every time:
+  - a re-delivered `modal_shown` for a **known** `modal_id` **updates the existing modal in place** and **never double-shows**; a re-sent `question_shown` for a known `question_batch_id` **replaces that batch in place**, a re-sent `slash_command_list` for a known `conversation_id` **replaces that menu in place**, a re-sent `background_task_roster` for a known `conversation_id` **replaces that roster in place**, a re-sent `model_list` for a known `conversation_id` **replaces that model menu in place**, and a re-sent `turn_state` for a known `conversation_id` **replaces that conversation's phase in place** — it is snapshot-shaped full state, so replacing is the same rule the live lane already asks for;
   - an id the client has **already resolved** is a **no-op**;
   - control state the daemon does **not** re-assert after a fresh handshake is **gone** (reset-on-reconnect): each reconnect is a fresh Noise_IK handshake, so the client **resets** its control state and rebuilds it from whatever the daemon re-asserts — anything resolved while the client was disconnected simply does not reappear.
 
-The two modes are **complements, not alternatives**: on one and the same connect a client takes a cursor backfill for the interactive event stream and a current-state snapshot for control state. The mechanism is chosen by *what kind of data* it carries, never by *how long the client was away*. Mechanism internals live in #877 (modal reconcile), #878 (queue reconcile), #1979 (question reconcile), #2006 (slash-command reconcile), #2078 (background-task-roster reconcile), #1863 (model-list reconcile) and #2712 (turn-phase reconcile); the answer-once security invariants are stated in [§ Modal](#modal-v2) and [§ Question](#question-v2), and are unchanged under re-delivery.
+The two modes are **complements, not alternatives**: on one and the same connect a client takes a cursor backfill for the interactive event stream and a current-state snapshot for control state. The mechanism is chosen by *what kind of data* it carries, never by *how long the client was away*. Mechanism internals live in #877 (modal reconcile), #1979 (question reconcile), #2006 (slash-command reconcile), #2078 (background-task-roster reconcile), #1863 (model-list reconcile) and #2712 (turn-phase reconcile); the answer-once security invariants are stated in [§ Modal](#modal-v2) and [§ Question](#question-v2), and are unchanged under re-delivery.
 
-The list above now names all **seven** frames the daemon reconciles. It named six until #2712, which added the current phase of a running turn: unlike its six twins, which read from a daemon-wide registry or pool, this one reads a snapshot of the interactive emitter's own open-turn state, and it runs after the mid-turn replay step rather than beside the other reconciles, so that a turn ending while a client is still connecting cannot leave that client holding a phase the turn has already left.
+The list above names the **six** remaining legacy connect-time frames. Queue
+snapshots are retired for all capabilities (#3727). Recover queued acceptance
+and terminal state through explicit thread catch-up and live item updates as
+[Queue (v2)](#queue-v2) describes. The running turn's phase comes from the
+interactive emitter's open-turn state after mid-turn replay, so a turn ending
+during connection setup cannot leave the client holding an obsolete phase.
 
 ## Error codes
 
