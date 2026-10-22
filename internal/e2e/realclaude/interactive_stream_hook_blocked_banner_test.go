@@ -157,7 +157,6 @@ package realclaude
 // exit code.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
