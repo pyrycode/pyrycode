@@ -20,6 +20,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -186,7 +187,7 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 		t.Fatal("channel session missing")
 	}
 	seal(protocol.Envelope{ID: 31391, Type: protocol.TypeSendMessage, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: conv, MessageID: "app-clear", Text: "/clear"})})
-	fresh := awaitConversationTransition(t, next, transitionWant{milestone: "clear", convID: conv, previous: pre.ID, because: "typed clear preserves apps", diag: func() string { return mustReadFile(t, filepath.Join(home, ".pyry", "test", "sessions.json")) }})
+	fresh := awaitConversationTransition(t, next, transitionWant{source: scenario.SourceSnapshot(t, home), milestone: "clear", convID: conv, previous: pre.ID, because: "typed clear preserves apps", diag: func() string { return mustReadFile(t, filepath.Join(home, ".pyry", "test", "sessions.json")) }})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := control.SessionsRm(ctx, h.SocketPath, fresh, control.JSONLPolicyLeave); err != nil {

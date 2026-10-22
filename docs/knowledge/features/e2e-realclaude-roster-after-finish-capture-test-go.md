@@ -168,7 +168,7 @@ a matching post-stop `background_task_outcome` or `background_task_gone` at its
 `EndedOrder`, with the same producing-session provenance and terminal status.
 A raw roster omission, a session-ending fact, an active acceptance or a stale
 ending cannot satisfy it. Gone retains an unknown outcome, not `stopped`.
-See [counted #3735 live acceptance](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+See [counted #3735 live acceptance](thread-package-shadow-lifecycle-and-evidence-retirement.md#shadow-lifecycle-and-evidence)
 for the current migrated proof; compilation and offline helpers are separate.
 
 Before that migration, the terminal drain accepted a stopped update or a later

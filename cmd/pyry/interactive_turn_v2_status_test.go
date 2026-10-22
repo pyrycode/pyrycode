@@ -295,11 +295,8 @@ func TestInteractiveTurnEmitterV2_ApiRetryClearAndRefire(t *testing.T) {
 	}
 }
 
-// An Unrecognized fans out as an unrecognized_message envelope to
-// interactive-capable conns only (the capability gate), carrying the cursor's
-// conversation_id plus the drop site, the offending type, the raw JSON, and the
-// truncated flag.
-func TestInteractiveTurnEmitterV2_UnrecognizedFansOutToInteractiveOnly(t *testing.T) {
+// Unsupported content retains its mapped source payload without raw publication.
+func TestInteractiveTurnEmitterV2_UnrecognizedSourceOnly(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -307,7 +304,7 @@ func TestInteractiveTurnEmitterV2_UnrecognizedFansOutToInteractiveOnly(t *testin
 		{ConnID: "a", Interactive: true},
 		{ConnID: "b", Interactive: false},
 	}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.Unrecognized{
 		Site:      turnevent.UnrecognizedLineType,
@@ -316,12 +313,12 @@ func TestInteractiveTurnEmitterV2_UnrecognizedFansOutToInteractiveOnly(t *testin
 		Truncated: true,
 	})
 
-	if got := len(bcast.pushes); got != 1 {
-		t.Fatalf("unrecognized pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	if got := len(testEmitterFacts(t, e)); got != 1 {
+		t.Fatalf("unrecognized recorded %d source facts; want exactly 1", got)
 	}
-	p := bcast.pushes[0]
-	if p.connID != "a" {
-		t.Fatalf("unrecognized pushed to conn %q; want interactive conn %q", p.connID, "a")
+	p := testEmitterFacts(t, e)[0]
+	if len(bcast.pushes) != 0 {
+		t.Fatal("unrecognized content published to an app")
 	}
 	if p.env.Type != protocol.TypeUnrecognizedMessage {
 		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeUnrecognizedMessage)

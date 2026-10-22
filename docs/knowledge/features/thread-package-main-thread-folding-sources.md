@@ -103,7 +103,7 @@ Parented text, ordinary tools and nested agents fold in [child lanes](thread-pac
 Linked Claude/legacy Bash calls retain ordinary identity with
 [background shell lifecycle](thread-package-agents-and-background-work.md#background-shells).
 [Cache persistence and epochs](thread-package-cache-and-epochs.md#cache-and-epochs) belong to the
-background store. [Daemon shadow wiring](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+background store. [Daemon shadow wiring](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication)
 folds history without app publication; thread protocol and read-mark migration
 remain downstream.
 
@@ -275,7 +275,7 @@ every committed prefix retains one permanent acceptance item, without a
 join-induced baseline or retirement. Older messages lacking the explicit
 reference can still expose both rows in a chunk ending before the outcome;
 later suppression of that public message retains genuine-withdrawal safety.
-See the [live publication regression](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+See the [live publication regression](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 Acceptance alone does not split assistant text; the delivered message still
 closes main text runs when ingested.
 

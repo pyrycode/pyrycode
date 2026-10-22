@@ -16,6 +16,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -184,6 +185,22 @@ func TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester(t *testing.T) {
 		sawTransition bool
 		deadline      = time.Now().Add(30 * time.Second)
 	)
+	source.OnEntry = func(entry history.Entry) {
+		if entry.Type == protocol.TypeSessionTransition {
+			var st protocol.SessionTransitionPayload
+			if err := json.Unmarshal(entry.Payload, &st); err != nil {
+				t.Fatalf("decode session_transition payload: %v", err)
+			}
+			if st.ConversationID != convID {
+				return
+			}
+			if st.NewSessionID == "" || st.NewSessionID == st.PreviousSessionID {
+				t.Errorf("session_transition did not carry a fresh id: previous=%q new=%q",
+					st.PreviousSessionID, st.NewSessionID)
+			}
+			sawTransition = true
+		}
+	}
 	for !sawReply || !sawTransition {
 		env, ok := nextEnv(deadline)
 		if !ok {
@@ -221,19 +238,6 @@ func TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester(t *testing.T) {
 				}
 			}
 			sawReply = true
-		case protocol.TypeSessionTransition:
-			var st protocol.SessionTransitionPayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode session_transition payload: %v", err)
-			}
-			if st.ConversationID != convID {
-				continue
-			}
-			if st.NewSessionID == "" || st.NewSessionID == st.PreviousSessionID {
-				t.Errorf("session_transition did not carry a fresh id: previous=%q new=%q",
-					st.PreviousSessionID, st.NewSessionID)
-			}
-			sawTransition = true
 		}
 	}
 

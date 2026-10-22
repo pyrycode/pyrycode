@@ -189,7 +189,7 @@ emitter facts. Field replacements are translated to `ThreadItem` JSON keys;
 combined replacements/text become one atomic changed message with complete
 `ResultContent`, while suffix-only changes become one append. Both use the actual
 previous/resulting item revisions with strict advancement. See
-[daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+[daemon publication](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 **A fresh baseline cannot repair an existing consumer silently.** Unload/reload
 and retry release old live batches; only the validated saved-boundary/suffix
@@ -203,7 +203,7 @@ teardown waits on relay Run. No `base_rev` is guessed and no partial recovery
 is published. Compact intervals also reset on unrepresentable root removal;
 unavailable recovery exposes no usable partial output. `Store.CatchUp` proves a
 separate reconstructed query range;
-the [installed daemon providers](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+the [installed daemon providers](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication)
 serve catch-up/pages from this same store. Reconnect initialization requires
 explicit requests for each open conversation.
 
@@ -288,7 +288,7 @@ deterministic item equality and follows the [recovery compatibility rules](threa
 An active-index set tracks affected private/public rows without a whole-fold
 scan. `TestStorePrivateActiveWork` checks an invisible active child and its later
 closure; an empty public list cannot establish unload eligibility. Retirement also
-requires [producer quiescence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+requires [producer quiescence](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence).
 
 A missing/unreadable reference during baseline, query or live-change rendering
 discards the whole output, even after successful partial lookup. Withdrawal

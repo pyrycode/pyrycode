@@ -92,7 +92,7 @@ func TestHistoryProjection_InteractiveMetadata(t *testing.T) {
 			evs, _ := e.ring.After(testConvID, 0)
 			assertLogMatchesRing(t, entries[1:], evs)
 			wantPushes := 2
-			if testRetiredInteractiveType(tt.typ) || testRetiredAgentType(tt.typ) {
+			if testRetiredInteractiveType(tt.typ) || testRetiredAgentType(tt.typ) || testRetiredSessionContentType(tt.typ) {
 				wantPushes = 0
 			}
 			if len(bcast.pushes) != wantPushes {

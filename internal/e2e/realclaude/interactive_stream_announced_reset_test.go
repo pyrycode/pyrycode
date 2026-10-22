@@ -298,11 +298,11 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// case-sensitively, and SendMessage's intercept sits below Route, so the id
 	// crossing into the reset is this registry key with its live binding.
 	w := newResetWindow()
-	w.source, w.sourceConv = scenario.SourceSnapshot(t, home), clearConvID
+	w.watchSource(t, home, clearConvID)
 	lifecycleRecordingBeforeReset(t, home)
 	sealSendMessage(t, phone, initSend, clearReqID, clearConvID, "m-clear", "/clear")
 
-	// --- AC 1: the four frames of the daemon-run reset -------------------------
+	// AC 1: three live reset edges and the retained rotation record.
 	w.awaitReset(t, phone, initRecv, clearReqID, clearResetWindowBudget)
 
 	assertResetEdge(t, "the first rising edge", w.edges[0], protocol.ResettingPayload{
@@ -333,13 +333,11 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 		Handoff:        "",
 	})
 
-	// The transition arrives AFTER the `restarting` edge and is asserted against
-	// nothing else — see the header's ordering decision for why the falling edge is
-	// deliberately left unordered against it. edges[1] is the phase change, so two
-	// edges having preceded the transition is exactly that claim.
+	// The retained rotation must be recorded after both rising live reset edges.
+	// Their daemon timestamps prove this independently of source polling time.
 	tr := w.transitions[0]
 	if tr.edgesBefore < 2 {
-		t.Errorf("the session_transition reached the client after %d resetting edge(s), want it after at least "+
+		t.Errorf("the retained session_transition was recorded after %d resetting edge(s), want it after at least "+
 			"the two rising ones: the rotation that fires the transition runs BELOW the `restarting` edge on "+
 			"resetThenRotate's own goroutine, so an earlier arrival means the edges are no longer emitted from "+
 			"there", tr.edgesBefore)
@@ -366,7 +364,7 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// comment — never to disk. Nothing claude wrote is in this line.
 	t.Logf("CAPTURE (#2485): a live client /clear ran the daemon's reset — "+
 		"resetting{active=%v phase=%q handoff=%q} → resetting{active=%v phase=%q handoff=%q} → "+
-		"session_transition{reason=%q, previous_session_id=%q, new_session_id=%q, conversation_id=%q, "+
+		"retained_session_transition{reason=%q, previous_session_id=%q, new_session_id=%q, conversation_id=%q, "+
 		"occurred_at=%s} (after %d edges) → resetting{active=%v phase=%q handoff=%q}",
 		w.edges[0].Active, w.edges[0].Phase, w.edges[0].Handoff,
 		w.edges[1].Active, w.edges[1].Phase, w.edges[1].Handoff,
@@ -450,7 +448,7 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 			"change, not a second reset, so a fourth frame means something started one", len(w.edges), w.edges)
 	}
 	if len(w.transitions) != 1 {
-		t.Errorf("the client saw %d session_transition frames across the whole window, want exactly 1: %+v — "+
+		t.Errorf("the source retained %d session_transition records across the whole window, want exactly 1: %+v — "+
 			"more than 1 means something re-keyed a second time for the same reset",
 			len(w.transitions), w.transitions)
 	}
@@ -524,14 +522,12 @@ func assertResetEdge(t *testing.T, what string, got, want protocol.ResettingPayl
 
 // --- the window drain --------------------------------------------------------
 
-// windowTransition is one observed session_transition plus the one thing about its
-// ARRIVAL that is assertable: how many resetting edges had already reached the client
-// when it landed. Recording the count rather than a timestamp is what keeps the
-// assertion in the same terms as the claim — "after the restarting edge" — instead of
-// turning an ordering question into a clock comparison.
+// windowTransition retains one source boundary and counts actual live edges
+// whose daemon timestamps precede its append. Source polling is not wire arrival.
 type windowTransition struct {
 	payload     protocol.SessionTransitionPayload
 	edgesBefore int
+	recordedAt  time.Time
 }
 
 // resetWindow is the state the reset window accumulates. Every frame between the
@@ -543,6 +539,8 @@ type resetWindow struct {
 	receive     scenario.Next
 	source      scenario.SourceFacts
 	sourceConv  string
+	sourceMark  uint64
+	edgeTimes   []time.Time
 	edges       []protocol.ResettingPayload
 	transitions []windowTransition
 	// turnIDs names every turn the client has seen a delta for. Its only consumer is
@@ -560,6 +558,13 @@ func newResetWindow() *resetWindow {
 	return &resetWindow{
 		turnIDs: make(map[string]struct{}),
 		acked:   make(map[uint64]struct{}),
+	}
+}
+
+func (w *resetWindow) watchSource(t *testing.T, home, conv string) {
+	w.source, w.sourceConv = scenario.SourceSnapshot(t, home), conv
+	for _, entry := range w.source(conv) {
+		w.sourceMark = entry.ID
 	}
 }
 
@@ -588,12 +593,26 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 		if w.receive == nil {
 			w.receive = scenario.PollingReceive(t, phone, cs)
 		}
-		env := w.receive(deadline)
-		if env.Type == "" {
-			return protocol.Envelope{}, false
+		poll := time.Now().Add(100 * time.Millisecond)
+		if deadline.Before(poll) {
+			poll = deadline
 		}
+		env := w.receive(poll)
 		if w.source != nil {
 			for _, entry := range w.source(w.sourceConv) {
+				if entry.ID > w.sourceMark {
+					w.sourceMark = entry.ID
+					switch entry.Type {
+					case protocol.TypeUnrecognizedMessage:
+						t.Fatal("reset produced unsupported source content")
+					case protocol.TypeSessionTransition:
+						var p protocol.SessionTransitionPayload
+						if json.Unmarshal(entry.Payload, &p) != nil || p.ConversationID != w.sourceConv {
+							t.Fatal("invalid reset source ownership")
+						}
+						w.transitions = append(w.transitions, windowTransition{payload: p, recordedAt: entry.TS})
+					}
+				}
 				if entry.Type != protocol.TypeAssistantDelta || entry.Session == nil {
 					continue
 				}
@@ -607,19 +626,6 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			}
 		}
 		switch env.Type {
-		case protocol.TypeUnrecognizedMessage:
-			var p protocol.UnrecognizedMessagePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode unrecognized_message payload: %v", err)
-			}
-			t.Fatalf("the /clear window produced an unrecognized_message: site=%q type=%q truncated=%v\n"+
-				"raw: %s\n\n"+
-				"Since #2456 the `/clear` never reaches claude, so this is NOT the retired announced-reset "+
-				"shape drifting. If message_type names conversation_reset, some OTHER input path is still "+
-				"producing that line and that is a new ticket, not this one — record the raw line above. "+
-				"Otherwise claude grew a message type streamsup.ignoredLineTypes has not measured, or the "+
-				"wrap-up turn answered with something other than the prose its prompt asks for.",
-				p.Site, p.MessageType, p.Truncated, p.Raw)
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope inside the /clear window: %s", string(env.Payload))
 		case protocol.TypeAck:
@@ -632,23 +638,24 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 				t.Fatalf("decode resetting payload: %v", err)
 			}
 			w.edges = append(w.edges, p)
-		case protocol.TypeSessionTransition:
-			var p protocol.SessionTransitionPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode session_transition payload: %v", err)
-			}
-			w.transitions = append(w.transitions, windowTransition{payload: p, edgesBefore: len(w.edges)})
-		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			w.edgeTimes = append(w.edgeTimes, env.TS)
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 			t.Fatal("retired raw content reached the reset window")
+		}
+		for i := range w.transitions {
+			w.transitions[i].edgesBefore = 0
+			for _, ts := range w.edgeTimes {
+				if !ts.After(w.transitions[i].recordedAt) {
+					w.transitions[i].edgesBefore++
+				}
+			}
 		}
 		return env, true
 	}
 }
 
-// awaitReset reads the window forward until the reset's three resetting edges and its
-// one session_transition have all arrived, in whatever interleaving the two
-// goroutines that emit them produce. The order they arrived in is recorded, not
-// enforced here; the case above is where the ordering claims are made.
+// awaitReset joins the three actual live resetting edges with the retained
+// transition record. Their daemon timestamps preserve the phase-before-rotation proof.
 func (w *resetWindow) awaitReset(t *testing.T, phone *fakephone.Client, cs *noise.CipherState,
 	clearReqID uint64, timeout time.Duration) {
 	t.Helper()
@@ -694,7 +701,7 @@ func (w *resetWindow) awaitRecallReply(t *testing.T, phone *fakephone.Client, cs
 		entries := source(conv)
 		for _, e := range entries {
 			switch e.Type {
-			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 			default:
 				continue
 			}

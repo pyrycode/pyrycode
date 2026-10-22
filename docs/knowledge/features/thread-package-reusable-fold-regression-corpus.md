@@ -38,7 +38,7 @@ same `testRecordedFrames` helper as the independent recorded replay tests and
 retains every emitted version. All checkpoints use fresh whole-prefix feeds,
 deterministic chunks cycling through 7/31/113 entries and single-entry feeds.
 These default-build offline gates require no credentials or recapture; preserve
-the separate [provenance and raw/legacy semantic assertions](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence). See
+the separate [provenance and raw/legacy semantic assertions](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence). See
 [baseline writing and digest conventions](thread-package-agents-and-background-work.md#agent-validation-and-testing).
 Canonical item hashing streams individually encoded rows in sorted field order.
 Only their Content requires generic JSON normalization, avoiding a second

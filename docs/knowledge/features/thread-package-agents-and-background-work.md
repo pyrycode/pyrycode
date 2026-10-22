@@ -541,7 +541,7 @@ finished nested Agent/Task rows against parent calls derived independently from
 raw facts; it rejects zero and wrong older parents and a main tool gaining one.
 `TestThreadShadowRawOwnerLateRepair` preserves supported report-only repair.
 These synthetic controls complement the
-[retained authenticated checkpoints](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence);
+[retained authenticated checkpoints](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication);
 Store/full-replay equality alone cannot detect a shared parenting error.
 
 `cmd/pyry.TestThreadAgentRecordedReplay` runs offline in the standard gate. It

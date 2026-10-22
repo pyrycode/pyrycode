@@ -72,7 +72,7 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 		}
 		env := poll(p)
 		switch env.Type {
-		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 			t.Fatal("retired shadow content reached app")
 		}
 		for _, entry := range snapshot(conv) {
@@ -80,6 +80,9 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 				continue
 			}
 			mark = entry.ID
+			if entry.Type == protocol.TypeSessionTransition {
+				legacy = append(legacy, protocol.Envelope{Type: entry.Type, TS: entry.TS, Payload: entry.Payload})
+			}
 			var p struct {
 				Parent string `json:"parent_tool_use_id"`
 				Name   string `json:"name"`
@@ -106,9 +109,6 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 				ends++
 				pending = pending[1:]
 			}
-		}
-		if env.Type == protocol.TypeSessionTransition {
-			legacy = append(legacy, env)
 		}
 		if env.Type == protocol.TypeError {
 			t.Fatal("shadow request failed")
@@ -138,8 +138,9 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: 5, Type: protocol.TypeNewSession, TS: time.Now().UTC()})
 	deadline = time.Now().Add(rotateBudget)
 	for {
-		env := read(deadline)
-		if env.Type == protocol.TypeSessionTransition {
+		read(deadline)
+		if len(legacy) > 0 {
+			env := legacy[len(legacy)-1]
 			var p protocol.SessionTransitionPayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid closure transition")

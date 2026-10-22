@@ -306,20 +306,21 @@ func TestRelayV2_StreamNewSessionNamedConversationRotatesThatOne(t *testing.T) {
 		m5Deadline    = time.Now().Add(20 * time.Second)
 	)
 	for !sawTransition {
-		env, ok := nextEnv(m5Deadline)
+		_, ok := nextEnv(m5Deadline)
 		if !ok {
 			t.Fatalf("M5 (AC-1/AC-2): never observed a session_transition for conversation B (%s) after a "+
 				"new_session naming it. Either the named id never reached the starter, or it was refused "+
 				"as unknown/unbound and the frame went inert.\nsessions.json:\n%s",
 				convB, mustReadFile(t, regPath))
 		}
-		if env.Type != protocol.TypeSessionTransition {
+		transitions := scenario.SourceSnapshot(t, home).Transitions(t, convB)
+		if len(scenario.SourceSnapshot(t, home).Transitions(t, convA)) > 0 {
+			t.Fatal("named reset changed the cursor conversation")
+		}
+		if len(transitions) == 0 {
 			continue
 		}
-		var st protocol.SessionTransitionPayload
-		if err := json.Unmarshal(env.Payload, &st); err != nil {
-			t.Fatalf("M5: decode session_transition payload: %v", err)
-		}
+		st := transitions[len(transitions)-1]
 		// AC-2: the transition names B, not the cursor's A. A transition for A here
 		// IS the defect, so it fails loudly rather than being skipped as noise.
 		if st.ConversationID == convA {

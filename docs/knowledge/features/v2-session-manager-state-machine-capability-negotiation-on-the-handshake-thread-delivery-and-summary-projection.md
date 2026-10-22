@@ -15,7 +15,7 @@ a running publisher on that same store, and becomes false before publisher
 teardown. Production negotiation, live publication, bounded queries and
 thread-only replay/resync bypass are installed. Readiness attests complete
 wiring, not that every conversation has completed replay. See
-[daemon publication and lifecycle](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+[daemon publication and lifecycle](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 With both expansion handlers and encoders compiled, `handleNoiseInit` supplies
 expansion readiness from the presence of **both** `ThreadToolBody` and
@@ -394,4 +394,4 @@ join. Admission after the snapshot crosses the daemon publication gate before
 Store capture, so it cannot miss that pass. Late relay checks authorize content,
 not the snapshot. `TestDaemonThreadCompactSwitch` covers both directions and
 both capture/admission orderings through the installed authenticated daemon;
-see [daemon evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+see [daemon evidence](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).

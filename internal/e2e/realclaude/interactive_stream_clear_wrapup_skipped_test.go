@@ -251,11 +251,12 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// and the intercept sits below Route, so the id crossing into the reset is this
 	// registry key with its live binding.
 	w := newResetWindow()
+	w.watchSource(t, home, skipConvID)
 	lifecycleRecordingBeforeReset(t, home)
 	nativeObservation.Add("reset_send", nil, nil)
 	sealSendMessage(t, phone, initSend, clearReqID, skipConvID, "m-clear", "/clear")
 
-	// --- AC 2: the four frames, with `skipped` on the phase change -------------
+	// AC 2: three live reset edges and the retained rotation, with skipped handoff.
 	w.awaitReset(t, phone, initRecv, clearReqID, skippedResetWindowBudget)
 	nativeObservation.Add("reset_observed", nil, nil)
 
@@ -289,15 +290,11 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 		Handoff:        "",
 	})
 
-	// The transition arrives AFTER the `restarting` edge and is asserted against nothing
-	// else — see the header for why the falling edge is deliberately left unordered
-	// against it. edges[1] is the phase change, so two edges having preceded the
-	// transition is exactly that claim. The session ids are the sibling's assertion and
-	// are not repeated: what this case adds is that the rotation still completes when the
-	// wrap-up did not.
+	// The retained rotation must be recorded after both rising live reset edges.
+	// Their daemon timestamps prove this independently of source polling time.
 	tr := w.transitions[0]
 	if tr.edgesBefore < 2 {
-		t.Errorf("the session_transition reached the client after %d resetting edge(s), want it after at least "+
+		t.Errorf("the retained session_transition was recorded after %d resetting edge(s), want it after at least "+
 			"the two rising ones: the rotation that fires the transition runs BELOW the `restarting` edge on "+
 			"resetThenRotate's own goroutine, so an earlier arrival means the edges are no longer emitted from "+
 			"there", tr.edgesBefore)
@@ -331,7 +328,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// gate's log and from there into a ticket comment — never to disk.
 	t.Logf("CAPTURE (#2486): a live /clear under -pyry-wrapup-deadline=%s ran the daemon's reset to "+
 		"completion with the wrap-up abandoned — resetting{active=%v phase=%q handoff=%q} → "+
-		"resetting{active=%v phase=%q handoff=%q} → session_transition{reason=%q, conversation_id=%q, "+
+		"resetting{active=%v phase=%q handoff=%q} → retained_session_transition{reason=%q, conversation_id=%q, "+
 		"occurred_at=%s} (after %d edges) → resetting{active=%v phase=%q handoff=%q}",
 		wrapUpSkipBound,
 		w.edges[0].Active, w.edges[0].Phase, w.edges[0].Handoff,

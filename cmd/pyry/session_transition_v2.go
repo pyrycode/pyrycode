@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -39,12 +38,12 @@ type switchTransitionPublication struct {
 	done       chan struct{}
 }
 
-// sessionTransitionEmitterV2 fans legacy boundaries to open interactive conns.
-// A bounded queue decouples ordinary off-lock pool callbacks from fanout; a
-// dedicated publication lane retains committed switches through sealing.
+// sessionTransitionEmitterV2 records captured session boundaries for the thread.
+// A bounded queue decouples ordinary off-lock pool callbacks from recording; a
+// dedicated lane retains committed switches through row publication and sealing.
 //
-// SECURITY: emitter logs carry only event/reason/conn_id discriminants and Push's
-// transport sentinel. Payloads, ownership and agent/session facts are never
+// SECURITY: emitter logs carry only event/reason discriminants.
+// Payloads, ownership and agent/session facts are never
 // logged. Ownership comes from captured facts or the exact-session registry
 // resolver; an unresolved event is dropped without guessing a routing key.
 type sessionTransitionEmitterV2 struct {
@@ -58,22 +57,17 @@ type sessionTransitionEmitterV2 struct {
 	// resolveAgent is an exact-session lookup used only at handoff, never drain.
 	resolveAgent func(string) (string, bool)
 
-	// hist records raw dividers and legacy boundaries once. Legacy boundaries
-	// skip replay; runtime divider receipts share the installed runtime ring.
-	// Nil or failed storage leaves eligible boundary delivery available.
+	// hist records raw dividers and retained transitions once. Boundaries never
+	// publish raw frames or receipts, including with nil or failed storage.
 	hist *history.Store
 
-	// switched publishes the committed row after the transition fanout.
+	// switched publishes the committed row after recording the transition.
 	switched func(string)
 
 	in chan sessions.SessionTransition
 	// switches is a reliable, unbuffered lane. Each sending daemon worker holds
 	// its conversation's reset exclusion until publication and sealing finish.
 	switches chan switchTransitionPublication
-
-	// nextID is confined to the publication lane. Runtime receipts carry replay
-	// IDs; legacy session_transition envelopes retain their absent EventID.
-	nextID uint64
 }
 
 // newSessionTransitionEmitterV2 constructs an emitter wired to bcast and the
@@ -204,7 +198,7 @@ func (e *sessionTransitionEmitterV2) Run(ctx context.Context) {
 		case req := <-e.switches:
 			e.broadcast(ctx, req.transition)
 			// Push only enqueues. Wait until the manager has applied its agent
-			// gate/tag and sealed all preceding status/transition/row frames.
+			// gate/tag and sealed all preceding status/row frames.
 			if b, ok := e.bcast.(interface{ FlushPushes(context.Context) error }); ok {
 				if err := b.FlushPushes(ctx); err != nil {
 					close(req.done)
@@ -221,9 +215,8 @@ func (e *sessionTransitionEmitterV2) Run(ctx context.Context) {
 	}
 }
 
-// broadcast appends and fans out a legacy boundary using captured ownership and
-// agent facts. Unknown reasons and unresolved ownership drop; individual Push
-// failures do not abort other recipients unless the daemon context is cancelled.
+// broadcast records boundaries using captured ownership and agent facts.
+// Unknown transition reasons and unresolved ownership drop without publication.
 func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.SessionTransition) {
 	if p, ok := runtimeDivider(t); ok {
 		raw, err := json.Marshal(p)
@@ -232,14 +225,7 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 			if source.Kind != "claude" && source.Kind != "codex" {
 				source = history.SessionProvenance{}
 			}
-			id := appendConversationHistory(e.hist, e.logger, "session_divider.history_append_err", t.ConversationID, historySessionDivider, raw, t.OccurredAt, source)
-			if payload, ok := legacyRuntimeReceipt(t.ConversationID, historySessionDivider, raw, id, t.OccurredAt); ok {
-				var ring *eventring.Ring
-				if e.runtimeSink != nil {
-					ring = e.runtimeSink.runtimeReplayRing
-				}
-				publishLegacyHistory(ctx, e.bcast, ring, e.logger, &e.nextID, t.ConversationID, protocol.TypeBanner, payload, t.OccurredAt, id)
-			}
+			appendConversationHistory(e.hist, e.logger, "session_divider.history_append_err", t.ConversationID, historySessionDivider, raw, t.OccurredAt, source)
 		}
 	}
 	payload, ok := toWirePayload(t)
@@ -274,47 +260,11 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 		return
 	}
 
-	// ONE timestamp per logical transition, hoisted out of the per-conn loop and
-	// shared by the durable log entry and every envelope (#2114). It was minted
-	// inside the loop until then, which gave N conns N timestamps for one
-	// transition and left no single value a log entry could carry. UTC matches
-	// what the interactive chokepoint stamps, so entries from the two producers
-	// are orderable by the field the log stores.
+	// One timestamp and append attempt per accepted transition, independently of
+	// connected clients. Rejected transitions do not enter the retained source log.
 	ts := time.Now().UTC()
-	// Appended once, after the drops above: an unknown reason and an
-	// unresolvable conversation both return before this point, so the log
-	// records what was fanned out and never what was refused. This producer
-	// skips the #647 replay ring, so the log is the ONLY place a session
-	// boundary is retained.
-	historyEntryID := appendConversationHistory(e.hist, e.logger, "session_transition.history_append_err",
+	appendConversationHistory(e.hist, e.logger, "session_transition.history_append_err",
 		convID, protocol.TypeSessionTransition, payloadJSON, ts, transitionProvenance(t))
-
-	// Fresh snapshot per transition: a phone that opened its session since the
-	// last event is included here; one that dropped is absent, or surfaces as a
-	// Push error below.
-	for _, c := range e.bcast.ActiveConns(ctx) {
-		if !c.Interactive {
-			continue // the capability gate — non-interactive conns never see the structured stream
-		}
-		e.nextID++
-		env := protocol.Envelope{
-			ID:             e.nextID,
-			Type:           protocol.TypeSessionTransition,
-			TS:             ts,
-			Payload:        payloadJSON,
-			HistoryEntryID: historyEntryID,
-		}
-		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
-			if ctx.Err() != nil {
-				return // teardown
-			}
-			e.logger.Debug("relay: session-transition push dropped",
-				"event", "session_transition.push_err",
-				"conn_id", c.ConnID,
-				"reason", payload.Reason,
-				"err", err)
-		}
-	}
 	if t.AgentSwitch && e.switched != nil {
 		e.switched(convID)
 	}

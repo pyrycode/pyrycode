@@ -20,10 +20,9 @@ Claude attribution, reported endings and roster-inferred gone facts use
 `closeAgentHistory` and `closeStartupAgentWork` append `agent_ended_with_session`
 through the same seam before session dividers (#3032), retaining unfinished
 agent/background work even after the main turn ends.
-The existing legacy emitters resolve the four event values — conversation
-id, wire type, marshalled payload, one hoisted timestamp — for the ring
-append or the fan-out itself, so their log append needed no new mapping, only
-a nil-guarded call before the per-conn loop in each. Operator history resolves them
+Emitters resolve conversation ID, source type, marshalled payload and one hoisted
+timestamp before the append attempt; publication eligibility is a separate step.
+Operator history resolves them
 from a safe `msgqueue.QueuedMessage`, available before the write through
 `msgqueue.DeliveryMessage` and again at confirmation through `OnDelivered`,
 not from an envelope in flight (see
@@ -41,7 +40,7 @@ supported live state continues independently, with content-free diagnostics.
 Coalescing, chunking and source-switch/boundary flush order remain recording
 contracts. Channel-post deltas/completion use their separate writer and retain
 publication pending #3737. See [interactive provenance](history-package-producers-interactive-provenance.md#interactive-provenance-2981)
-and [thread publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+and [thread publication](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 Background-task start/update/roster reports also retain their single append
 attempt, payloads, timestamps, visibility and captured source even without
@@ -53,6 +52,36 @@ sources. This retirement applies to every app and nil/failed storage; task
 progress and bound-session stop controls remain supported. The runner's retained
 roster/join state still serves controls, but connect-time roster publication and
 its exclusive provider/wiring are removed. Stop acceptance supplies no outcome.
+
+Session transitions and content notices retain their source appends while raw
+publication is retired for every app (#3736). `sessionTransitionEmitterV2.broadcast`
+records `session_divider` and accepted `session_transition` sources without raw
+fan-out or substitute transition-divider receipts. Both refusal types,
+`compaction_boundary` and `unrecognized_message` return from `emit` after their
+single append attempt, before projection, replay or delivery. Payloads,
+timestamps, explicit visibility and captured conversation/agent/session
+provenance remain unchanged; unknown reasons and unresolved owners stay rejected.
+The rule holds without clients, without `thread`, and with nil/failed storage;
+failure cannot restore publication and diagnostics expose no content.
+
+Canonical live items and explicit catch-up consume these sources without
+duplicating session dividers, refusal notices, compaction or unsupported-content
+items. Pre-divider closure, switch callbacks and flush/completion barriers,
+cancellation and busy release remain intact. Delayed predecessor output retains
+its source and cannot clear or close the successor. Supported live
+model/settings/catalogs, prompts, progress, retry and compaction readings/controls
+retain their source tags and ordered clears. A readable source is not evidence
+that earlier live frames have drained: reset tests compare daemon timestamps,
+and switch tests pause the retained committed-row callback.
+
+The [counted Linux proof](thread-package-shadow-lifecycle-and-evidence-retirement.md#session-and-content-notice-retirement-3736)
+on `9ebba3462074` records 28121/28121 race-unit, 1963/1963 fake integration and
+2268/2268 configured live leaf tests, zero failed, with 27/2/27 skipped
+respectively; historical failed results remain failed. It also distinguishes
+the 163/163 focused parent/subtest events from leaf counts and tagged compilation
+from live acceptance. These passes do not complete #3737's residual runtime,
+prompt-answer, standalone-banner/channel publication cleanup or #3718's final
+family acceptance. Shared adapters still serve those surviving producers.
 
 ### Producer topics
 
@@ -116,14 +145,15 @@ These are daemon session routing IDs, distinct from conversation IDs and
 agent-native IDs. `transitionProvenance` supplies `history.SessionProvenance`
 through `appendConversationHistory` only for a nonempty session ID paired with
 actual `claude` or `codex` facts. Missing IDs, unavailable lookups and unknown or
-unsupported agent facts leave provenance absent while eligible legacy delivery
-continues. A nonempty unsupported captured agent is not replaced by a lookup.
+unsupported agent facts leave provenance absent; raw transition publication
+remains retired (#3736). A nonempty unsupported captured agent is not replaced
+by a lookup.
 Delayed `broadcast` never looks up an agent or substitutes a replacement
 session for provenance, even if an unavailable lookup later becomes available;
 it neither defaults to Claude nor invents `none`.
 
-A nonempty captured `ConversationID` is authoritative for both history and
-live routing after another rotation, pool removal or registry replacement.
+A nonempty captured `ConversationID` is authoritative for source ownership and
+canonical routing after another rotation, pool removal or registry replacement.
 `toWirePayload` retains that owner. Only when ownership is absent may
 `broadcast` use the existing exact-session conversation resolver; if ownership
 remains unresolved, it drops the event without guessing a conversation.
@@ -132,10 +162,10 @@ and [ADR 042's session provenance](../decisions/042-daemon-built-thread.md#sessi
 
 Raw `Store.Page` exposes captured metadata in warm and reopened stores; old
 untagged entries remain untouched. Visibility stays `clear` shown and
-`idle_evict` hidden. Legacy live/page payload meanings, durable identities,
-unread watermarks and recipient gates retain their behavior, including eviction's
-mirrored wire session IDs. Nil/failed storage still allows eligible fan-out with
-absent history identity. The compatibility enqueue remains nonblocking and drops
+`idle_evict` hidden. Retained source payloads and durable identities keep their
+meaning, including eviction's mirrored legacy source session IDs. Neither
+nil/failed storage nor absent provenance restores raw fan-out or divider receipts
+(#3736). The compatibility enqueue remains nonblocking and drops
 on full; runtime enqueue retains each captured boundary behind a coalescing wake
 without waiting for storage or publication.
 Committed switches retain their transition/history, row and sealing order.

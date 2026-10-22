@@ -132,6 +132,7 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	sendNewSessionFrameFor(t, phone2, send2, 2524, convB)
 
 	newB := awaitConversationTransition(t, next2, transitionWant{
+		source:     scenario.SourceSnapshot(t, home),
 		milestone:  "M4 (AC-1/AC-2)",
 		convID:     convB,
 		forbidConv: convA,
@@ -335,6 +336,7 @@ func TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation(t *testi
 	})
 
 	newB := awaitConversationTransition(t, next2, transitionWant{
+		source:     scenario.SourceSnapshot(t, home),
 		milestone:  "M4",
 		convID:     convB,
 		forbidConv: convA,
@@ -380,6 +382,7 @@ func TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation(t *testi
 // answers on the harness side. A transposed convID and forbidConv here would
 // invert an isolation assertion into a vacuous one.
 type transitionWant struct {
+	source     scenario.SourceFacts
 	milestone  string
 	convID     string        // the conversation whose rotation is under test
 	forbidConv string        // a rotation reaching this one is an isolation failure
@@ -388,34 +391,36 @@ type transitionWant struct {
 	diag       func() string // read lazily: only the failure paths pay for it
 }
 
-// awaitConversationTransition drains to the conversation-scoped session_transition
-// for want.convID and answers the fresh id it carries.
-//
-// Shared by this file's two specs because they differ only in WHICH frame raises
-// the rotation — the named new_session a client's Reset control sends, or the
-// /clear it types — and #2456 makes "the same thing happens" the contract. Two
-// hand-written assertion blocks would be free to drift apart in exactly the place
-// the contract says they must not.
-//
-// The forbidConv check runs BEFORE the convID filter, so an isolation failure is
-// reported as one rather than timing out as a missing transition.
+// awaitConversationTransition observes retained rotation facts while draining
+// actual live controls. A transition in the forbidden conversation fails isolation.
 func awaitConversationTransition(t *testing.T, next func(time.Time) (protocol.Envelope, bool),
 	want transitionWant) string {
 	t.Helper()
 	deadline := time.Now().Add(25 * time.Second)
 	for {
-		env, ok := next(deadline)
-		if !ok {
+		poll := time.Now().Add(100 * time.Millisecond)
+		if deadline.Before(poll) {
+			poll = deadline
+		}
+		env, ok := next(poll)
+		if !ok && !time.Now().Before(deadline) {
 			t.Fatalf("%s: never observed a session_transition for conversation %s after %s.\nsessions.json:\n%s",
 				want.milestone, want.convID, want.because, want.diag())
 		}
-		if env.Type != protocol.TypeSessionTransition {
+		switch env.Type {
+		case protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
+			t.Fatal("retired content reached reset transport")
+		case protocol.TypeError:
+			t.Fatal("reset failed: ", string(env.Payload))
+		}
+		transitions := want.source.Transitions(t, want.convID)
+		if want.forbidConv != "" && len(want.source.Transitions(t, want.forbidConv)) > 0 {
+			t.Fatal("reset crossed conversation ownership")
+		}
+		if len(transitions) == 0 {
 			continue
 		}
-		var st protocol.SessionTransitionPayload
-		if err := json.Unmarshal(env.Payload, &st); err != nil {
-			t.Fatalf("%s: decode session_transition payload: %v", want.milestone, err)
-		}
+		st := transitions[len(transitions)-1]
 		if st.ConversationID == want.forbidConv {
 			t.Fatalf("%s: the rotation landed on conversation %s after a reset naming %s: %s → %s",
 				want.milestone, want.forbidConv, want.convID, st.PreviousSessionID, st.NewSessionID)

@@ -18,34 +18,9 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// TestRelayV2_StreamUnrecognizedMessageReachesPhone is the live, end-to-end proof
-// that claude output the stream parser has no mapping for reaches a client instead
-// of vanishing.
-//
-// Before this feature the parser dropped such output into a Debug log. The
-// production daemon runs at info level, so the drop left NO trace anywhere and no
-// client was told. That is fine for the message types we deliberately ignore. It
-// is not fine for a type we have never seen: a future claude version that moved
-// something meaningful into a new message type would show nothing, everywhere,
-// with nothing saying why.
-//
-// The fake emits two shapes per turn ahead of its normal reply, one for each of
-// the two drop sites a live claude could plausibly grow:
-//
-//	{"type":"fake_future_event",…}                     → an unknown TOP-LEVEL type
-//	{"type":"assistant","message":{"content":[         → an unknown assistant BLOCK
-//	   {"type":"fake_future_block",…}]}}
-//
-// and the daemon must turn each into one unrecognized_message frame carrying the
-// offending type and its raw JSON.
-//
-// THE NEGATIVE HALF IS THE POINT. The same run asserts the fake's NORMAL reply
-// still produces its assistant_delta and turn_end, and that the ordinary traffic
-// raises no unrecognized frames of its own. A feature that surfaces unknown output
-// is only worth having if known output stays silent; the tier that proves that
-// against real claude is the realclaude suite's zero-unrecognized assertion, and
-// this is its hermetic sibling.
-func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
+// Unknown line and assistant-block output retain their raw source payloads.
+// The ordinary reply still completes, and no raw content reaches the phone.
+func TestRelayV2_StreamUnrecognizedMessageRetained(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"
 		knownConvID = "33333333-3333-4333-8333-333333333333"
@@ -101,10 +76,11 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 		t.Fatalf("phone A dial: %v", err)
 	}
 	t.Cleanup(func() { _ = phoneA.Close() })
-	// Interactive — the capability the unrecognized_message frame is gated on.
+	// Keep a real interactive peer open while observing retained source content.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
 	source := scenario.NewSourceObserver(t, home)
+	source.AllowUnrecognized = true
 	sealSend := func(env protocol.Envelope) {
 		source.Before(env)
 		t.Helper()
@@ -153,6 +129,12 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 			if strings.Contains(p.Text, echoNeedle) {
 				sawEcho = true
 			}
+		case protocol.TypeUnrecognizedMessage:
+			var p protocol.UnrecognizedMessagePayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode unrecognized_message payload: %v", err)
+			}
+			unrecognized = append(unrecognized, p)
 		case protocol.TypeTurnEnd:
 			sawTurnEnd = true
 		}
@@ -167,19 +149,13 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
-		case protocol.TypeUnrecognizedMessage:
-			var p protocol.UnrecognizedMessagePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode unrecognized_message payload: %v", err)
-			}
-			unrecognized = append(unrecognized, p)
 
 		}
 	}
 
 	// --- The positive half: both drop sites surfaced.
 	if len(unrecognized) != 2 {
-		t.Fatalf("unrecognized_message frames: got %d, want 2 (one per drop site)\n%+v",
+		t.Fatalf("unrecognized_message source facts: got %d, want 2 (one per drop site)\n%+v",
 			len(unrecognized), unrecognized)
 	}
 

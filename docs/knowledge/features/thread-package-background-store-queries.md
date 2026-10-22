@@ -204,7 +204,7 @@ or descendant identities are returned. These are package-owned Store facts
 matching the [header semantics](../../protocol-mobile.md#thread-query-messages).
 `runThreadChildren` forwards these facts in bounded expansion replies, and
 production compact delivery uses them through the real Store installation.
-See [daemon compact wiring and evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+See [daemon compact wiring and evidence](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 Initial `Store.publish` initializes every public row's freshness from consumed
 publication progress. Checkpoint restoration seeds public prefix rows without
@@ -498,7 +498,7 @@ Relay/daemon delivery is installed: `daemonThreadPublisher.publish` reads
 `CompactChanges` only after observed version advancement, under its cancellable
 operation context, on the existing 50 ms publication schedule. Calling it at
 the current version would wait instead of flushing. See
-[daemon coalescing and recovery](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+[daemon coalescing and recovery](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence).
 The Store supplies interval facts and evidence only; the installed relay owns
 authenticated delivery. Neither establishes a full inventory baseline or
 expansion completion.

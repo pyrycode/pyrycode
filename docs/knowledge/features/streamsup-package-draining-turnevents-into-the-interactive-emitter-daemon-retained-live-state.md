@@ -438,7 +438,7 @@ authenticated thread/legacy peers, complete item reconstruction and current
 readings. Fold publication remains coordinator-owned and independent of source
 admission and history writers; held peer delivery cannot block either producer.
 Both publishers cancel and join before releasing their installation slots.
-See [fold publication and gap recovery](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+See [fold publication and gap recovery](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence)
 and [relay quarantine](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 Production live thread publication and supplied-state reconciliation are active;
 connect/reconnect snapshots still initialize only transient readings. Client

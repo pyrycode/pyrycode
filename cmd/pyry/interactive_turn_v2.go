@@ -144,10 +144,9 @@ type interactiveTurnEmitterV2 struct {
 	// single-goroutine. Appended on emit, before the per-conn fan-out.
 	ring *eventring.Ring
 
-	// hist records source facts before any publication. Assistant, tool and
-	// completion content reaches apps through the canonical thread only, even
-	// when this store is absent or an append fails. Constructor callers may
-	// leave it nil; appendConversationHistory owns that guard.
+	// hist records source facts before any publication. Session content reaches
+	// apps through the canonical thread only, even when storage is absent or fails.
+	// Constructor callers may leave it nil; appendConversationHistory owns that guard.
 	hist *history.Store
 
 	// usageRec is the per-conversation context-reading memory (#2460): the daemon's
@@ -1352,7 +1351,8 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		convID, typ, payloadJSON, ts, e.source)
 	switch typ {
 	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
-		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster:
+		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster,
+		protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 		return
 	}
 	if !legacyHistoryType(typ) {
