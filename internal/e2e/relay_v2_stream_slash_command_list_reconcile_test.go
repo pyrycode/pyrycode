@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"slices"
 	"strings"
 	"testing"
@@ -205,6 +207,7 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 	// structural. Interactive is load-bearing rather than incidental: the fan-out and the
 	// reconcile both gate on the capability, so a non-interactive handshake yields zero
 	// frames and a vacuously red test that looks exactly like a missing seam.
+	source := scenario.NewSourceObserver(t, home)
 	dialInteractive := func(name, token string) (func(protocol.Envelope), func(time.Time) (protocol.Envelope, bool)) {
 		t.Helper()
 		dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -215,7 +218,7 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 		}
 		t.Cleanup(func() { _ = phone.Close() })
 		send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-		return sealedConnDriver(t, phone, name, send, recv)
+		return sealedConnDriver(t, phone, name, send, recv, source)
 	}
 
 	var obs lateSlashCommandListObservation
@@ -306,6 +309,21 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 		}),
 	})
 	turnDeadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, lateSlashCommandListEchoNeedle) {
+				obs.sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnvA(turnDeadline)
 		if !ok {
@@ -318,16 +336,7 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 			t.Fatalf("unexpected error envelope during the turn: %s", string(env.Payload))
 		case protocol.TypeSlashCommandList:
 			obs.listsOnMinter++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, lateSlashCommandListEchoNeedle) {
-				obs.sawEcho = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 

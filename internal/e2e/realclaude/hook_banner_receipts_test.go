@@ -104,11 +104,11 @@ func TestHookBannerReceiptWindow(t *testing.T) {
 			f[1], f[2] = f[2], f[1]
 			return f, e
 		}, false},
-		{"opening after text", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
+		{"opening after live responding", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
 			f[2], f[3] = f[3], f[2]
 			return f, e
 		}, false},
-		{"refused text before refusal", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
+		{"refused phase before refusal", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
 			return append([]protocol.Envelope{f[3]}, f...), e
 		}, false},
 		{"refused lifecycle", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
@@ -180,8 +180,10 @@ func testHookBannerWindow(t *testing.T) ([]protocol.Envelope, []history.Entry) {
 		{ID: 17, Type: "send_delivered", Payload: fact(map[string]any{"accepted_entry_id": 15, "delivery_entry_id": 16, "occurred_at": at, "reason": "delivered"})},
 		{ID: 18, Type: "main_turn_opened", Payload: fact(map[string]any{"turn_id": "turn", "occurred_at": at})},
 	}
+	entries = append(entries, history.Entry{ID: 19, Type: protocol.TypeAssistantDelta, Payload: raw(protocol.AssistantDeltaPayload{ConversationID: "conv", TurnID: "turn", Text: "reply"})})
 	for i := range entries {
 		entries[i].TS = at
+		entries[i].Session = &history.SessionProvenance{Kind: "claude", SessionID: "session"}
 	}
 	var frames []protocol.Envelope
 	for _, i := range []int{3, 7} {
@@ -195,7 +197,7 @@ func testHookBannerWindow(t *testing.T) ([]protocol.Envelope, []history.Entry) {
 	reqID := uint64(9)
 	frames = append(frames[:1], append([]protocol.Envelope{{Type: protocol.TypeAck, InReplyTo: &reqID}}, frames[1:]...)...)
 	frames = append(frames,
-		protocol.Envelope{Type: protocol.TypeAssistantDelta, Payload: raw(protocol.AssistantDeltaPayload{ConversationID: "conv", TurnID: "turn", Text: "reply"})},
+		protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "responding"})},
 		protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "idle"})})
 	return frames, entries
 }

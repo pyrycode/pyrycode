@@ -6,17 +6,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // queuePlacementReader keeps canonical items across catch-up and live patches.
 // Foreign conversations never alter its revision or identity state.
 type queuePlacementReader struct {
-	t       *testing.T
-	w       Wire
-	conv    string
-	items   map[uint64]protocol.ThreadItem
-	pending []protocol.ThreadItem
+	t         *testing.T
+	w         Wire
+	conv      string
+	items     map[uint64]protocol.ThreadItem
+	pending   []protocol.ThreadItem
+	version   uint64
+	sourceID  uint64
+	ends      []history.Entry
+	idle      time.Time
+	completed map[string]bool
 }
 
 func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementReader {
@@ -56,7 +62,46 @@ func QueuePlacementFrames(t *testing.T, w Wire, conv string) func(time.Time) (Qu
 func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bool) {
 	r.t.Helper()
 	for {
-		if len(r.pending) > 0 {
+		if r.w.Source != nil {
+			if r.completed == nil {
+				r.completed = map[string]bool{}
+			}
+			for _, e := range r.w.Source(r.conv) {
+				if e.ID <= r.sourceID {
+					continue
+				}
+				r.sourceID = e.ID
+				if e.Type != protocol.TypeTurnEnd {
+					continue
+				}
+				var p struct {
+					ConversationID  string `json:"conversation_id"`
+					TurnID          string `json:"turn_id"`
+					ParentToolUseID string `json:"parent_tool_use_id"`
+				}
+				if json.Unmarshal(e.Payload, &p) != nil {
+					r.t.Fatal("invalid queued terminal source")
+				}
+				if p.ConversationID != r.conv || p.ParentToolUseID != "" {
+					continue
+				}
+				if e.Session == nil || p.TurnID == "" {
+					r.t.Fatal("queued terminal source lost identity")
+				}
+				key := e.Session.Kind + "/" + e.Session.SessionID + "/" + p.TurnID
+				if !r.completed[key] {
+					r.ends = append(r.ends, e)
+					r.completed[key] = true
+				}
+			}
+		}
+		boundary := len(r.ends) > 0 && (len(r.pending) == 0 || (r.pending[0].Order != 0 && r.pending[0].Order > r.ends[0].ID))
+		if boundary && r.version >= r.ends[0].ID && !r.idle.IsZero() && !r.idle.Before(r.ends[0].TS) {
+			r.ends = r.ends[1:]
+			r.idle = time.Time{}
+			return QueuePlacementFrame{Kind: "turn_end"}, true
+		}
+		if len(r.pending) > 0 && !boundary {
 			item := r.pending[0]
 			r.pending = r.pending[1:]
 			old := r.items[item.ID]
@@ -104,7 +149,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 					f.Kind = "delta"
 				}
 			case "turn_end":
-				if old.ID == 0 {
+				if old.ID == 0 && r.w.Source == nil {
 					f.Kind = "turn_end"
 				}
 			}
@@ -113,8 +158,15 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			}
 			continue
 		}
-		env := r.w.Next(deadline)
+		readDeadline := deadline
+		if r.w.Source != nil {
+			readDeadline = pollDeadline(deadline)
+		}
+		env := r.w.Next(readDeadline)
 		if env.Type == "" {
+			if r.w.Source != nil && time.Now().Before(deadline) {
+				continue
+			}
 			return QueuePlacementFrame{}, false
 		}
 		decode := func(v any) {
@@ -129,12 +181,14 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			var p protocol.ThreadItemsPayload
 			decode(&p)
 			if p.ConversationID == r.conv {
+				r.version = max(r.version, p.Version)
 				r.pending = append(r.pending, p.Items...)
 			}
 		case protocol.TypeThreadItemAdded:
 			var p protocol.ThreadItemAddedPayload
 			decode(&p)
 			if p.ConversationID == r.conv {
+				r.version = max(r.version, p.Version)
 				r.pending = append(r.pending, p.Item)
 			}
 		case protocol.TypeThreadItemChanged:
@@ -143,6 +197,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			if p.ConversationID != r.conv {
 				continue
 			}
+			r.version = max(r.version, p.Version)
 			item := r.items[p.ItemID]
 			if item.Rev != p.BaseRev {
 				r.t.Fatal("thread patch revision gap")
@@ -173,6 +228,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			if p.ConversationID != r.conv {
 				continue
 			}
+			r.version = max(r.version, p.Version)
 			item := r.items[p.ItemID]
 			if item.Rev != p.BaseRev {
 				r.t.Fatal("thread append revision gap")
@@ -201,6 +257,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 					f.Kind = "reply_state"
 				}
 				if p.ConversationID == r.conv && p.State == "idle" {
+					r.idle = env.TS
 					f.Kind = "idle"
 				}
 			}

@@ -66,8 +66,9 @@ func QuestionAnswer(t *testing.T, w Wire, c QuestionConfig) {
 		t.Fatal("parked question model update did not complete")
 	}
 	entries, choice := ChooseAnswers(t, batch)
+	after, _ := QuestionBoundary(t, w.Source, c.ConversationID)
 	w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: "e2e-1987-answer-token", Answers: entries})
-	text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.TurnBudget, w.Source)
+	text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.TurnBudget, after)
 	RequireChoice(t, text, choice)
 	RequirePromptAnswerHistory(t, c.Home, c.ConversationID, batch.QuestionBatchID, "answer", c.HistorySession)
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "m-after-model-change", Text: c.Followup})

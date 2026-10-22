@@ -7,7 +7,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
 	"path/filepath"
 	"slices"
@@ -380,46 +381,41 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			// The decoder reads the next binary→phone application envelope, skipping
 			// non-noise_msg frames in capture order so the receive nonce stays in sequence.
 			// nextEnv retains dismissal observations across all receive phases.
-			reader.read = func(deadline time.Time) (protocol.Envelope, bool) {
-				t.Helper()
-				for {
-					remaining := time.Until(deadline)
-					if remaining <= 0 {
-						return protocol.Envelope{}, false
+
+			source := scenario.NewSourceObserver(t, home)
+			source.Watch(knownConvID)
+			var verdictText strings.Builder
+			source.OnEntry = func(entry history.Entry) {
+				if entry.Type == protocol.TypeToolUse && !sawToolUse {
+					if json.Unmarshal(entry.Payload, &toolUse) != nil {
+						t.Fatal("invalid source tool")
 					}
-					raw, err := phone.ReceiveBytes(remaining)
-					if err != nil {
-						if errors.Is(err, fakephone.ErrReceiveTimeout) {
-							return protocol.Envelope{}, false
-						}
-						t.Fatalf("phone receive: %v", err)
-					}
-					var inner protocol.InnerFrameV2
-					if err := json.Unmarshal(raw, &inner); err != nil {
-						t.Fatalf("decode inner frame: %v", err)
-					}
-					if inner.Type != protocol.TypeNoiseMsg {
-						continue
-					}
-					env := decryptInnerEnvelope(t, inner, recvCS)
-					if !sawToolUse && env.Type == protocol.TypeToolUse {
-						if err := json.Unmarshal(env.Payload, &toolUse); err != nil {
-							t.Fatalf("decode tool_use payload: %v", err)
-						}
-						sawToolUse = true
-					}
-					if tc.question && questionShown.QuestionBatchID == "" && env.Type == protocol.TypeQuestionShown {
-						if err := json.Unmarshal(env.Payload, &questionShown); err != nil {
-							t.Fatalf("decode question_shown payload: %v", err)
-						}
-					}
-					if !tc.question && shown.ModalID == "" && env.Type == protocol.TypeModalShown {
-						if err := json.Unmarshal(env.Payload, &shown); err != nil {
-							t.Fatalf("decode modal_shown payload: %v", err)
-						}
-					}
-					return env, true
+					sawToolUse = true
 				}
+				if entry.Type == protocol.TypeAssistantDelta {
+					var p protocol.AssistantDeltaPayload
+					if json.Unmarshal(entry.Payload, &p) != nil || p.ConversationID != knownConvID {
+						t.Fatal("invalid verdict source")
+					}
+					if p.ParentToolUseID == "" {
+						verdictText.WriteString(p.Text)
+					}
+				}
+			}
+			poll := scenario.PollingReceive(t, phone, recvCS)
+			reader.read = func(deadline time.Time) (protocol.Envelope, bool) {
+				env, ok := source.Next(poll, deadline)
+				if tc.question && questionShown.QuestionBatchID == "" && env.Type == protocol.TypeQuestionShown {
+					if err := json.Unmarshal(env.Payload, &questionShown); err != nil {
+						t.Fatalf("decode question_shown payload: %v", err)
+					}
+				}
+				if !tc.question && shown.ModalID == "" && env.Type == protocol.TypeModalShown {
+					if err := json.Unmarshal(env.Payload, &shown); err != nil {
+						t.Fatalf("decode modal_shown payload: %v", err)
+					}
+				}
+				return env, ok
 			}
 			nextEnv := reader.next
 
@@ -663,6 +659,7 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				var fromStart uint64
 				_, replayRecv := driveHandshakeToOpenDaemonInteractiveResuming(t, phone, pubKey, payload.Token, &fromStart)
 				recvCS = replayRecv
+				poll = scenario.PollingReceive(t, phone, recvCS)
 			} else {
 				// The extension arm's delay is the stimulus, not a synchronisation
 				// hack: the point is that MORE THAN ONE window elapses on a parked,
@@ -719,6 +716,13 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 						t.Fatalf("observed the verdict needle %q but never modal_dismissed{%s,%s}", tc.wantNeedle, tc.wantOutcome, tc.wantSource)
 					}
 				}
+				for _, bad := range tc.forbidNeedles {
+					if strings.Contains(verdictText.String(), bad) {
+						t.Fatal("source verdict contains forbidden decision")
+					}
+				}
+				sawNeedle = strings.Contains(verdictText.String(), tc.wantNeedle)
+
 				if env.Type == protocol.TypeError {
 					t.Fatalf("unexpected error envelope during drain: %s", string(env.Payload))
 				}
@@ -731,24 +735,6 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					// of as a confusing "never observed the verdict" timeout below.
 					t.Fatalf("replay returned a resync marker (payload=%s): the conversation's retained tail was evicted "+
 						"before the witness reconnected, so this case can no longer observe the verdict it proves", string(env.Payload))
-				case protocol.TypeAssistantDelta:
-					var d protocol.AssistantDeltaPayload
-					if err := json.Unmarshal(env.Payload, &d); err != nil {
-						t.Fatalf("decode assistant_delta payload: %v", err)
-					}
-					for _, bad := range tc.forbidNeedles {
-						if strings.Contains(d.Text, bad) {
-							t.Fatalf("assistant_delta carried the FORBIDDEN needle %q (Text=%q); the %s case must reflect only %q — "+
-								"approve-allow is a fail-open, approve-error is a masked client-side failure, and either must fail loudly",
-								bad, d.Text, tc.name, tc.wantNeedle)
-						}
-					}
-					if strings.Contains(d.Text, tc.wantNeedle) {
-						if d.ConversationID != knownConvID {
-							t.Errorf("assistant_delta ConversationID = %q, want %q", d.ConversationID, knownConvID)
-						}
-						sawNeedle = true
-					}
 				case protocol.TypeQuestionDismissed:
 					if !tc.question {
 						continue

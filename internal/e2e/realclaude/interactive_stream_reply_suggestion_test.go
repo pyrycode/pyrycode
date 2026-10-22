@@ -120,6 +120,10 @@ func readSuggestEnvelope(h *perConvHarness) (protocol.Envelope, error) {
 
 // suggestWatch folds every envelope the run reads into the state it asserts on.
 type suggestWatch struct {
+	source         scenario.SourceFacts
+	sourceID       uint64
+	terminal       time.Time
+	session, turn  string
 	sawDelta, idle bool
 	setRev         uint64 // latest non-empty suggestion's revision; 0 = none yet
 	clearRev       uint64 // revision of a clear above setRev; 0 = none yet
@@ -128,6 +132,39 @@ type suggestWatch struct {
 
 func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
 	t.Helper()
+	if w.source != nil {
+		for _, e := range w.source(suggestConvID) {
+			if e.ID <= w.sourceID {
+				continue
+			}
+			w.sourceID = e.ID
+			var p struct {
+				Conversation string `json:"conversation_id"`
+				Turn         string `json:"turn_id"`
+				Parent       string `json:"parent_tool_use_id"`
+				Text         string `json:"text"`
+			}
+			if json.Unmarshal(e.Payload, &p) != nil {
+				t.Fatal("invalid suggestion source")
+			}
+			if p.Conversation != suggestConvID || p.Parent != "" || p.Turn == "" || e.Session == nil {
+				continue
+			}
+			if w.turn == "" && e.Type == protocol.TypeAssistantDelta {
+				w.turn, w.session = p.Turn, e.Session.SessionID
+			}
+			if p.Turn != w.turn || e.Session.SessionID != w.session {
+				continue
+			}
+			if e.Type == protocol.TypeAssistantDelta && strings.TrimSpace(p.Text) != "" {
+				w.sawDelta = true
+			}
+			if e.Type == protocol.TypeTurnEnd {
+				w.terminal = e.TS
+			}
+		}
+	}
+
 	switch env.Type {
 	case protocol.TypeError:
 		var ep protocol.ErrorPayload
@@ -135,20 +172,14 @@ func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
 			t.Fatalf("daemon sent an error whose payload did not decode: %v", err)
 		}
 		t.Fatalf("daemon sent error code %q (retryable=%v)", ep.Code, ep.Retryable)
-	case protocol.TypeAssistantDelta:
-		var p protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			t.Fatalf("decode assistant_delta payload: %v", err)
-		}
-		if p.ConversationID == suggestConvID && strings.TrimSpace(p.Text) != "" {
-			w.sawDelta = true
-		}
+	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+		t.Fatal("retired suggestion content reached app")
 	case protocol.TypeTurnState:
 		var st protocol.TurnStatePayload
 		if err := json.Unmarshal(env.Payload, &st); err != nil {
 			t.Fatalf("decode turn_state payload: %v", err)
 		}
-		if st.State == "idle" && st.ConversationID == suggestConvID && w.sawDelta {
+		if st.State == "idle" && st.ConversationID == suggestConvID && w.sawDelta && !w.terminal.IsZero() && !env.TS.Before(w.terminal) {
 			w.idle = true
 		}
 	case protocol.TypeReplySuggestion:
@@ -824,7 +855,7 @@ func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
 		return nil
 	})
 	frames := startSuggestReader(t, h)
-	w := &suggestWatch{bounded: true}
+	w := &suggestWatch{bounded: true, source: scenario.SourceSince(t, h.home, suggestConvID)}
 	logSource := func() {
 		source := readSuggestSource(t, evidence)
 		t.Log(source.diagnostic(w.idle, w.setRev, w.clearRev))

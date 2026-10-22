@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"sort"
 	"strings"
 	"testing"
@@ -177,7 +178,9 @@ func driveContextUsageTurn(t *testing.T) contextUsageObservation {
 	// type, so a second gate is not what this tier is looking for.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -190,33 +193,8 @@ func driveContextUsageTurn(t *testing.T) contextUsageObservation {
 		sendNoiseMsg(t, phoneA, ciphertext)
 	}
 
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			// The receive nonce is sequential, so every noise_msg MUST be decrypted in
-			// receive order — filter AFTER decrypting, never before, or the CipherState
-			// desyncs and every later decrypt fails with a misleading error.
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recvA), true
-		}
-	}
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) { return source.Next(poll, deadline) }
 
 	sealSend(protocol.Envelope{
 		ID:   contextUsageSendReqID,
@@ -240,20 +218,26 @@ func driveContextUsageTurn(t *testing.T) contextUsageObservation {
 			// only thing that can see a field the payload type does not declare.
 			obs.contextUsage = append(obs.contextUsage, append(json.RawMessage(nil), env.Payload...))
 			obs.contextUsageAt = append(obs.contextUsageAt, obs.receivedOrdinal)
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
-			if obs.turnEndAt < 0 {
-				obs.turnEndAt = obs.receivedOrdinal
-			}
 		case protocol.TypeUnrecognizedMessage:
 			obs.unrecognized++
+
+		}
+	}
+
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
 		case protocol.TypeAssistantDelta:
 			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
 				t.Fatalf("decode assistant_delta payload: %v", err)
 			}
 			if strings.Contains(p.Text, contextUsageEchoNeedle) {
 				obs.sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+			if obs.turnEndAt < 0 {
+				obs.turnEndAt = obs.receivedOrdinal
 			}
 		}
 	}

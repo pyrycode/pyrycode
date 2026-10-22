@@ -126,16 +126,18 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 	}
 	heldText := "Without using tools, reply briefly about retained session recovery. marker=held-2859"
 	state := &sessionErrorObservation{}
+	poll := scenario.PollingReceive(t, phone, recv)
 	next := scenario.QueuePlacementFrames(t, scenario.Wire{
 		Send: func(kind string, payload any) uint64 {
 			sealEnvelope(t, phone, send, protocol.Envelope{ID: 100, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 			return 100
 		},
 		Next: func(until time.Time) protocol.Envelope {
-			env := readSessionErrorEnvelope(t, phone, recv, until)
+			env := poll(until)
 			state.observe(t, env)
 			return env
 		},
+		Source: scenario.SourceSince(t, home, liveConvID),
 	}, liveConvID)
 	observe := func(until time.Time) {
 		f, ok := next(until)
@@ -334,12 +336,8 @@ func (s *sessionErrorObservation) observe(t *testing.T, env protocol.Envelope) {
 		default:
 			t.Fatalf("unexpected session-error code: %s", p.Code)
 		}
-	case protocol.TypeAssistantDelta:
-		var p protocol.AssistantDeltaPayload
-		decodeSessionErrorPayload(t, env, &p)
-		if p.ConversationID == liveConvID && strings.TrimSpace(p.Text) != "" {
-			s.delta = true
-		}
+	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+		t.Fatal("retired recovery content reached app")
 	case protocol.TypeTurnState:
 		var p protocol.TurnStatePayload
 		decodeSessionErrorPayload(t, env, &p)

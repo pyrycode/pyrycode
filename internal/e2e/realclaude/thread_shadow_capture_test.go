@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,81 +58,93 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal("daemon source commit unavailable")
 	}
-	sealSendMessage(t, h.phone, h.initSend, 2, conv, "shadow-start", fmt.Sprintf(
-		"Follow these steps exactly. First say SHADOW_BEFORE. Then use Bash once in the foreground (never background) to run: for i in $(seq 1 15); do sleep 1; done; echo SHADOW_TOOL. After Bash completes say SHADOW_AFTER. Then use Agent exactly once in the foreground; ask it to say exactly SHADOW_CHILD without tools. Wait for it and then say SHADOW_MAIN_DONE. No other tools. run=%d", time.Now().UnixNano()))
+
+	snapshot := scenario.SourceSince(t, h.home, conv)
+	poll := scenario.PollingReceive(t, h.phone, h.initRecv)
+	var mark uint64
 	var legacy []protocol.Envelope
-	deadline := time.Now().Add(3 * perTurnReplyBudget)
-	sent, ends := false, 0
-	for ends < 2 {
-		env, ok := nextSubagentTextEnvelope(t, h, deadline)
-		if !ok {
-			t.Fatal("shadow conversation did not complete")
+	var pending []history.Entry
+	ends, toolWindow := 0, false
+	read := func(deadline time.Time) protocol.Envelope {
+		p := time.Now().Add(20 * time.Millisecond)
+		if deadline.Before(p) {
+			p = deadline
 		}
+		env := poll(p)
 		switch env.Type {
-		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeTurnEnd, protocol.TypeSessionTransition:
-			var owner struct {
-				Conversation string `json:"conversation_id"`
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			t.Fatal("retired shadow content reached app")
+		}
+		for _, entry := range snapshot(conv) {
+			if entry.ID <= mark {
+				continue
 			}
-			_ = json.Unmarshal(env.Payload, &owner)
-			if owner.Conversation == conv {
-				legacy = append(legacy, env)
+			mark = entry.ID
+			var p struct {
+				Parent string `json:"parent_tool_use_id"`
+				Name   string `json:"name"`
+			}
+			if json.Unmarshal(entry.Payload, &p) != nil {
+				t.Fatal("invalid shadow source")
+			}
+			if entry.Type == protocol.TypeToolUse && p.Parent == "" && p.Name == "Bash" {
+				toolWindow = true
+			}
+			if entry.Type == protocol.TypeTurnEnd && p.Parent == "" {
+				if entry.Session == nil {
+					t.Fatal("shadow terminal lacks producing session")
+				}
+				pending = append(pending, entry)
 			}
 		}
-		if env.Type == protocol.TypeToolUse && !sent {
-			var p protocol.ToolUsePayload
+		if env.Type == protocol.TypeTurnState && len(pending) > 0 {
+			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid tool observation")
+				t.Fatal("invalid shadow live phase")
 			}
-			if p.ConversationID == conv && p.Name == "Bash" && p.ParentToolUseID == "" {
-				sealSendMessage(t, h.phone, h.initSend, 3, conv, "shadow-queued", "SHADOW_QUEUED: reply exactly SHADOW_REPLY without tools.")
-				sent = true
-			}
-		}
-		if env.Type == protocol.TypeTurnEnd {
-			var p protocol.TurnEndPayload
-			_ = json.Unmarshal(env.Payload, &p)
-			if p.ConversationID == conv {
+			if p.ConversationID == conv && p.State == "idle" && !env.TS.Before(pending[0].TS) {
 				ends++
+				pending = pending[1:]
 			}
 		}
-	}
-	if !sent {
-		t.Fatal("no busy Bash window for queue acceptance")
-	}
-	// Close a genuinely active third turn so settlement before the divider is observable.
-	sealSendMessage(t, h.phone, h.initSend, 4, conv, "shadow-close", "Use Bash once in the foreground: for i in $(seq 1 15); do sleep 1; done; echo SHADOW_CLOSURE.")
-	deadline = time.Now().Add(perTurnReplyBudget)
-	for {
-		env, ok := nextSubagentTextEnvelope(t, h, deadline)
-		if !ok {
-			t.Fatal("no active closure work")
-		}
-		if env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeToolUse {
+		if env.Type == protocol.TypeSessionTransition {
 			legacy = append(legacy, env)
 		}
-		if env.Type == protocol.TypeToolUse {
-			var p protocol.ToolUsePayload
-			_ = json.Unmarshal(env.Payload, &p)
-			if p.ConversationID == conv && p.Name == "Bash" {
-				break
-			}
+		if env.Type == protocol.TypeError {
+			t.Fatal("shadow request failed")
 		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("shadow observation timed out")
+		}
+		return env
+	}
+	sealSendMessage(t, h.phone, h.initSend, 2, conv, "shadow-start", fmt.Sprintf(
+		"Follow these steps exactly. First say SHADOW_BEFORE. Then use Bash once in the foreground (never background) to run: for i in $(seq 1 15); do sleep 1; done; echo SHADOW_TOOL. After Bash completes say SHADOW_AFTER. Then use Agent exactly once in the foreground; ask it to say exactly SHADOW_CHILD without tools. Wait for it and then say SHADOW_MAIN_DONE. No other tools. run=%d", time.Now().UnixNano()))
+	deadline := time.Now().Add(3 * perTurnReplyBudget)
+	sent := false
+	for ends < 2 {
+		read(deadline)
+		if toolWindow && !sent {
+			sealSendMessage(t, h.phone, h.initSend, 3, conv, "shadow-queued", "SHADOW_QUEUED: reply exactly SHADOW_REPLY without tools.")
+			sent = true
+		}
+	}
+	toolWindow = false
+	sealSendMessage(t, h.phone, h.initSend, 4, conv, "shadow-close", "Use Bash once in the foreground: for i in $(seq 1 15); do sleep 1; done; echo SHADOW_CLOSURE.")
+	deadline = time.Now().Add(perTurnReplyBudget)
+	for !toolWindow {
+		read(deadline)
 	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: 5, Type: protocol.TypeNewSession, TS: time.Now().UTC()})
 	deadline = time.Now().Add(rotateBudget)
 	for {
-		env, ok := nextSubagentTextEnvelope(t, h, deadline)
-		if !ok {
-			t.Fatal("session closure absent")
-		}
-		if env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeToolResult || env.Type == protocol.TypeTurnEnd {
-			legacy = append(legacy, env)
-		}
+		env := read(deadline)
 		if env.Type == protocol.TypeSessionTransition {
 			var p protocol.SessionTransitionPayload
-			_ = json.Unmarshal(env.Payload, &p)
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid closure transition")
+			}
 			if p.ConversationID == conv {
-				legacy = append(legacy, env)
 				break
 			}
 		}

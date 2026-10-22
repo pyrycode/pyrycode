@@ -69,8 +69,6 @@ package realclaude
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
@@ -83,8 +81,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
-	"github.com/pyrycode/pyrycode/internal/noise"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // Fixed identifiers for the seeded state. Single-char-repeat UUID stems are
@@ -219,10 +215,11 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// room to spare. A RED here is the honest surface for the restart-after-
 	// eviction risk — if re-activation does not reattach to the transcript, the
 	// resume turn never drains.
+	resumeSource := scenario.SourceSince(t, home, evictResumeConvID)
 	sealSendMessage(t, phone, initSend, 3, evictResumeConvID, "m-2",
 		"What was the exact token I asked you to remember earlier? "+
 			"Reply with only that token, nothing else.")
-	recallText := drainForResumedTurnText(t, phone, initRecv, evictResumeConvID, perTurnReplyBudget)
+	recallText := scenario.CompletedTurn(t, scenario.PollingReceive(t, phone, initRecv), evictResumeConvID, perTurnReplyBudget, false, resumeSource)
 
 	// Assert continuity (AC4): a true --resume reloads the transcript and recalls
 	// the token; a forked fresh spawn would not → RED. Case-fold Contains tolerates
@@ -287,95 +284,6 @@ func spawnBootstrapDaemonWithIdle(t *testing.T, home, workdir, claudeBin, relayU
 		t.Fatalf("realclaude: daemon not ready: %v\nstderr:\n%s", err, stderr.String())
 	}
 	return d
-}
-
-// drainForResumedTurnText is a fork of drainForCompletedTurn
-// (interactive_stream_liveness_test.go): same M1(non-empty assistant_delta)→
-// M2(terminal turn_state{idle}) milestones and the same in-order noise-decrypt
-// discipline (the receive nonce is sequential, so every noise_msg MUST be
-// decrypted in order; a non-noise_msg control frame is skipped without decrypting).
-// The one behavioural delta: it ACCUMULATES every matching delta's Text and RETURNS
-// the concatenation at M2, so the caller can match the planted token against the
-// full reply. Distinct name from #1173's drainForCompletedTurnText (not on main; a
-// shared name would redeclare once #1173 lands).
-func drainForResumedTurnText(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
-	t.Helper()
-	sawDelta := false
-	var sb strings.Builder
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the resume turn never "+
-					"drained end-to-end (the re-activation did not recover --session-id→--resume, or delivery never "+
-					"reached the respawned child)", convID, timeout)
-			}
-			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
-				"the resume turn opened but never closed", convID, timeout)
-		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the milestone-specific t.Fatalf above
-			}
-			t.Fatalf("phone receive (resume drain): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (resume drain): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) does not advance the
-			// receive nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (resume drain): %v", err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (resume drain): %v", err)
-		}
-		switch env.Type {
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID != convID {
-				continue
-			}
-			// Accumulate every chunk for the driving conv (the token may span deltas
-			// or be wrapped in punctuation). M1: a non-empty streamed delta marks the
-			// turn live — no content/echo assertion here (real claude is
-			// non-deterministic); the planted-token match is the caller's job.
-			sb.WriteString(p.Text)
-			if !sawDelta && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
-			}
-		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			// M2: after the delta, the terminal idle state closes the turn — return
-			// the accumulated reply text for the token match.
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("M2: terminal turn_state{idle} for %q — the resume turn closed (%d bytes captured)", convID, sb.Len())
-				return sb.String()
-			}
-		}
-	}
 }
 
 // waitForIdleEvictionWARN polls the daemon's captured stderr until it carries the

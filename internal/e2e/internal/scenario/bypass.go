@@ -41,8 +41,9 @@ func BypassQuestions(t *testing.T, w Wire, c BypassQuestionsConfig) {
 			}
 			values = append(values, options[len(options)-2].Label, c.FreeText)
 		}
+		after, _ := QuestionBoundary(t, w.Source, c.ConversationID)
 		w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: fmt.Sprintf("bypass-answer-%d", i), Answers: []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: values}}})
-		text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.Budget, w.Source)
+		text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.Budget, after)
 		for _, value := range values {
 			if !strings.Contains(strings.ToLower(text), strings.ToLower(value)) {
 				t.Fatal("bypass continuation omitted an answer value")

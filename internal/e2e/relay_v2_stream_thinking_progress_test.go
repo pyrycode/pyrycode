@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,7 +165,8 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 	// Interactive, and load-bearing: a non-interactive handshake yields zero frames, which
 	// the silent test would read as a pass. The crossing test is what catches that.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
-	sealSend, nextEnv := sealedConnDriver(t, phoneA, "phone A", sendA, recvA)
+	source := scenario.NewSourceObserver(t, home)
+	sealSend, nextEnv := sealedConnDriver(t, phoneA, "phone A", sendA, recvA, source)
 
 	sealSend(protocol.Envelope{
 		ID:   thinkingProgressSendReqID,
@@ -178,6 +181,21 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 
 	var obs thinkingProgressObservation
 	deadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, thinkingProgressNeedle) {
+				obs.sawNeedle = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnv(deadline)
 		if !ok {
@@ -192,16 +210,7 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 			obs.progress = append(obs.progress, append(json.RawMessage(nil), env.Payload...))
 		case protocol.TypeUnrecognizedMessage:
 			obs.unrecognized++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, thinkingProgressNeedle) {
-				obs.sawNeedle = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 	return obs

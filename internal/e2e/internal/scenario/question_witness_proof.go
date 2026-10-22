@@ -61,17 +61,6 @@ func ObserveWitnessAnswer(env protocol.Envelope, convID, batchID string, text *s
 			return errors.New("question dismissal does not match original remote answer")
 		}
 		*dismissed = true
-	case protocol.TypeAssistantDelta:
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			return err
-		}
-		if d.ConversationID == convID {
-			text.WriteString(d.Text)
-			if d.Text != "" {
-				*idle = false
-			}
-		}
 	case protocol.TypeTurnState:
 		var st protocol.TurnStatePayload
 		if err := json.Unmarshal(env.Payload, &st); err != nil {
@@ -79,6 +68,24 @@ func ObserveWitnessAnswer(env protocol.Envelope, convID, batchID string, text *s
 		}
 		if st.ConversationID == convID {
 			*idle = st.State == "idle"
+		}
+	}
+	return nil
+}
+
+// ObserveWitnessSource consumes neutral retained continuation facts.
+func ObserveWitnessSource(entry history.Entry, convID string, text *strings.Builder, idle *bool) error {
+	if entry.Type != protocol.TypeAssistantDelta {
+		return nil
+	}
+	var p protocol.AssistantDeltaPayload
+	if err := json.Unmarshal(entry.Payload, &p); err != nil {
+		return err
+	}
+	if p.ConversationID == convID && p.ParentToolUseID == "" {
+		text.WriteString(p.Text)
+		if p.Text != "" {
+			*idle = false
 		}
 	}
 	return nil

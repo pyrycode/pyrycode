@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +242,7 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 	// and the reconcile both gate on the capability, so a non-interactive handshake
 	// yields zero frames and a vacuously red test that looks exactly like a missing
 	// seam. The token is passed, never printed.
+	source := scenario.NewSourceObserver(t, home)
 	dialInteractive := func(name, token string) (func(protocol.Envelope), func(time.Time) (protocol.Envelope, bool)) {
 		t.Helper()
 		dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -250,7 +253,7 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 		}
 		t.Cleanup(func() { _ = phone.Close() })
 		send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-		return sealedConnDriver(t, phone, name, send, recv)
+		return sealedConnDriver(t, phone, name, send, recv, source)
 	}
 
 	var obs lateRosterObservation
@@ -340,6 +343,21 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 		}),
 	})
 	turnDeadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, lateRosterEchoNeedle) {
+				obs.sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnvA(turnDeadline)
 		if !ok {
@@ -352,16 +370,7 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 			t.Fatalf("unexpected error envelope during the turn: %s", string(env.Payload))
 		case protocol.TypeBackgroundTaskRoster:
 			obs.rostersOnMinter++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, lateRosterEchoNeedle) {
-				obs.sawEcho = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 
@@ -380,6 +389,14 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 	// nonce that is in sequence.
 	_, nextEnvB := dialInteractive("phone-b", tokens[2])
 	collectDeadline := time.Now().Add(20 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeTurnState, protocol.TypeTurnEnd:
+			obs.turnFramesOnObserver++
+
+		}
+	}
+
 	for !obs.found {
 		env, ok := nextEnvB(collectDeadline)
 		if !ok {
@@ -418,8 +435,6 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 			switch env.Type {
 			case protocol.TypeError:
 				t.Fatalf("unexpected error envelope on phone-b after the first roster: %s", string(env.Payload))
-			case protocol.TypeTurnState, protocol.TypeTurnEnd:
-				obs.turnFramesOnObserver++
 			case protocol.TypeBackgroundTaskRoster:
 				obs.extraOnObserver++ // counted, never decoded, never printed
 			}

@@ -5,6 +5,8 @@ package realclaude
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -25,12 +27,20 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 	hold := newStopHoldOperation(t, h.workdir, fifo)
 	reader := newStopTaskReader(t, h)
 	declarePhysicalRecording(t, h.home, "stop-hold", 1, hold.prompt())
+	source := scenario.NewSourceObserver(t, h.home)
+	source.Watch(convID)
 	sealSendMessage(t, h.phone, h.initSend, 27960, convID, "stop-held-task", hold.prompt())
 	setup := stopHeldTaskSetup{hold: hold}
+	source.OnEntry = func(entry history.Entry) {
+		if err := setup.observeSource(entry, convID, fifo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll := func(d time.Time) protocol.Envelope { env, _ := reader.receive(t, time.Until(d)); return env }
 	var taskID string
 	deadline := time.Now().Add(perTurnReplyBudget)
 	for taskID == "" {
-		env, ok := reader.receive(t, min(100*time.Millisecond, time.Until(deadline)))
+		env, ok := source.Next(poll, deadline)
 		if !ok {
 			if time.Now().After(deadline) {
 				t.Fatalf("held task setup timed out: %s fifo_arrived=%t", setup.diagnostic(), stopTaskFIFOArrived(arrived))
@@ -104,12 +114,20 @@ type stopHeldTaskSetup struct {
 }
 
 func (s *stopHeldTaskSetup) observe(env protocol.Envelope, convID, fifo string) error {
-	switch env.Type {
+	return s.observePayload(env.Type, env.Payload, convID, fifo)
+}
+
+func (s *stopHeldTaskSetup) observeSource(entry history.Entry, convID, fifo string) error {
+	return s.observePayload(entry.Type, entry.Payload, convID, fifo)
+}
+
+func (s *stopHeldTaskSetup) observePayload(kind string, payload json.RawMessage, convID, fifo string) error {
+	switch kind {
 	case protocol.TypeError:
 		return fmt.Errorf("request refused")
 	case protocol.TypeToolUse:
 		var p protocol.ToolUsePayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("decode tool use")
 		}
 		if p.ConversationID == convID {
@@ -135,7 +153,7 @@ func (s *stopHeldTaskSetup) observe(env protocol.Envelope, convID, fifo string) 
 		}
 	case protocol.TypeBackgroundTaskStarted:
 		var p protocol.BackgroundTaskStartedPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("decode task start")
 		}
 		if p.ConversationID == convID {
@@ -146,7 +164,7 @@ func (s *stopHeldTaskSetup) observe(env protocol.Envelope, convID, fifo string) 
 		}
 	case protocol.TypeBackgroundTaskRoster:
 		var p protocol.BackgroundTaskRosterPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("decode task roster")
 		}
 		if p.ConversationID == convID {

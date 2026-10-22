@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"io"
 	"os"
 	"os/exec"
@@ -36,27 +38,41 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 	defer release()
 	backgroundPrompt := rafcapPrompt(background, daemonRecordingNonce(t, time.Now().UnixNano()))
 	declarePhysicalRecording(t, h.home, "composer-background", 1, backgroundPrompt)
+	source := scenario.NewSourceObserver(t, h.home)
+	source.Watch(convID)
+	poll := scenario.PollingReceive(t, h.phone, h.initRecv)
+	next := func(deadline time.Time) protocol.Envelope {
+		env, ok := source.Next(poll, deadline)
+		if !ok {
+			t.Fatal("composer source/live deadline")
+		}
+		if env.Type == protocol.TypeError || env.Type == protocol.TypeUnrecognizedMessage {
+			t.Fatal("composer live alarm")
+		}
+		return env
+	}
 	sealSendMessage(t, h.phone, h.initSend, 27750, convID, "composer-background", backgroundPrompt)
 	var setup stopHeldTaskSetup
 	ended := false
+	source.OnEntry = func(entry history.Entry) {
+		if err := setup.observeSource(entry, convID, background); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Type == protocol.TypeTurnEnd {
+			var p protocol.TurnEndPayload
+			if json.Unmarshal(entry.Payload, &p) != nil || p.StopReason != "end_turn" {
+				t.Fatal("setup source reason")
+			}
+			ended = true
+		}
+	}
 	deadline := time.Now().Add(perTurnReplyBudget)
 	for setup.taskID() == "" || !ended {
-		env := composerReceive(t, h, deadline)
+		env := next(deadline)
 		if err := setup.observe(env, convID, background); err != nil {
 			t.Fatalf("background setup: %v; %s", err, setup.diagnostic())
 		}
-		if env.Type == protocol.TypeTurnEnd {
-			var p protocol.TurnEndPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal("decode setup turn end")
-			}
-			if p.ConversationID == convID {
-				if p.StopReason != "end_turn" {
-					t.Fatalf("setup turn ended with %q", p.StopReason)
-				}
-				ended = true
-			}
-		}
+
 	}
 	composerRendezvous(t, arrived)
 	composerRequireReader(t, background, fifoLiveReaderPresent)
@@ -64,24 +80,27 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 	defer releaseForeground()
 	foregroundPrompt := composerForegroundPrompt(foregroundCommand, daemonRecordingNonce(t, time.Now().UnixNano()))
 	declarePhysicalRecording(t, h.home, "composer-foreground", 2, foregroundPrompt)
-	sealSendMessage(t, h.phone, h.initSend, 27751, convID, "composer-foreground", foregroundPrompt)
-	deadline = time.Now().Add(perTurnReplyBudget)
-	for {
-		env := composerReceive(t, h, deadline)
-		if env.Type == protocol.TypeTurnEnd || env.Type == protocol.TypeError {
-			t.Fatal("foreground turn ended or refused before held call")
+	source.Watch(convID)
+	heldCall := false
+	source.OnEntry = func(entry history.Entry) {
+		if entry.Type == protocol.TypeTurnEnd {
+			t.Fatal("foreground ended before stop")
 		}
-		if env.Type != protocol.TypeToolUse {
-			continue
+		if entry.Type != protocol.TypeToolUse {
+			return
 		}
 		var p protocol.ToolUsePayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			t.Fatal("decode foreground tool")
+		if json.Unmarshal(entry.Payload, &p) != nil {
+			t.Fatal("invalid foreground source")
 		}
-		if p.ConversationID == convID && p.Name == "Bash" && p.Input["command"] == foregroundCommand && p.Input["run_in_background"] != "true" {
-			break
-		}
+		heldCall = p.ConversationID == convID && p.ParentToolUseID == "" && p.Name == "Bash" && p.Input["command"] == foregroundCommand && p.Input["run_in_background"] != "true"
 	}
+	sealSendMessage(t, h.phone, h.initSend, 27751, convID, "composer-foreground", foregroundPrompt)
+	deadline = time.Now().Add(perTurnReplyBudget)
+	for !heldCall {
+		next(deadline)
+	}
+
 	// The exact tool input above establishes identity, and the arrival file
 	// witnesses actual shell execution. The command can finish only when the
 	// rig creates its release file. Confirm its process is still live before Stop.
@@ -90,12 +109,25 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 		t.Fatalf("foreground not held before Composer Stop: %v", err)
 	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: 27752, Type: protocol.TypeInterrupt, TS: time.Now().UTC()})
-	drainForCancelledTurnEnd(t, h.phone, h.initRecv, convID, perTurnReplyBudget, false)
+	cancelled := false
+	source.OnEntry = func(entry history.Entry) {
+		if entry.Type == protocol.TypeTurnEnd {
+			var p protocol.TurnEndPayload
+			if json.Unmarshal(entry.Payload, &p) != nil || p.StopReason != "cancelled" {
+				t.Fatal("foreground cancellation reason")
+			}
+			cancelled = true
+		}
+	}
+	deadline = time.Now().Add(perTurnReplyBudget)
+	for !cancelled {
+		next(deadline)
+	}
 	composerRequireReader(t, background, fifoLiveReaderPresent)
 	release()
 	deadline = time.Now().Add(perTurnReplyBudget)
 	for {
-		env := composerReceive(t, h, deadline)
+		env := next(deadline)
 		if env.Type != protocol.TypeBackgroundTaskUpdated {
 			continue
 		}

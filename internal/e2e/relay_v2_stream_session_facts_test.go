@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"sort"
 	"strings"
 	"testing"
@@ -155,7 +156,9 @@ func driveSessionFactsTurn(t *testing.T, riderValue string) sessionFactsObservat
 	// making the rider-off half vacuously green — the arrival half is what catches it.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -168,34 +171,8 @@ func driveSessionFactsTurn(t *testing.T, riderValue string) sessionFactsObservat
 		sendNoiseMsg(t, phoneA, ciphertext)
 	}
 
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			// The receive nonce is sequential, so every noise_msg MUST be decrypted in
-			// receive order — filter AFTER decrypting, never before, or the CipherState
-			// desyncs and every later decrypt fails with a misleading error. A
-			// non-noise_msg control frame does not advance the nonce and is skipped.
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recvA), true
-		}
-	}
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) { return source.Next(poll, deadline) }
 
 	sealSend(protocol.Envelope{
 		ID:   sessionFactsSendReqID,
@@ -215,6 +192,21 @@ func driveSessionFactsTurn(t *testing.T, riderValue string) sessionFactsObservat
 	// been through the parser: no sleep, no poll, no ordering race to tune.
 	var obs sessionFactsObservation
 	deadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, sessionFactsEchoNeedle) {
+				obs.sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnv(deadline)
 		if !ok {
@@ -231,16 +223,7 @@ func driveSessionFactsTurn(t *testing.T, riderValue string) sessionFactsObservat
 			obs.sessionFacts = append(obs.sessionFacts, append(json.RawMessage(nil), env.Payload...))
 		case protocol.TypeUnrecognizedMessage:
 			obs.unrecognized++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, sessionFactsEchoNeedle) {
-				obs.sawEcho = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 	return obs

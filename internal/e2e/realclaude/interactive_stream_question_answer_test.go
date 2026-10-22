@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"strings"
 	"testing"
 	"time"
@@ -91,13 +92,18 @@ func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.Cip
 // raiseRealQuestionBatch asserts a nonempty batch before any answer is sent.
 func raiseRealQuestionBatch(t *testing.T, h *perConvHarness, reqID uint64, convID, triggerPrompt string, prior ...*strings.Builder) protocol.QuestionShownPayload {
 	t.Helper()
+	source := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), triggerPrompt)
 	var collected *strings.Builder
 	if len(prior) > 0 {
 		collected = prior[0]
 	}
-	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, collected, nil)
+	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, nil)
 
+	if collected != nil {
+		_, pre := scenario.QuestionBoundary(t, source, convID)
+		collected.WriteString(pre)
+	}
 	var batch protocol.QuestionShownPayload
 	if err := json.Unmarshal(env.Payload, &batch); err != nil {
 		t.Fatalf("decode question_shown payload: %v", err)
@@ -157,30 +163,12 @@ func (p *questionAnswerTurn) observe(env protocol.Envelope) error {
 	return scenario.ObserveWitnessAnswer(env, p.convID, p.batchID, &p.text, &p.dismissed, &p.idle)
 }
 
-func (p *questionAnswerTurn) complete() bool {
-	return scenario.WitnessAnswerComplete(p.witness, p.text.String(), p.dismissed, p.idle)
+func (p *questionAnswerTurn) observeSource(entry history.Entry) error {
+	return scenario.ObserveWitnessSource(entry, p.convID, &p.text, &p.idle)
 }
 
-func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID, witness string, timeout time.Duration) string {
-	t.Helper()
-	proof := questionAnswerTurn{convID: convID, batchID: batchID, witness: witness}
-	deadline := time.Now().Add(timeout)
-	for {
-		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
-		if !ok {
-			t.Fatalf("answer proof incomplete: dismissal=%v idle=%v; continuation=%q", proof.dismissed, proof.idle, truncateString(proof.text.String(), questionTextLogCap))
-		}
-		if env.Type == protocol.TypeToolResult {
-			t.Logf("question tool result: %q", truncateString(string(env.Payload), questionTextLogCap))
-		}
-		if err := proof.observe(env); err != nil {
-			t.Fatal(err)
-		}
-		if proof.complete() {
-			t.Logf("answered continuation: %q", truncateString(proof.text.String(), questionTextLogCap))
-			return proof.text.String()
-		}
-	}
+func (p *questionAnswerTurn) complete() bool {
+	return scenario.WitnessAnswerComplete(p.witness, p.text.String(), p.dismissed, p.idle)
 }
 
 // receiveQuestionEnvelope decrypts every Noise frame in order. Transport controls
@@ -243,7 +231,7 @@ func checkQuestionControl(env protocol.Envelope, parked *protocol.QuestionShownP
 
 // Retain pre-answer prose and reject resolution while the question must remain
 // outstanding, including during an in-band model update.
-func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, prior *strings.Builder, parked *protocol.QuestionShownPayload) protocol.Envelope {
+func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, parked *protocol.QuestionShownPayload) protocol.Envelope {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -254,12 +242,8 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 		if err := checkQuestionControl(env, parked); err != nil {
 			t.Fatal(err)
 		}
-		if env.Type == protocol.TypeAssistantDelta && prior != nil {
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			prior.WriteString(p.Text)
+		if env.Type == protocol.TypeAssistantDelta {
+			t.Fatal("retired pre-answer text reached app")
 		}
 		if env.Type == want {
 			return env

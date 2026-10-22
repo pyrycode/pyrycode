@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +98,38 @@ func TestRelayV2_StreamBackgroundConversationTailReachesHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
-	sealSend, nextEnv := sealedConnDriver(t, phone, "phone", send, recv)
+	type seen struct{ toolResult, reply, turnEnd bool }
+	got := map[string]*seen{bgConvA: {}}
+	tools := map[string]bool{}
+	source := scenario.NewSourceObserver(t, home)
+	source.OnEntry = func(entry history.Entry) {
+		var p struct {
+			Conversation string `json:"conversation_id"`
+			Text         string `json:"text"`
+			Parent       string `json:"parent_tool_use_id"`
+		}
+		if json.Unmarshal(entry.Payload, &p) != nil {
+			t.Fatal("invalid background source")
+		}
+		if p.Parent != "" {
+			return
+		}
+		state := got[p.Conversation]
+		if state == nil {
+			t.Fatal("foreign background source")
+		}
+		switch entry.Type {
+		case protocol.TypeToolUse:
+			tools[p.Conversation] = true
+		case protocol.TypeToolResult:
+			state.toolResult = true
+		case protocol.TypeAssistantDelta:
+			state.reply = state.reply || strings.Contains(p.Text, bgConvNeedle)
+		case protocol.TypeTurnEnd:
+			state.turnEnd = true
+		}
+	}
+	sealSend, nextEnv := sealedConnDriver(t, phone, "phone", send, recv, source)
 
 	// Mint B over the wire.
 	sealSend(protocol.Envelope{ID: 27390, Type: protocol.TypeCreateConversation, TS: time.Now().UTC(),
@@ -117,6 +150,7 @@ func TestRelayV2_StreamBackgroundConversationTailReachesHistory(t *testing.T) {
 				t.Fatalf("decode conversation_created: %v", err)
 			}
 			convB = p.ID
+			got[convB] = &seen{}
 		}
 	}
 
@@ -125,23 +159,10 @@ func TestRelayV2_StreamBackgroundConversationTailReachesHistory(t *testing.T) {
 		sealSend(protocol.Envelope{ID: reqID, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
 			Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: msgID, Text: "go\n"})})
 		deadline := time.Now().Add(30 * time.Second)
-		for {
+		for !tools[convID] {
 			env, ok := nextEnv(deadline)
-			if !ok {
-				t.Fatalf("no tool_use for conversation %s; its turn never went in flight", convID)
-			}
-			if env.Type == protocol.TypeError {
-				t.Fatalf("unexpected error envelope: %s", env.Payload)
-			}
-			if env.Type != protocol.TypeToolUse {
-				continue
-			}
-			var p protocol.ToolUsePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode tool_use: %v", err)
-			}
-			if p.ConversationID == convID {
-				return
+			if !ok || env.Type == protocol.TypeError {
+				t.Fatal("no fresh source tool use")
 			}
 		}
 	}
@@ -151,8 +172,6 @@ func TestRelayV2_StreamBackgroundConversationTailReachesHistory(t *testing.T) {
 
 	// Release both tails. Each child deletes the file when it consumes it, so it is
 	// re-created whenever it is gone until both turns have ended.
-	type seen struct{ toolResult, reply, turnEnd bool }
-	got := map[string]*seen{bgConvA: {}, convB: {}}
 	deadline = time.Now().Add(30 * time.Second)
 	for !got[bgConvA].turnEnd || !got[convB].turnEnd {
 		if _, err := os.Stat(releasePath); os.IsNotExist(err) {
@@ -167,29 +186,8 @@ func TestRelayV2_StreamBackgroundConversationTailReachesHistory(t *testing.T) {
 			}
 			continue
 		}
-		var p struct {
-			ConversationID string `json:"conversation_id"`
-			Text           string `json:"text"`
-		}
-		switch env.Type {
-		case protocol.TypeToolResult, protocol.TypeAssistantDelta, protocol.TypeTurnEnd:
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode %s: %v", env.Type, err)
-			}
-		default:
-			continue
-		}
-		s, ok := got[p.ConversationID]
-		if !ok {
-			t.Fatalf("%s stamped with unknown conversation %q", env.Type, p.ConversationID)
-		}
-		switch env.Type {
-		case protocol.TypeToolResult:
-			s.toolResult = true
-		case protocol.TypeAssistantDelta:
-			s.reply = s.reply || strings.Contains(p.Text, bgConvNeedle)
-		case protocol.TypeTurnEnd:
-			s.turnEnd = true
+		if env.Type == protocol.TypeError {
+			t.Fatal("background tail refused")
 		}
 	}
 	if a := got[bgConvA]; !a.toolResult || !a.reply {

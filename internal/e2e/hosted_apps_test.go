@@ -180,7 +180,7 @@ func TestHostedAppsChannelIndependence(t *testing.T) {
 	phone, send, recv := dialPairedPhone(t, fr, home, payload.Token, pub, "phone")
 	seal, next := noiseWire(t, phone, send, recv)
 	conv := createConversationOverWire(t, seal, next, 31389)
-	sendAndAwaitEcho(t, seal, next, "initial turn", 31390, conv, "app-before-clear", "before clear", "before clear")
+	sendAndAwaitEcho(t, home, seal, next, "initial turn", 31390, conv, "app-before-clear", "before clear", "before clear")
 	pre, ok := readEntryByLabel(filepath.Join(home, ".pyry", "test", "sessions.json"), conv)
 	if !ok {
 		t.Fatal("channel session missing")

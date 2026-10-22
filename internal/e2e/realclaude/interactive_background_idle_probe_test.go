@@ -121,10 +121,9 @@ package realclaude
 // no gate.
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,6 +244,7 @@ const (
 // `interactiveTurnEmitterV2` states the package rule that application output
 // never reaches a log, and this record is pasted into a public issue.
 type bgIdleFrame struct {
+	Origin      string `json:"origin,omitempty"`
 	Index       int    `json:"index"`
 	At          string `json:"at"`
 	SinceSendMS int64  `json:"since_send_ms"`
@@ -406,6 +406,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 
 	sentAt := time.Now()
 	rec.SentAt = sentAt.Format(time.RFC3339Nano)
+	source := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, bgIdleSendID, convID, bgIdleMessageID, rec.Prompt)
 
 	// AC2's second read, taken synchronously at the instant idle is recorded.
@@ -416,7 +417,7 @@ func TestInteractiveStreamBackgroundIdleProbe(t *testing.T) {
 	}
 
 	frames, dropped, terminatedOn := bgIdleRecordTurn(t, h.phone, h.initRecv, convID,
-		sentAt, perTurnReplyBudget, atIdle)
+		sentAt, perTurnReplyBudget, atIdle, source)
 	rec.Frames = frames
 	rec.FramesDropped = dropped
 	rec.TerminatedOn = terminatedOn
@@ -485,61 +486,62 @@ func bgIdlePrompt(fifoPath string, nonce int64) string {
 // the error ONLY — adding the raw or sealed frame "to help debug it" would put
 // ciphertext and payload into CI logs.
 func bgIdleRecordTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherState,
-	convID string, sentAt time.Time, budget time.Duration, atIdle func()) (frames []bgIdleFrame, dropped int, terminatedOn string) {
+	convID string, sentAt time.Time, budget time.Duration, atIdle func(), source scenario.SourceFacts) (frames []bgIdleFrame, dropped int, terminatedOn string) {
 	t.Helper()
-	deadline := time.Now().Add(budget)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return frames, dropped, bgIdleTerminatedBudget
-		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // no frames while `cat` blocks — re-loop into the budget check
-			}
-			t.Fatalf("phone receive (recording turn): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame: %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue // non-noise_msg control frame does not advance the receive nonce
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data: %v", err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope: %v", err)
-		}
 
+	deadline := time.Now().Add(budget)
+	next := scenario.PollingReceive(t, phone, cs)
+	var mark uint64
+	record := func(f bgIdleFrame) {
 		at := time.Now()
-		f := bgIdleFrameFromEnvelope(env)
 		f.At = at.Format(time.RFC3339Nano)
 		f.SinceSendMS = at.Sub(sentAt).Milliseconds()
 		if len(frames) < bgIdleMaxFrames {
 			f.Index = len(frames)
 			frames = append(frames, f)
 		} else {
-			// The cap is never silent, and draining continues past it so the
-			// terminal-idle detection and atIdle still fire.
 			dropped++
 		}
-
-		if f.Type == protocol.TypeTurnState && f.ConversationID == convID && f.State == bgIdleStateIdle {
+	}
+	for time.Now().Before(deadline) {
+		poll := time.Now().Add(20 * time.Millisecond)
+		if deadline.Before(poll) {
+			poll = deadline
+		}
+		env := next(poll)
+		for _, e := range source(convID) {
+			if e.ID <= mark {
+				continue
+			}
+			mark = e.ID
+			switch e.Type {
+			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+				if e.Session == nil || e.Session.SessionID == "" {
+					t.Fatal("probe source lacks producing session")
+				}
+				f := bgIdleFrameFromPayload(e.Type, e.Payload)
+				f.Origin = "source"
+				record(f)
+			}
+		}
+		if env.Type == "" {
+			continue
+		}
+		switch env.Type {
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			t.Fatal("retired probe content reached app")
+		}
+		f := bgIdleFrameFromEnvelope(env)
+		f.Origin = "live"
+		record(f)
+		if f.Type == protocol.TypeTurnState && f.ConversationID == convID && f.State == bgIdleStateIdle && !env.TS.Before(sentAt) {
 			if atIdle != nil {
 				atIdle()
 			}
 			return frames, dropped, bgIdleTerminatedIdle
 		}
 	}
+	return frames, dropped, bgIdleTerminatedBudget
 }
 
 // bgIdleFrameFromEnvelope is the ONE extraction site: a five-arm allowlist plus
@@ -549,14 +551,18 @@ func bgIdleRecordTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherSta
 // offending message, protocol/`UnrecognizedMessagePayload`) and assistant_delta.text
 // out of a public issue by construction rather than by care.
 func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
-	f := bgIdleFrame{Type: env.Type}
-	if len(env.Payload) == 0 {
+	return bgIdleFrameFromPayload(env.Type, env.Payload)
+}
+
+func bgIdleFrameFromPayload(kind string, payload json.RawMessage) bgIdleFrame {
+	f := bgIdleFrame{Type: kind}
+	if len(payload) == 0 {
 		return f
 	}
-	switch env.Type {
+	switch kind {
 	case protocol.TypeTurnState:
 		var p protocol.TurnStatePayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			f.PayloadDecodeFailed = true
 			return f
 		}
@@ -564,7 +570,7 @@ func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 		f.State = p.State
 	case protocol.TypeToolUse:
 		var p protocol.ToolUsePayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			f.PayloadDecodeFailed = true
 			return f
 		}
@@ -575,7 +581,7 @@ func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 		f.InputSummary = p.InputSummary
 	case protocol.TypeToolResult:
 		var p protocol.ToolResultPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			f.PayloadDecodeFailed = true
 			return f
 		}
@@ -587,7 +593,7 @@ func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 		f.ResultSummary = p.ResultSummary
 	case protocol.TypeTurnEnd:
 		var p protocol.TurnEndPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			f.PayloadDecodeFailed = true
 			return f
 		}
@@ -596,7 +602,7 @@ func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 		f.StopReason = p.StopReason
 	case protocol.TypeAssistantDelta:
 		var p protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			f.PayloadDecodeFailed = true
 			return f
 		}
@@ -609,7 +615,7 @@ func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 		var p struct {
 			ConversationID string `json:"conversation_id"`
 		}
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(payload, &p); err != nil {
 			f.PayloadDecodeFailed = true
 			return f
 		}

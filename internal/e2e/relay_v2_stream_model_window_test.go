@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,7 +116,9 @@ func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 	t.Cleanup(func() { _ = phoneA.Close() })
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -127,14 +130,8 @@ func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 		}
 		sendNoiseMsg(t, phoneA, cipher)
 	}
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return protocol.Envelope{}, false
-		}
-		return decryptInnerEnvelope(t, readInnerFrame(t, phoneA, remaining), recvA), true
-	}
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) { return source.Next(poll, deadline) }
 	// Correlate on in_reply_to rather than on type, so a TypeError refusal is
 	// reported as the regression it is instead of being drained past into a
 	// timeout. Unsolicited frames (turn_state and friends) interleave freely.
@@ -225,7 +222,7 @@ func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 		if env.Type == protocol.TypeError {
 			t.Fatalf("unexpected error envelope during the turn: %s", string(env.Payload))
 		}
-		if env.Type == protocol.TypeTurnEnd {
+		if source.Ended(convID) {
 			sawTurnEnd = true
 		}
 	}

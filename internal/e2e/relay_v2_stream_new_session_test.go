@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"slices"
@@ -181,7 +182,9 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// Interactive — the capability handleNewSession AND the structured stream require.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -200,52 +203,13 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// ok=false on deadline.
 	// Record each turn's echo even when it precedes its send_message ack.
 	sawDelta, sawDeltaTwo := false, false
+	poll := scenario.PollingReceive(t, phoneA, recvA)
 	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			env := decryptInnerEnvelope(t, inner, recvA)
-			if env.Type == protocol.TypeAssistantDelta {
-				var d protocol.AssistantDeltaPayload
-				if err := json.Unmarshal(env.Payload, &d); err != nil {
-					t.Fatalf("phone A decode assistant_delta payload: %v", err)
-				}
-				if !sawDelta {
-					if d.ConversationID != knownConvID {
-						t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, knownConvID)
-					}
-					if !strings.Contains(d.Text, echoNeedleOne) {
-						t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
-							"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedleOne)
-					}
-					sawDelta = true
-				} else if strings.Contains(d.Text, echoNeedleTwo) {
-					if d.ConversationID != knownConvID {
-						t.Errorf("M6: post-rotation assistant_delta ConversationID: got %q, want %q — the event was forwarded "+
-							"but stamped for the wrong conversation", d.ConversationID, knownConvID)
-					}
-					sawDeltaTwo = true
-				}
-			}
-			return env, true
-		}
+		env, ok := source.Next(poll, deadline)
+		text := source.Text(knownConvID)
+		sawDelta = sawDelta || strings.Contains(text, echoNeedleOne)
+		sawDeltaTwo = sawDeltaTwo || strings.Contains(text, echoNeedleTwo)
+		return env, ok
 	}
 
 	// --- M1 (AC-1 precondition): pre-rotation baseline. Drive send_message #1 to the

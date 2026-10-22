@@ -30,12 +30,8 @@ func AwaitWitnessQuestionControl(t *testing.T, next Next, want string, budget ti
 		if err := CheckWitnessQuestionControl(env, parked); err != nil {
 			t.Fatal(err)
 		}
-		if env.Type == protocol.TypeAssistantDelta && prior != nil {
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid pre-answer text")
-			}
-			prior.WriteString(p.Text)
+		if env.Type == protocol.TypeAssistantDelta {
+			t.Fatal("retired pre-answer text delivered on wire")
 		}
 		if env.Type == want {
 			return env
@@ -152,12 +148,14 @@ func WitnessQuestionAnswer(t *testing.T, w Wire, c WitnessQuestionConfig) {
 		witness = NewQuestionWitness(t)
 	}
 	answers := ChooseWitnessAnswers(t, batch, false, witness)
+	after, preAnswer := QuestionBoundary(t, w.Source, c.ConversationID)
+	prior.WriteString(preAnswer)
 	if err := CheckQuestionWitness(witness, batch, c.Prompt, prior.String()); err != nil {
 		t.Fatal(err)
 	}
 	w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: "e2e-1987-answer-token", Answers: answers})
 	RequireWitnessAnswerHistory(t, c.Home, c.ConversationID, c.SessionID, batch, answers)
-	WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget, w.Source)
+	WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget, after)
 }
 
 type WitnessBypassConfig struct {
@@ -188,11 +186,13 @@ func WitnessBypassQuestions(t *testing.T, w Wire, c WitnessBypassConfig) {
 			witness = NewQuestionWitness(t)
 		}
 		answers := ChooseWitnessAnswers(t, batch, multi, witness)
+		after, preAnswer := QuestionBoundary(t, w.Source, c.ConversationID)
+		prior.WriteString(preAnswer)
 		if err := CheckQuestionWitness(witness, batch, prompt, prior.String()); err != nil {
 			t.Fatal(err)
 		}
 		w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: fmt.Sprintf("bypass-answer-%d", 3+i*2), Answers: answers})
-		text := WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget, w.Source)
+		text := WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget, after)
 		prior.WriteString(text)
 		n := 1
 		if multi {

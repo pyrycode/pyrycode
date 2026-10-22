@@ -138,6 +138,54 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 	}
 }
 
+// QuestionBoundary separates pre-answer prose from continuation while retaining
+// the parked turn's producing identity. A predecessor cannot answer a successor.
+func QuestionBoundary(t *testing.T, source SourceFacts, conv string) (SourceFacts, string) {
+	t.Helper()
+	if source == nil {
+		t.Fatal("question requires source observation")
+	}
+	entries := source(conv)
+	var before sourceTurn
+	before.feed(t, conv, entries)
+	if before.turn == "" {
+		for _, e := range entries {
+			var p struct {
+				Conversation string `json:"conversation_id"`
+				Turn         string `json:"turn_id"`
+				Parent       string `json:"parent_tool_use_id"`
+			}
+			if json.Unmarshal(e.Payload, &p) == nil && p.Conversation == conv && p.Parent == "" && p.Turn != "" && e.Session != nil && e.Type == protocol.TypeToolUse {
+				before.turn, before.session = p.Turn, *e.Session
+			}
+		}
+	}
+	mark := before.watermark
+	return func(id string) []history.Entry {
+		if id != conv {
+			t.Fatal("question boundary crossed conversations")
+		}
+		var after []history.Entry
+		for _, e := range source(conv) {
+			if e.ID <= mark {
+				continue
+			}
+			var p struct {
+				Conversation string `json:"conversation_id"`
+				Turn         string `json:"turn_id"`
+				Parent       string `json:"parent_tool_use_id"`
+			}
+			if json.Unmarshal(e.Payload, &p) != nil {
+				t.Fatal("invalid question source")
+			}
+			if p.Conversation == conv && p.Parent == "" && (before.turn == "" || (p.Turn == before.turn && e.Session != nil && *e.Session == before.session)) {
+				after = append(after, e)
+			}
+		}
+		return after
+	}, before.text.String()
+}
+
 func sourceFacts(t *testing.T, sources []SourceFacts, conv string) []history.Entry {
 	t.Helper()
 	if len(sources) != 1 || sources[0] == nil {

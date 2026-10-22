@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,54 +19,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// TestRelayV2_StreamInterruptStopsRunningTurn is the LIVE, end-to-end proof that a
-// phone-originated interrupt is honoured PER CONVERSATION under
-// interactive_runner:"stream-json" (#1136). #1141 proved one send_message drains on
-// the stream path; this proves the next behaviour on that path — an interrupt ends
-// the running turn — with a fakeclaude that is genuinely mid-turn when the interrupt
-// arrives.
-//
-// The production interrupt path is shipped and unit-tested: the streamsup primitive
-// ((*streamsup.Runner).Interrupt() → a control_request line, #1120), the
-// per-conversation routing (activeInterrupter → resolveBoundRunner → the active
-// conversation's bound runner, #1121), and the parser's interrupt classification
-// (error_during_execution → cancelled, #1120). This spec is the first time all of
-// them run TOGETHER, live, over the stream toggle:
-//
-//	phone create_conversation → daemon mints session-B (stream RunnerFactory) →
-//	  fakeclaude-B (interrupt mode)
-//	phone send_message(convB,"…go") → sessionRouter.Route [stamps active = convB] →
-//	  boundSession.WriteUserTurn → streamsup WriteTurn → {"type":"user",…} →
-//	  fakeclaude-B echoes {"type":"assistant",…} (NO result — the turn stays in flight)
-//	  → daemon Parser → TextChunk → drain gate (session-B == active ✓) → emitter →
-//	  turn_state{responding} → assistant_delta{"…go"}                          ── M1 (AC1)
-//	phone interrupt (no payload) → handleInterrupt → activeInterrupter.SendEsc() →
-//	  active=convB → resolveBoundRunner(convB) → session-B.Runner() →
-//	  streamRunner.Interrupt() → WriteInterrupt → {"type":"control_request",…} →
-//	  fakeclaude-B stdin → fakeclaude-B: {"type":"result","subtype":"error_during_execution"}
-//	  → daemon Parser → TurnEnd{Cancelled} → drain gate (session-B == active ✓) →
-//	  emitter → turn_end{StopReason:"cancelled"} → turn_state{idle}            ── M2 (AC2/AC3)
-//
-// THE TARGET IS A *MINTED* CONVERSATION (its own, non-bootstrap runner). This is what
-// makes the e2e exercise #1121's routing. Had the target been bootstrap-bound (as in
-// #1141's send test), resolveBoundRunner would return the bootstrap runner —
-// indistinguishable from the pre-#1121 bug (interrupt → bootstrap). Minting forces the
-// interrupt to reach session-B's OWN child. The idle bootstrap session is the other
-// conversation running concurrently under the same daemon, and it is provably not the
-// target: under the pre-#1121 bug the interrupt would hit the (non-active) bootstrap →
-// no observable turn_end → M2 times out. Correct routing → turn_end{cancelled, convB}.
-// So M2 IS the live isolation proof (AC3). Runner-level cross-conversation isolation is
-// unit-owned by #1121 (interrupt_routing_test.go), deterministically — the belt; the
-// e2e is a different fabric confirming the wired target.
-//
-// VACUOUS-PASS GUARD (the stream analogue of the PTY sibling's, relay_v2_interrupt_test.go).
-// The fake emits NO result on the user turn, so the ONLY source of a turn_end is its
-// response to the interrupt control_request (structural causality: a turn_end ⟺ the
-// interrupt was received and honoured). Asserting StopReason == "cancelled" (a
-// spontaneous end would be "end_turn") is a second, independent guard. M1-before /
-// M2-after ordering is the third. The stream path CAN assert StopReason — the PTY
-// sibling cannot (tui-driver's EventKindJsonlEndOfTurn can't distinguish an
-// interrupt-stop from a clean end); this is the distinguishing rigour of the stream path.
+// TestRelayV2_StreamInterruptStopsRunningTurn requires a fresh source echo,
+// a cancelled source end from that producing turn and actual terminal live idle.
 func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	const (
 		initialUUID    = "11111111-1111-4111-8111-111111111111" // bootstrap
@@ -119,7 +74,9 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// Interactive — the capability both the structured stream AND handleInterrupt require.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -150,59 +107,38 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// Keep M1's echo through the ack wait on the same single reader.
 	var convB string
 	sawDelta := false
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			env := decryptInnerEnvelope(t, inner, recvA)
-			if env.Type == protocol.TypeUnrecognizedMessage {
-				var p protocol.UnrecognizedMessagePayload
-				if err := json.Unmarshal(env.Payload, &p); err != nil {
-					t.Fatalf("phone A decode unrecognized_message payload: %v", err)
-				}
-				t.Fatalf("an unrecognized_message reached the phone during the interrupt: site=%q type=%q truncated=%v\n"+
-					"raw: %s\n\n"+
-					"The interrupt ack is the expected culprit (#1500): the daemon writes an interrupt "+
-					"control_request to the child's stdin and the child answers on the SAME stdout the parser "+
-					"reads, so a missing control_response arm in streamsup.consumeLine turns every interrupt into "+
-					"this frame — the one frame whose whole value is meaning \"claude started emitting something "+
-					"NEW\". Read the type above: if it is control_response the arm regressed; anything else means "+
-					"the fake grew a shape the parser has no mapping for.",
-					p.Site, p.MessageType, p.Truncated, p.Raw)
-			}
-			if env.Type == protocol.TypeAssistantDelta && convB != "" && !sawDelta {
-				var d protocol.AssistantDeltaPayload
-				if err := json.Unmarshal(env.Payload, &d); err != nil {
-					t.Fatalf("phone A decode assistant_delta payload: %v", err)
-				}
-				if d.ConversationID != convB {
-					t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, convB)
-				}
-				if !strings.Contains(d.Text, echoNeedle) {
-					t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
-						"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedle)
-				}
-				sawDelta = true
-			}
-			return env, true
+	sawInterruptedEnd := false
+	source.OnEntry = func(entry history.Entry) {
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			Text           string `json:"text"`
+			Parent         string `json:"parent_tool_use_id"`
+			Reason         string `json:"stop_reason"`
 		}
+		if json.Unmarshal(entry.Payload, &p) != nil {
+			t.Fatal("invalid interrupt source")
+		}
+		if p.ConversationID != convB || p.Parent != "" {
+			return
+		}
+		if entry.Type == protocol.TypeAssistantDelta && strings.Contains(p.Text, echoNeedle) {
+			sawDelta = true
+		}
+		if entry.Type == protocol.TypeTurnEnd {
+			if p.Reason != "cancelled" {
+				t.Fatal("interrupt source did not end cancelled")
+			}
+			sawInterruptedEnd = true
+		}
+	}
+
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
+		env, ok := source.Next(poll, deadline)
+		if env.Type == protocol.TypeUnrecognizedMessage {
+			t.Fatal("interrupt exposed an unsupported provider message")
+		}
+		return env, ok
 	}
 
 	// --- Mint the target conversation over the wire. All-null create_conversation
@@ -303,74 +239,17 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// turn_end arrives for convB at all proves the interrupt reached the minted
 	// conversation's own bound runner (not the idle bootstrap) — the live routing-target
 	// confirmation (AC3).
-	sawInterruptedEnd := false
 	m2Deadline := time.Now().Add(15 * time.Second)
 	for !sawInterruptedEnd {
-		env, ok := nextEnv(m2Deadline)
-		if !ok {
-			t.Fatal("M2: never observed a turn_end after the interrupt; the interrupt did not stop the turn " +
-				"(it never routed to the minted conversation's bound runner, or the fake never honoured the control_request). " +
-				"The fake emits NO result on the user turn, so the ONLY source of a turn_end is its interrupt response")
+		if _, ok := nextEnv(m2Deadline); !ok {
+			t.Fatal("no matching cancelled source and terminal live idle")
 		}
-		if env.Type != protocol.TypeTurnEnd {
-			continue
-		}
-		var te protocol.TurnEndPayload
-		if err := json.Unmarshal(env.Payload, &te); err != nil {
-			t.Fatalf("phone A decode turn_end payload: %v", err)
-		}
-		if te.ConversationID != convB {
-			t.Errorf("turn_end ConversationID: got %q, want %q", te.ConversationID, convB)
-		}
-		if te.StopReason != "cancelled" {
-			t.Fatalf("M2: turn_end StopReason = %q, want %q (a spontaneous end would be \"end_turn\"; \"cancelled\" "+
-				"confirms the fake took the error_during_execution path in response to the interrupt control_request)",
-				te.StopReason, "cancelled")
-		}
-		sawInterruptedEnd = true
 	}
 	t.Logf("M2: observed turn_end{StopReason:cancelled} for the minted conversation — the interrupt stopped the turn (AC2/AC3)")
 }
 
-// TestRelayV2_StreamInterruptNamedConversationStopsThatOne is #2103's fake-daemon
-// proof: with the daemon's current-conversation cursor parked on A, an interrupt
-// naming B stops B's turn and leaves A's running. Its bare-path sibling above stays
-// exactly as it was — that is the shape an un-upgraded client sends.
-//
-// THE SEND ORDER IS FORCED, not chosen. A conversation is mid-turn only after a
-// send, and the cursor is stamped only by a successful sessionRouter.Route, so the
-// conversation that must own the cursor has to be sent to LAST. It cannot be
-// re-stamped afterwards either: a second send to a conversation whose turn is in
-// flight blocks on streamTurnHoldTimeout, which is fifteen minutes. Hence B, then A.
-//
-//	M1  mint B         — create_conversation; since #2085 this binds B's session
-//	                     without spawning its child.
-//	M2  send to B      — B's child comes up, B's turn goes in flight, cursor = B.
-//	M3  send to A      — A's turn goes in flight and the cursor moves to A. This is
-//	                     the step that makes the test able to fail: with the cursor
-//	                     on A, a daemon that ignored the named id stops A.
-//	M4  interrupt B    — the frame under test.
-//
-// The assertion is a trio, and each member covers the others' blind spot:
-//
-//	(a) v2.interrupt.dispatched carrying B's conversation id. Proves the frame
-//	    arrived, resolved B and dispatched to B's bound runner. Under the pre-#2103
-//	    daemon the identical record carries A's id, so the ID is the discriminator,
-//	    not the record's existence.
-//	(b) B's turn_end on the wire, stamped with B's id. Before #2739 the drain
-//	    dropped every event of a non-active conversation, so this frame could not
-//	    exist with the cursor on A and the test waited for the drop record instead.
-//	    It is not a proxy for the actuation: fakeclaude's interrupt mode emits no
-//	    result on a user turn, so the only possible source of a TurnEnd for B is its
-//	    response to the interrupt control_request.
-//	(c) no turn_end for A on the wire. Under the #2103 defect the interrupt stops A
-//	    and turn_end{convA,cancelled} arrives. This is the live, on-the-wire form of
-//	    "A's turn is still in flight".
-//
-// (c) runs LAST because it is destructive: it ends on a receive that reaches its
-// deadline, and a timed-out fakephone receive takes the conn down with it (see
-// waitForLog's doc). Ordering it before the log assertions would report the
-// resulting death as an unrelated failure.
+// TestRelayV2_StreamInterruptNamedConversationStopsThatOne keeps both turns
+// running, interrupts B while the cursor is on A, and verifies A stays open.
 func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111" // bootstrap, bound to conversation A
@@ -437,7 +316,9 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 	t.Cleanup(func() { _ = phoneA.Close() })
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -452,29 +333,38 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 
 	// One reader for the whole test so the receive CipherState nonce stays in
 	// sequence; ok=false on deadline.
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recvA), true
+	echoes := map[string]string{}
+	ends := map[string]string{}
+	sessions := map[string]string{}
+	source.OnEntry = func(entry history.Entry) {
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			Text           string `json:"text"`
+			Parent         string `json:"parent_tool_use_id"`
+			Reason         string `json:"stop_reason"`
 		}
+		if json.Unmarshal(entry.Payload, &p) != nil {
+			t.Fatal("invalid named interrupt source")
+		}
+		if p.Parent != "" {
+			return
+		}
+		sessions[p.ConversationID] = entry.Session.SessionID
+		if entry.Type == protocol.TypeAssistantDelta {
+			echoes[p.ConversationID] += p.Text
+		}
+		if entry.Type == protocol.TypeTurnEnd {
+			ends[p.ConversationID] = p.Reason
+		}
+	}
+
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
+		env, ok := source.Next(poll, deadline)
+		if env.Type == protocol.TypeUnrecognizedMessage {
+			t.Fatal("interrupt exposed an unsupported provider message")
+		}
+		return env, ok
 	}
 
 	// sendAndAwaitEcho drives one send_message and drains to the assistant_delta
@@ -496,27 +386,20 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 			}),
 		})
 		deadline := time.Now().Add(30 * time.Second)
-		for {
+		acked := false
+		for !acked || !strings.Contains(echoes[convID], needle) {
 			env, ok := nextEnv(deadline)
 			if !ok {
-				t.Fatalf("%s: never observed an assistant_delta echoing %q for conversation %s; that "+
-					"conversation's turn never went in flight, so the interrupt under test would be "+
-					"inert and this test vacuous", milestone, needle, convID)
+				t.Fatalf("%s: no correlated ack and fresh source echo for %s", milestone, convID)
 			}
 			if env.Type == protocol.TypeError {
-				t.Fatalf("%s: unexpected error envelope: %s", milestone, string(env.Payload))
+				t.Fatal("send rejected")
 			}
-			if env.Type != protocol.TypeAssistantDelta {
-				continue
-			}
-			var d protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &d); err != nil {
-				t.Fatalf("%s: decode assistant_delta payload: %v", milestone, err)
-			}
-			if d.ConversationID == convID && strings.Contains(d.Text, needle) {
-				return
+			if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == reqID {
+				acked = true
 			}
 		}
+
 	}
 
 	// --- M1: mint conversation B over the wire. All-null create_conversation
@@ -588,51 +471,25 @@ func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
 	waitForLogLineAll(t, h.Stderr, []string{"v2.interrupt.dispatched", convB}, 15*time.Second)
 	t.Logf("[t=%s] M4(a): the interrupt dispatched to conversation B's own bound runner", elapsed())
 
-	// (b) B's turn ended, on the wire under B's own id (#2739). A turn_end for A
-	// before it is the #2103 defect and fails here rather than in (c).
-	turnEndDeadline := time.Now().Add(15 * time.Second)
-	for {
-		env, ok := nextEnv(turnEndDeadline)
-		if !ok {
-			t.Fatalf("M4(b): no turn_end for conversation B (%s, session %s) reached the phone", convB, entryB.ID)
+	deadline := time.Now().Add(15 * time.Second)
+	for ends[convB] == "" {
+		if _, ok := nextEnv(deadline); !ok {
+			t.Fatal("named B lacks matching source cancellation and live idle")
 		}
-		if env.Type != protocol.TypeTurnEnd {
-			continue
-		}
-		var te protocol.TurnEndPayload
-		if err := json.Unmarshal(env.Payload, &te); err != nil {
-			t.Fatalf("M4(b): decode turn_end payload: %v", err)
-		}
-		if te.ConversationID == convA {
-			t.Fatalf("M4(b) (AC-1): conversation A's turn ended (StopReason %q) after an interrupt naming B (%s)",
-				te.StopReason, convB)
-		}
-		if te.ConversationID == convB {
-			break
+		if ends[convA] != "" {
+			t.Fatal("named B interrupt stopped cursor A")
 		}
 	}
-	t.Logf("[t=%s] M4(b): conversation B's turn_end reached the phone (session %s)", elapsed(), entryB.ID)
-
-	// (c) A's turn is still in flight. Destructive and therefore last: this loop
-	// ends on a receive that reaches its deadline, which takes the phone conn down.
+	if ends[convB] != "cancelled" || sessions[convB] != entryB.ID || sessions[convA] != initialUUID {
+		t.Fatal("named interrupt lost reason or producing session")
+	}
 	settle := time.Now().Add(3 * time.Second)
-	for {
-		env, ok := nextEnv(settle)
-		if !ok {
+	for time.Now().Before(settle) {
+		if _, ok := nextEnv(settle); !ok {
 			break
 		}
-		if env.Type != protocol.TypeTurnEnd {
-			continue
-		}
-		var te protocol.TurnEndPayload
-		if err := json.Unmarshal(env.Payload, &te); err != nil {
-			t.Fatalf("M4(c): decode turn_end payload: %v", err)
-		}
-		if te.ConversationID == convA {
-			t.Fatalf("M4(c) (AC-1): conversation A's turn ended (StopReason %q) after an interrupt naming "+
-				"B (%s). A is the CURSOR's conversation and its turn must still be in flight: this is "+
-				"the #2103 defect.", te.StopReason, convB)
+		if ends[convA] != "" {
+			t.Fatal("cursor A ended after named B interrupt")
 		}
 	}
-	t.Logf("[t=%s] M4(c): no turn_end for conversation A — the cursor's turn is still in flight", elapsed())
 }

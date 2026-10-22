@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,29 +191,14 @@ func TestRelayV2_StreamRejectsModelAbsentFromPublishedMenu(t *testing.T) {
 		t.Errorf("settings after rejected whole frame = %+v, want prior model/effort and unavailable permission pair", settings)
 	}
 
+	source := scenario.SourceSince(t, home, modelRejectConvID)
 	seal(protocol.Envelope{ID: 102, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
 		Payload: mustJSON(t, protocol.SendMessagePayload{
 			ConversationID: modelRejectConvID, MessageID: "m-after-reject", Text: modelRejectTurnText,
 		})})
-	deadline := time.Now().Add(20 * time.Second)
-	var sawEcho, sawEnd bool
-	for !sawEnd {
-		env := decryptInnerEnvelope(t, readInnerFrame(t, phone, time.Until(deadline)), recv)
-		switch env.Type {
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta: %v", err)
-			}
-			sawEcho = sawEcho || bytes.Contains([]byte(p.Text), []byte(modelRejectTurnText))
-		case protocol.TypeTurnEnd:
-			sawEnd = true
-		case protocol.TypeError:
-			t.Fatalf("later turn returned error: %s", env.Payload)
-		}
-	}
-	if !sawEcho {
-		t.Fatal("later turn ended without the fake Claude echo; the prior child did not remain usable")
+	text := scenario.CompletedTurn(t, scenario.PollingReceive(t, phone, recv), modelRejectConvID, 20*time.Second, false, source)
+	if !strings.Contains(text, modelRejectTurnText) {
+		t.Fatal("model rejection left no fresh child echo")
 	}
 }
 

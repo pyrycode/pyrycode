@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"strings"
 	"testing"
 	"time"
@@ -74,8 +75,11 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 	first := waitForRunnerStatus(t, h, 20*time.Second, "first child running",
 		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 	var statuses []protocol.MCPStatusPayload
+	source := scenario.NewSourceObserver(t, home)
+	poll := scenario.PollingReceive(t, phone, recv)
 	drainTurn := func(text string, reqID uint64) bool {
 		t.Helper()
+		source.Watch(mcpStatusConvID)
 		sendSealedEnvelope(t, phone, send, protocol.Envelope{
 			ID:   reqID,
 			Type: protocol.TypeSendMessage,
@@ -90,7 +94,7 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 		sawEcho := false
 		deadline := time.Now().Add(30 * time.Second)
 		for {
-			env, ok := nextAttachmentEnvelope(t, phone, recv, deadline)
+			env, ok := source.Next(poll, deadline)
 			if !ok {
 				t.Fatalf("turn %d did not finish; echo=%v statuses=%d", reqID, sawEcho, len(statuses))
 			}
@@ -103,14 +107,10 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 					t.Fatalf("decode mcp_status during turn %d: %v", reqID, err)
 				}
 				statuses = append(statuses, status)
-			case protocol.TypeAssistantDelta:
-				var delta protocol.AssistantDeltaPayload
-				if err := json.Unmarshal(env.Payload, &delta); err != nil {
-					t.Fatalf("decode assistant_delta during turn %d: %v", reqID, err)
-				}
-				sawEcho = sawEcho || strings.Contains(delta.Text, strings.TrimSpace(text))
-			case protocol.TypeTurnEnd:
-				return sawEcho
+
+			}
+			if source.Ended(mcpStatusConvID) {
+				return strings.Contains(source.Text(mcpStatusConvID), strings.TrimSpace(text))
 			}
 		}
 	}

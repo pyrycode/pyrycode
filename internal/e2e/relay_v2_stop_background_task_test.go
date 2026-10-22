@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,8 @@ func TestRelayV2_StopBackgroundTaskCompletesOnlyAddressedTask(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, paired.Token)
-	seal, next := sealedConnDriver(t, phone, "stop client", send, recv)
+	source := scenario.NewSourceObserver(t, home)
+	seal, next := sealedConnDriver(t, phone, "stop client", send, recv, source)
 	seal(protocol.Envelope{ID: 27960, Type: protocol.TypeCreateConversation, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.CreateConversationPayload{})})
 	var convB string
 	deadline := time.Now().Add(15 * time.Second)
@@ -157,6 +159,12 @@ func TestRelayV2_StopBackgroundTaskCompletesOnlyAddressedTask(t *testing.T) {
 			t.Fatal("unexpected stop reply or turn closure")
 		}
 	}
+	for _, conv := range []string{convA, convB} {
+		if _, ended := source.Terminal(conv); ended {
+			t.Fatal("background stop ended a running reply source")
+		}
+	}
+
 	logs, err := filepath.Glob(logStem + ".*")
 	if err != nil {
 		t.Fatal(err)

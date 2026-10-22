@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"strings"
 	"testing"
 	"time"
@@ -53,41 +54,31 @@ const (
 // The settle window after turn_end is what turns "none yet" into "none".
 func drainReqCtxUsageTurn(t *testing.T, phone mcpQueryPhone, text string) (unsolicited int) {
 	t.Helper()
-	sawEcho, sawTurnEnd := false, false
 	deadline := time.Now().Add(30 * time.Second)
+	settled := false
 	for {
-		env, ok := nextAttachmentEnvelope(t, phone.client, phone.recv, deadline)
+		env, ok := phone.source.Next(phone.next, deadline)
 		if !ok {
-			if sawTurnEnd {
+			if settled {
 				return unsolicited
 			}
-			t.Fatalf("turn %q did not finish; echo=%v", strings.TrimSpace(text), sawEcho)
+			t.Fatal("source turn did not settle")
 		}
-		switch env.Type {
-		case protocol.TypeError:
-			t.Fatalf("unexpected error during turn %q: %s", strings.TrimSpace(text), env.Payload)
-		case protocol.TypeContextUsage:
-			if env.InReplyTo == nil {
-				unsolicited++
-				// The reading this warmup exists to observe has landed; nothing later
-				// in the settle window changes the claim, so stop rather than spend
-				// the rest of it.
-				if sawTurnEnd {
-					return unsolicited
-				}
+		if env.Type == protocol.TypeError {
+			t.Fatal("turn refused")
+		}
+		if env.Type == protocol.TypeContextUsage && env.InReplyTo == nil {
+			unsolicited++
+		}
+		if !settled && phone.source.Ended(reqCtxUsageConvID) {
+			if !strings.Contains(phone.source.Text(reqCtxUsageConvID), strings.TrimSpace(text)) {
+				t.Fatal("context turn lost fresh echo")
 			}
-		case protocol.TypeAssistantDelta:
-			var delta protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &delta); err != nil {
-				t.Fatalf("decode assistant_delta: %v", err)
-			}
-			sawEcho = sawEcho || strings.Contains(delta.Text, strings.TrimSpace(text))
-		case protocol.TypeTurnEnd:
-			if !sawEcho {
-				t.Fatalf("turn %q ended without its echo", strings.TrimSpace(text))
-			}
-			sawTurnEnd = true
+			settled = true
 			deadline = time.Now().Add(10 * time.Second)
+		}
+		if settled && unsolicited > 0 {
+			return unsolicited
 		}
 	}
 }
@@ -125,12 +116,13 @@ func TestRelayV2_RequestContextUsageAnswersCorrelatedReading(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phoneClient.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phoneClient, pubKey, payload.Token)
-	phone := mcpQueryPhone{client: phoneClient, send: send, recv: recv}
+	phone := mcpQueryPhone{client: phoneClient, send: send, recv: recv, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phoneClient, recv)}
 
 	// A completed turn does two things at once: it gives the conversation a live
 	// child to ask, and it puts an UNSOLICITED context_usage on the same lane the
 	// reply will travel — which is what makes the correlation assertion below
 	// meaningful rather than vacuous.
+	phone.source.Watch(reqCtxUsageConvID)
 	sendSealedEnvelope(t, phone.client, phone.send, protocol.Envelope{
 		ID:   reqCtxUsageWarmupID,
 		Type: protocol.TypeSendMessage,

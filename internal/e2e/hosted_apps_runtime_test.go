@@ -180,7 +180,7 @@ func TestHostedAppsRuntimeFailureIsolation(t *testing.T) {
 			defer phone.Close()
 			seal, next := noiseWire(t, phone, send, recv)
 			conv := createConversationOverWire(t, seal, next, 32049)
-			sendAndAwaitEcho(t, seal, next, "turn despite app failure", 32050, conv, "failure-turn", "still usable", "still usable")
+			sendAndAwaitEcho(t, home, seal, next, "turn despite app failure", 32050, conv, "failure-turn", "still usable", "still usable")
 			if mode != "missing" {
 				deadline := time.Now().Add(20 * time.Second)
 				for {

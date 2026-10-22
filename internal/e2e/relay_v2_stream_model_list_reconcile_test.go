@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"slices"
 	"strings"
 	"testing"
@@ -99,12 +100,15 @@ type lateModelListObservation struct {
 // context is cancelled, so a timed-out client cannot be reused and the first timeout
 // must be terminal for the window), and non-noise_msg inner frames skipped WITHOUT
 // decrypting while every noise_msg is decrypted in arrival order.
-func sealedConnDriver(t *testing.T, phone *fakephone.Client, name string, send, recv *noise.CipherState) (
+func sealedConnDriver(t *testing.T, phone *fakephone.Client, name string, send, recv *noise.CipherState, sources ...*scenario.SourceObserver) (
 	func(protocol.Envelope), func(time.Time) (protocol.Envelope, bool)) {
 	t.Helper()
 
 	sealSend := func(env protocol.Envelope) {
 		t.Helper()
+		if len(sources) != 0 {
+			sources[0].Before(env)
+		}
 		raw, err := json.Marshal(env)
 		if err != nil {
 			t.Fatalf("%s marshal envelope: %v", name, err)
@@ -116,29 +120,13 @@ func sealedConnDriver(t *testing.T, phone *fakephone.Client, name string, send, 
 		sendNoiseMsg(t, phone, ciphertext)
 	}
 
+	poll := scenario.PollingReceive(t, phone, recv)
 	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phone.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("%s receive: %v", name, err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("%s decode inner frame: %v", name, err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recv), true
+		if len(sources) != 0 {
+			return sources[0].Next(poll, deadline)
 		}
+		env := poll(deadline)
+		return env, env.Type != ""
 	}
 
 	return sealSend, nextEnv
@@ -222,7 +210,8 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 	}
 	t.Cleanup(func() { _ = phoneA.Close() })
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
-	sealSendA, nextEnvA := sealedConnDriver(t, phoneA, "phone A", sendA, recvA)
+	source := scenario.NewSourceObserver(t, home)
+	sealSendA, nextEnvA := sealedConnDriver(t, phoneA, "phone A", sendA, recvA, source)
 
 	var obs lateModelListObservation
 
@@ -280,6 +269,21 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 		}),
 	})
 	turnDeadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, lateModelListEchoNeedle) {
+				obs.sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnvA(turnDeadline)
 		if !ok {
@@ -292,16 +296,7 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 			t.Fatalf("unexpected error envelope during the turn: %s", string(env.Payload))
 		case protocol.TypeModelList:
 			obs.listsOnMinter++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, lateModelListEchoNeedle) {
-				obs.sawEcho = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 

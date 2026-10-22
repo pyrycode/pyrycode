@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,7 +117,7 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	// CONSTRAINT for future edits: this window must stay ≥ 3 ×
 	// msgqueue.defaultRetryInterval plus spawn. If either number moves, so does
 	// this one.
-	h := startPerConvHarness(t, home, initialUUID, relayURL, "-pyry-idle-timeout=8s")
+	startPerConvHarness(t, home, initialUUID, relayURL, "-pyry-idle-timeout=8s")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
@@ -156,6 +157,7 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	// evicted→active registry flip — neither of which is the proof: the send
 	// handler acks on accept-into-backlog, well before the respawned child is
 	// stdin-ready. The proof is M1/M2 below.
+	wakeSource := scenario.SourceSince(t, home, convA)
 	send := protocol.Envelope{
 		ID:   reqID,
 		Type: protocol.TypeSendMessage,
@@ -183,91 +185,11 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	// arrives BEFORE the delta; ignore turn_states until sawDelta is set. The
 	// phone conn is read serially on the test goroutine (the single reader — two
 	// readers would race the Noise receive nonce).
-	sawDelta := false
-	drainDeadline := time.Now().Add(20 * time.Second)
-	for {
-		remaining := time.Until(drainDeadline)
-		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("M1: phone never observed an assistant_delta for the reactivated conversation %s. "+
-					"Either delivery never reached the respawned child (stale sink binding on the new runner, "+
-					"or a drain-gate tag mismatch) or the session re-evicted before the turn landed. The "+
-					"stream_turn.no_conversation Debug record discriminates them — daemon stderr tail:\n%s",
-					convA, stderrTail(h, 4000))
-			}
-			t.Fatal("M2: phone observed the assistant_delta but never a terminal " +
-				"turn_state{idle}; the turn opened but never closed")
-		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the milestone-specific t.Fatal above
-			}
-			t.Fatalf("phone receive (drain): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("phone decode inner frame (drain): %v", err)
-		}
-		// Skip on the INNER type only, never on a decrypted envelope: the receive
-		// CipherState must open sealed frames in arrival order, so dropping a
-		// noise_msg undecrypted desynchronises the nonce and every later open fails.
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue
-		}
-		env := decryptInnerEnvelope(t, inner, initRecv)
-
-		switch env.Type {
-		case protocol.TypeAssistantDelta:
-			if sawDelta {
-				continue
-			}
-			var d protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &d); err != nil {
-				t.Fatalf("phone decode assistant_delta payload: %v", err)
-			}
-			// BOTH halves are required, and a wrong-conversation delta is a hard
-			// fail rather than a loop-continue. Marker alone would be satisfied by
-			// convA's text delivered on convB — which IS the cross-bleed defect
-			// AC#4 exists to catch. Conversation alone would be satisfied by any
-			// delta on convA, including a stale pre-eviction one.
-			if d.ConversationID != convA {
-				t.Fatalf("M1: assistant_delta scoped to the WRONG conversation: got %q, want %q "+
-					"(cross-discussion bleed — convA's turn surfaced on another discussion)",
-					d.ConversationID, convA)
-			}
-			if !strings.Contains(d.Text, wakeNeedle) {
-				t.Fatalf("M1: assistant_delta did not carry this turn's marker; got Text=%q, want it to "+
-					"contain %q (stream-mode fakeclaude echoes the sent prompt, so the marker is the "+
-					"round-trip proof that THIS turn reached the respawned child)", d.Text, wakeNeedle)
-			}
-			sawDelta = true
-			t.Logf("M1: phone observed assistant_delta on the reactivated conversation carrying this turn's marker")
-		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("phone decode turn_state payload: %v", err)
-			}
-			if st.State != "idle" {
-				continue
-			}
-			if st.ConversationID != convA {
-				t.Errorf("turn_state ConversationID: got %q, want %q", st.ConversationID, convA)
-			}
-			t.Logf("M2: phone observed terminal turn_state{idle} — the reactivated turn closed")
-
-			// AC#4 (no cross-bleed): convA's reactivation did NOT touch convB. With
-			// no cap there is no LRU eviction, and an evicted session has no reason
-			// to wake without its own send/attach. Checked AFTER M2 so the claim is
-			// "convB stayed evicted across a COMPLETED turn in convA", not merely
-			// across an ack; the 8s window leaves ample room before convA re-arms.
-			assertEvicted(t, regPath, boundB)
-			return
-		}
+	text := scenario.CompletedTurn(t, scenario.PollingReceive(t, phone, initRecv), convA, 20*time.Second, false, wakeSource)
+	if !strings.Contains(text, wakeNeedle) {
+		t.Fatal("reactivated source lost fresh marker")
 	}
+	assertEvicted(t, regPath, boundB)
 }
 
 // TestE2E_PerConversation_CapEvictsCrossDiscussion drives the active cap with
@@ -509,6 +431,7 @@ func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pubKey []by
 func activateViaTurn(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState,
 	regPath, convID, boundID string, reqID uint64, messageID, text string) {
 	t.Helper()
+	source := scenario.SourceSince(t, filepath.Dir(filepath.Dir(filepath.Dir(regPath))), convID)
 	send := protocol.Envelope{
 		ID:   reqID,
 		Type: protocol.TypeSendMessage,
@@ -529,59 +452,8 @@ func activateViaTurn(t *testing.T, phone *fakephone.Client, initSend, initRecv *
 	}
 	sendNoiseMsg(t, phone, ct)
 
-	sawDelta := false
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("priming turn on %s never produced an assistant_delta — the first message did not "+
-					"bring the conversation's child up", convID)
-			}
-			t.Fatalf("priming turn on %s opened but never closed with turn_state{idle}", convID)
-		}
-		frame, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the t.Fatalf above
-			}
-			t.Fatalf("phone receive (priming %s): %v", convID, err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(frame, &inner); err != nil {
-			t.Fatalf("decode inner frame (priming %s): %v", convID, err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue
-		}
-		env := decryptInnerEnvelope(t, inner, initRecv)
-		switch env.Type {
-		case protocol.TypeAssistantDelta:
-			var d protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &d); err != nil {
-				t.Fatalf("decode assistant_delta (priming %s): %v", convID, err)
-			}
-			if d.ConversationID == convID {
-				sawDelta = true
-			}
-		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state (priming %s): %v", convID, err)
-			}
-			if st.State != "idle" || st.ConversationID != convID {
-				continue
-			}
-			// The registry write trails the in-memory transition, so poll rather
-			// than assert: the turn closing proves the child ran, this proves the
-			// state the eviction assertions are about to watch leave.
-			waitForSessionState(t, regPath, boundID, "active", 5*time.Second)
-			return
-		}
-	}
+	scenario.CompletedTurn(t, scenario.PollingReceive(t, phone, initRecv), convID, 30*time.Second, false, source)
+	waitForSessionState(t, regPath, boundID, "active", 5*time.Second)
 }
 
 // createConversationViaPhone sends an all-null create_conversation (server
