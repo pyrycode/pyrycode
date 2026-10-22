@@ -12,6 +12,16 @@ from the standard gate, and state missing concurrency settings explicitly. The
 [relay admission investigation](../../specs/architecture/3485-relay-fixture-admission.md#standard-gate-result)
 retains both forms without treating a gate pass as historical failure attribution.
 
+State whether totals count leaf tests or all Go test events. Go JSON includes
+parent tests as well as their subtests; a passing parent adds an event without
+adding another leaf scenario. Keep skipped outcomes separate from executed
+passes. Comparing a leaf tally with raw event totals can otherwise suggest
+missing coverage where only the counting convention differs. For example, the
+[queued-send retirement evidence](../../specs/architecture/3728-user-queue-retirement-acceptance.md#counted-proof-and-applicability)
+has 2,255 passing leaves plus 276 passing parents and 27 skips: 2,558 run events,
+2,531 passes, zero failures and 27 skips. Those are the same historical run,
+not two independent executions.
+
 Before accepting a baseline comparison as attribution, compare suite composition and
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.

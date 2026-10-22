@@ -194,3 +194,49 @@ Builder review found no missing implementation obligation to reopen. This stage
 delivers the evidence map only: final configured gates, live applicability and
 documentation reconciliation remain with their existing owners. Retain
 `needs-real-claude` on #3728; do not claim whole-feature PASS from this handoff.
+
+## Documentation reconciliation — 2026-10-22
+
+All documentation handoff items are satisfied against the integrated code and
+retained assertions. Correct merged child wording is retained:
+
+- [Mobile protocol](../../protocol-mobile.md): the `send_message` application row
+  now states the final retirement contract and links to queue observation.
+  Full thread item, Queue observation and delivery identity, Legacy receipt
+  identity, `send_queued_now`, and the canonical lifecycle/receipt examples
+  already preserve acceptance identity, unordered queued/written states,
+  actual-delivery order, hidden drop, visible restart loss, recovery,
+  attachments and dequeue/Send now binding. No further edits are needed there.
+- [Queue overview](../../knowledge/features/msgqueue-package.md), Delivered
+  notification / Durability boundary, and [queue lifecycle](../../knowledge/features/msgqueue-package-lifecycle.md),
+  Delivered notification: already distinguish retained recording, readiness,
+  binding, placement and thread wakeups from retired publication; no queue
+  receipt worker remains.
+- [History producers](../../knowledge/features/history-package-producers.md),
+  Accepted sends and linked outcomes, and [legacy eligibility](../../knowledge/features/history-package-producers-legacy-compatibility.md),
+  Legacy eligibility and explicit visibility: already exclude all queued facts
+  from receipt projection while retaining source validation, visibility,
+  provenance and other producers' contracts.
+
+Checked recording/readiness against `queuedSendHistory.accepted` and
+`beforeDelivery`, projection exclusion against `legacyRuntimeFact` and
+`legacyRuntimeReceipt`, and canonical identity/reopening against
+`TestOperatorPublicationRetired`, `TestQueuedReceiptsRetired` and
+`TestQueuedSourceValidation`. The test-counting lesson is recorded in
+[test execution and artifact survival](../../knowledge/features/development-verification-test-execution-and-artifact-survival.md).
+No documents were added or removed, so the catalog and startup map are unchanged.
+
+The subsequent dispatcher gates tested Linux candidate
+`76031502ccb180ba0cc037f1b5a85c218fec6fc3` with main
+`3c01097672fff84fe9f63caa5c715fb32ae617f6`. The supplied gate report records
+28,128 executed/passed unit leaves with 27 skips, 1,950 executed/passed fake
+integration leaves with two skips, and 2,255 executed/passed live leaves with
+27 skips; each has zero failures. These leaf tallies are distinct from the
+raw event totals in the verifier review and historical child evidence above.
+All ten configured deterministic steps passed. The live output identified as
+`2026-10-22T09-10-05-576Z` records
+`TestRealClaude_OrdinaryQueuedPlacement` passed in 22.1 seconds and
+`TestRealClaude_SendQueuedNowPlacement` passed in 34.7 seconds. This supplies
+the final-parent live evidence that was pending at the earlier handoff; no
+historical failure is relabelled and no operator, privacy, recording or approval
+hold is released. Other operating systems remain outside this ticket's scope.
