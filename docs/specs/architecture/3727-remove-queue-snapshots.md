@@ -113,6 +113,20 @@ Pending documentation stage:
 
 ## Revisions
 
+- 2026-10-22 manual repair plan, before code: Juhana requested manual handling
+  through the documentation stage. Repair the two verifier findings in the
+  retained PR. Send-now must inspect the complete final canonical queued-item
+  set, including initial catch-up and subsequent additions and patches. Keep
+  accepted-item delivery and all existing ordering, binding and isolation
+  assertions. Add distinct-ID adverse controls and a valid cleared-item control.
+  Reproduce the selected recorded recovery failure with retained inner JSONL,
+  then assign delivery observation to one path while preserving rejection of
+  actual duplicate deliveries. Run focused Linux race checks with the shared
+  admission hold, then the normal complete verifier and counted live placement
+  gates. Preserve every earlier failure. No production behaviour, credentials,
+  authorisation or queue command contract changes in these test-only repairs.
+  Existing independent verification remains required before documentation.
+
 - 2026-10-21: Queue observation uses one canonical item accumulator for explicit
   catch-up, additions, patches and appends. Delivery checks bind the accepted
   item ID because a terminal queue handle is no longer an action target. The source
