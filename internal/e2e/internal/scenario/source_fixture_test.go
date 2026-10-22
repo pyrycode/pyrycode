@@ -51,40 +51,38 @@ func testSourceWire(t *testing.T, w Wire, completeIdle ...bool) Wire {
 	}
 	w.Source = func(conv string) []history.Entry { return entries[mark:] }
 	w.Next = func(deadline time.Time) protocol.Envelope {
-		for {
-			env := next(deadline)
-			switch env.Type {
-			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied:
-				appendFact(env)
-				return protocol.Envelope{}
-			case protocol.TypeTurnEnd:
-				appendFact(env)
-				ended = true
-				var p protocol.TurnEndPayload
-				if json.Unmarshal(env.Payload, &p) != nil {
-					t.Fatal("invalid terminal fixture")
-				}
-				raw, err := json.Marshal(protocol.TurnStatePayload{ConversationID: p.ConversationID, State: "idle"})
+		env := next(deadline)
+		switch env.Type {
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied:
+			appendFact(env)
+			return protocol.Envelope{}
+		case protocol.TypeTurnEnd:
+			appendFact(env)
+			ended = true
+			var p protocol.TurnEndPayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid terminal fixture")
+			}
+			raw, err := json.Marshal(protocol.TurnStatePayload{ConversationID: p.ConversationID, State: "idle"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw}
+		case protocol.TypeTurnState:
+			var p protocol.TurnStatePayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid live fixture")
+			}
+			if p.State == "idle" && !ended && (len(completeIdle) == 0 || completeIdle[0]) {
+				raw, err := json.Marshal(protocol.TurnEndPayload{ConversationID: p.ConversationID, StopReason: "end_turn"})
 				if err != nil {
 					t.Fatal(err)
 				}
-				return protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw}
-			case protocol.TypeTurnState:
-				var p protocol.TurnStatePayload
-				if json.Unmarshal(env.Payload, &p) != nil {
-					t.Fatal("invalid live fixture")
-				}
-				if p.State == "idle" && !ended && (len(completeIdle) == 0 || completeIdle[0]) {
-					raw, err := json.Marshal(protocol.TurnEndPayload{ConversationID: p.ConversationID, StopReason: "end_turn"})
-					if err != nil {
-						t.Fatal(err)
-					}
-					appendFact(protocol.Envelope{Type: protocol.TypeTurnEnd, Payload: raw})
-					ended = true
-				}
+				appendFact(protocol.Envelope{Type: protocol.TypeTurnEnd, Payload: raw})
+				ended = true
 			}
-			return env
 		}
+		return env
 	}
 	return w
 }
