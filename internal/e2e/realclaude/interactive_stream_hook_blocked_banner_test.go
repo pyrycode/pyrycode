@@ -167,7 +167,6 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // hookBannerRigDir is the rig directory's name under the harness-minted HOME.
