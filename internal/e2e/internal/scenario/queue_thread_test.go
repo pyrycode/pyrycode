@@ -52,6 +52,13 @@ func TestQueueCompletionCheckpoint(t *testing.T) {
 			}
 			requests++
 			p := value.(protocol.ThreadCatchUpPayload)
+			if requests == 2 {
+				env := frame(protocol.TypeError, protocol.ErrorPayload{Code: "thread.query_failed", Retryable: true}, 22)
+				id := requests
+				env.InReplyTo = &id
+				frames = append(frames, env)
+				return id
+			}
 			version := uint64(1)
 			if requests > 1 {
 				if p.Epoch != "epoch" || p.Version == 0 {
@@ -98,8 +105,8 @@ func TestQueueCompletionCheckpoint(t *testing.T) {
 	if want := "[delta:one turn_end: delta:two turn_end:]"; fmt.Sprint(got) != want {
 		t.Fatalf("two-turn boundary = %v, want %s", got, want)
 	}
-	if requests != 2 {
-		t.Fatalf("checkpoint requests = %d, want baseline plus one completion checkpoint", requests)
+	if requests != 3 {
+		t.Fatalf("checkpoint requests = %d, want baseline, rejected checkpoint and successful retry", requests)
 	}
 }
 

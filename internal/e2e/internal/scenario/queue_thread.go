@@ -23,6 +23,7 @@ type queuePlacementReader struct {
 	checkpoint uint64
 	request    uint64
 	requested  uint64
+	retryAfter time.Time
 	sourceID   uint64
 	ends       []history.Entry
 	since      time.Time
@@ -103,7 +104,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				}
 			}
 		}
-		if len(r.ends) > 0 && r.checkpoint < r.ends[0].ID && r.request == 0 {
+		if len(r.ends) > 0 && r.checkpoint < r.ends[0].ID && r.request == 0 && !time.Now().Before(r.retryAfter) {
 			r.requested = r.version
 			r.request = r.w.Send(protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: r.conv, Epoch: r.epoch, Version: r.requested, Limit: 100})
 		}
@@ -193,6 +194,15 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			}
 		}
 		switch env.Type {
+		case protocol.TypeError:
+			var p protocol.ErrorPayload
+			decode(&p)
+			if r.request != 0 && env.InReplyTo != nil && *env.InReplyTo == r.request && p.Code == "thread.query_failed" && p.Retryable {
+				r.request = 0
+				r.retryAfter = time.Now().Add(20 * time.Millisecond)
+				continue
+			}
+			r.t.Fatalf("queue observation received error: %s", p.Code)
 		case "queue_state":
 			r.t.Fatal("retired queue snapshot reached the app")
 		case protocol.TypeThreadItems:
