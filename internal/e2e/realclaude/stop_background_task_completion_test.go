@@ -36,7 +36,10 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	poll := func(d time.Time) protocol.Envelope { env, _ := reader.receive(t, time.Until(d)); return env }
+	poll := func(d time.Time) protocol.Envelope {
+		env, _ := reader.receive(t, min(200*time.Millisecond, time.Until(d)))
+		return env
+	}
 	var taskID string
 	deadline := time.Now().Add(perTurnReplyBudget)
 	for taskID == "" {
@@ -76,7 +79,7 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: request, Type: protocol.TypeThreadCatchUp, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.ThreadCatchUpPayload{ConversationID: convID, Limit: 100})})
 			pending, items = true, nil
 		}
-		env, _ := source.Next(poll, min(deadline, time.Now().Add(200*time.Millisecond)))
+		env, _ := source.Next(poll, deadline)
 		if env.Type == protocol.TypeError {
 			var p protocol.ErrorPayload
 			if json.Unmarshal(env.Payload, &p) != nil || p.Code != "thread.query_failed" || !p.Retryable {

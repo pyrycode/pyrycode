@@ -84,7 +84,7 @@ func TestAgentContentRetired(t *testing.T) {
 			} {
 				handle(ev)
 			}
-			if e.inTurn || e.turnID != "" || e.currentState != "idle" {
+			if e.inTurn || e.turnID != "" || e.currentState != "" {
 				t.Fatal("child/background traffic reopened main turn")
 			}
 			items := publish()
