@@ -23,8 +23,8 @@ covers discovery, query/live ordering, retirement and recorded evidence.
 Interactive assistant/tool/completion source folding remains authoritative while
 its compatibility publication is retired for every app (#3734), including peers
 without `thread` and nil/failed history. Supported live state remains separate;
-channel-post publication awaits #3737. `TestInteractiveContentRetired` compares
-actual canonical live revisions with explicit catch-up, checking settled ordered
+channel-post publication is also retired (#3737).
+`TestInteractiveContentRetired` compares actual canonical live revisions with explicit catch-up, checking settled ordered
 text, tool/parent attribution and reused identities without raw frames/replay or
 substitute receipts. Its replay/storage controls and tagged compilation are
 deterministic evidence, not live acceptance.
@@ -50,7 +50,18 @@ neutrality and source isolation; its storage controls prevent publication from
 returning when history fails. The
 [counted Linux evidence and ordering lessons](thread-package-shadow-lifecycle-and-evidence-retirement.md#session-and-content-notice-retirement-3736)
 include the subsequent deterministic and configured live passes on `9ebba3462074`.
-They do not complete #3737's residual cleanup or #3718's final family acceptance.
+They do not establish #3718's final family acceptance.
+
+Standalone banners, runtime/startup and resolved prompt-answer facts, and channel
+post chunks/completion also retain source recording without raw frames, new
+content replay copies or inert receipts for any app (#3737). Canonical live
+items and explicit catch-up consume saved facts and completed posts; open
+prompts, dismissals, controls and ordered live state remain supported.
+[Residual retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737)
+records prompt responsiveness, completion-before-wake/recovery and counted Linux
+prompt/hook acceptance, preserving original failures. Replay admission/pump and
+shared ring/`SetReplaySource` retirement remain #3738/#3739; #3718 still owns final
+family acceptance.
 
 ### Reusable fold regression corpus
 
