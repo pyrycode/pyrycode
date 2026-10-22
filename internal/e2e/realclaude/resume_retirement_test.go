@@ -164,13 +164,10 @@ func TestResumePredecessorRejectsBoundary(t *testing.T) {
 
 func TestResumePredecessorDeadline(t *testing.T) {
 	t.Parallel()
-	for _, receiptPresent := range []bool{false, true} {
-		name := "receipt-absent"
-		if receiptPresent {
-			name = "predecessor-present"
-		}
+	for _, name := range []string{"receipt-absent", "predecessor-present", "retirement-after-deadline"} {
 		t.Run(name, func(t *testing.T) {
 			path := testResumeReceiptPath(t)
+			receiptPresent := name != "receipt-absent"
 			if receiptPresent {
 				r := claudetape.LifecycleReceipt{Success: true, Frames: 1, OwnerPID: os.Getpid()}
 				if err := claudetape.PublishLifecycleControl(path, r); err != nil {
@@ -178,9 +175,16 @@ func TestResumePredecessorDeadline(t *testing.T) {
 				}
 			}
 			start := time.Now()
-			_, err := waitLifecycleResumePredecessor(path, os.Getpid(), start.Add(50*time.Millisecond), func(pid int, signal syscall.Signal) error {
+			deadline := start.Add(50 * time.Millisecond)
+			_, err := waitLifecycleResumePredecessor(path, os.Getpid(), deadline, func(pid int, signal syscall.Signal) error {
 				if !receiptPresent {
 					t.Error("missing receipt reached process observation")
+				}
+				if name == "retirement-after-deadline" {
+					timer := time.NewTimer(time.Until(deadline))
+					defer timer.Stop()
+					<-timer.C
+					return syscall.ESRCH
 				}
 				return syscall.Kill(pid, signal)
 			})

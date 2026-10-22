@@ -72,3 +72,7 @@ Pending documentation stage: in `docs/testing/daemon-recordings.md`, “Idle evi
 - Threat model: no relay/auth contract changes. PID reuse cannot produce a false disappearance because a present PID remains pending. Existing final source, ownership and cleanup audits remain mandatory.
 
 No MUST FIX, SHOULD FIX or deferred security findings.
+
+## Revisions
+
+- 2026-10-22: added an expiry control for ESRCH observed after the deadline; a successful observation must itself finish within the shared budget. No contract or deadline changed. QMD timed out, so the runtime-authorized repository/document search fallback supplied the topic context. The managed selector rejects per-component regex anchors; focused replay uses exact `^TestRecordedClaude$` with the sole `session-resume` scenario selected by environment. The baseline's accepted prefix selector also ran the startup control; preserve its actual counts separately.

@@ -108,9 +108,10 @@ func lifecycleRecordingResumeRole(c lifecycleRecordingConfig, session string, ar
 	return binding, nil
 }
 
-// The original WARN gate already passed. Join the actual owned predecessor EOF
-// before snapshotting its complete native output. Replay restores it before the
-// unchanged resume send, so production's real existence probe must select resume.
+// The original WARN gate already passed. Join the successful owned EOF receipt
+// and predecessor disappearance before snapshotting its complete native output.
+// Replay restores it before the unchanged resume send, so production's real
+// existence probe must select resume.
 func lifecycleRecordingResumeSnapshot(t *testing.T, home string) {
 	t.Helper()
 	c, ok := lifecycleRecordingCurrent(t)
@@ -175,12 +176,18 @@ func waitLifecycleResumePredecessor(path string, owner int, deadline time.Time, 
 			if !r.Success || r.Error != "" || r.Frames == 0 || r.OwnerPID != owner {
 				return r, fmt.Errorf("resume predecessor receipt failed or has foreign ownership")
 			}
-			if observe(owner, 0) != syscall.ESRCH {
-				return r, fmt.Errorf("original eviction did not stop its owned predecessor")
+			switch err := observe(owner, 0); err {
+			case syscall.ESRCH:
+				if time.Now().Before(deadline) {
+					return r, nil
+				}
+			case nil:
+				// Receipt publication can precede the daemon's provider Wait.
+			default:
+				return r, fmt.Errorf("resume predecessor observation: %w", err)
 			}
-			return r, nil
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
 	}
 	return claudetape.LifecycleReceipt{}, fmt.Errorf("resume predecessor boundary: %w", context.DeadlineExceeded)
 }
