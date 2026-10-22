@@ -74,14 +74,15 @@ func TestInteractiveContentRetired(t *testing.T) {
 			t.Fatal(err)
 		}
 		published := live[liveStart:]
-		if len(published) != len(result.Items) {
-			t.Fatalf("live/catch-up counts: %d/%d", len(published), len(result.Items))
+		rows := map[uint64]protocol.ThreadItem{}
+		for _, env := range published {
+			testRetiredThreadUpdate(t, conv, rows, env)
 		}
-		for i, env := range published {
-			var added protocol.ThreadItemAddedPayload
-			if env.Type != protocol.TypeThreadItemAdded || json.Unmarshal(env.Payload, &added) != nil || added.ConversationID != conv || !reflect.DeepEqual(added.Item, daemonThreadItem(result.Items[i])) {
-				t.Fatalf("live item %d differs from ordered explicit catch-up", i)
-			}
+		if len(rows) != len(result.Items) {
+			t.Fatalf("live/catch-up rows: %d/%d", len(rows), len(result.Items))
+		}
+		for _, item := range result.Items {
+			testDaemonThreadJSONEqual(t, rows[item.ID], daemonThreadItem(item))
 		}
 		var texts []string
 		var tools, notices int
@@ -131,6 +132,70 @@ func TestInteractiveContentRetired(t *testing.T) {
 				t.Fatalf("retired live frame: %s", push.env.Type)
 			}
 		}
+	}
+}
+
+func testRetiredThreadUpdate(t *testing.T, conv string, rows map[uint64]protocol.ThreadItem, env protocol.Envelope) {
+	t.Helper()
+	var meta struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	if json.Unmarshal(env.Payload, &meta) != nil || meta.ConversationID != conv {
+		t.Fatal("foreign/invalid canonical update")
+	}
+	switch env.Type {
+	case protocol.TypeThreadItemAdded:
+		var p protocol.ThreadItemAddedPayload
+		if json.Unmarshal(env.Payload, &p) != nil || rows[p.Item.ID].ID != 0 {
+			t.Fatal("invalid or repeated item addition")
+		}
+		rows[p.Item.ID] = p.Item
+	case protocol.TypeThreadItemChanged:
+		var p protocol.ThreadItemChangedPayload
+		if json.Unmarshal(env.Payload, &p) != nil || rows[p.ItemID].Rev != p.BaseRev {
+			t.Fatal("broken canonical change chain")
+		}
+		raw, err := json.Marshal(rows[p.ItemID])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		for key, value := range p.Changes {
+			fields[key] = value
+		}
+		fields["rev"], _ = json.Marshal(p.Rev)
+		raw, err = json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var item protocol.ThreadItem
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatal(err)
+		}
+		rows[p.ItemID] = item
+	case protocol.TypeThreadTextAppend:
+		var p protocol.ThreadTextAppendPayload
+		if json.Unmarshal(env.Payload, &p) != nil || rows[p.ItemID].Rev != p.BaseRev {
+			t.Fatal("broken canonical text chain")
+		}
+		item := rows[p.ItemID]
+		var content map[string]json.RawMessage
+		if err := json.Unmarshal(item.Content, &content); err != nil {
+			t.Fatal(err)
+		}
+		var text string
+		if err := json.Unmarshal(content["text"], &text); err != nil {
+			t.Fatal(err)
+		}
+		content["text"], _ = json.Marshal(text + p.Text)
+		item.Content, _ = json.Marshal(content)
+		item.Rev = p.Rev
+		rows[p.ItemID] = item
+	default:
+		t.Fatalf("unexpected canonical update %s", env.Type)
 	}
 }
 
