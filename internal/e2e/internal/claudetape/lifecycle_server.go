@@ -20,7 +20,7 @@ import (
 // for a closed, source-bound launch. No fixture supplies a host process target.
 type LifecycleBrokerServer struct {
 	listener  *net.UnixListener
-	launch    func(string, int) (*exec.Cmd, error)
+	launch    func(string, int) (*exec.Cmd, io.Closer, error)
 	mu        sync.Mutex
 	claimed   map[string]bool
 	allowed   map[string]bool
@@ -32,7 +32,11 @@ type LifecycleBrokerServer struct {
 	handling  sync.WaitGroup
 }
 
-func NewLifecycleBrokerServer(socket string, jobs []string, launch func(string, int) (*exec.Cmd, error)) (*LifecycleBrokerServer, error) {
+// NewLifecycleBrokerServer calls launch only for validated transfers. A non-nil
+// closer returned by launch transfers to the handler, even on a launch error.
+// The handler closes it exactly once after its final command use; a timed-out
+// Join does not release resources still owned by an in-flight callback.
+func NewLifecycleBrokerServer(socket string, jobs []string, launch func(string, int) (*exec.Cmd, io.Closer, error)) (*LifecycleBrokerServer, error) {
 	fail := errors.New("invalid lifecycle broker server")
 	if !filepath.IsAbs(socket) || len(jobs) == 0 || launch == nil || checkpointDirectory(filepath.Dir(socket)) != nil {
 		return nil, fail
@@ -152,7 +156,10 @@ func (s *LifecycleBrokerServer) handle(c *net.UnixConn) {
 			return
 		}
 	}
-	cmd, err := s.launch(job, peer)
+	cmd, diagnostic, err := s.launch(job, peer)
+	if diagnostic != nil {
+		defer func() { _ = diagnostic.Close() }() // Best effort; preserve the launch/child verdict.
+	}
 	if err != nil || cmd == nil || len(cmd.ExtraFiles) != 0 || cmd.Process != nil {
 		bad()
 		return

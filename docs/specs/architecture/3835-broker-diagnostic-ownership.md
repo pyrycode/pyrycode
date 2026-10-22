@@ -67,3 +67,7 @@ None. Original-root replay failures remain failures tracked by #3834 and do not 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-22
+
+## Revisions
+
+- 2026-10-22: Regression construction additionally covers `cancel-after-start`: a real broker child signals readiness on its transferred descriptor and blocks on its transferred input; bounded Join must kill and reap it and close its diagnostic once. Source pipe cleanup belongs to the outer probe so it cannot accidentally release that child before cancellation. The diagnostic helper returns the concrete `*os.File` (which implements the planned `io.Closer`) so tests can assert descriptor usability/closure. The supported anchored-root selection is `^TestRecordedClaude$` plus the single-scenario environment: Go treats root/subtest anchors separately, and the earlier `^TestRecordedClaude/session-resume$` also selected the similarly prefixed startup test. Subsequent replay uses the exact root; preserve that earlier result and its actual selection separately.

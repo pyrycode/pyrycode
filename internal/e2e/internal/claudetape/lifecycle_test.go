@@ -235,19 +235,19 @@ func TestLifecycleExecKeepsActualPIDAndJournalsAfterKill(t *testing.T) {
 				t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 				job.BrokerSocket = filepath.Join(socketDir, "socket")
 				brokerJob := filepath.Join(root, "broker-job.json")
-				server, err = NewLifecycleBrokerServer(job.BrokerSocket, []string{brokerJob}, func(path string, peer int) (*exec.Cmd, error) {
+				server, err = NewLifecycleBrokerServer(job.BrokerSocket, []string{brokerJob}, func(path string, peer int) (*exec.Cmd, io.Closer, error) {
 					var got lifecycleProbeJob
 					if ReadLifecycleControl(path, MaxBytes, &got) != nil {
-						return nil, os.ErrInvalid
+						return nil, nil, os.ErrInvalid
 					}
 					expected := job
 					expected.Config.OwnerPID = peer
 					if !reflect.DeepEqual(got, expected) {
-						return nil, os.ErrInvalid
+						return nil, nil, os.ErrInvalid
 					}
 					cmd := exec.Command(os.Args[0], "-test.run=^TestLifecycleProbeProcess$")
 					cmd.Env = append(os.Environ(), "PYRY_LIFECYCLE_PROBE=broker", "PYRY_LIFECYCLE_PROBE_JOB="+path)
-					return cmd, nil
+					return cmd, nil, nil
 				})
 				if err != nil {
 					t.Fatal(err)

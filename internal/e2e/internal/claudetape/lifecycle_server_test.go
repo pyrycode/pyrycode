@@ -57,17 +57,17 @@ func TestLifecycleBrokerServerRejectsForeignPartialDuplicateTransfers(t *testing
 			socket := filepath.Join(root, "socket")
 			job := filepath.Join(root, "owned.job")
 			var calls atomic.Int32
-			s, e := NewLifecycleBrokerServer(socket, []string{job}, func(path string, peer int) (*exec.Cmd, error) {
+			s, e := NewLifecycleBrokerServer(socket, []string{job}, func(path string, peer int) (*exec.Cmd, io.Closer, error) {
 				calls.Add(1)
 				if peer != os.Getpid() {
 					t.Error("kernel peer identity changed")
 				}
 				if kind == "foreign-owner" || kind == "failed-launch" {
-					return nil, os.ErrInvalid
+					return nil, nil, os.ErrInvalid
 				}
 				cmd := exec.Command(os.Args[0], "-test.run=^TestLifecycleServerTerminalProbe$")
 				cmd.Env = append(os.Environ(), "PYRY_LIFECYCLE_SERVER_PROBE=1")
-				return cmd, nil
+				return cmd, nil, nil
 			})
 			if e != nil {
 				t.Fatal(e)
@@ -189,7 +189,7 @@ func TestLifecycleBrokerServerCancellationCannotStartLateChild(t *testing.T) {
 	socket, job := filepath.Join(root, "socket"), filepath.Join(root, "owned.job")
 	entered, release := make(chan struct{}), make(chan struct{})
 	command := exec.Command(os.Args[0], "-test.run=^TestLifecycleServerTerminalProbe$")
-	s, e := NewLifecycleBrokerServer(socket, []string{job}, func(string, int) (*exec.Cmd, error) { close(entered); <-release; return command, nil })
+	s, e := NewLifecycleBrokerServer(socket, []string{job}, func(string, int) (*exec.Cmd, io.Closer, error) { close(entered); <-release; return command, nil, nil })
 	if e != nil {
 		t.Fatal(e)
 	}
