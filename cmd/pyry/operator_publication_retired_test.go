@@ -78,6 +78,7 @@ func TestOperatorReceiptWorkerJoins(t *testing.T) {
 	e, _, ring := testQueuedReceiptEmitter(h)
 	b := &testQueuedBlockedBroadcaster{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	stop := startOperatorMessageStreamV2(ctx, e, b, ring)
+	defer func() { cancel(); stop() }()
 	h.accepted(testConvID, msgqueue.QueuedMessage{ID: 1, TS: historyTS})
 	awaitProvenanceSignal(t, b.entered)
 	cancel()
