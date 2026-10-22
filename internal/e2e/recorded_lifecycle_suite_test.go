@@ -260,12 +260,10 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			return nil, os.ErrInvalid
 		}
 		cmd := exec.Command(binary, "-test.run=^TestLifecycleTapeBrokerProcess$", "--", jobPath)
-		diagnostic, err := os.OpenFile(filepath.Join(retained, job.Role+".diagnostic.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		_, err := recordedLifecycleDiagnostic(t, cmd, filepath.Join(retained, job.Role+".diagnostic.json"))
 		if err != nil {
 			return nil, err
 		}
-		t.Cleanup(func() { _ = diagnostic.Close() })
-		cmd.Stdout = diagnostic
 		cmd.Env = os.Environ()
 		if mode == "replay" {
 			cmd.Env = recordedPoolOfflineEnv()
@@ -626,6 +624,16 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 
 	t.Logf("mode=%s scenario=%s original_daemon_roots=1 child_roles=%d", mode, name, len(profile.Roles))
+}
+
+func recordedLifecycleDiagnostic(t *testing.T, cmd *exec.Cmd, path string) (*os.File, error) {
+	diagnostic, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { _ = diagnostic.Close() })
+	cmd.Stdout = diagnostic
+	return diagnostic, nil
 }
 
 type recordedWorkerCompletion struct {
