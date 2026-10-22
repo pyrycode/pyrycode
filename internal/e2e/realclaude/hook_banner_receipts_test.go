@@ -44,11 +44,21 @@ func TestHookBannerReceiptWindow(t *testing.T) {
 		change func([]protocol.Envelope, []history.Entry) ([]protocol.Envelope, []history.Entry)
 		valid  bool
 	}{
-		{"receipts before ack", nil, true},
-		{"acceptance after ack", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			f[3], f[4] = f[4], f[3]
-			return f, e
-		}, true},
+		{"canonical queued delivery without receipts", nil, true},
+		{"queued acceptance receipt", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
+			extra := f[2]
+			extra.HistoryEntryID = &e[0].ID
+			id := uint64(999)
+			extra.EventID = &id
+			return append(f, extra), e
+		}, false},
+		{"queued delivery receipt", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
+			extra := f[2]
+			extra.HistoryEntryID = &e[2].ID
+			id := uint64(999)
+			extra.EventID = &id
+			return append(f, extra), e
+		}, false},
 		{"duplicate", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
 			return append(f, f[0]), e
 		}, false},
@@ -56,7 +66,7 @@ func TestHookBannerReceiptWindow(t *testing.T) {
 			return append(f[:1], f[2:]...), e
 		}, false},
 		{"unexpected", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			mutatePayload(&f[5], "text", "unexpected")
+			mutatePayload(&f[2], "text", "unexpected")
 			return f, e
 		}, false},
 		{"missing history ID", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
@@ -72,11 +82,7 @@ func TestHookBannerReceiptWindow(t *testing.T) {
 			return f, e
 		}, false},
 		{"wrong raw fact", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			e[0].Type = "send_dropped"
-			return f, e
-		}, false},
-		{"delivery before acceptance", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			f[0], f[1] = f[1], f[0]
+			e[3].Type = "send_dropped"
 			return f, e
 		}, false},
 		{"wrong delivery link", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
@@ -95,25 +101,25 @@ func TestHookBannerReceiptWindow(t *testing.T) {
 			return f, e
 		}, false},
 		{"opening before ack", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			f[4], f[6] = f[6], f[4]
+			f[1], f[2] = f[2], f[1]
 			return f, e
 		}, false},
 		{"opening after text", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			f[6], f[7] = f[7], f[6]
+			f[2], f[3] = f[3], f[2]
 			return f, e
 		}, false},
 		{"refused text before refusal", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			return append([]protocol.Envelope{f[7]}, f...), e
+			return append([]protocol.Envelope{f[3]}, f...), e
 		}, false},
 		{"refused lifecycle", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			return append([]protocol.Envelope{f[8]}, f...), e
+			return append([]protocol.Envelope{f[4]}, f...), e
 		}, false},
 		{"missing refusal", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			mutatePayload(&f[2], "text", "")
+			mutatePayload(&f[0], "text", "")
 			return f, e
 		}, false},
 		{"truncated refusal", func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
-			mutatePayload(&f[2], "truncated", true)
+			mutatePayload(&f[0], "truncated", true)
 			return f, e
 		}, false},
 	}
@@ -125,13 +131,13 @@ func TestHookBannerReceiptWindow(t *testing.T) {
 				valid  bool
 			}{name: key + map[bool]string{false: " null", true: " absent"}[missing], change: func(f []protocol.Envelope, e []history.Entry) ([]protocol.Envelope, []history.Entry) {
 				var p map[string]json.RawMessage
-				_ = json.Unmarshal(f[0].Payload, &p)
+				_ = json.Unmarshal(f[2].Payload, &p)
 				if missing {
 					delete(p, key)
 				} else {
 					p[key] = json.RawMessage("null")
 				}
-				f[0].Payload, _ = json.Marshal(p)
+				f[2].Payload, _ = json.Marshal(p)
 				return f, e
 			}})
 		}
@@ -178,7 +184,7 @@ func testHookBannerWindow(t *testing.T) ([]protocol.Envelope, []history.Entry) {
 		entries[i].TS = at
 	}
 	var frames []protocol.Envelope
-	for _, i := range []int{0, 2, 3, 4, 6, 7} {
+	for _, i := range []int{3, 7} {
 		id, eventID := entries[i].ID, uint64(100+i)
 		p := raw(protocol.BannerPayload{ConversationID: "conv", Level: "info"})
 		if i == 3 {
@@ -187,7 +193,7 @@ func testHookBannerWindow(t *testing.T) ([]protocol.Envelope, []history.Entry) {
 		frames = append(frames, protocol.Envelope{Type: protocol.TypeBanner, Payload: p, TS: at, HistoryEntryID: &id, EventID: &eventID})
 	}
 	reqID := uint64(9)
-	frames = append(frames[:4], append([]protocol.Envelope{{Type: protocol.TypeAck, InReplyTo: &reqID}}, frames[4:]...)...)
+	frames = append(frames[:1], append([]protocol.Envelope{{Type: protocol.TypeAck, InReplyTo: &reqID}}, frames[1:]...)...)
 	frames = append(frames,
 		protocol.Envelope{Type: protocol.TypeAssistantDelta, Payload: raw(protocol.AssistantDeltaPayload{ConversationID: "conv", TurnID: "turn", Text: "reply"})},
 		protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "idle"})})

@@ -10,6 +10,9 @@
 - `cmd/pyry/queued_send_history_test.go`, `cmd/pyry/queued_legacy_receipts_test.go`: mixed lifecycle, startup, delayed confirmation and failure scenarios require canonical assertions.
 - `cmd/pyry/operator_publication_retired_test.go`: preserve canonical identity coverage; remove receipt-only worker tests.
 - `cmd/pyry/accepted_delivery_test.go`: retain live follower and failed-companion append regressions unchanged.
+- `cmd/pyry/stream_turn_drain.go`, `queued_item_actions_test.go`, `thread_shadow_legacy_test.go`: shared placement capacity, acceptance binding observer and mixed legacy/shadow coverage.
+- `internal/e2e/internal/scenario/hook.go`, `internal/e2e/realclaude/hook_banner_receipts_test.go`, `interactive_stream_hook_blocked_banner_test.go`: mixed refusal oracle and fixtures must observe canonical queued delivery while retaining other receipt families.
+- `docs/knowledge/features/e2e-harness.md`, `e2e-realclaude.md`: shared scenario and offline tagged checks do not establish live acceptance.
 - `docs/knowledge/features/msgqueue-package.md`, `msgqueue-package-lifecycle.md`: successful write is distinct from actual Claude placement; removing publication must retain recording seams.
 - `docs/knowledge/features/thread-package.md`, `history-package-producers.md`, `history-package-producers-legacy-compatibility.md`: raw facts remain authoritative; legacy eligibility is independent of visibility.
 - `docs/knowledge/decisions/042-daemon-built-thread.md`, Sessions, agents, messages, read marks: stable acceptance identity, unordered queued items, ordered actual delivery and hidden drops.
@@ -100,3 +103,18 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-22
+
+## Revisions
+- 2026-10-22: inspection found placement command capacity shared with the deleted
+  receipt mailbox. Keep its value under `placementCommandQueueSize` in
+  `queued_message_placement.go` and update `newStreamTurnSink`; no capacity change.
+  Convert `TestQueueBindingBeforePublication` to a `bindItem` observer so it still
+  removes an item during incomplete acceptance without a receipt callback.
+  Remove receipt wiring from `TestThreadShadowLegacy` while keeping its mixed
+  other-producer and reopened shadow coverage. These additional files remain local
+  to the same retirement; estimated total written work remains below 800 lines.
+- 2026-10-22: `scenario.CheckHookBannerWindow` and its tagged offline fixture
+  required four queued receipt banners in a mixed hook-refusal scenario. Remove
+  those positive expectations and observe canonical delivered user items from raw
+  history, retaining refusal identity, opening receipt and ACK/text ordering.
+  Preserve tagged fixture mutation tests for the remaining receipt family.

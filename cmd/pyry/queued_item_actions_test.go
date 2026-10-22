@@ -118,25 +118,22 @@ func TestBoundQueueActionsRestart(t *testing.T) {
 	}
 }
 
-func TestQueueBindingBeforePublication(t *testing.T) {
+func TestQueueBindingBeforeAcceptanceCompletes(t *testing.T) {
 	t.Parallel()
 	h := testSendHistory(historylog.New(t.TempDir()))
 	q := testBoundQueue(t, h, 1)
 	called := false
-	// Removal during the acceptance receipt defers its terminal callback; do not
-	// recursively remove when the subsequent drop receipt is published.
-	h.publish = func(m operatorMessage) {
-		if called {
-			return
-		}
+	bind := h.bindItem
+	h.bindItem = func(c string, queueID, itemID uint64) {
+		bind(c, queueID, itemID)
 		called = true
-		if m.historyEntryID == nil || !q.RemoveItem(testConvID, 1, *m.historyEntryID) {
-			t.Error("published acceptance was not yet bound")
+		if !q.RemoveItem(c, queueID, itemID) {
+			t.Error("acceptance was not yet bound")
 		}
 	}
 	q.Enqueue(testConvID, "queued")
 	if !called || len(q.Snapshot(testConvID)) != 0 {
-		t.Fatal("acceptance publication missing")
+		t.Fatal("acceptance binding missing")
 	}
 	failed := testSendHistory(nil)
 	failed.bindItem = func(string, uint64, uint64) { t.Error("failed append established binding") }

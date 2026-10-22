@@ -622,11 +622,8 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	defer postDelivery.stopAccepting()
 	postDelivery.sessionFor = channelPostSession(convReg, pool.HarnessFor)
 	postDelivery.bind(turnBusy)
-	// Receipts use a bounded mailbox before their relay consumer exists.
-	ome := newOperatorMessageEmitterV2(logger)
 	sends := newQueuedSendHistory(conversationHistory, logger, channelPostSession(convReg, pool.HarnessFor))
 	sends.attachmentName = storedQueuedAttachmentName(resolveInstanceDirPath(*name), convReg)
-	sends.publish = ome.notifyReceipt
 	// Queued Claude history entries wait for placement on the stream drain. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
 	// which commits at the write as before.
@@ -860,8 +857,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		resetting:    resetting,
 		debugBundler: debugBundler,
 		settings:     liveSettingsUpdater{settingsUpdaterAdapter: settingsUpdaterAdapter{pool, modelVocabulary}, live: liveBindings},
-		// Receipt publication starts in startRelayV2.
-		operatorMessages: ome,
 		// #2646: the capability list is read off an adapter over the same pool and
 		// store as settings above, so it reports exactly what that one checks.
 		capabilities: liveSettingsUpdater{settingsUpdaterAdapter: settingsUpdaterAdapter{pool, modelVocabulary}, live: liveBindings}.Capabilities,

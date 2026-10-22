@@ -257,7 +257,7 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 	return &streamTurnSink{
 		runtimeWake:           make(chan struct{}, 1),
 		ch:                    make(chan streamTurnEnvelope, buf),
-		placementCommands:     make(chan func(), operatorMessageQueueSize),
+		placementCommands:     make(chan func(), placementCommandQueueSize),
 		stopped:               make(map[streamChildKey]confirmedStreamStop),
 		stoppedWake:           make(chan struct{}, 1),
 		droppableCap:          buf - min(streamTurnSinkCloseReserve, buf/2),

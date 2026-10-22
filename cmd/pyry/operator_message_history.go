@@ -11,7 +11,7 @@ import (
 )
 
 // newOperatorMessageHistory records safe client text at stream placement or
-// confirmation. Only the linked neutral receipt is published. Composed
+// confirmation. Queued sends are observed through canonical thread items. Composed
 // delivery bytes and host attachment paths are absent from QueuedMessage.
 func newOperatorMessageHistory(store *history.Store, place *sendNowPlacement, logger *slog.Logger, source ...history.SessionProvenance) msgqueue.DeliveredFunc {
 	var sends *queuedSendHistory
@@ -65,10 +65,7 @@ func operatorMessageHistory(store *history.Store, place *sendNowPlacement, logge
 			ts := time.Now().UTC()
 			historyEntryID := appendConversationHistory(store, logger, "operator_message.history_append_err",
 				convID, protocol.TypeMessage, stored, ts, captured)
-			receipt := sends.delivered(convID, msg.ID, ref, historyEntryID, ts, captured)
-			if receipt != nil && sends.publish != nil {
-				sends.publish(*receipt)
-			}
+			sends.delivered(convID, msg.ID, ref, historyEntryID, ts, captured)
 		}
 		place.attach(convID, msg.ID, commit)
 	}

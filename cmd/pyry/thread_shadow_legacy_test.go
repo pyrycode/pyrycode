@@ -142,10 +142,7 @@ func TestThreadShadowLegacy(t *testing.T) {
 		sends := testSendHistory(h)
 		msg := msgqueue.QueuedMessage{ID: 1, MessageID: "send", Text: "operator", TS: occurred}
 		sends.accepted(testConvID, msg)
-		operator := newOperatorMessageEmitterV2(discardLogger())
-		sends.publish = operator.notifyReceipt
 		operatorMessageHistory(h, nil, discardLogger(), sends)(testConvID, msg)
-		operator.broadcast(ctx, mgr, e.ring)
 		posts := newChannelPostEmitterV2(mgr, ctx, discardLogger())
 		posts.ring = e.ring
 		d := testDelivery(t, t.TempDir(), h, nil)

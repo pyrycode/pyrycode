@@ -460,7 +460,7 @@ func (w *hookBannerWindow) next(t *testing.T, h *perConvHarness,
 }
 
 // awaitBanner waits for this conversation's hook reason under one deadline.
-// Empty queued receipts are retained and cannot complete the refusal wait.
+// Other producers' neutral receipts cannot complete the refusal wait.
 func (w *hookBannerWindow) awaitBanner(t *testing.T, h *perConvHarness,
 	rig oslcapRig, convID string, timeout time.Duration) protocol.BannerPayload {
 	t.Helper()

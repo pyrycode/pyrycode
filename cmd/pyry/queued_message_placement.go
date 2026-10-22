@@ -15,6 +15,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
+const placementCommandQueueSize = 16
+
 func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink, store *history.Store, isClaude func(string) bool, logger *slog.Logger) {
 	p.confirmationDispatch = func(commit func()) {
 		if sink.runtimeEnabled.Load() {

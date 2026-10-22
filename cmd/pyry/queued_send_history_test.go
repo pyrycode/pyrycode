@@ -110,7 +110,6 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 			dir := t.TempDir()
 			store := history.New(dir)
 			h := testSendHistory(store)
-			ome, bcast, ring := testQueuedReceiptEmitter(h)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			terminal := make(chan struct{}, 1)
@@ -194,13 +193,20 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 					t.Fatal("terminal missing")
 				}
 			}
-			ome.broadcast(ctx, bcast, ring)
-			ome.broadcast(ctx, bcast, ring)
-			testQueuedReceiptIdentity(t, store, bcast, ring)
-			// Repeated drains retain exactly one publication per durable identity.
-			ome.broadcast(ctx, bcast, ring)
-			ome.broadcast(ctx, bcast, ring)
-			testQueuedReceiptIdentity(t, store, bcast, ring)
+			users := testCanonicalUsers(t, store, testConvID)
+			status, shown, order := "queued", true, uint64(0)
+			switch outcome {
+			case "delivered", "send_now", "retry":
+				status, order = "delivered", 2
+			case "removed", "give_up":
+				status, shown = "dropped", false
+			}
+			if len(users) != 1 || users[0].ID != 1 || users[0].Status != status || users[0].Shown != shown || users[0].Order != order {
+				t.Fatalf("canonical lifecycle: %+v", users)
+			}
+			if !reflect.DeepEqual(users, testCanonicalUsers(t, history.New(dir), testConvID)) {
+				t.Fatal("reopened lifecycle differs")
+			}
 			entries := historyEntries(t, store, testConvID)
 			want := 2
 			if outcome == "delivered" || outcome == "send_now" || outcome == "retry" {
@@ -242,7 +248,6 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 		t.Run(map[bool]string{false: "echo", true: "idle"}[idle], func(t *testing.T) {
 			store := history.New(t.TempDir())
 			h := testSendHistory(store)
-			ome, bcast, ring := testQueuedReceiptEmitter(h)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sink := newStreamTurnSink(16, discardLogger())
@@ -294,8 +299,10 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 			close(releaseConfirm)
 			<-enqueued
 			<-confirmed
-			ome.broadcast(ctx, bcast, ring)
-			testQueuedReceiptIdentity(t, store, bcast, ring)
+			users := testCanonicalUsers(t, store, testConvID)
+			if len(users) != 1 || users[0].ID != 1 || users[0].Order != 2 || users[0].Status != "delivered" || users[0].Session != "receiving-source" {
+				t.Fatalf("canonical placement: %+v", users)
+			}
 			entries := historyEntries(t, store, testConvID)
 			if len(entries) != 3 || entries[0].Type != historySendAccepted || entries[1].Type != protocol.TypeMessage || entries[2].Type != historySendDelivered {
 				t.Fatalf("ordering: %+v", entries)
@@ -357,7 +364,6 @@ func TestQueuedSendHistoryFailures(t *testing.T) {
 				store = history.New(path)
 			}
 			h := newQueuedSendHistory(store, bufLogger(&logs), nil)
-			ome, bcast, ring := testQueuedReceiptEmitter(h)
 			m := msgqueue.QueuedMessage{ID: 1, Text: "private-message", DeviceID: "private-sender", TS: historyTS}
 			h.accepted(testConvID, m)
 			if !nilStore {
@@ -366,10 +372,6 @@ func TestQueuedSendHistoryFailures(t *testing.T) {
 				}
 			}
 			operatorMessageHistory(store, nil, bufLogger(&logs), h)(testConvID, m)
-			ome.broadcast(context.Background(), bcast, ring)
-			if len(bcast.pushes) != 0 || len(ome.pending) != 0 {
-				t.Fatal("failed acceptance minted a receipt")
-			}
 
 			if !nilStore {
 				all := historyEntries(t, store, testConvID)
@@ -448,8 +450,8 @@ func TestQueuedSendHistoryLossRetryAndUnbound(t *testing.T) {
 		if legacyHistoryType(e.Type) {
 			t.Fatalf("raw legacy eligible: %s", e.Type)
 		}
-		if _, ok := legacyRuntimeReceipt(testConvID, e.Type, e.Payload, &e.ID, e.TS); !ok {
-			t.Fatalf("legacy receipt missing: %s", e.Type)
+		if _, ok := legacyRuntimeReceipt(testConvID, e.Type, e.Payload, &e.ID, e.TS); ok {
+			t.Fatalf("queued fact projected legacy receipt: %s", e.Type)
 		}
 	}
 }
