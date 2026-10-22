@@ -221,14 +221,6 @@ func TestLegacyRuntimeReceipts_StorageFailure(t *testing.T) {
 	}
 }
 
-func testLegacyReceiptEnvelope(t *testing.T, env protocol.Envelope, convID string) {
-	t.Helper()
-	var banner protocol.BannerPayload
-	if env.Type != protocol.TypeBanner || env.HistoryEntryID == nil || *env.HistoryEntryID == 0 || env.TS.IsZero() || json.Unmarshal(env.Payload, &banner) != nil || banner != (protocol.BannerPayload{ConversationID: convID, Level: "info"}) {
-		t.Fatalf("invalid legacy receipt: %+v", env)
-	}
-}
-
 func TestLegacyRuntimeReceipts_StartupDivider(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
