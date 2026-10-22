@@ -15,14 +15,14 @@ import (
 )
 
 func TestSessionErrorObservationControls(t *testing.T) {
-	for _, name := range []string{"clear", "foreign-clear", "nonempty-clear", "delivery-once", "duplicate-delivery", "actual-error"} {
+	for _, name := range []string{"clear", "foreign-clear", "nonempty-clear", "delivery-once", "duplicate-delivery", "actual-error", "terminal-checkpoint"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSessionErrorObservationHelperProcess$", "-test.v")
 			cmd.Env = append(os.Environ(), "PYRY_RECOVERY_OBSERVATION_CONTROL="+name)
 			out, err := cmd.CombinedOutput()
-			valid := name == "clear" || name == "delivery-once" || name == "actual-error"
+			valid := name == "clear" || name == "delivery-once" || name == "actual-error" || name == "terminal-checkpoint"
 			if ctx.Err() != nil || (err == nil) != valid {
 				t.Fatalf("recovery observation acceptance err=%v output=%s", err, out)
 			}
@@ -39,6 +39,18 @@ func TestSessionErrorObservationHelperProcess(t *testing.T) {
 	conv, _ := json.Marshal(liveConvID)
 	clear := protocol.Envelope{Type: protocol.TypeSessionError, Payload: json.RawMessage(`{}`), ConversationID: conv, SessionStateCleared: true}
 	switch name {
+	case "terminal-checkpoint":
+		state.observePlacement(t, scenario.QueuePlacementFrame{Kind: "delta", Text: "reply"})
+		raw, _ := json.Marshal(protocol.TurnStatePayload{ConversationID: liveConvID, State: "idle"})
+		state.observe(t, protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw})
+		state.observePlacement(t, scenario.QueuePlacementFrame{Kind: "idle"})
+		if state.completed {
+			t.Fatal("idle bypassed the attributed source/canonical completion checkpoint")
+		}
+		state.observePlacement(t, scenario.QueuePlacementFrame{Kind: "turn_end"})
+		if !state.completed {
+			t.Fatal("settled source/canonical completion was lost")
+		}
 	case "clear", "foreign-clear", "nonempty-clear":
 		if name == "foreign-clear" {
 			clear.ConversationID = json.RawMessage(`"other"`)

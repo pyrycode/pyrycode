@@ -13,16 +13,20 @@ import (
 // queuePlacementReader keeps canonical items across catch-up and live patches.
 // Foreign conversations never alter its revision or identity state.
 type queuePlacementReader struct {
-	t         *testing.T
-	w         Wire
-	conv      string
-	items     map[uint64]protocol.ThreadItem
-	pending   []protocol.ThreadItem
-	version   uint64
-	sourceID  uint64
-	ends      []history.Entry
-	idle      time.Time
-	completed map[string]bool
+	t          *testing.T
+	w          Wire
+	conv       string
+	items      map[uint64]protocol.ThreadItem
+	pending    []protocol.ThreadItem
+	version    uint64
+	epoch      string
+	checkpoint uint64
+	request    uint64
+	requested  uint64
+	sourceID   uint64
+	ends       []history.Entry
+	idles      []time.Time
+	completed  map[string]bool
 }
 
 func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementReader {
@@ -49,6 +53,7 @@ func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementR
 			r.items[item.ID] = item
 		}
 		if p.Final {
+			r.epoch, r.version, r.checkpoint = p.Epoch, p.Version, p.Version
 			return r
 		}
 	}
@@ -95,10 +100,17 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				}
 			}
 		}
+		if len(r.ends) > 0 && r.checkpoint < r.ends[0].ID && r.request == 0 {
+			r.requested = r.version
+			r.request = r.w.Send(protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: r.conv, Epoch: r.epoch, Version: r.requested, Limit: 100})
+		}
 		boundary := len(r.ends) > 0 && (len(r.pending) == 0 || (r.pending[0].Order != 0 && r.pending[0].Order > r.ends[0].ID))
-		if boundary && r.version >= r.ends[0].ID && !r.idle.IsZero() && !r.idle.Before(r.ends[0].TS) {
+		for len(r.ends) > 0 && len(r.idles) > 0 && r.idles[0].Before(r.ends[0].TS) {
+			r.idles = r.idles[1:]
+		}
+		if boundary && r.checkpoint >= r.ends[0].ID && len(r.idles) > 0 {
 			r.ends = r.ends[1:]
-			r.idle = time.Time{}
+			r.idles = r.idles[1:]
 			return QueuePlacementFrame{Kind: "turn_end"}, true
 		}
 		if len(r.pending) > 0 && !boundary {
@@ -167,6 +179,9 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			if r.w.Source != nil && time.Now().Before(deadline) {
 				continue
 			}
+			if len(r.ends) > 0 {
+				r.t.Logf("queue completion wait: version=%d checkpoint=%d request=%d terminal=%d pending=%d idles=%d", r.version, r.checkpoint, r.request, r.ends[0].ID, len(r.pending), len(r.idles))
+			}
 			return QueuePlacementFrame{}, false
 		}
 		decode := func(v any) {
@@ -181,8 +196,18 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			var p protocol.ThreadItemsPayload
 			decode(&p)
 			if p.ConversationID == r.conv {
+				if p.Epoch != r.epoch {
+					r.t.Fatal("thread checkpoint changed epoch")
+				}
 				r.version = max(r.version, p.Version)
 				r.pending = append(r.pending, p.Items...)
+				if p.Final && env.InReplyTo != nil && *env.InReplyTo == r.request {
+					if p.FromVersion != nil && *p.FromVersion != r.requested {
+						r.t.Fatal("thread checkpoint changed requested version")
+					}
+					r.checkpoint = max(r.checkpoint, p.Version)
+					r.request = 0
+				}
 			}
 		case protocol.TypeThreadItemAdded:
 			var p protocol.ThreadItemAddedPayload
@@ -199,6 +224,9 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			}
 			r.version = max(r.version, p.Version)
 			item := r.items[p.ItemID]
+			if item.Rev >= p.Rev {
+				continue // a full catch-up may already include this revision
+			}
 			if item.Rev != p.BaseRev {
 				r.t.Fatal("thread patch revision gap")
 			}
@@ -230,6 +258,9 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			}
 			r.version = max(r.version, p.Version)
 			item := r.items[p.ItemID]
+			if item.Rev >= p.Rev {
+				continue // a full catch-up may already include this revision
+			}
 			if item.Rev != p.BaseRev {
 				r.t.Fatal("thread append revision gap")
 			}
@@ -257,7 +288,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 					f.Kind = "reply_state"
 				}
 				if p.ConversationID == r.conv && p.State == "idle" {
-					r.idle = env.TS
+					r.idles = append(r.idles, env.TS)
 					f.Kind = "idle"
 				}
 			}
