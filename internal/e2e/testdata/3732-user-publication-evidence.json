@@ -1,0 +1,183 @@
+{
+  "ticket": 3732,
+  "tested_revision": "2386638f73c1deaa558b710e60c3a0c8384aac9d",
+  "tested_tree": "e0a8534b13a56f183034e0e87c2ca801d3f90d50",
+  "os_arch": "linux/amd64",
+  "go_version": "go1.26.9",
+  "cgo_enabled": true,
+  "goflags": "unset",
+  "gomaxprocs": "unset",
+  "gorace": "unset",
+  "source_state": "Clean throughout the bulk checks at tested_revision. Followup 286fc2ed changes only receipt-worker test failure cleanup; its focused race rerun passed. Final commit adds evidence only.",
+  "counting": "Go run/pass/fail/skip events include parent tests and subtests; leaf_tests excludes parents.",
+  "reports": [
+    {
+      "name": "daemon",
+      "raw_report": "/tmp/builder-3732/daemon.json",
+      "sha256": "79aad2f30ee6909bd00a7c94595c759953ff36742fd030574ca95c45ce89dd8b",
+      "executed": 209,
+      "passed": 209,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 174,
+      "stderr": "/tmp/builder-3732/daemon.stderr",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "command": "python3 scripts/test-admission.py -- go test -json -count=1 -timeout=30m -race -run '^(TestOperatorPublicationRetired|TestOperatorReceipt|TestOperatorMessageHistory|TestOrdinaryQueuePlacement|TestQueuedSend|TestQueuedLegacyReceipts|TestQueuedPlacement|TestOperatorDeliveryProvenance|TestAcceptedDelivery|TestLiveProducers_HistoryEntryID|TestThreadShadowLegacy|TestDaemonThreadPublication|TestDaemonThreadOffscreenShownRecovery|TestHistoryProjection_OtherProducerMetadata|TestRuntimeHistory|TestQueuedAttachment|TestDeliveredAttachment|TestBoundQueue|TestQueueBindingBeforePublication)' ./cmd/pyry > /tmp/builder-3732/daemon.json 2> /tmp/builder-3732/daemon.stderr"
+    },
+    {
+      "name": "controls",
+      "raw_report": "/tmp/builder-3732/controls.json",
+      "sha256": "edae71f48fbf88af667d8defa1c94efe383eff988904efc24c7a29aa51347bc4",
+      "executed": 41,
+      "passed": 41,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 39,
+      "stderr": "/tmp/builder-3732/controls.stderr",
+      "stderr_sha256": "d2af93992f5e4d044fca3258896e39981e5f0346b449ec9737d189022b977c46",
+      "command": "python3 scripts/test-admission.py -- go test -json -count=1 -timeout=30m -race -run '^(TestOrdinaryQueueControls|TestSendNowPlacementControls)$' ./internal/e2e/internal/scenario > /tmp/builder-3732/controls.json 2> /tmp/builder-3732/controls.stderr"
+    },
+    {
+      "name": "shadow-controls",
+      "raw_report": "/tmp/builder-3732/shadow-controls.json",
+      "sha256": "d4c8bb5e6027e4620bb418caad905e28d1cc0d45a18e8e4b6266a2d234afa63e",
+      "executed": 72,
+      "passed": 72,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 65,
+      "stderr": "/tmp/builder-3732/shadow-controls.stderr",
+      "stderr_sha256": "435da9306c35af2704358ba08006af39d77d10d08f07682418885e57bd2a721a",
+      "command": "python3 scripts/test-admission.py -- go test -json -count=1 -timeout=30m -race -run '^(TestThreadShadowPairWithoutUserPublication|TestThreadShadowPairRejectsUserContent|TestThreadShadowRetainedEvidence|TestThreadShadowReaderRejectsIncomplete|TestThreadShadowRawRowsRejectsLostText|TestThreadShadowMessageTimeProjection|TestThreadShadowQueueHandleProjection)$' ./internal/e2e/realclaude > /tmp/builder-3732/shadow-controls.json 2> /tmp/builder-3732/shadow-controls.stderr"
+    },
+    {
+      "name": "integration",
+      "raw_report": "/tmp/builder-3732/integration.json",
+      "sha256": "eec61a1a2fec3ce849e97b58dd9780e077e180440273cab0610da06faee18250",
+      "executed": 3,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 2,
+      "stderr": "/tmp/builder-3732/integration.stderr",
+      "stderr_sha256": "46a50e63bd6c06c3d91ac16b538b72dc2f2f7f91397cc29599a60a5c935a0d7a",
+      "command": "PYRY_CLAUDE_TAPE_SCENARIOS='[\"ordinary-queue-placement\",\"send-now-placement\"]' python3 scripts/test-admission.py -- go test -json -count=1 -timeout=30m -race -tags e2e -run '^TestRecordedClaude$' ./internal/e2e > /tmp/builder-3732/integration.json 2> /tmp/builder-3732/integration.stderr"
+    }
+  ],
+  "earlier_attempts": [
+    {
+      "name": "red",
+      "raw_report": "/tmp/builder-3732/red.json",
+      "sha256": "9b235eb643fcd80fb35606c4fdbc04891fe4ac280ef45405804d9b8a2862bbfa",
+      "executed": 1,
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "leaf_tests": 1,
+      "source_state": "Plan f1505470 plus the initial failing regression only; production unchanged from 1293cdb5."
+    },
+    {
+      "name": "focused-1",
+      "raw_report": "/tmp/builder-3732/focused-1.json",
+      "sha256": "89e2c3cb41f4abb0a6cc75daa61a25c59275d4d1273571cf57676fac0ee2b62f",
+      "executed": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 0,
+      "source_state": "in-progress tree; not final acceptance",
+      "result": "Compilation failed; zero tests executed."
+    },
+    {
+      "name": "focused-2",
+      "raw_report": "/tmp/builder-3732/focused-2.json",
+      "sha256": "86235764676c37ffa37958495003b05ffe37fbbe27745ad35325aabac6290b75",
+      "executed": 152,
+      "passed": 139,
+      "failed": 13,
+      "skipped": 0,
+      "leaf_tests": 127,
+      "source_state": "in-progress tree; not final acceptance",
+      "result": "Migration assertions and a removed callback synchronization signal failed; corrected in the candidate. Historical failures remain failed."
+    },
+    {
+      "name": "focused-3",
+      "raw_report": "/tmp/builder-3732/focused-3.json",
+      "sha256": "19e8c966370fb150fb0a897086f1df9f47c21d34d8f99be302b07d1209bf24c6",
+      "executed": 153,
+      "passed": 153,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 128,
+      "source_state": "in-progress tree; not final acceptance"
+    },
+    {
+      "name": "tagged-controls",
+      "raw_report": "/tmp/builder-3732/tagged-controls.json",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "executed": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 0,
+      "stderr": "/tmp/builder-3732/tagged-controls.stderr",
+      "stderr_sha256": "5f9dfc962030466543fd0a3bc55a4aac7470da5c901a3d0ad911658dda5c7e6a",
+      "source_state": "in-progress tree; not final acceptance",
+      "result": "Broad selector refused before execution; narrowed exact selection followed."
+    },
+    {
+      "name": "tagged-focused",
+      "raw_report": "/tmp/builder-3732/tagged-focused.json",
+      "sha256": "f191fab62fa1a896296433222d43681899b1314929942d88858e9a8c61c10713",
+      "executed": 0,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "leaf_tests": 0,
+      "stderr": "/tmp/builder-3732/tagged-focused.stderr",
+      "stderr_sha256": "542620e4657440809d903976fdf8f5a23addf3c57f3d3176117276ac7fa70e8e",
+      "source_state": "in-progress tree; not final acceptance",
+      "result": "Zero tests: live build tag excludes offline controls. Corrected by shadow-controls; never counted as a pass."
+    }
+  ],
+  "static_checks": [
+    {
+      "command": "go vet ./...",
+      "exit_code": 0,
+      "raw_report": "/tmp/builder-3732/final-vet.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "go vet -tags e2e,e2e_realclaude ./internal/e2e/...",
+      "exit_code": 0,
+      "raw_report": "/tmp/builder-3732/final-tagged-vet.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "go build -o /tmp/builder-3732/pyry ./cmd/pyry",
+      "exit_code": 0,
+      "raw_report": "/tmp/builder-3732/final-build.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "pending": [
+    "Dispatcher/verifier configured full gates",
+    "TestRealClaude_OrdinaryQueuedPlacement",
+    "TestRealClaude_SendQueuedNowPlacement",
+    "Documentation handoff in the plan and PR"
+  ],
+  "verification_scope": "Other operating systems are outside this ticket's verification scope; compilation and recorded replay are not live acceptance.",
+  "followup": {
+    "name": "worker-cleanup",
+    "revision": "286fc2ed98bafb20c6b63c134241238fe96ba281",
+    "raw_report": "/tmp/builder-3732/worker-cleanup.json",
+    "sha256": "1e730271d10aaf9e6e3917464649c9059a0c936c71e1f634802d3a52288e9de1",
+    "stderr": "/tmp/builder-3732/worker-cleanup.stderr",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "executed": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "command": "python3 scripts/test-admission.py -- go test -json -count=1 -timeout=30m -race -run '^TestOperatorReceiptWorkerJoins$' ./cmd/pyry > /tmp/builder-3732/worker-cleanup.json 2> /tmp/builder-3732/worker-cleanup.stderr"
+  }
+}
