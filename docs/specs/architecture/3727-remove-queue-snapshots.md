@@ -113,6 +113,14 @@ Pending documentation stage:
 
 ## Revisions
 
+- 2026-10-22 diagnosis amendment, before repair: the retained inner replay first
+  fails on a legitimate session-error clear with an empty payload. The thread
+  observer must distinguish a validated, correctly scoped clear from an actual
+  error reading. Preserve rejection of malformed and foreign clears. Raw delivery
+  must not be counted in the envelope observer and again in the placement-frame
+  observer. Keep one delivery counter with actual duplicate rejection. Both
+  retained and dropped recovery arms must execute after these corrections.
+
 - 2026-10-22 manual repair plan, before code: Juhana requested manual handling
   through the documentation stage. Repair the two verifier findings in the
   retained PR. Send-now must inspect the complete final canonical queued-item
