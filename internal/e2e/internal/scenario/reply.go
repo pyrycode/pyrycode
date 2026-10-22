@@ -66,17 +66,31 @@ func PollingReceive(t *testing.T, phone interface {
 	Close() error
 }, cs *noise.CipherState) Next {
 	t.Helper()
+	next, _ := PollingReceiveWithStop(t, phone, cs)
+	return next
+}
+
+// PollingReceiveWithStop also permits a reconnecting harness to close and join
+// the old connection's pending read before it installs a successor reader.
+// Stop is idempotent. Call Next and Stop serially from the test goroutine.
+func PollingReceiveWithStop(t *testing.T, phone interface {
+	Receiver
+	Close() error
+}, cs *noise.CipherState) (Next, func()) {
+	t.Helper()
 	type result struct {
 		raw []byte
 		err error
 	}
 	var pending chan result
-	t.Cleanup(func() {
+	stop := func() {
+		_ = phone.Close()
 		if pending != nil {
-			_ = phone.Close()
 			<-pending
+			pending = nil
 		}
-	})
+	}
+	t.Cleanup(stop)
 	return func(deadline time.Time) protocol.Envelope {
 		for time.Now().Before(deadline) {
 			if pending == nil {
@@ -118,7 +132,7 @@ func PollingReceive(t *testing.T, phone interface {
 			return env
 		}
 		return protocol.Envelope{}
-	}
+	}, stop
 }
 
 const WarnRateLimitStatus = "allowed_warning"
