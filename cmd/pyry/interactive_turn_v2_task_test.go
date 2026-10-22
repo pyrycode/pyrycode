@@ -160,7 +160,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksNoLifecycleMutation(t *testing.
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, tt := range bgTaskEvents() {
 		e.Handle(context.Background(), tt.ev)
@@ -170,7 +170,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksNoLifecycleMutation(t *testing.
 		protocol.TypeBackgroundTaskUpdated,
 		protocol.TypeBackgroundTaskRoster,
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, bare) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, bare) {
 		t.Fatalf("bare background-task envelopes: got %v, want %v", got, bare)
 	}
 
@@ -180,7 +180,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksNoLifecycleMutation(t *testing.
 		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
 		protocol.TypeAssistantDelta, // hello
 	)
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("post-background-task envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
@@ -199,7 +199,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksFlushPendingDeltaFirst(t *testi
 			cur := &stubCursor{}
 			cur.set(testConvID)
 			bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-			e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+			e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 			e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "before"})
 			e.Handle(context.Background(), tt.ev)
@@ -209,7 +209,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksFlushPendingDeltaFirst(t *testi
 				protocol.TypeAssistantDelta, // "before", flushed ahead of the frame
 				tt.wantTyp,
 			}
-			if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+			if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 				t.Fatalf("envelope order:\n got %v\nwant %v", got, wantTypes)
 			}
 		})
@@ -224,7 +224,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskRosterMidTurnDoesNotDisturbOpenT
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{Text: "a1"},                 // opens turn: responding, buffers a1
@@ -243,11 +243,11 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskRosterMidTurnDoesNotDisturbOpenT
 		protocol.TypeTurnEnd,              //
 		protocol.TypeTurnState,            // idle
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("mid-turn roster envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 2 {
 		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
 	}
@@ -533,7 +533,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskProgressNoLifecycleMutation(t *t
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	// Two of them, because one frame cannot show that a repeating variant leaves the
 	// tracker alone every time rather than only the first time.
@@ -544,7 +544,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskProgressNoLifecycleMutation(t *t
 	// A turn_state anywhere in the sequence is the observable signature of a
 	// transitionTo call, so the exact frame sequence is the assertion.
 	want := []string{protocol.TypeBackgroundTaskProgress, protocol.TypeBackgroundTaskProgress}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, want) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, want) {
 		t.Fatalf("bare background_task_progress envelopes: got %v, want %v", got, want)
 	}
 	if e.inTurn {
@@ -565,7 +565,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskProgressNoLifecycleMutation(t *t
 		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
 		protocol.TypeAssistantDelta, // hello
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("post-progress envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 }

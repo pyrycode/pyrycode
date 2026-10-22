@@ -208,12 +208,9 @@ func TestInteractiveTurnEmitterV2_TransitionOrder(t *testing.T) {
 	}
 
 	wantTypes := []string{
-		protocol.TypeTurnState,      // thinking
-		protocol.TypeTurnState,      // responding
-		protocol.TypeAssistantDelta, // hello
-		protocol.TypeToolUse,        // Read
-		protocol.TypeTurnEnd,        // end_turn
-		protocol.TypeTurnState,      // idle
+		protocol.TypeTurnState, // thinking
+		protocol.TypeTurnState, // responding
+		protocol.TypeTurnState, // idle
 	}
 	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
 		t.Fatalf("envelope type order:\n got %v\nwant %v", got, wantTypes)
@@ -255,7 +252,7 @@ func TestInteractiveTurnEmitterV2_PerTurnSeqReset(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		// turn A — distinct MessageIDs so each TextChunk is its own delta: the
@@ -271,7 +268,7 @@ func TestInteractiveTurnEmitterV2_PerTurnSeqReset(t *testing.T) {
 		e.Handle(context.Background(), ev)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 4 {
 		t.Fatalf("want 4 assistant_delta, got %d", len(deltas))
 	}
@@ -379,14 +376,13 @@ func TestInteractiveTurnEmitterV2_MidTurnJoin(t *testing.T) {
 	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})        // buffers; turn_state responding emit#2: [a,b]
 	e.flushDelta(context.Background())                                        // coalesced delta emit#3: [a,b]
 
-	// a saw everything: thinking, responding, assistant_delta.
-	wantA := []string{protocol.TypeTurnState, protocol.TypeTurnState, protocol.TypeAssistantDelta}
+	// A receives both live phase readings.
+	wantA := []string{protocol.TypeTurnState, protocol.TypeTurnState}
 	if got := pushTypes(pushesFor(bcast.pushes, "a")); !slices.Equal(got, wantA) {
 		t.Fatalf("conn a envelopes: got %v, want %v", got, wantA)
 	}
-	// b joined for the second event: responding + assistant_delta, never the
-	// first event's thinking.
-	wantB := []string{protocol.TypeTurnState, protocol.TypeAssistantDelta}
+	// B joins for responding and never receives the earlier thinking reading.
+	wantB := []string{protocol.TypeTurnState}
 	if got := pushTypes(pushesFor(bcast.pushes, "b")); !slices.Equal(got, wantB) {
 		t.Fatalf("conn b envelopes: got %v, want %v", got, wantB)
 	}
@@ -663,7 +659,7 @@ func TestInteractiveTurnEmitterV2_SameIDCoalesce(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{MessageID: "m1", Text: "Hel"},
@@ -673,7 +669,7 @@ func TestInteractiveTurnEmitterV2_SameIDCoalesce(t *testing.T) {
 		e.Handle(context.Background(), ev)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 1 {
 		t.Fatalf("same-id chunks: got %d assistant_delta, want 1 (coalesced)", len(deltas))
 	}
@@ -689,7 +685,7 @@ func TestInteractiveTurnEmitterV2_SameIDCoalesce(t *testing.T) {
 		protocol.TypeTurnEnd,
 		protocol.TypeTurnState, // idle
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 }
@@ -701,7 +697,7 @@ func TestInteractiveTurnEmitterV2_NewIDBoundaryFlush(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{MessageID: "m1", Text: "A"},
@@ -711,7 +707,7 @@ func TestInteractiveTurnEmitterV2_NewIDBoundaryFlush(t *testing.T) {
 		e.Handle(context.Background(), ev)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 2 {
 		t.Fatalf("two message ids: got %d assistant_delta, want 2", len(deltas))
 	}
@@ -734,7 +730,7 @@ func TestInteractiveTurnEmitterV2_TimerFlushMidMessage(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "A"})
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "B"})
@@ -742,7 +738,7 @@ func TestInteractiveTurnEmitterV2_TimerFlushMidMessage(t *testing.T) {
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "C"})
 	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	want := []struct {
 		text string
 		seq  int
@@ -800,15 +796,15 @@ func TestInteractiveTurnEmitterV2_FlushBeforeNonText(t *testing.T) {
 			cur := &stubCursor{}
 			cur.set(testConvID)
 			bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-			e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+			e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 			e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "A"})
 			e.Handle(context.Background(), tt.trailing)
 
-			if got := pushTypes(bcast.pushes); !slices.Equal(got, tt.wantTypes) {
+			if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, tt.wantTypes) {
 				t.Fatalf("%s envelope order:\n got %v\nwant %v", tt.name, got, tt.wantTypes)
 			}
-			deltas := assistantDeltas(t, bcast.pushes)
+			deltas := assistantDeltas(t, testEmitterFacts(t, e))
 			if len(deltas) != 1 || deltas[0].Text != "A" {
 				t.Fatalf("%s: want one assistant_delta {A} before the non-text envelope, got %+v", tt.name, deltas)
 			}
@@ -823,7 +819,7 @@ func TestInteractiveTurnEmitterV2_FlushAtTurnBoundary(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{MessageID: "m1", Text: "A"},
@@ -838,7 +834,7 @@ func TestInteractiveTurnEmitterV2_FlushAtTurnBoundary(t *testing.T) {
 		protocol.TypeTurnEnd,
 		protocol.TypeTurnState, // idle
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("turn-boundary envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 }
@@ -850,7 +846,7 @@ func TestInteractiveTurnEmitterV2_OneSeqPerCoalescedDelta(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{MessageID: "m1", Text: "x"},
@@ -861,7 +857,7 @@ func TestInteractiveTurnEmitterV2_OneSeqPerCoalescedDelta(t *testing.T) {
 		e.Handle(context.Background(), ev)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 1 {
 		t.Fatalf("three same-id chunks: got %d assistant_delta, want 1", len(deltas))
 	}
@@ -898,12 +894,9 @@ func TestInteractiveTurnEmitterV2_RingRecordsEmittedEvents(t *testing.T) {
 		t.Fatal("ring reported a gap for a fresh query")
 	}
 	wantTypes := []string{
-		protocol.TypeTurnState,      // thinking
-		protocol.TypeTurnState,      // responding
-		protocol.TypeAssistantDelta, // hello (flushed before tool_use)
-		protocol.TypeToolUse,        // Read
-		protocol.TypeTurnEnd,        // end_turn
-		protocol.TypeTurnState,      // idle
+		protocol.TypeTurnState, // thinking
+		protocol.TypeTurnState, // responding
+		protocol.TypeTurnState, // idle
 	}
 	if rt := ringEventTypes(got); !slices.Equal(rt, wantTypes) {
 		t.Fatalf("ring event types:\n got %v\nwant %v", rt, wantTypes)
@@ -938,7 +931,7 @@ func TestInteractiveTurnEmitterV2_RingIDIsPerEventNotPerConn(t *testing.T) {
 	}
 
 	got, _ := e.ring.After(testConvID, 0)
-	const wantEvents = 6 // thinking, responding, delta, tool_use, turn_end, idle
+	const wantEvents = 3 // thinking, responding, idle
 	if len(got) != wantEvents {
 		t.Fatalf("ring recorded %d events, want %d (one per logical event, not per conn)", len(got), wantEvents)
 	}
@@ -1104,7 +1097,7 @@ func TestInteractiveTurnEmitterV2_WireEventIDsStrictlyIncreasing(t *testing.T) {
 // (assistant/tool_use → system/permission_denied → user/tool_result), and it is what
 // lets the join be asserted against a real sibling frame rather than against a literal
 // this test wrote twice.
-func TestInteractiveTurnEmitterV2_ToolDeniedFansOutToInteractiveOnly(t *testing.T) {
+func TestInteractiveTurnEmitterV2_RecordedDenialKeepsJoin(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -1112,7 +1105,7 @@ func TestInteractiveTurnEmitterV2_ToolDeniedFansOutToInteractiveOnly(t *testing.
 		{ConnID: "a", Interactive: true},
 		{ConnID: "b", Interactive: false},
 	}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	ctx := context.Background()
 	e.Handle(ctx, turnevent.ToolStart{
@@ -1128,12 +1121,9 @@ func TestInteractiveTurnEmitterV2_ToolDeniedFansOutToInteractiveOnly(t *testing.
 		TruncatedFields: []string{"message"},
 	})
 
-	denials := pushesOfType(bcast.pushes, protocol.TypeToolDenied)
+	denials := pushesOfType(testEmitterFacts(t, e), protocol.TypeToolDenied)
 	if len(denials) != 1 {
 		t.Fatalf("tool_denied pushed %d envelopes; want exactly 1 (interactive conn only)", len(denials))
-	}
-	if denials[0].connID != "a" {
-		t.Fatalf("tool_denied pushed to conn %q; want interactive conn %q", denials[0].connID, "a")
 	}
 	var dp protocol.ToolDeniedPayload
 	if err := json.Unmarshal(denials[0].env.Payload, &dp); err != nil {
@@ -1152,7 +1142,7 @@ func TestInteractiveTurnEmitterV2_ToolDeniedFansOutToInteractiveOnly(t *testing.
 		t.Fatalf("tool_denied dropped_fields: got %v, want nil", dp.DroppedFields)
 	}
 
-	uses := pushesOfType(bcast.pushes, protocol.TypeToolUse)
+	uses := pushesOfType(testEmitterFacts(t, e), protocol.TypeToolUse)
 	if len(uses) != 1 {
 		t.Fatalf("expected exactly one tool_use to join against; got %d", len(uses))
 	}
@@ -1274,7 +1264,7 @@ func TestInteractiveTurnEmitterV2_ToolProgressFansOutToInteractiveOnly(t *testin
 		{ConnID: "a", Interactive: true},
 		{ConnID: "b", Interactive: false},
 	}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	ctx := context.Background()
 	e.Handle(ctx, turnevent.ToolStart{ToolCallID: "tool-progress-33", Title: "Bash"})
@@ -1291,7 +1281,7 @@ func TestInteractiveTurnEmitterV2_ToolProgressFansOutToInteractiveOnly(t *testin
 	if err := json.Unmarshal(progress[0].env.Payload, &got); err != nil {
 		t.Fatalf("decode tool_progress payload: %v", err)
 	}
-	uses := pushesOfType(bcast.pushes, protocol.TypeToolUse)
+	uses := pushesOfType(testEmitterFacts(t, e), protocol.TypeToolUse)
 	if len(uses) != 1 {
 		t.Fatalf("tool_use count: got %d, want 1", len(uses))
 	}

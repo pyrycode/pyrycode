@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -24,7 +22,7 @@ func newParentLaneEmitter(t *testing.T, convID string) (*stubCursor, *fakeIntera
 	cur := &stubCursor{}
 	cur.set(convID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 	t.Cleanup(func() { e.flushTimer.Stop() })
 	return cur, bcast, e
 }
@@ -32,7 +30,7 @@ func newParentLaneEmitter(t *testing.T, convID string) (*stubCursor, *fakeIntera
 func TestInteractiveTurnEmitterV2_ParentLanesInterleaveInArrivalOrder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, bcast, e := newParentLaneEmitter(t, testConvID)
+	_, _, e := newParentLaneEmitter(t, testConvID)
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{MessageID: "shared", Text: "main-0a"},
@@ -47,7 +45,7 @@ func TestInteractiveTurnEmitterV2_ParentLanesInterleaveInArrivalOrder(t *testing
 		e.Handle(ctx, ev)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 5 {
 		t.Fatalf("assistant deltas = %d, want 5: %+v", len(deltas), deltas)
 	}
@@ -76,7 +74,7 @@ func TestInteractiveTurnEmitterV2_ParentLanesInterleaveInArrivalOrder(t *testing
 func TestInteractiveTurnEmitterV2_ParentLaneTimerFlushKeepsIdentity(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, bcast, e := newParentLaneEmitter(t, testConvID)
+	_, _, e := newParentLaneEmitter(t, testConvID)
 
 	first := strings.Repeat("x", maxDeltaTextBytes+1)
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "one", ParentToolCallID: parentLaneA, Text: first})
@@ -89,7 +87,7 @@ func TestInteractiveTurnEmitterV2_ParentLaneTimerFlushKeepsIdentity(t *testing.T
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "one", ParentToolCallID: parentLaneA, Text: "second"})
 	e.flushDelta(ctx)
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 3 {
 		t.Fatalf("assistant deltas = %d, want 3", len(deltas))
 	}
@@ -109,7 +107,7 @@ func TestInteractiveTurnEmitterV2_ParentLaneTimerFlushKeepsIdentity(t *testing.T
 func TestInteractiveTurnEmitterV2_TurnEndRetainsParentLanes(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, bcast, e := newParentLaneEmitter(t, testConvID)
+	_, _, e := newParentLaneEmitter(t, testConvID)
 
 	e.Handle(ctx, turnevent.ThoughtChunk{})
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "old", ParentToolCallID: parentLaneA, Text: "old-child"})
@@ -118,7 +116,7 @@ func TestInteractiveTurnEmitterV2_TurnEndRetainsParentLanes(t *testing.T) {
 	e.Handle(ctx, turnevent.TextChunk{MessageID: "new-child", ParentToolCallID: parentLaneA, Text: "new-child"})
 	e.Handle(ctx, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 3 {
 		t.Fatalf("assistant deltas = %d, want 3: %+v", len(deltas), deltas)
 	}
@@ -151,7 +149,7 @@ func TestInteractiveTurnEmitterV2_TurnEndRetainsParentLanes(t *testing.T) {
 		protocol.TypeTurnEnd,
 		protocol.TypeTurnState,
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("turn-end envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 }
@@ -161,13 +159,13 @@ func TestInteractiveTurnEmitterV2_TurnEndRetainsParentLanes(t *testing.T) {
 func TestInteractiveTurnEmitterV2_ParentLanesPerConversation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	_, bcast, e := newParentLaneEmitter(t, switchConvA)
+	_, _, e := newParentLaneEmitter(t, switchConvA)
 
 	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "old", ParentToolCallID: parentLaneA, Text: "a-child"})
 	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "new", ParentToolCallID: parentLaneA, Text: "b-child"})
 	e.flushAll(ctx)
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 2 {
 		t.Fatalf("assistant deltas = %d, want 2", len(deltas))
 	}
@@ -189,42 +187,17 @@ func TestInteractiveTurnEmitterV2_ParentLanesPerConversation(t *testing.T) {
 	}
 }
 
-func TestInteractiveTurnEmitterV2_AttributedDeltaUsesRingAndHistory(t *testing.T) {
+func TestInteractiveTurnEmitterV2_AttributedDeltaRetainsHistoryOnly(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 	_, bcast, e := newParentLaneEmitter(t, testConvID)
-	store := history.New(t.TempDir())
-	e.hist = store
-
-	e.Handle(ctx, turnevent.TextChunk{MessageID: "child", ParentToolCallID: parentLaneA, Text: "retained child"})
-	e.flushAll(ctx)
-
+	e.Handle(t.Context(), turnevent.TextChunk{MessageID: "child", ParentToolCallID: parentLaneA, Text: "retained child"})
+	e.flushAll(t.Context())
 	events, gap := e.ring.After(testConvID, 0)
-	if gap {
-		t.Fatal("ring reports a gap for one child delta")
+	if gap || len(events) != 0 || len(bcast.pushes) != 0 {
+		t.Fatal("attributed text reached raw delivery")
 	}
-	entries := historyEntries(t, store, testConvID)
-	assertLogMatchesRing(t, entries, events)
-	if len(bcast.pushes) != len(events) {
-		t.Fatalf("wire pushes = %d, ring events = %d", len(bcast.pushes), len(events))
-	}
-
-	var ringDelta protocol.AssistantDeltaPayload
-	found := false
-	for _, ev := range events {
-		if ev.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		if err := json.Unmarshal(ev.Payload, &ringDelta); err != nil {
-			t.Fatalf("decode retained assistant delta: %v", err)
-		}
-		found = true
-	}
-	if !found {
-		t.Fatal("attributed assistant delta missing from ring and matching history")
-	}
-	if ringDelta.ParentToolUseID != parentLaneA || ringDelta.Text != "retained child" || ringDelta.Seq != 0 {
-		t.Errorf("retained delta = {parent:%q text:%q seq:%d}, want attributed child at seq 0",
-			ringDelta.ParentToolUseID, ringDelta.Text, ringDelta.Seq)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
+	if len(deltas) != 1 || deltas[0].ParentToolUseID != parentLaneA || deltas[0].Text != "retained child" || deltas[0].Seq != 0 {
+		t.Fatalf("source delta = %+v", deltas)
 	}
 }

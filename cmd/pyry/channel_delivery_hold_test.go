@@ -76,7 +76,9 @@ type testPostBoundaryBcast struct {
 }
 
 func (b *testPostBoundaryBcast) Push(ctx context.Context, id string, env protocol.Envelope) error {
-	if env.Type == protocol.TypeTurnEnd {
+	var phase protocol.TurnStatePayload
+	_ = json.Unmarshal(env.Payload, &phase)
+	if env.Type == protocol.TypeTurnState && phase.State == "idle" {
 		close(b.entered)
 		select {
 		case <-b.release:
@@ -374,8 +376,14 @@ func TestChannelDelivery_TeardownCompletionGatesSuccessorUntilExit(t *testing.T)
 	sink.exits.Add(1)
 	trans.obs(sessions.SessionTransition{Reason: sessions.ReasonEviction, PreviousID: "sess-a"})
 	sink.sinkFor("sess-a")(snEnd)
-	for collectEnvs(t, b.pushed, 1)[0].Type != protocol.TypeTurnEnd {
-	}
+	testShadowWait(t, func() bool {
+		for _, entry := range historyEntries(t, h, testConvID) {
+			if entry.Type == protocol.TypeTurnEnd {
+				return true
+			}
+		}
+		return false
+	})
 	done := make(chan error, 1)
 	wrote := make(chan struct{}, 1)
 	w := funcWriter{write: func(context.Context, string, []byte) error { wrote <- struct{}{}; return nil }}
@@ -525,13 +533,13 @@ func TestChannelDelivery_RetainedStopBeforeLaterProducerOutput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cleanup := startStreamTurnDrainV2(ctx, sink, e, busy.resolve, busy, discardLogger())
 	defer func() { cancel(); cleanup() }()
-	frames := collectEnvs(t, b.pushed, 4)
-	if frames[1].Type != protocol.TypeAssistantDelta || frames[2].Type != protocol.TypeTurnState || frames[3].Type != protocol.TypeTurnState {
+	frames := collectEnvs(t, b.pushed, 3)
+	if frames[1].Type != protocol.TypeTurnState || frames[2].Type != protocol.TypeTurnState {
 		t.Fatal("retained stop did not separate old tail and later output")
 	}
 	var closed, opened protocol.TurnStatePayload
-	_ = json.Unmarshal(frames[2].Payload, &closed)
-	_ = json.Unmarshal(frames[3].Payload, &opened)
+	_ = json.Unmarshal(frames[1].Payload, &closed)
+	_ = json.Unmarshal(frames[2].Payload, &opened)
 	if closed.State != "idle" || opened.State != "responding" {
 		t.Fatal("retained stop closed later producer output")
 	}
@@ -540,7 +548,7 @@ func TestChannelDelivery_RetainedStopBeforeLaterProducerOutput(t *testing.T) {
 		t.Fatal("post entered the later producer turn")
 	}
 	sink.exitFor("sess-a")()
-	collectEnvs(t, b.pushed, 2)
+	collectEnvs(t, b.pushed, 1)
 	d.drain()
 	got := testDeltas(t, h, testConvID)
 	if len(got) != 3 || got[0].Text != "old tail" || got[1].Text != "new reply" || got[2].TurnID != post {

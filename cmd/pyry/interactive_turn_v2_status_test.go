@@ -61,11 +61,11 @@ func TestInteractiveTurnEmitterV2_StallNoLifecycleMutation(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	// A bare stall before any turn: only the stall, no turn_state / delta.
 	e.Handle(context.Background(), turnevent.Stall{})
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeStall}) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, []string{protocol.TypeStall}) {
 		t.Fatalf("bare stall envelopes: got %v, want [%s]", got, protocol.TypeStall)
 	}
 
@@ -78,7 +78,7 @@ func TestInteractiveTurnEmitterV2_StallNoLifecycleMutation(t *testing.T) {
 		protocol.TypeTurnState,      // responding — fresh turn opens after the stall
 		protocol.TypeAssistantDelta, // hello
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("post-stall envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
@@ -94,7 +94,7 @@ func TestInteractiveTurnEmitterV2_StallMidTurnDoesNotDisturbOpenTurn(t *testing.
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.TextChunk{Text: "a1"}, // opens turn: responding, buffers a1
@@ -111,11 +111,11 @@ func TestInteractiveTurnEmitterV2_StallMidTurnDoesNotDisturbOpenTurn(t *testing.
 		protocol.TypeStall,          // stall, no surrounding turn_state
 		protocol.TypeAssistantDelta, // a2
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("mid-turn stall envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 2 {
 		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
 	}
@@ -229,12 +229,12 @@ func TestInteractiveTurnEmitterV2_StatusPeersNoLifecycleMutation(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	// Bare status peers before any turn: only their own frames, no turn_state / delta.
 	e.Handle(context.Background(), turnevent.ApiRetry{Active: true, Current: 3, Total: 10})
 	e.Handle(context.Background(), turnevent.Compacting{Active: true})
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeApiRetry, protocol.TypeCompacting}) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, []string{protocol.TypeApiRetry, protocol.TypeCompacting}) {
 		t.Fatalf("bare status-peer envelopes: got %v, want [%s %s]", got, protocol.TypeApiRetry, protocol.TypeCompacting)
 	}
 
@@ -248,7 +248,7 @@ func TestInteractiveTurnEmitterV2_StatusPeersNoLifecycleMutation(t *testing.T) {
 		protocol.TypeTurnState,      // responding — fresh turn opens after the status peers
 		protocol.TypeAssistantDelta, // hello
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("post-status-peer envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
@@ -356,7 +356,7 @@ func TestInteractiveTurnEmitterV2_UnrecognizedNoLifecycleMutation(t *testing.T) 
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	// Bare unrecognized before any turn: its own frame only, no turn_state.
 	e.Handle(context.Background(), turnevent.Unrecognized{
@@ -364,7 +364,7 @@ func TestInteractiveTurnEmitterV2_UnrecognizedNoLifecycleMutation(t *testing.T) 
 		Kind: "some_future_event",
 		Raw:  `{"type":"some_future_event"}`,
 	})
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeUnrecognizedMessage}) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, []string{protocol.TypeUnrecognizedMessage}) {
 		t.Fatalf("bare unrecognized envelopes: got %v, want [%s]", got, protocol.TypeUnrecognizedMessage)
 	}
 
@@ -376,7 +376,7 @@ func TestInteractiveTurnEmitterV2_UnrecognizedNoLifecycleMutation(t *testing.T) 
 		protocol.TypeTurnState,      // responding — fresh turn opens afterwards
 		protocol.TypeAssistantDelta, // hello
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("post-unrecognized envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 }
@@ -388,7 +388,7 @@ func TestInteractiveTurnEmitterV2_UnrecognizedFlushesPendingDeltaFirst(t *testin
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "before"})
 	e.Handle(context.Background(), turnevent.Unrecognized{
@@ -402,7 +402,7 @@ func TestInteractiveTurnEmitterV2_UnrecognizedFlushesPendingDeltaFirst(t *testin
 		protocol.TypeAssistantDelta,      // "before", flushed ahead of the diagnostic
 		protocol.TypeUnrecognizedMessage, //
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 }
@@ -475,12 +475,12 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressStartsTurn(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.ThinkingProgress{EstimatedTokens: 5, EstimatedTokensDelta: 5})
 
 	wantOpenTypes := []string{protocol.TypeTurnState, protocol.TypeThinkingProgress}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantOpenTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantOpenTypes) {
 		t.Fatalf("bare thinking_progress envelopes: got %v, want %v", got, wantOpenTypes)
 	}
 	if !e.inTurn {
@@ -503,7 +503,7 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressStartsTurn(t *testing.T) {
 		protocol.TypeTurnEnd,
 		protocol.TypeTurnState, // idle closes it
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("thinking_progress lifecycle envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"thinking", "idle"}) {
@@ -526,7 +526,7 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
 	beforeTurnID := e.turnID
@@ -560,11 +560,11 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressMidTurnDoesNotDisturbOpenTurn(
 		protocol.TypeTurnEnd,        //
 		protocol.TypeTurnState,      // idle
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("mid-turn thinking_progress envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 2 {
 		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
 	}
@@ -589,7 +589,7 @@ func TestInteractiveTurnEmitterV2_OrdinaryTurnEmitsNoThinkingProgressFrames(t *t
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	for _, ev := range []turnevent.Event{
 		turnevent.ThoughtChunk{Text: "reasoning"},
@@ -611,7 +611,7 @@ func TestInteractiveTurnEmitterV2_OrdinaryTurnEmitsNoThinkingProgressFrames(t *t
 		protocol.TypeTurnEnd,        // end_turn
 		protocol.TypeTurnState,      // idle
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("ordinary-turn envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 }
@@ -768,7 +768,7 @@ func TestInteractiveTurnEmitterV2_RateLimitedNoLifecycleMutation(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.RateLimited{
 		Status:          rateLimitedStatusFixture,
@@ -779,7 +779,7 @@ func TestInteractiveTurnEmitterV2_RateLimitedNoLifecycleMutation(t *testing.T) {
 
 	// A turn_state anywhere in the sequence is the observable signature of a
 	// transitionTo call, so the exact single-frame sequence is the assertion.
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeRateLimited}) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, []string{protocol.TypeRateLimited}) {
 		t.Fatalf("bare rate_limited envelopes: got %v, want [%s]", got, protocol.TypeRateLimited)
 	}
 	if e.inTurn {
@@ -799,7 +799,7 @@ func TestInteractiveTurnEmitterV2_RateLimitedNoLifecycleMutation(t *testing.T) {
 		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
 		protocol.TypeAssistantDelta, // hello
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("post-rate_limited envelopes:\n got %v\nwant %v", got, wantTypes)
 	}
 	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
@@ -819,7 +819,7 @@ func TestInteractiveTurnEmitterV2_RateLimitedMidTurnDoesNotDisturbOpenTurn(t *te
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
 	beforeTurnID, beforeState := e.turnID, e.currentState
@@ -856,11 +856,11 @@ func TestInteractiveTurnEmitterV2_RateLimitedMidTurnDoesNotDisturbOpenTurn(t *te
 		protocol.TypeTurnEnd,        //
 		protocol.TypeTurnState,      // idle
 	}
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+	if got := pushTypes(testEmitterFacts(t, e)); !slices.Equal(got, wantTypes) {
 		t.Fatalf("mid-turn rate_limited envelope order:\n got %v\nwant %v", got, wantTypes)
 	}
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 2 {
 		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
 	}
@@ -1026,12 +1026,12 @@ func TestInteractiveTurnEmitterV2_BannerFlushesPendingDeltaFirst(t *testing.T) {
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "hello"})
 	e.Handle(context.Background(), turnevent.Banner{Level: bannerLevelFixture, Text: bannerTextFixture})
 
-	got := pushTypes(bcast.pushes)
+	got := pushTypes(testEmitterFacts(t, e))
 	if len(got) < 2 {
 		t.Fatalf("envelopes: got %v, want a flushed delta followed by a banner", got)
 	}

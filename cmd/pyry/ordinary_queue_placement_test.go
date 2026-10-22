@@ -66,8 +66,8 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 				collectEnvs(t, bcast.pushed, 1)
 				id := q.EnqueueDelivery(testConvID, "duplicate-id", "safe user text", "composed /host/private prompt")
 				send(snEnd)
-				preceding := collectEnvs(t, bcast.pushed, 3)
-				if preceding[1].Type != protocol.TypeTurnEnd {
+				preceding := collectEnvs(t, bcast.pushed, 1)
+				if preceding[0].Type != protocol.TypeTurnState {
 					t.Fatal(envTypes(preceding))
 				}
 				select {
@@ -93,7 +93,7 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 				}
 				want := 1
 				if releaseAfterEnd || noEcho {
-					want = 4
+					want = 2
 				}
 				got := collectEnvs(t, bcast.pushed, want)
 				users := testCanonicalUsers(t, store, testConvID)
@@ -109,7 +109,7 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 				send(echoOf("composed /host/private prompt"))
 				if !releaseAfterEnd && !noEcho {
 					send(snEnd)
-					got = append(got, collectEnvs(t, bcast.pushed, 3)...)
+					got = append(got, collectEnvs(t, bcast.pushed, 1)...)
 				}
 				// A barrier event in another conversation makes late callback/echo processing observable.
 				sink.sinkFor("s2")(snOpener)
@@ -229,16 +229,16 @@ func TestOrdinaryQueuePlacement_IdenticalWritesInterleaveWithSendNow(t *testing.
 	id3 := q.EnqueueDelivery(testConvID, "duplicate", "safe", "identical delivery")
 	close(held)
 	send(snEnd)
-	collectEnvs(t, bcast.pushed, 3)
+	collectEnvs(t, bcast.pushed, 1)
 	// The send-now carry opens a second turn; ordinary delivery still waits for it.
 	send(snOpener)
 	send(snEnd)
-	collectEnvs(t, bcast.pushed, 4)
+	collectEnvs(t, bcast.pushed, 2)
 	waitWrite()
 	send(echoOf("identical delivery"))
 	send(snOpener)
 	send(snEnd)
-	collectEnvs(t, bcast.pushed, 4)
+	collectEnvs(t, bcast.pushed, 2)
 	users := testCanonicalUsers(t, store, testConvID)
 	if len(users) != 3 {
 		t.Fatalf("canonical users: %+v", users)
@@ -318,7 +318,7 @@ func TestOrdinaryQueuePlacement_FailedWriteRetriesOnce(t *testing.T) {
 	sink.sinkFor("s1")(echoOf("composed"))
 	sink.sinkFor("s1")(snOpener)
 	sink.sinkFor("s1")(snEnd)
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectEnvs(t, bcast.pushed, 2)
 	for _, env := range got {
 		if env.Type == protocol.TypeMessage {
 			t.Fatal("raw user frame")

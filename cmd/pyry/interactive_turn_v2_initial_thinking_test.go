@@ -39,7 +39,7 @@ func newInitialThinkingPipeline(t *testing.T) *initialThinkingPipeline {
 		snapshots: [][]relay.ActiveConn{{{ConnID: "client", Interactive: true}}},
 		pushErr:   map[string]error{"client": relay.ErrConnNotFound},
 	}
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, logger)
+	emitter := testRecordedEmitter(t, cur, bcast, logger)
 	busy := newTurnBusyTracker(stubBusyResolve(map[string]string{
 		initialThinkingSession: testConvID,
 		"session-other":        initialThinkingOther,
@@ -120,14 +120,14 @@ func TestInitialThinkingParserToEmitterTerminalPaths(t *testing.T) {
 				}
 
 				writeInitialThinkingLines(t, p.parser, terminal.line)
-				wantTypes := append(append([]string{}, source.wantTypes...), protocol.TypeTurnEnd, protocol.TypeTurnState)
+				wantTypes := append(append([]string{}, source.wantTypes...), protocol.TypeTurnState)
 				if got := pushTypes(p.bcast.pushes); !slices.Equal(got, wantTypes) {
 					t.Fatalf("terminal envelope order: got %v, want %v", got, wantTypes)
 				}
 				if got := turnStateValues(t, p.bcast.pushes); !slices.Equal(got, []string{"thinking", "idle"}) {
 					t.Fatalf("terminal turn states: got %v, want [thinking idle]", got)
 				}
-				ends := pushesOfType(p.bcast.pushes, protocol.TypeTurnEnd)
+				ends := pushesOfType(testEmitterFacts(t, p.emitter), protocol.TypeTurnEnd)
 				if len(ends) != 1 {
 					t.Fatalf("turn_end count = %d, want 1", len(ends))
 				}

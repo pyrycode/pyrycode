@@ -162,7 +162,16 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 	source := history.SessionProvenance{Kind: "claude", SessionID: "session-" + string(a)}
 	e.HandleFor(t.Context(), string(a), turnevent.TextChunk{MessageID: "reply", Text: "pong"}, source)
 	e.HandleFor(t.Context(), string(a), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
-	read("legacy", protocol.TypeTurnEnd, 0)
+	for {
+		frame := read("legacy", protocol.TypeTurnState, 0)
+		var phase protocol.TurnStatePayload
+		if json.Unmarshal(frame.Payload, &phase) != nil {
+			t.Fatal("invalid completion phase")
+		}
+		if phase.ConversationID == string(a) && phase.State == "idle" {
+			break
+		}
+	}
 	raw, err := h.LatestEntryID(a)
 	if err != nil {
 		t.Fatal(err)

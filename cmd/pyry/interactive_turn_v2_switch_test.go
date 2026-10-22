@@ -45,7 +45,7 @@ func newTwoConvEmitter(t *testing.T) (*interactiveTurnEmitterV2, *fakeInteractiv
 	cur := &stubCursor{}
 	cur.set(switchConvB) // the cursor names B throughout; HandleFor must not read it
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 	snap := &turnPhaseSnapshot{}
 	e.phases = snap
 	return e, bcast, snap
@@ -83,7 +83,7 @@ func TestInteractiveTurnV2_InterleavedConversationsKeepOwnTurns(t *testing.T) {
 	e.HandleFor(ctx, switchConvB, turnevent.ToolStart{ToolCallID: "tb", Title: "Read"})
 	e.HandleFor(ctx, switchConvB, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e, switchConvA, switchConvB))
 	if len(deltas) != 2 {
 		t.Fatalf("assistant deltas = %d, want 2", len(deltas))
 	}
@@ -109,7 +109,7 @@ func TestInteractiveTurnV2_InterleavedConversationsKeepOwnTurns(t *testing.T) {
 	}
 
 	var turnEnds []string
-	for _, p := range bcast.pushes {
+	for _, p := range testEmitterFacts(t, e, switchConvA, switchConvB) {
 		if p.env.Type != protocol.TypeTurnEnd {
 			continue
 		}
@@ -136,7 +136,7 @@ func TestInteractiveTurnV2_InterleavedConversationsKeepOwnTurns(t *testing.T) {
 func TestInteractiveTurnV2_SharedTimerFlushesOtherConversation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	e, bcast, _ := newTwoConvEmitter(t)
+	e, _, _ := newTwoConvEmitter(t)
 
 	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "ma", Text: "from A"})
 	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "mb", Text: "from B"})
@@ -150,7 +150,7 @@ func TestInteractiveTurnV2_SharedTimerFlushesOtherConversation(t *testing.T) {
 	}
 	e.flushAll(ctx)
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e, switchConvA, switchConvB))
 	if len(deltas) != 2 {
 		t.Fatalf("assistant deltas = %d, want 2", len(deltas))
 	}
@@ -168,14 +168,14 @@ func TestInteractiveTurnV2_SharedTimerFlushesOtherConversation(t *testing.T) {
 func TestInteractiveTurnV2_FlushAllFlushesEveryConversation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	e, bcast, _ := newTwoConvEmitter(t)
+	e, _, _ := newTwoConvEmitter(t)
 
 	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "ma", Text: "A text"})
 	e.HandleFor(ctx, switchConvB, turnevent.TextChunk{MessageID: "mb", Text: "B text"})
 	e.flushAll(ctx)
 
 	got := map[string]string{}
-	for _, d := range assistantDeltas(t, bcast.pushes) {
+	for _, d := range assistantDeltas(t, testEmitterFacts(t, e, switchConvA, switchConvB)) {
 		got[d.ConversationID] = d.Text
 	}
 	if got[switchConvA] != "A text" || got[switchConvB] != "B text" || len(got) != 2 {
@@ -195,7 +195,7 @@ func TestInteractiveTurnV2_CleanPriorTurnEndUnaffected(t *testing.T) {
 	e.HandleFor(ctx, switchConvA, turnevent.TextChunk{MessageID: "a2", Text: "two"})
 	e.flushAll(ctx)
 
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e, switchConvA, switchConvB))
 	if len(deltas) != 2 || deltas[0].TurnID == deltas[1].TurnID {
 		t.Fatalf("deltas = %+v, want two with distinct turn ids", deltas)
 	}

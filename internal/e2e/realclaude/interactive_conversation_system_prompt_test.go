@@ -102,7 +102,7 @@ func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
 
 	// Arm 1 — the conversation whose stored prompt asks for the marker.
 	sealSendMessage(t, h.phone, h.initSend, 2, livePromptedConvID, "m-prompted", livePromptTurnQuery)
-	prompted := drainForCompletedTurnText(t, h.phone, h.initRecv, livePromptedConvID, perTurnReplyBudget)
+	prompted := drainForCompletedSourceText(t, h.phone, h.initRecv, h.home, livePromptedConvID, perTurnReplyBudget)
 	if !strings.Contains(prompted, marker) {
 		t.Errorf("AC #5: the reply for the conversation whose stored system prompt asks for %q does not "+
 			"carry it — the stored prompt did not reach the spawn.\nreply: %s", marker, prompted)
@@ -113,7 +113,7 @@ func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
 	// conversation's session; its reply NOT carrying it is what makes arm 1
 	// evidence about the prompt rather than about claude's habits.
 	sealSendMessage(t, h.phone, h.initSend, 3, liveBareConvID, "m-bare", livePromptTurnQuery)
-	bare := drainForCompletedTurnText(t, h.phone, h.initRecv, liveBareConvID, perTurnReplyBudget)
+	bare := drainForCompletedSourceText(t, h.phone, h.initRecv, h.home, liveBareConvID, perTurnReplyBudget)
 	if strings.Contains(bare, marker) {
 		t.Errorf("AC #5: the reply for the conversation with NO stored system prompt carries %q — "+
 			"a per-session prompt file is being shared across sessions.\nreply: %s", marker, bare)

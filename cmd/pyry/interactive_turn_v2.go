@@ -144,19 +144,10 @@ type interactiveTurnEmitterV2 struct {
 	// single-goroutine. Appended on emit, before the per-conn fan-out.
 	ring *eventring.Ring
 
-	// hist is the durable conversation log (#2114): the same envelopes the ring
-	// holds for reconnect catch-up, kept past the ring's per-conversation bound
-	// and past a daemon restart, which is what the ring cannot do. Appended on
-	// emit beside the ring, before the per-conn fan-out.
-	//
-	// nil means no durable log, and emitting is then exactly what it was before
-	// this field existed — which is what lets every emitter test here keep
-	// constructing emitters with no store. Assigned after construction rather
-	// than passed to newInteractiveTurnEmitterV2: that constructor has 86 call
-	// sites across 8 test files, and a positional parameter is not separable
-	// from its call sites in Go. Concrete pointer, never an interface; see
-	// appendConversationHistory for why that matters and where the nil guard
-	// lives.
+	// hist records source facts before any publication. Assistant, tool and
+	// completion content reaches apps through the canonical thread only, even
+	// when this store is absent or an append fails. Constructor callers may
+	// leave it nil; appendConversationHistory owns that guard.
 	hist *history.Store
 
 	// usageRec is the per-conversation context-reading memory (#2460): the daemon's
@@ -1382,6 +1373,10 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	ts := time.Now().UTC()
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts, e.source)
+	switch typ {
+	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+		return
+	}
 	if !legacyHistoryType(typ) {
 		var ok bool
 		payloadJSON, ok = legacyRuntimeReceipt(convID, typ, payloadJSON, historyEntryID, ts)
