@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -62,10 +61,7 @@ func (e *interactiveTurnEmitterV2) recordRuntimeFact(ctx context.Context, typ st
 		e.logger.Warn("history: runtime fact marshal failed", "event", "runtime_history.marshal_err")
 		return
 	}
-	id := appendConversationHistory(e.hist, e.logger, "runtime_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
-	if payload, ok := legacyRuntimeReceipt(p.ConversationID, typ, raw, id, p.OccurredAt); ok {
-		publishLegacyHistory(ctx, e.bcast, e.ring, e.logger, &e.nextID, p.ConversationID, protocol.TypeBanner, payload, p.OccurredAt, id)
-	}
+	appendConversationHistory(e.hist, e.logger, "runtime_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
 }
 
 func runtimeSourceKey(convID, sessionID string, incarnation uint64) string {

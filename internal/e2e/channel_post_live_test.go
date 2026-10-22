@@ -20,28 +20,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// TestChannelPost_E2E_ReachesAttachedClient closes the loop #2496 was split for
-// (#2498): a cron posts into a channel on the host, and an ALREADY-CONNECTED
-// client is told, without a reconnect.
-//
-// Every piece under it already exists and is covered on its own — the verb and
-// its durable record (#2497), the host-side fan-out shape (#2156), the frame type
-// (#607/#609) and the interactive grant (#626). What has never run together is
-// the join: until this ticket the recorded post reached a connected client as
-// nothing at all, and reached a reconnecting one as a `message` entry whose role
-// the current clients deliberately draw as null.
-//
-// The phone is attached before acceptance so this proves live fan-out. The
-// disconnected-device test separately covers bounded reconnect replay.
-//
-// THE CHANNEL IS CREATED BY THE POST ITSELF, through the label-misses arm, which
-// is the shape a cron's first run actually takes. That also puts a
-// conversation_updated on the same wire immediately before the assistant_delta,
-// so the read loop below has to classify rather than take the next frame — which
-// is the honest condition, not a simplification of it.
-//
-// Fake-daemon tier (fakeclaude, fakerelay, fakephone; no credentials, no
-// network), so `make check` covers the delivery path.
+// Attached clients retain controls while posts are served by canonical catch-up.
 func TestChannelPost_E2E_ReachesAttachedClient(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"
@@ -86,7 +65,8 @@ func TestChannelPost_E2E_ReachesAttachedClient(t *testing.T) {
 		t.Fatalf("phone dial: %v", err)
 	}
 	t.Cleanup(func() { _ = phone.Close() })
-	_, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
+	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token, protocol.CapabilityThread)
+	seal, next := sealedConnDriver(t, phone, "attached", send, recv)
 
 	// ── The post, with the phone already attached ──
 	p := runVerb(t, h.SocketPath, home, "channel", "post", "--name", channelName, "--text", text)
@@ -96,71 +76,51 @@ func TestChannelPost_E2E_ReachesAttachedClient(t *testing.T) {
 
 	row := waitForConversationNamed(t, home, channelName)
 
-	// ── The live frame ──
-	var delta protocol.AssistantDeltaPayload
-	deadline := time.Now().Add(frameDeadline)
-	for delta.Text == "" {
-		env, ok := nextAttachmentEnvelope(t, phone, recv, deadline)
-		if !ok {
-			t.Fatal("no assistant_delta arrived after a successful post; a message recorded while a " +
-				"client is attached must reach it without a reconnect")
-		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue // the created channel's conversation_updated, or the bootstrap session's pushes
-		}
-		// A post carries no in_reply_to: nothing solicits it. Asserting the absence
-		// here is what stops a future producer from quietly correlating it to
-		// whatever request happened to be in flight.
-		if env.InReplyTo != nil {
-			t.Errorf("assistant_delta carried in_reply_to = %v; nothing solicits a posted message", *env.InReplyTo)
-		}
-		if err := json.Unmarshal(env.Payload, &delta); err != nil {
-			t.Fatalf("decode assistant_delta payload: %v", err)
-		}
-	}
-
-	if delta.Text != text {
-		t.Errorf("pushed text = %q, want the posted %q", delta.Text, text)
-	}
-	if delta.ConversationID != row.ID {
-		t.Errorf("pushed conversation_id = %q, want the channel the post created %q", delta.ConversationID, row.ID)
-	}
-	if delta.TurnID == "" {
-		t.Error("pushed turn_id is empty; a client coalesces on it and every post would join one bubble")
-	}
-
-	for {
-		env, ok := nextAttachmentEnvelope(t, phone, recv, time.Now().Add(frameDeadline))
-		if !ok {
-			t.Fatal("live post completion absent")
-		}
-		if env.Type == protocol.TypeTurnEnd {
-			assertHostPostEnd(t, env.Payload, row.ID, delta.TurnID)
-			break
-		}
-	}
-	// ── The durable half, in the shape that was pushed ──
-	//
-	// The two legs are produced independently — the push travels the relay and
-	// this reads the file — so the claim that they carry ONE payload is a check
-	// rather than a tautology. One delta and its completion draw the post once.
 	waitForHistoryType(t, home, row.ID, protocol.TypeTurnEnd, 5*time.Second)
 	entries := readHistoryEntries(home, row.ID)
 	if len(entries) != 2 {
-		t.Fatalf("history holds %d entries, want exactly 2 — delta and completion", len(entries))
+		t.Fatal("post source is not unique")
+	}
+	var delta protocol.AssistantDeltaPayload
+	if json.Unmarshal(entries[0].Payload, &delta) != nil || delta.Text != text || delta.ConversationID != row.ID || delta.TurnID == "" {
+		t.Fatal("post source changed")
 	}
 	assertHostPostEnd(t, entries[1].Payload, row.ID, delta.TurnID)
-	if entries[0].Type != protocol.TypeAssistantDelta {
-		t.Errorf("entry type = %q, want %q — the record must be the shape that was pushed",
-			entries[0].Type, protocol.TypeAssistantDelta)
+	seal(protocol.Envelope{ID: 3737, Type: protocol.TypeThreadCatchUp, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.ThreadCatchUpPayload{ConversationID: row.ID, Limit: 100})})
+	deadline := time.Now().Add(frameDeadline)
+	found := false
+	for {
+		env, ok := next(deadline)
+		if !ok || env.Type == protocol.TypeError {
+			t.Fatal("post catch-up unavailable")
+		}
+		if env.Type == protocol.TypeBanner || env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeTurnEnd {
+			t.Fatal("raw post publication")
+		}
+		if env.Type != protocol.TypeThreadItems || env.InReplyTo == nil || *env.InReplyTo != 3737 {
+			continue
+		}
+		var p protocol.ThreadItemsPayload
+		if json.Unmarshal(env.Payload, &p) != nil || p.ConversationID != row.ID {
+			t.Fatal("invalid post catch-up")
+		}
+		for _, item := range p.Items {
+			var content struct {
+				Text string `json:"text"`
+			}
+			if item.Kind == "assistant_message" && json.Unmarshal(item.Content, &content) == nil && content.Text == text {
+				if found || item.Active {
+					t.Fatal("duplicate or incomplete canonical post")
+				}
+				found = true
+			}
+		}
+		if p.Final {
+			break
+		}
 	}
-	var recorded protocol.AssistantDeltaPayload
-	if err := json.Unmarshal(entries[0].Payload, &recorded); err != nil {
-		t.Fatalf("decode recorded payload: %v", err)
-	}
-	if recorded != delta {
-		t.Errorf("recorded %+v but pushed %+v; a client that reconnects must read back what a "+
-			"connected one was shown", recorded, delta)
+	if !found {
+		t.Fatal("canonical post missing")
 	}
 }
 
@@ -269,13 +229,8 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 		switch env.Type {
 		case protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied:
 			t.Fatal("interactive tool content reached app transport")
-		case protocol.TypeAssistantDelta, protocol.TypeTurnEnd:
-			var p struct {
-				Turn string `json:"turn_id"`
-			}
-			if json.Unmarshal(env.Payload, &p) != nil || p.Turn == "" || p.Turn == claudeTurn {
-				t.Fatal("interactive content reached app transport")
-			}
+		case protocol.TypeAssistantDelta, protocol.TypeTurnEnd, protocol.TypeBanner:
+			t.Fatal("retired content reached app transport")
 		}
 		return env, env.Type != "" || time.Now().Before(deadline)
 	}
@@ -325,25 +280,27 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	var posted protocol.AssistantDeltaPayload
 	deadline = time.Now().Add(15 * time.Second)
 	for posted.Text == "" {
-		env, ok := next(deadline)
+		_, ok := next(deadline)
 		if !ok {
 			t.Fatal("released post absent")
 		}
 		ended = terminal.ID != 0
-		if env.Type == protocol.TypeTurnEnd {
-			t.Fatal("interactive completion reached app transport")
+		for _, entry := range readHistoryEntries(home, convID) {
+			if entry.Type != protocol.TypeAssistantDelta {
+				continue
+			}
+			var p protocol.AssistantDeltaPayload
+			if json.Unmarshal(entry.Payload, &p) != nil {
+				t.Fatal("invalid post source")
+			}
+			if p.Text != post {
+				continue
+			}
+			if !ended || p.TurnID == claudeTurn || p.Seq != 0 {
+				t.Fatal("post crossed completion")
+			}
+			posted = p
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var p protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			t.Fatal(err)
-		}
-		if !ended || p.TurnID == claudeTurn || p.Text != post || p.Seq != 0 {
-			t.Fatalf("post crossed completion: %+v", p)
-		}
-		posted = p
 	}
 	if reply.String() != "reply-head"+bgConvNeedle {
 		t.Fatalf("reply split or changed: %q", reply.String())
@@ -356,12 +313,16 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 		if !ok {
 			t.Fatal("post completion or successor absent")
 		}
-		if env.Type == protocol.TypeTurnEnd {
-			assertHostPostEnd(t, env.Payload, convID, posted.TurnID)
-			postEnded = true
-		}
-		if env.Type == protocol.TypeAssistantDelta {
-			t.Fatal("interactive successor reached app transport")
+		_ = env
+		for _, entry := range readHistoryEntries(home, convID) {
+			if entry.Type != protocol.TypeTurnEnd {
+				continue
+			}
+			var end channelPostEndIdentity
+			if json.Unmarshal(entry.Payload, &end) == nil && end.TurnID == posted.TurnID {
+				assertHostPostEnd(t, entry.Payload, convID, posted.TurnID)
+				postEnded = true
+			}
 		}
 		for _, e := range source(convID) {
 			var p protocol.AssistantDeltaPayload

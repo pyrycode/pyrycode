@@ -31,7 +31,7 @@ type channelDeliveryPost struct {
 	Text           string                       `json:"text"`
 	TS             time.Time                    `json:"ts"`
 	Session        *history.SessionProvenance   `json:"session,omitempty"`
-	delivered      bool                         // cleanup can fail after delivery; never repeat its announcement
+	delivered      bool                         // cleanup can fail after completion; never repeat its wake
 	diagnosed      bool                         // content-free hold warning, once per process
 }
 
@@ -47,7 +47,6 @@ type channelDelivery struct {
 	posts    []channelDeliveryPost
 	hist     channelDeliveryHistory
 	carry    func(conversations.ConversationID, string)
-	announce func(protocol.AssistantDeltaPayload)
 	complete func(channelPostTurnEndPayload)
 	log      *slog.Logger
 	save     func([]channelDeliveryPost) error
@@ -362,8 +361,8 @@ func (t *turnBusyTracker) publishPostBoundary(id string, active bool) {
 }
 
 // deliver reconciles every history page: unrelated newer entries may hide a
-// recorded prefix. A complete record on entry means cleanup only, even when the
-// process died before its first live push. History is the recovery guarantee.
+// recorded prefix. A complete record on entry means cleanup only and never
+// wakes again. History is the recovery guarantee.
 func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 	chunks := splitDeltaText(post.Text, maxDeltaTextBytes)
 	payloads := make([]protocol.AssistantDeltaPayload, len(chunks))
@@ -399,7 +398,6 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		}
 		cursor = page.Cursor
 	}
-	appended := false
 	for i, p := range payloads {
 		if recorded[i] {
 			continue
@@ -413,7 +411,6 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeAssistantDelta, raw, post.TS, metadata); err != nil {
 			return err
 		}
-		appended = true
 	}
 	if !completed {
 		raw, err := json.Marshal(completion)
@@ -425,14 +422,8 @@ func (d *channelDelivery) deliver(post channelDeliveryPost) error {
 		if _, err := d.hist.AppendWithMetadata(post.ConversationID, protocol.TypeTurnEnd, raw, post.TS, metadata); err != nil {
 			return err
 		}
-		appended = true
 	}
-	if appended && d.announce != nil {
-		for _, p := range payloads {
-			d.announce(p)
-		}
-	}
-	if appended && d.complete != nil {
+	if !completed && d.complete != nil {
 		d.complete(completion)
 	}
 	return nil

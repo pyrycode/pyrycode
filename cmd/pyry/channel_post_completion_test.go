@@ -1,17 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/pyrycode/pyrycode/internal/control"
-	"github.com/pyrycode/pyrycode/internal/relay"
 	"strings"
 	"testing"
 
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/relay"
+	"github.com/pyrycode/pyrycode/internal/thread"
 )
 
 func testPostCompletion(t *testing.T, raw json.RawMessage, conv, turn string) {
@@ -38,7 +38,7 @@ func TestChannelDelivery_CompletionRequired(t *testing.T) {
 	d := testDelivery(t, dir, h, nil)
 	turn := testAccept(t, d, id, "post")
 	var live int
-	d.announce = func(protocol.AssistantDeltaPayload) { live++ }
+	d.complete = func(channelPostTurnEndPayload) { live++ }
 	d.drain()
 	if live != 0 || len(d.posts) != 1 {
 		t.Fatal("completion failure announced or consumed pending work")
@@ -55,40 +55,39 @@ func TestChannelDelivery_CompletionRequired(t *testing.T) {
 		t.Fatalf("retry did not complete exactly once: entries=%v live=%d", page.Entries, live)
 	}
 	testPostCompletion(t, page.Entries[0].Payload, string(id), turn)
+	testCanonicalPost(t, history.New(dir), id, turn, "post")
 }
 
-// testPostOrderBcast observes the production emit path at each live enqueue.
-type testPostOrderBcast struct {
-	*fakeInteractiveBcast
-	t      *testing.T
-	h      *history.Store
-	e      *channelPostEmitterV2
-	conv   string
-	turn   string
-	events int
-}
-
-func (b *testPostOrderBcast) Push(ctx context.Context, conn string, env protocol.Envelope) error {
-	b.t.Helper()
-	page, err := b.h.Page(conversations.ConversationID(b.conv), "", 128)
-	if err != nil || len(page.Entries) != b.events || page.Entries[0].Type != protocol.TypeTurnEnd {
-		b.t.Fatalf("live before complete durable history: %v %v", page, err)
+func testCanonicalPost(t *testing.T, h *history.Store, id conversations.ConversationID, turn, text string) {
+	t.Helper()
+	f := thread.New(string(id))
+	r, err := h.Forward(id, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	retained, gap := b.e.ring.After(b.conv, 0)
-	if gap || len(retained) == 0 || env.EventID == nil {
-		b.t.Fatal("live before shared replay recording")
+	version, err := h.LatestEntryID(id)
+	if err != nil {
+		t.Fatal(err)
 	}
-	last := retained[len(retained)-1]
-	if last.ID != *env.EventID || last.Type != env.Type || !bytes.Equal(last.Payload, env.Payload) {
-		b.t.Fatal("live event differs from replay")
+	if err := r.Walk(t.Context(), version, f.Feed); err != nil {
+		t.Fatal(err)
 	}
-	if len(b.e.waker.trig) != 0 {
-		b.t.Fatal("wake before live fan-out finished")
+	count := 0
+	for _, item := range f.Items() {
+		if item.Kind != "assistant_message" {
+			continue
+		}
+		count++
+		var content struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(item.Content, &content) != nil || content.Text != text || item.Turn != turn || item.Active || item.Status != "done" {
+			t.Fatal("canonical post lost text, identity or completion")
+		}
 	}
-	if env.Type == protocol.TypeTurnEnd {
-		testPostCompletion(b.t, env.Payload, b.conv, b.turn)
+	if count != 1 {
+		t.Fatalf("canonical post count = %d", count)
 	}
-	return b.fakeInteractiveBcast.Push(ctx, conn, env)
 }
 
 func TestChannelPost_RecordingReplayLiveWakeOrder(t *testing.T) {
@@ -101,19 +100,23 @@ func TestChannelPost_RecordingReplayLiveWakeOrder(t *testing.T) {
 			h := &testPostHistory{Store: history.New(dir), fail: id, failAt: len(chunks) + 1}
 			d := testDelivery(t, dir, h, nil)
 			turn := testAccept(t, d, id, text)
-			b := &testPostOrderBcast{fakeInteractiveBcast: &fakeInteractiveBcast{}, t: t, h: h.Store, conv: string(id), turn: turn, events: len(chunks) + 1}
+			b := &fakeInteractiveBcast{}
 			if connected {
-				b.snapshots = [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}, {ConnID: "b", Interactive: true}}}
+				b.snapshots = [][]relay.ActiveConn{{{ConnID: "legacy", Interactive: true}, {ConnID: "thread", Interactive: true, Thread: true}}}
 			}
 			e := newChannelPostEmitterV2(b, context.Background(), quietLogger())
-			// Use the same ring as the interactive producer, rather than a post-owned one.
-			e.ring = newInteractiveTurnEmitterV2(&activeConversation{}, b, quietLogger()).ring
 			e.waker = newPushWaker(b, nil, nil, quietLogger())
-			b.e = e
-			d.announce, d.complete = e.announce, e.complete
+			d.complete = func(p channelPostTurnEndPayload) {
+				page, err := h.Page(id, "", 128)
+				if err != nil || len(page.Entries) != len(chunks)+1 || page.Entries[0].Type != protocol.TypeTurnEnd {
+					t.Fatal("wake before complete history")
+				}
+				testPostCompletion(t, page.Entries[0].Payload, string(id), turn)
+				e.complete(p)
+			}
 			d.drain()
-			if e.ring.NewestID(string(id)) != 0 || len(b.pushes) != 0 || len(e.waker.trig) != 0 {
-				t.Fatal("failed completion entered replay/live/wake")
+			if len(e.waker.trig) != 0 || len(d.posts) != 1 {
+				t.Fatal("failed completion consumed work or woke")
 			}
 			d.drain()
 			if len(e.waker.trig) != 1 {
@@ -124,33 +127,24 @@ func TestChannelPost_RecordingReplayLiveWakeOrder(t *testing.T) {
 				t.Fatal("wrong wake cause")
 			}
 			<-e.waker.trig
-			events, gap := e.ring.After(string(id), 0)
-			if gap || len(events) != len(chunks)+1 {
-				t.Fatal("incomplete replay")
-			}
-			testPostCompletion(t, events[len(chunks)].Payload, string(id), turn)
+			got := testDeltas(t, h.Store, id)
 			var joined strings.Builder
-			for i, ev := range events[:len(chunks)] {
-				var p protocol.AssistantDeltaPayload
-				if err := json.Unmarshal(ev.Payload, &p); err != nil {
-					t.Fatal(err)
-				}
+			for i, p := range got {
 				if p.Seq != i || p.TurnID != turn {
-					t.Fatal("replay order or identity changed")
+					t.Fatal("chunk order or identity changed")
 				}
 				joined.WriteString(p.Text)
-				if connected && (*b.pushes[2*i].env.EventID != ev.ID || *b.pushes[2*i+1].env.EventID != ev.ID) {
-					t.Fatal("connection-dependent ids")
-				}
 			}
 			if joined.String() != text {
-				t.Fatal("maximum post text changed")
+				t.Fatal("maximum post changed")
 			}
 			d.drain()
-			// Reading retained events, or cleanup-only reload, must not re-notify.
-			e.ring.After(string(id), 0)
-			if len(e.waker.trig) != 0 {
-				t.Fatal("replay triggered wake")
+			again := testDelivery(t, dir, history.New(dir), nil)
+			again.complete = d.complete
+			again.drain()
+			testCanonicalPost(t, history.New(dir), id, turn, text)
+			if len(b.pushes) != 0 || len(e.waker.trig) != 0 {
+				t.Fatal("raw publication or repeated completion wake")
 			}
 		})
 	}

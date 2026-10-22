@@ -76,11 +76,9 @@ type assistantDeltaLane struct {
 }
 
 // interactiveTurnEmitterV2 is the stateful structured turn-event emitter at the
-// heart of Phase 2 (ADR 025 § Phase 2). It consumes one neutral
-// turnevent.Event at a time via Handle, derives the turn_state lifecycle
-// statefully (responding / thinking / idle), maps each content event to a v2
-// wire envelope via the pure #627 adapter, and fans each envelope only to v2
-// conns that were granted the interactive capability (#626).
+// heart of the stream drain. It consumes one neutral turnevent.Event at a time
+// via Handle, derives the responding/thinking/idle lifecycle, records content
+// sources for the authoritative thread, and publishes supported live state.
 //
 // It is a passive state machine — it spawns no goroutine and owns no queue
 // (contrast assistantTurnEmitterV2, whose PTY-drain source could wedge claude).
@@ -133,15 +131,9 @@ type interactiveTurnEmitterV2 struct {
 	// increasing subsequence.
 	nextID uint64
 
-	// ring stores every fanned-out event under a durable, connection-independent
-	// id that is unique daemon-wide (#2022) for the #647 reconnect-replay path,
-	// while retention stays per conversation. It is owned here
-	// (created in the constructor, daemon-resident since the emitter is built
-	// once in startRelayV2), distinct from the
-	// per-conn envelope nextID above (NOT overloaded). The ring is self-
-	// synchronised: it is the one field a second goroutine (the future query
-	// path) may touch, so the emitter's other fields stay unguarded and
-	// single-goroutine. Appended on emit, before the per-conn fan-out.
+	// ring retains supported fallback live state for reconnect under a distinct,
+	// connection-independent ID. It is synchronized separately from the drain's
+	// lifecycle state. Content sources never enter this ring.
 	ring *eventring.Ring
 
 	// hist records source facts before any publication. Session content reaches
@@ -1328,8 +1320,8 @@ func (e *interactiveTurnEmitterV2) emitMappedAt(ctx context.Context, convID stri
 	e.emit(ctx, convID, typ, payload)
 }
 
-// emit records one fact and publishes eligible legacy events. It marshals once,
-// snapshots connections per event and preserves the interactive recipient gate.
+// emit records one source fact. Only supported live state retains the legacy
+// delivery path; conversation content is published by daemonThreadPublisher.
 func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string, payload any) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -1343,27 +1335,21 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		return
 	}
 
-	// One timestamp and history append per logical event, including with no
-	// recipients. Eligible events enter the replay ring only after the append
-	// result is known; absent or failed storage does not prevent their delivery.
+	// One timestamp and append attempt per logical event, including without
+	// recipients. Storage failure never restores raw content publication.
 	ts := time.Now().UTC()
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts, e.source)
 	switch typ {
-	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
+	case protocol.TypeMessage, protocol.TypeBanner, protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
 		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster,
-		protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
+		protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage, protocol.TypeSessionTransition:
 		return
 	}
 	if !legacyHistoryType(typ) {
-		var ok bool
-		payloadJSON, ok = legacyRuntimeReceipt(convID, typ, payloadJSON, historyEntryID, ts)
-		if !ok {
-			return
-		}
-		typ = protocol.TypeBanner
+		return
 	}
-	publishLegacyHistory(ctx, e.bcast, e.ring, e.logger, &e.nextID, convID, typ, payloadJSON, ts, historyEntryID)
+	e.publishLiveState(ctx, convID, typ, payloadJSON, ts, historyEntryID)
 }
 
 // eventKind returns a content-free type discriminant for an Event, for log

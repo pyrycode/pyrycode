@@ -154,9 +154,9 @@ func TestChannelDelivery_RetryAndCarryIndependence(t *testing.T) {
 			d := testDelivery(t, dir, h, carry.record)
 			text := strings.Repeat("雪<&", maxDeltaTextBytes)
 			turn := testAccept(t, d, id, text)
-			var announced []protocol.AssistantDeltaPayload
+			var announced []channelPostTurnEndPayload
 			if live {
-				d.announce = func(p protocol.AssistantDeltaPayload) {
+				d.complete = func(p channelPostTurnEndPayload) {
 					got := testDeltas(t, h.Store, id)
 					if len(got) != len(splitDeltaText(text, maxDeltaTextBytes)) {
 						t.Error("announcement before whole history")
@@ -191,7 +191,7 @@ func TestChannelDelivery_RetryAndCarryIndependence(t *testing.T) {
 			if joined.String() != text || len(reg.PendingChannelPosts(id)) != 0 {
 				t.Fatal("retry lost text or re-added carry")
 			}
-			if live && len(announced) != len(got) {
+			if live && len(announced) != 1 {
 				t.Fatal("incomplete live delivery")
 			}
 		})
@@ -221,21 +221,24 @@ func TestChannelDelivery_ConcurrentFIFO(t *testing.T) {
 	}
 	wg.Wait()
 	accepted := append([]channelDeliveryPost(nil), d.posts...)
-	var live []protocol.AssistantDeltaPayload
-	d.announce = func(p protocol.AssistantDeltaPayload) { live = append(live, p) }
+	var live []channelPostTurnEndPayload
+	d.complete = func(p channelPostTurnEndPayload) { live = append(live, p) }
 	d.drain()
 	got := testDeltas(t, h, id)
-	if len(live) != len(got) {
+	if len(live) != len(accepted) {
 		t.Fatal("missing live chunks")
 	}
 	pos := 0
-	for _, post := range accepted {
+	for index, post := range accepted {
+		if live[index].TurnID != post.TurnID {
+			t.Fatal("completion order changed")
+		}
 		for seq, text := range splitDeltaText(post.Text, maxDeltaTextBytes) {
 			if pos >= len(got) {
 				t.Fatal("missing history")
 			}
 			p := got[pos]
-			if p.TurnID != post.TurnID || p.Seq != seq || p.Text != text || live[pos] != p {
+			if p.TurnID != post.TurnID || p.Seq != seq || p.Text != text {
 				t.Fatal("interleaved or reordered posts")
 			}
 			pos++
@@ -321,13 +324,12 @@ func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
 				}
 			}
 			reloaded := testDelivery(t, dir, history.New(dir), func(conversations.ConversationID, string) { carries++ })
-			var live, completed int
+			var completed int
 			reloaded.complete = func(p channelPostTurnEndPayload) {
 				completed++
 				raw, _ := json.Marshal(p)
 				testPostCompletion(t, raw, string(id), turn)
 			}
-			reloaded.announce = func(protocol.AssistantDeltaPayload) { live++ }
 			reloaded.drain()
 			got := testDeltas(t, history.New(dir), id)
 			if len(got) != len(chunks) || carries != 1 {
@@ -338,10 +340,10 @@ func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
 					t.Fatal("reload changed identity/text")
 				}
 			}
-			if prefix == len(chunks)+1 && (live != 0 || completed != 0) {
+			if prefix == len(chunks)+1 && completed != 0 {
 				t.Fatal("fully recorded post re-announced")
 			}
-			if prefix <= len(chunks) && (live != len(chunks) || completed != 1) {
+			if prefix <= len(chunks) && completed != 1 {
 				t.Fatal("incomplete post was not announced after completion")
 			}
 			page, err := reloaded.hist.Page(id, "", history.MaxPageEntries)
@@ -369,6 +371,7 @@ func TestChannelDelivery_ReloadInterruptions(t *testing.T) {
 			if len(testDeltas(t, h, id)) != len(chunks) {
 				t.Fatal("cleanup lost on reload")
 			}
+			testCanonicalPost(t, history.New(dir), id, turn, text)
 		})
 	}
 }
@@ -378,24 +381,23 @@ func TestChannelDelivery_CleanupFailureDoesNotRepeat(t *testing.T) {
 	h := history.New(dir)
 	d := testDelivery(t, dir, h, nil)
 	id := conversations.ConversationID(testPostID(t))
-	testAccept(t, d, id, "hello")
-	var live, completed int
+	turn := testAccept(t, d, id, "hello")
+	var completed int
 	d.complete = func(channelPostTurnEndPayload) { completed++ }
-	d.announce = func(protocol.AssistantDeltaPayload) { live++ }
 	save := d.save
 	d.save = func([]channelDeliveryPost) error { return errors.New("cleanup") }
 	d.drain()
 	d.drain()
-	if live != 1 || completed != 1 || len(testDeltas(t, h, id)) != 1 {
+	if completed != 1 || len(testDeltas(t, h, id)) != 1 {
 		t.Fatal("cleanup failure duplicated delivery")
 	}
 	reloaded := testDelivery(t, dir, history.New(dir), nil)
-	reloaded.announce = d.announce
 	reloaded.complete = d.complete
 	reloaded.drain()
-	if live != 1 || completed != 1 {
+	if completed != 1 {
 		t.Fatal("complete pending work re-announced on restart")
 	}
+	testCanonicalPost(t, history.New(dir), id, turn, "hello")
 	testWaitDelivery(t, d, id)
 	d.save = save
 	d.drain()

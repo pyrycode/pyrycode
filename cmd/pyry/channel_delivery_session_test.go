@@ -189,12 +189,11 @@ func TestChannelDelivery_SessionRetryRecovery(t *testing.T) {
 				d := testDelivery(t, dir, h, nil)
 				d.sessionFor = channelPostSession(reg, func(sessions.SessionID) (string, error) { return "claude", nil })
 				turn := testAccept(t, d, id, strings.Repeat("x", 2*maxDeltaTextBytes+1))
-				var live, complete int
-				announce := func(protocol.AssistantDeltaPayload) { live++ }
+				var complete int
 				completion := func(channelPostTurnEndPayload) { complete++ }
-				d.announce, d.complete = announce, completion
+				d.complete = completion
 				d.drain()
-				if live != 0 || complete != 0 {
+				if complete != 0 {
 					t.Fatal("published partial history")
 				}
 				prefix, err := h.Page(id, "", 10)
@@ -209,7 +208,7 @@ func TestChannelDelivery_SessionRetryRecovery(t *testing.T) {
 					t.Fatal("recovery inferred provenance")
 					return nil
 				}
-				d.announce, d.complete = announce, completion
+				d.complete = completion
 				d.drain()
 				want := &history.SessionProvenance{Kind: "claude", SessionID: "accepted-route"}
 				entries := testPostSessionEntries(t, history.New(dir), id, want, 4)
@@ -223,13 +222,14 @@ func TestChannelDelivery_SessionRetryRecovery(t *testing.T) {
 						t.Fatal("retry changed chunk identity")
 					}
 				}
-				if live != 3 || complete != 1 {
-					t.Fatalf("publication counts = %d, %d", live, complete)
+				if complete != 1 {
+					t.Fatalf("completion count = %d", complete)
 				}
 				again := testDelivery(t, dir, history.New(dir), nil)
-				again.announce, again.complete = announce, completion
+				again.complete = completion
 				again.drain()
-				if live != 3 || complete != 1 {
+				testCanonicalPost(t, history.New(dir), id, turn, strings.Repeat("x", 2*maxDeltaTextBytes+1))
+				if complete != 1 {
 					t.Fatal("cleanup recovery republished")
 				}
 			})
