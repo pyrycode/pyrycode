@@ -238,8 +238,6 @@ type relayWiring struct {
 	// nil in foreground/v1 ⇒ no resolver is installed and no session names a
 	// client, which is the pre-#2148 text byte for byte.
 	setClientIdentity func(enum func(context.Context) []relay.ActiveConn)
-	// operatorMessages publishes neutral queued receipts through a bounded mailbox.
-	operatorMessages *operatorMessageEmitterV2
 	// sessionErr is the pre-built session_error emitter (#1008) whose Run goroutine
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
 	// the msgqueue OnGiveUp seam) before the relay broadcaster exists.
@@ -1679,8 +1677,7 @@ func startRelayV2(
 	// and called from the returned drain closure. A wiring with no sink (a test
 	// literal) leaves it nil, which is what the nil-guard at the call site is for.
 	var streamDrainCleanup func()
-	// replayRing is the emitter's ring, lifted out of the branch for the
-	// operator-message push below (#2699); nil in a wiring with no sink.
+	// replayRing is shared by the stream and other legacy producers; nil without a sink.
 	var replayRing *eventring.Ring
 	if w.streamSink != nil {
 		// STREAM MODE (#1081): the turn stream is fed from the stream-json runner's
@@ -1798,9 +1795,6 @@ func startRelayV2(
 		w.postDelivery.complete = postEmitter.complete
 	}
 
-	// Publish queued receipts independently of stored user-message sources.
-	streamOperatorMessageCleanup := startOperatorMessageStreamV2(ctx, w.operatorMessages, mgr, replayRing)
-
 	// Wire the session_error producer (#1008): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a typed session_error frame to capability-gated
 	// interactive phones whenever the message queue gives up delivering a
@@ -1837,7 +1831,6 @@ func startRelayV2(
 			streamDrainCleanup()
 		}
 		streamTransitionsCleanup()
-		streamOperatorMessageCleanup()
 		streamSessionErrCleanup()
 		streamClaudeUsageCleanup()
 		streamResettingCleanup()

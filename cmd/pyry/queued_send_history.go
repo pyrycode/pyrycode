@@ -12,7 +12,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 const (
@@ -103,11 +102,10 @@ type queuedSendReference struct {
 }
 
 // References exist only for this daemon run. A placement may arrive before the
-// acceptance callback, but cannot append or publish until that append completes.
+// acceptance callback, but cannot append until that append completes.
 type queuedSendHistory struct {
 	store          *history.Store
 	logger         *slog.Logger
-	publish        func(operatorMessage)
 	bindItem       func(string, uint64, uint64)
 	source         func(conversations.ConversationID) *history.SessionProvenance
 	attachmentName func(string, string) (string, bool)
@@ -189,26 +187,7 @@ func (h *queuedSendHistory) accepted(c string, m msgqueue.QueuedMessage) {
 	if ref.id != nil && h.bindItem != nil {
 		h.bindItem(c, m.ID, *ref.id)
 	}
-	h.notify(h.receipt(historySendAccepted, p, m.TS, ref.id))
 	close(ref.ready)
-}
-
-func (h *queuedSendHistory) receipt(typ string, p queuedSendFact, at time.Time, id *uint64) *operatorMessage {
-	raw, err := json.Marshal(p)
-	if err != nil {
-		return nil
-	}
-	payload, ok := legacyRuntimeReceipt(p.ConversationID, typ, raw, id, at)
-	if !ok {
-		return nil
-	}
-	return &operatorMessage{convID: p.ConversationID, typ: protocol.TypeBanner, payload: payload, ts: at, historyEntryID: id}
-}
-
-func (h *queuedSendHistory) notify(receipt *operatorMessage) {
-	if receipt != nil && h.publish != nil {
-		h.publish(*receipt)
-	}
 }
 
 func (h *queuedSendHistory) beforeDelivery(c string, id uint64) *queuedSendReference {
@@ -220,24 +199,21 @@ func (h *queuedSendHistory) beforeDelivery(c string, id uint64) *queuedSendRefer
 	return ref
 }
 
-func (h *queuedSendHistory) delivered(c string, id uint64, ref *queuedSendReference, deliveryID *uint64, at time.Time, source history.SessionProvenance) *operatorMessage {
+func (h *queuedSendHistory) delivered(c string, id uint64, ref *queuedSendReference, deliveryID *uint64, at time.Time, source history.SessionProvenance) {
 	if h == nil {
-		return nil
+		return
 	}
 	ref.mu.Lock()
 	defer ref.mu.Unlock()
 	if ref.completed {
-		return nil
+		return
 	}
 	ref.completed = true
-	var receipt *operatorMessage
 	if ref.id != nil && deliveryID != nil {
 		p := queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, DeliveryEntryID: *deliveryID, OccurredAt: at, Reason: string(msgqueue.TerminalDelivered)}
-		entryID := h.append(historySendDelivered, p, at, source)
-		receipt = h.receipt(historySendDelivered, p, at, entryID)
+		h.append(historySendDelivered, p, at, source)
 	}
 	h.forget(c, id)
-	return receipt
 }
 
 func (h *queuedSendHistory) forget(c string, id uint64) {
@@ -260,8 +236,7 @@ func (h *queuedSendHistory) terminal(c string, m msgqueue.QueuedMessage, outcome
 	if ref.id != nil {
 		at := time.Now().UTC()
 		p := queuedSendFact{ConversationID: c, AcceptedEntryID: *ref.id, OccurredAt: at, Reason: string(outcome)}
-		entryID := h.append(historySendDropped, p, at, source)
-		h.notify(h.receipt(historySendDropped, p, at, entryID))
+		h.append(historySendDropped, p, at, source)
 	}
 	h.forget(c, m.ID)
 }

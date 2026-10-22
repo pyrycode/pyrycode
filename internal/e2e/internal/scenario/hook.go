@@ -8,8 +8,10 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/thread"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -240,15 +242,14 @@ func hookBannerIsRefusal(p protocol.BannerPayload, convID string) bool {
 	return p.ConversationID == convID && bytes.Contains([]byte(p.Text), []byte(oslcapBlockReason))
 }
 
-// hookBannerCheckWindow joins legacy banners to raw facts, whose durable IDs
-// distinguish otherwise identical receipts. Queued receipts have no ack gate.
+// CheckHookBannerWindow joins retained banners to raw facts and observes queued
+// delivery through canonical items. Queued facts must never project banners.
 func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.Entry, frames []protocol.Envelope) error {
 	raw := make(map[uint64]history.Entry, len(entries))
 	for _, entry := range entries {
 		raw[entry.ID] = entry
 	}
 	positions := make(map[string]int)
-	receiptIDs := make(map[string]uint64)
 	seenIDs, seenEvents := make(map[uint64]bool), make(map[uint64]bool)
 	ack, firstDelta, opening := -1, -1, -1
 	var openingTurn, assistantTurn string
@@ -320,42 +321,14 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 					return fmt.Errorf("receipt %d is not an empty info banner", id)
 				}
 				var fact struct {
-					ConversationID  string    `json:"conversation_id"`
-					MessageID       string    `json:"message_id"`
-					AcceptedAt      time.Time `json:"accepted_at"`
-					AcceptedEntryID uint64    `json:"accepted_entry_id"`
-					DeliveryEntryID uint64    `json:"delivery_entry_id"`
-					OccurredAt      time.Time `json:"occurred_at"`
-					Reason          string    `json:"reason"`
-					TurnID          string    `json:"turn_id"`
+					ConversationID string    `json:"conversation_id"`
+					OccurredAt     time.Time `json:"occurred_at"`
+					TurnID         string    `json:"turn_id"`
 				}
 				if err := json.Unmarshal(entry.Payload, &fact); err != nil || fact.ConversationID != convID {
 					return fmt.Errorf("receipt %d has invalid raw fact", id)
 				}
 				switch entry.Type {
-				case "send_accepted":
-					if !fact.AcceptedAt.Equal(entry.TS) {
-						return fmt.Errorf("acceptance %d timestamp mismatch", id)
-					}
-					key = "accepted:" + fact.MessageID
-				case "send_delivered":
-					accepted, delivery := raw[fact.AcceptedEntryID], raw[fact.DeliveryEntryID]
-					var a struct {
-						ConversationID string `json:"conversation_id"`
-						MessageID      string `json:"message_id"`
-					}
-					var message protocol.MessagePayload
-					if json.Unmarshal(accepted.Payload, &a) != nil || json.Unmarshal(delivery.Payload, &message) != nil ||
-						accepted.Type != "send_accepted" || delivery.Type != protocol.TypeMessage ||
-						a.ConversationID != convID || message.ConversationID != convID || message.Role != "user" || a.MessageID != message.MessageID ||
-						accepted.ID >= delivery.ID || delivery.ID >= id || fact.Reason != "delivered" || !fact.OccurredAt.Equal(entry.TS) {
-						return fmt.Errorf("delivery %d has invalid acceptance/user-message link", id)
-					}
-					key = "delivered:" + a.MessageID
-					acceptedPosition, exists := positions["accepted:"+a.MessageID]
-					if !exists || acceptedPosition >= i || receiptIDs["accepted:"+a.MessageID] != accepted.ID {
-						return fmt.Errorf("delivery %d does not follow its identified acceptance receipt", id)
-					}
 				case "main_turn_opened":
 					if fact.TurnID == "" || !fact.OccurredAt.Equal(entry.TS) || ack < 0 || firstDelta >= 0 {
 						return fmt.Errorf("opening %d must follow ack and precede assistant text", id)
@@ -369,19 +342,42 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 				return fmt.Errorf("duplicate banner for %q", key)
 			}
 			positions[key] = i
-			receiptIDs[key] = id
 		}
 	}
-	for _, key := range []string{"refusal", "accepted:m-blocked", "delivered:m-blocked", "accepted:m-live", "delivered:m-live", "opening"} {
+	for _, key := range []string{"refusal", "opening"} {
 		if _, exists := positions[key]; !exists {
 			return fmt.Errorf("missing banner for %q", key)
 		}
 	}
-	if len(positions) != 6 {
-		return fmt.Errorf("unexpected banners: got %d, want 6", len(positions))
+	if len(positions) != 2 {
+		return fmt.Errorf("unexpected banners: got %d, want 2", len(positions))
 	}
 	if ack < 0 || firstDelta <= opening || openingTurn != assistantTurn || openingEntry.ID <= refusalEntry.ID || openingEntry.TS.Before(refusalEntry.TS) {
 		return fmt.Errorf("opening does not identify the post-refusal assistant turn")
+	}
+	ordered := append([]history.Entry(nil), entries...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	fold := thread.New(convID)
+	if err := fold.Feed(ordered); err != nil {
+		return fmt.Errorf("fold queued hook sends: %w", err)
+	}
+	for _, messageID := range []string{"m-blocked", "m-live"} {
+		found := false
+		for _, item := range fold.Items() {
+			var content struct {
+				MessageID string `json:"message_id"`
+			}
+			if item.Kind != "user_message" || json.Unmarshal(item.Content, &content) != nil || content.MessageID != messageID {
+				continue
+			}
+			if found || item.Status != "delivered" || item.Active || !item.Shown || item.Order <= item.ID || raw[item.ID].Type != "send_accepted" {
+				return fmt.Errorf("invalid canonical queued delivery for %q", messageID)
+			}
+			found = true
+		}
+		if !found {
+			return fmt.Errorf("missing canonical queued delivery for %q", messageID)
+		}
 	}
 	return nil
 }

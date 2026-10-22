@@ -153,9 +153,8 @@ visibility; raw pages expose it in warm and reopened stores. Legacy entries
 stay untagged, and callers without source information remain usable with
 absent provenance, never inferred as `none`. Raw user-message fan-out and newly
 appended reconnect replay are retired for every app (#3732); retained source
-facts feed canonical thread items and explicit catch-up. Neutral receipts keep
-their original durable identity and existing eligible recipients, and failed
-storage cannot mint one.
+facts feed canonical thread items and explicit catch-up. Queued acceptance,
+delivery, drop and loss facts produce no legacy receipts (#3733).
 
 ### Accepted sends and linked outcomes (#2972)
 
@@ -228,26 +227,27 @@ Abandoning an unconfirmed successful write preserves the original acceptance
 entry ID, device/message/queue identities, text and attachment IDs. Ordinary
 history remains `queued`; Send now remains `written`. These are unresolved
 history states, not runnable FIFO entries: possibly consumed input is never
-automatically re-enqueued or replayed. Abandonment appends no `send_delivered`,
-publishes no delivered receipt and invents no child-exit loss reason.
+automatically re-enqueued or replayed. Abandonment appends no `send_delivered`
+and invents no child-exit loss reason.
 Later callbacks or predecessor/successor events cannot revive the placement.
 
 An actually empty binding is explicit `kind: none` with no session ID. Unknown
 or unavailable source facts remain absent. Delivery retains the
 [receiving-session snapshot](#operator-delivery-provenance-2983), even after
 rebinding; startup never substitutes a replacement session for the acceptance.
-Hidden drops do not raise the raw displayable watermark. The original four raw payloads
-stay off legacy history, live publication and reconnect replay. After a
-successful append, `legacyRuntimeReceipt` projects validated facts as empty
-info banners at their original durable IDs and timestamps (#3167). Acceptance
-requires `accepted_at`; outcomes require `occurred_at`, `accepted_entry_id` and
-the exact reason in the table, with `delivery_entry_id` also required for
-delivery. Sender/message fields remain optional. Malformed/unknown facts stay
-holes. Receipts carry no send text, attachments, sender fields or raw facts and
-confer no sight or lifecycle changes. Receipt acceptance supplies no shown-thread
-or read-mark authority, including for hidden removal/give-up. Raw visibility,
+Hidden drops do not raise the raw displayable watermark. All five queued fact
+types stay off legacy live publication and newly appended reconnect replay,
+including their receipt projection and connections without `thread` (#3733).
+Queued sends are observed through canonical thread items and explicit catch-up;
+queued acceptance, delivery, drop and loss facts produce no legacy receipts.
+`legacyRuntimeFact` excludes them, and `legacyRuntimeReceipt` rejects them even
+when valid, durably identified and explicitly shown. Source validation remains:
+acceptance requires `accepted_at`; outcomes require `occurred_at`,
+`accepted_entry_id` and the exact reason in the table, with `delivery_entry_id`
+also required for delivery. `send_written` requires reason `written` and no
+delivery link. Sender/message fields remain optional. Raw visibility,
 provenance, internal watermarks and ID allocation retain their contracts. See
-[legacy validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+[legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 **Gate placement itself on acceptance completion.** Queue callback ordering
 cannot protect the earlier commit on echo or normal completion: placement can
@@ -271,22 +271,17 @@ inferred from text, timestamps, app IDs or reusable queue handles. See
 [delivery reference validation and prefixes](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
 Later confirmation acknowledges placement without appending or publishing again.
 
-**Keep receipt notification off the peer fan-out lock (#3167).** Acceptance
-appends and enqueues its receipt before releasing `ready`; placement waits for
-that barrier. If notification acquired `operatorMessageEmitterV2`'s fan-out
-mutex, a stalled peer could block acceptance and therefore placement.
-`notifyReceipt` instead uses a separate mutex for a bounded mailbox and a
-nonblocking wake. `Run` drains pending receipts through `broadcast` under the
-fan-out mutex. After recording the source and linked delivered outcome,
-`operatorMessageHistory` submits only that outcome's neutral receipt through
-`queuedSendHistory.publish`, independently of any raw user frame. Receipt
-notification never acquires the fan-out mutex or performs peer I/O; fan-out
-holds the mailbox mutex only while taking pending items. The worker preserves
-acceptance-before-outcome receipt order, while unrelated assistant traffic can
-interleave. A full mailbox logs a content-free discriminant and leaves explicit
-thread catch-up as recovery. Parent cancellation stops the worker and cleanup
-joins it; late producers can only fill the bounded unread mailbox. Delayed
-confirmation and late echoes add no duplicate source or receipt.
+**Readiness protects recording and binding, independently of transport.**
+`queuedSendHistory.accepted` appends and calls `bindItem` with the successful
+durable ID before closing `ref.ready`. Removing its receipt notification must
+retain both steps: placement can arrive before the acceptance callback, and a
+queue action can take the item while acceptance is incomplete. No queue receipt
+emitter, mailbox, worker or relay wiring remains. Queue callbacks perform no
+peer I/O; source appends retain thread wakeups. Placement stays serialized with
+stream output through `sendNowPlacement.bindQueued` and the stream drain's
+placement command queue. Delayed confirmation and late echoes add no duplicate
+source or canonical item. See
+[placement capacity](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 **Use the arbitrated terminal outcome, not a removal return value.** An
 in-flight `Remove` returning true can express a deferred request. Confirmed
@@ -309,10 +304,9 @@ attempt. See
 and [ADR 042](../decisions/042-daemon-built-thread.md).
 
 Storage remains best effort: nil/failed history preserves queue acceptance,
-delivery/removal and retained placement. Nil/failed appends mint no receipt
-identity. Failed acceptance writes release the placement gate without inventing
-an ID, message acceptance reference or linked outcome; a surviving operator
-message remains an ordinary delivery. A failed message append creates no
+delivery/removal and retained placement. Failed acceptance writes release the
+placement gate without inventing an ID, message acceptance reference or linked
+outcome; a surviving operator message remains an ordinary delivery. A failed message append creates no
 `send_delivered`, leaving only the committed acceptance or intermediate written
 fact. A failed `send_delivered` append leaves a committed linked message
 delivered/inactive under its acceptance ID, with no fabricated `outcome` object
@@ -327,8 +321,9 @@ discriminants without raw errors, message content, sender keys or host paths.
 
 `send_written` is an additional intermediate fact (#3508). Only successful Send
 now queue delivery emits it; failed writes retain the backlog. Its native item
-is visible and active with status `written`, at its unchanged acceptance order.
-Placement on echo or normal completion alone supplies final delivery chronology.
+is visible and active with status `written`, retaining its acceptance ID and
+no `order`. Placement on echo or normal completion alone supplies final delivery
+chronology.
 A per-acceptance leaf lock deduplicates write callbacks and orders them before
 a racing final outcome without holding the global reference-map lock across
 history I/O.
