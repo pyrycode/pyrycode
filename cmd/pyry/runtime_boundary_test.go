@@ -162,7 +162,7 @@ func TestRuntimeHistoryEvictionBeforeOutput(t *testing.T) {
 					}
 					fence := make(chan struct{})
 					sink.dispatchPlacement(ctx, func() {
-						newOperatorMessageHistory(store, nil, nil, discardLogger())(testConvID, msgqueue.QueuedMessage{Text: "operator-B"})
+						newOperatorMessageHistory(store, nil, discardLogger())(testConvID, msgqueue.QueuedMessage{Text: "operator-B"})
 						close(fence)
 					})
 					testAccept(t, delivery, conversations.ConversationID(testConvID), "post-B")

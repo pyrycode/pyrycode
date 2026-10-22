@@ -69,7 +69,7 @@ func testShadowPairWith(t *testing.T, children []testShadowFact) (shadowHistory,
 		}
 		h.Entries = append(h.Entries, history.Entry{ID: uint64(i + 1), Type: fact.typ, Payload: raw, Session: &history.SessionProvenance{SessionID: "session", Kind: "claude"}})
 		switch fact.typ {
-		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeMessage, protocol.TypeTurnEnd:
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeTurnEnd:
 			e.Legacy = append(e.Legacy, protocol.Envelope{Type: fact.typ, Payload: raw})
 		case "session_divider":
 			e.Legacy = append(e.Legacy, protocol.Envelope{Type: protocol.TypeSessionTransition, Payload: raw})
@@ -140,18 +140,14 @@ func TestThreadShadowPairRejectsUserContent(t *testing.T) {
 	}
 }
 
-func TestThreadShadowPairRejectsUserLegacyMismatch(t *testing.T) {
-	for _, typ := range []string{protocol.TypeMessage} {
-		t.Run(typ, func(t *testing.T) {
-			h, e := testShadowUserPair(t)
-			for i := range e.Legacy {
-				if e.Legacy[i].Type == typ {
-					e.Legacy[i].Payload = json.RawMessage(strings.ReplaceAll(string(e.Legacy[i].Payload), "SHADOW_QUEUED:", "SHADOW_QUEUED: changed"))
-				}
-			}
-			if shadowValidatePair(h, e, false) == nil {
-				t.Fatal("raw and independently observed legacy user text mismatch accepted")
-			}
-		})
+func TestThreadShadowPairWithoutUserPublication(t *testing.T) {
+	h, e := testShadowUserPair(t)
+	for _, env := range e.Legacy {
+		if env.Type == protocol.TypeMessage {
+			t.Fatal("synthetic pair requires retired raw user publication")
+		}
+	}
+	if err := shadowValidatePair(h, e, false); err != nil {
+		t.Fatal(err)
 	}
 }

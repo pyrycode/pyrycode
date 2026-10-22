@@ -109,8 +109,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	var legacyText strings.Builder
 	var agentCall string
 	var childText strings.Builder
-	var legacyDelivered string
-	tool, result, delivered, closed := false, false, false, false
+	tool, result, closed := false, false, false
 	for _, env := range e.Legacy {
 		var p struct {
 			ConversationID  string `json:"conversation_id"`
@@ -146,16 +145,11 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			if bytes.Contains(env.Payload, []byte("SHADOW_TOOL")) {
 				result = true
 			}
-		case protocol.TypeMessage:
-			if p.Role == "user" && p.MessageID == "shadow-queued" && strings.Contains(p.Text, "SHADOW_QUEUED") {
-				delivered = true
-				legacyDelivered = p.Text
-			}
 		case protocol.TypeSessionTransition:
 			closed = true
 		}
 	}
-	if !tool || !result || !delivered || !closed || agentCall == "" || !strings.Contains(childText.String(), "SHADOW_CHILD") || !strings.Contains(legacyText.String(), "SHADOW_BEFORE") || !strings.Contains(legacyText.String(), "SHADOW_AFTER") || !strings.Contains(legacyText.String(), "SHADOW_REPLY") {
+	if !tool || !result || !closed || agentCall == "" || !strings.Contains(childText.String(), "SHADOW_CHILD") || !strings.Contains(legacyText.String(), "SHADOW_BEFORE") || !strings.Contains(legacyText.String(), "SHADOW_AFTER") || !strings.Contains(legacyText.String(), "SHADOW_REPLY") {
 		return errors.New("required legacy scenario absent")
 	}
 	var accepted, delivery, outcome, end, divider uint64
@@ -207,8 +201,8 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	var message protocol.MessagePayload
 	if json.Unmarshal(h.Entries[accepted-1].Payload, &acceptance) != nil || acceptance.DeviceID == "" || !strings.Contains(acceptance.Text, "SHADOW_QUEUED") ||
 		h.Entries[delivery-1].Type != protocol.TypeMessage || json.Unmarshal(h.Entries[delivery-1].Payload, &message) != nil ||
-		message.Role != "user" || message.MessageID != "shadow-queued" || message.Text != legacyDelivered {
-		return errors.New("raw acceptance or delivery differs from observed legacy user text")
+		message.Role != "user" || message.MessageID != "shadow-queued" || !strings.Contains(message.Text, "SHADOW_QUEUED") {
+		return errors.New("raw acceptance or delivery is missing queued user content")
 	}
 	for _, cp := range e.Checkpoints {
 		if err := shadowRawRows(h, cp); err != nil {

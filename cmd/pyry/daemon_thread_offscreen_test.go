@@ -75,8 +75,11 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 
 	delivered := make(chan struct{}, 1)
 	q, err := msgqueue.New(msgqueue.Config{
-		Deliver:     func(context.Context, string, []byte) error { return nil },
-		OnDelivered: operatorMessageHistory(h, func(operatorMessage) { delivered <- struct{}{} }, nil, discardLogger(), nil),
+		Deliver: func(context.Context, string, []byte) error { return nil },
+		OnDelivered: func(c string, m msgqueue.QueuedMessage) {
+			operatorMessageHistory(h, nil, discardLogger(), nil)(c, m)
+			delivered <- struct{}{}
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

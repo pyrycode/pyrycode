@@ -94,7 +94,7 @@ func TestRuntimeHistoryWriterOrdering(t *testing.T) {
 	b(turnevent.TextChunk{Text: "B-tail"})
 	transition.Enqueue(sessions.SessionTransition{ConversationID: testConvID, PreviousID: "b", NewID: "c", PreviousAgent: "codex", NextAgent: "claude", Cause: sessions.CauseRecovery, OccurredAt: at.Add(time.Millisecond)})
 	sink.dispatchPlacement(ctx, func() {
-		newOperatorMessageHistory(store, nil, nil, discardLogger(), history.SessionProvenance{Kind: "claude", SessionID: "c"})(testConvID, msgqueue.QueuedMessage{Text: "operator-C"})
+		newOperatorMessageHistory(store, nil, discardLogger(), history.SessionProvenance{Kind: "claude", SessionID: "c"})(testConvID, msgqueue.QueuedMessage{Text: "operator-C"})
 	})
 	delivery.sessionFor = func(conversations.ConversationID) *history.SessionProvenance {
 		return &history.SessionProvenance{Kind: "claude", SessionID: "c"}

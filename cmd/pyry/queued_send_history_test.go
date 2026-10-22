@@ -114,8 +114,7 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			terminal := make(chan struct{}, 1)
-			pushes := make(chan operatorMessage, 2)
-			delivered := operatorMessageHistory(store, func(m operatorMessage) { ome.broadcast(ctx, bcast, ring, m); pushes <- m }, nil, discardLogger(), h)
+			delivered := operatorMessageHistory(store, nil, discardLogger(), h)
 			attempts := make(chan struct{}, 1)
 			var q *msgqueue.Queue
 			tries := 0
@@ -195,10 +194,12 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 					t.Fatal("terminal missing")
 				}
 			}
-			ome.broadcast(ctx, bcast, ring, operatorMessage{})
+			ome.broadcast(ctx, bcast, ring)
+			ome.broadcast(ctx, bcast, ring)
 			testQueuedReceiptIdentity(t, store, bcast, ring)
 			// Repeated drains retain exactly one publication per durable identity.
-			ome.broadcast(ctx, bcast, ring, operatorMessage{})
+			ome.broadcast(ctx, bcast, ring)
+			ome.broadcast(ctx, bcast, ring)
 			testQueuedReceiptIdentity(t, store, bcast, ring)
 			entries := historyEntries(t, store, testConvID)
 			want := 2
@@ -222,9 +223,6 @@ func TestQueuedSendHistoryLifecycle(t *testing.T) {
 			if want == 3 {
 				if last.Type != historySendDelivered || p.DeliveryEntryID != entries[1].ID || p.Reason != "delivered" {
 					t.Fatalf("delivery: %+v", p)
-				}
-				if len(pushes) != 1 {
-					t.Fatal("push count")
 				}
 			} else {
 				if last.Type != historySendDropped || *last.Shown || p.Reason != outcome || last.Session.SessionID != "drop-source" {
@@ -257,13 +255,11 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 				close(placementEntered)
 				placementRecord(c, m, source...)
 			}
-			pushes := make(chan operatorMessage, 2)
-			sink.setOperatorPublisher(func(m operatorMessage) { ome.broadcast(ctx, bcast, ring, m); pushes <- m })
 			written := make(chan struct{})
 			release := make(chan struct{})
 			confirmed := make(chan struct{})
 			releaseConfirm := make(chan struct{})
-			record := operatorMessageHistory(store, nil, place, discardLogger(), h)
+			record := operatorMessageHistory(store, place, discardLogger(), h)
 			q, err := msgqueue.New(msgqueue.Config{Logger: discardLogger(), OnAccepted: func(c string, m msgqueue.QueuedMessage) { <-release; h.accepted(c, m) }, OnDelivered: func(c string, m msgqueue.QueuedMessage) { <-releaseConfirm; record(c, m); close(confirmed) }, OnTerminal: h.terminal,
 				Deliver: func(ctx context.Context, c string, payload []byte) error {
 					return place.write(ctx, c, payload, func() error { close(written); return nil }, &history.SessionProvenance{Kind: "codex", SessionID: "receiving-source"})
@@ -292,12 +288,13 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 			}
 			close(release)
 			<-placed
-			if len(historyEntries(t, store, testConvID)) != 3 || len(pushes) != 1 {
+			if len(historyEntries(t, store, testConvID)) != 3 {
 				t.Fatal("placement waited for confirmation")
 			}
 			close(releaseConfirm)
 			<-enqueued
 			<-confirmed
+			ome.broadcast(ctx, bcast, ring)
 			testQueuedReceiptIdentity(t, store, bcast, ring)
 			entries := historyEntries(t, store, testConvID)
 			if len(entries) != 3 || entries[0].Type != historySendAccepted || entries[1].Type != protocol.TypeMessage || entries[2].Type != historySendDelivered {
@@ -307,9 +304,6 @@ func TestQueuedSendHistoryPlacement(t *testing.T) {
 				if e.Session == nil || e.Session.SessionID != "receiving-source" {
 					t.Fatalf("source: %+v", e)
 				}
-			}
-			if len(pushes) != 1 {
-				t.Fatal("duplicate publication")
 			}
 		})
 	}
@@ -371,20 +365,12 @@ func TestQueuedSendHistoryFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			pushes := 0
-			operatorMessageHistory(store, func(m operatorMessage) {
-				pushes++
-				ome.broadcast(context.Background(), bcast, ring, m)
-				if (m.historyEntryID == nil) != nilStore {
-					t.Error("wrong legacy identity")
-				}
-			}, nil, bufLogger(&logs), h)(testConvID, m)
-			if len(bcast.pushes) != 2 || bcast.pushes[0].env.Type != protocol.TypeMessage || len(ome.pending) != 0 {
-				t.Fatal("failed acceptance minted a receipt or lost legacy delivery")
+			operatorMessageHistory(store, nil, bufLogger(&logs), h)(testConvID, m)
+			ome.broadcast(context.Background(), bcast, ring)
+			if len(bcast.pushes) != 0 || len(ome.pending) != 0 {
+				t.Fatal("failed acceptance minted a receipt")
 			}
-			if pushes != 1 {
-				t.Fatal("publication lost")
-			}
+
 			if !nilStore {
 				all := historyEntries(t, store, testConvID)
 				if len(all) != 1 || all[0].Type != protocol.TypeMessage {

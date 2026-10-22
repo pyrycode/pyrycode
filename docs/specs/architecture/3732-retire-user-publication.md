@@ -81,3 +81,7 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-22
+
+## Revisions
+
+- 2026-10-22: Tagged-source review found `shadowWitness` still required an independently pushed raw user message. Remove that requirement and its exclusive positive mismatch control; retain raw acceptance/delivery joins and canonical checkpoint content mutation controls. The capture still records the other producers that its shared adapter validates. Receipt ordering is acceptance before outcome; asynchronous receipts need not precede unrelated assistant traffic. Mixed tests explicitly drain the mailbox where comparing chronological receipt identities.

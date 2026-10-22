@@ -24,7 +24,7 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 	store := history.New(dir)
 	h := testSendHistory(store)
 	ome, bcast, ring := testQueuedReceiptEmitter(h)
-	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }, OnAccepted: h.accepted, OnDelivered: operatorMessageHistory(store, func(m operatorMessage) { ome.broadcast(context.Background(), bcast, ring, m) }, nil, discardLogger(), h), OnTerminal: h.terminal, SendNow: func(context.Context, string, uint64, []byte) error { return nil }})
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }, OnAccepted: h.accepted, OnDelivered: operatorMessageHistory(store, nil, discardLogger(), h), OnTerminal: h.terminal, SendNow: func(context.Context, string, uint64, []byte) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,10 +32,12 @@ func TestQueuedLegacyReceipts_CompletedTurn(t *testing.T) {
 	if !q.SendNow(testConvID, id) {
 		t.Fatal("send now refused")
 	}
+	ome.broadcast(context.Background(), bcast, ring)
 	e := newInteractiveTurnEmitterV2(nil, bcast, discardLogger())
 	e.hist, e.ring = store, ring
 	e.HandleFor(context.Background(), testConvID, turnevent.TextChunk{Text: "pong"}, history.SessionProvenance{})
 	e.HandleFor(context.Background(), testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, history.SessionProvenance{})
+	ome.broadcast(context.Background(), bcast, ring)
 	testQueuedReceiptIdentity(t, store, bcast, ring)
 	raw := historyEntries(t, store, testConvID)
 	for _, reader := range []*history.Store{store, history.New(dir)} {
@@ -109,15 +111,22 @@ func TestQueuedLegacyReceipts_Validation(t *testing.T) {
 }
 
 func testQueuedReceiptEmitter(h *queuedSendHistory) (*operatorMessageEmitterV2, *fakeInteractiveBcast, *eventring.Ring) {
-	ome := newOperatorMessageEmitterV2(nil, discardLogger())
+	ome := newOperatorMessageEmitterV2(discardLogger())
 	h.publish = ome.notifyReceipt
-	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "phone", Interactive: true}, {ConnID: "peer", Interactive: true}, {ConnID: "noninteractive"}}}}
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "phone", Interactive: true}, {ConnID: "peer", Interactive: true, Thread: true}, {ConnID: "noninteractive"}}}}
 	return ome, bcast, eventring.New(64)
 }
 
 func testQueuedReceiptIdentity(t *testing.T, store *history.Store, bcast *fakeInteractiveBcast, ring *eventring.Ring) {
 	t.Helper()
 	page, _ := testLegacyReceipts(t, store)
+	filtered := page[:0]
+	for _, entry := range page {
+		if entry.Type != protocol.TypeMessage {
+			filtered = append(filtered, entry)
+		}
+	}
+	page = filtered
 	events, _ := ring.After(testConvID, 0)
 	if len(events) != len(page) || len(bcast.pushes) != 2*len(events) {
 		t.Fatalf("page/live/replay counts %d/%d/%d", len(page), len(bcast.pushes), len(events))
@@ -142,14 +151,14 @@ func TestQueuedLegacyReceipts_Startup(t *testing.T) {
 	h := testSendHistory(store)
 	ome, bcast, ring := testQueuedReceiptEmitter(h)
 	h.accepted(testConvID, msgqueue.QueuedMessage{ID: 1, TS: historyTS})
-	ome.broadcast(context.Background(), bcast, ring, operatorMessage{})
+	ome.broadcast(context.Background(), bcast, ring)
 	before, _ := ring.After(testConvID, 0)
 	accepted, err := readStartupSends(history.New(dir), conversations.ConversationID(testConvID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	closeStartupSends(history.New(dir), discardLogger(), testConvID, accepted, historyTS.Add(time.Second))
-	ome.broadcast(context.Background(), bcast, ring, operatorMessage{})
+	ome.broadcast(context.Background(), bcast, ring)
 	after, _ := ring.After(testConvID, 0)
 	if !reflect.DeepEqual(before, after) || len(bcast.pushes) != 2 {
 		t.Fatal("startup backfilled live/replay")
@@ -196,12 +205,23 @@ func TestQueuedLegacyReceipts_NonblockingPublication(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("peer did not stall")
 	}
-	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }, OnAccepted: h.accepted, OnTerminal: h.terminal})
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }, OnAccepted: h.accepted, OnTerminal: h.terminal,
+		OnDelivered: operatorMessageHistory(store, nil, discardLogger(), h),
+		SendNow:     func(context.Context, string, uint64, []byte) error { return nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
-	go func() { id := q.Enqueue(testConvID, "safe"); q.Remove(testConvID, id); close(done) }()
+	go func() {
+		id := q.Enqueue(testConvID, "safe")
+		if !q.SendNow(testConvID, id) {
+			t.Error("send now refused")
+		}
+		id = q.Enqueue(testConvID, "drop")
+		q.Remove(testConvID, id)
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -221,11 +241,10 @@ func TestQueuedLegacyReceipts_SendNowDelayedConfirmation(t *testing.T) {
 	place := newSendNowPlacement(ctx, func(string) (string, bool) { return testConvID, true }, func(ctx context.Context, _ string) error { <-ctx.Done(); return ctx.Err() })
 	place.sendHistory = h
 	place.bindQueued(ctx, sink, store, func(string) bool { return true }, discardLogger())
-	sink.setOperatorPublisher(func(m operatorMessage) { ome.broadcast(ctx, bcast, ring, m) })
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	written := make(chan struct{})
-	record := operatorMessageHistory(store, nil, place, discardLogger(), h)
+	record := operatorMessageHistory(store, place, discardLogger(), h)
 	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }, OnAccepted: h.accepted, OnTerminal: h.terminal,
 		OnDelivered: func(c string, m msgqueue.QueuedMessage) { close(entered); <-release; record(c, m) },
 		SendNow: func(ctx context.Context, c string, _ uint64, payload []byte) error {
@@ -244,6 +263,7 @@ func TestQueuedLegacyReceipts_SendNowDelayedConfirmation(t *testing.T) {
 		t.Fatal("write confirmation committed before placement")
 	}
 	place.echo("session", echoOf("host prompt"))
+	ome.broadcast(context.Background(), bcast, ring)
 	testQueuedReceiptIdentity(t, store, bcast, ring)
 	raw := historyEntries(t, store, testConvID)
 	if len(raw) != 3 {
@@ -259,6 +279,7 @@ func TestQueuedLegacyReceipts_SendNowDelayedConfirmation(t *testing.T) {
 	}
 	place.echo("session", echoOf("host prompt"))
 	place.idle("session")
+	ome.broadcast(context.Background(), bcast, ring)
 	testQueuedReceiptIdentity(t, store, bcast, ring)
 	if !reflect.DeepEqual(raw, historyEntries(t, store, testConvID)) {
 		t.Fatal("confirmation/echo duplicated chronology")
@@ -273,7 +294,7 @@ func TestQueuedLegacyReceipts_StorageFailure(t *testing.T) {
 	ome, bcast, ring := testQueuedReceiptEmitter(h)
 	h.accepted(testConvID, msgqueue.QueuedMessage{ID: 1, TS: historyTS})
 	h.accepted(testConvID, msgqueue.QueuedMessage{ID: 2, TS: historyTS})
-	ome.broadcast(context.Background(), bcast, ring, operatorMessage{})
+	ome.broadcast(context.Background(), bcast, ring)
 	saved := dir + "-saved"
 	if err := os.Rename(dir, saved); err != nil {
 		t.Fatal(err)
@@ -282,18 +303,14 @@ func TestQueuedLegacyReceipts_StorageFailure(t *testing.T) {
 	if err := os.WriteFile(dir, []byte("blocked"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	operatorMessageHistory(store, func(m operatorMessage) { ome.broadcast(context.Background(), bcast, ring, m) }, nil, discardLogger(), h)(testConvID, msgqueue.QueuedMessage{ID: 1, TS: historyTS, Text: "safe"})
+	operatorMessageHistory(store, nil, discardLogger(), h)(testConvID, msgqueue.QueuedMessage{ID: 1, TS: historyTS, Text: "safe"})
 	h.terminal(testConvID, msgqueue.QueuedMessage{ID: 2}, msgqueue.TerminalRemoved)
-	ome.broadcast(context.Background(), bcast, ring, operatorMessage{})
+	ome.broadcast(context.Background(), bcast, ring)
 	events, _ := ring.After(testConvID, 0)
-	if len(events) != 3 || len(bcast.pushes) != 6 || events[2].Type != protocol.TypeMessage || events[2].HistoryEntryID != 0 {
-		t.Fatal("failed delivery/drop minted receipt or suppressed eligible message")
+	if len(events) != 2 || len(bcast.pushes) != 4 {
+		t.Fatal("failed delivery/drop minted a receipt")
 	}
-	for _, push := range bcast.pushes[4:] {
-		if push.env.HistoryEntryID != nil {
-			t.Fatal("failed storage supplied identity")
-		}
-	}
+
 	if raw := historyEntries(t, history.New(saved), testConvID); len(raw) != 2 {
 		t.Fatal("failed writes changed durable allocation")
 	}

@@ -238,9 +238,7 @@ type relayWiring struct {
 	// nil in foreground/v1 ⇒ no resolver is installed and no session names a
 	// client, which is the pre-#2148 text byte for byte.
 	setClientIdentity func(enum func(context.Context) []relay.ActiveConn)
-	// operatorMessages is the pre-built live push of the operator's own delivered
-	// message (#2699), fed from the msgqueue OnDelivered seam before the relay broadcaster exists. Its
-	// Run also takes the replay ring, which this leg creates.
+	// operatorMessages publishes neutral queued receipts through a bounded mailbox.
 	operatorMessages *operatorMessageEmitterV2
 	// sessionErr is the pre-built session_error emitter (#1008) whose Run goroutine
 	// startRelayV2 starts over the v2 manager. Built at main.go (channel shared with
@@ -1741,9 +1739,6 @@ func startRelayV2(
 		// transition below, the #1210 child-exit lane through the drain, and — for a
 		// write that fails after its mark — the delivery seam's own undo (see
 		// stream_turn_busy.go's feeds note).
-		if w.operatorMessages != nil {
-			w.streamSink.setOperatorPublisher(func(m operatorMessage) { w.operatorMessages.broadcast(ctx, mgr, emitter.ring, m) })
-		}
 		if w.streamSink.live == nil {
 			w.streamSink.live = newDaemonLiveState(conversationFor)
 		}
@@ -1803,10 +1798,7 @@ func startRelayV2(
 		w.postDelivery.complete = postEmitter.complete
 	}
 
-	// Wire the operator-message push (#2699): each confirmed delivery's `message`
-	// envelope, the bytes the durable log stores, goes to every interactive conn
-	// and into the replay ring. With no stream sink the
-	// ring is nil and the push carries no event_id.
+	// Publish queued receipts independently of stored user-message sources.
 	streamOperatorMessageCleanup := startOperatorMessageStreamV2(ctx, w.operatorMessages, mgr, replayRing)
 
 	// Wire the session_error producer (#1008): start the pre-built emitter's Run

@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,9 +33,9 @@ const (
 // deliver the test controls. done closes once the producer has run, so a test
 // reads the log without polling it. The wrapper only sequences — the value under
 // test is still newOperatorMessageHistory's closure.
-func opQueue(t *testing.T, store *history.Store, buf *bytes.Buffer, push func(operatorMessage), deliver msgqueue.DeliverFunc) (*msgqueue.Queue, chan struct{}) {
+func opQueue(t *testing.T, store *history.Store, buf *bytes.Buffer, deliver msgqueue.DeliverFunc) (*msgqueue.Queue, chan struct{}) {
 	t.Helper()
-	producer := newOperatorMessageHistory(store, push, nil, bufLogger(buf))
+	producer := newOperatorMessageHistory(store, nil, bufLogger(buf))
 	done := make(chan struct{})
 	q, err := msgqueue.New(msgqueue.Config{
 		Deliver:       deliver,
@@ -87,7 +85,7 @@ func TestOperatorMessageHistory_AppendsUserMessageWithQueuedText(t *testing.T) {
 	t.Parallel()
 	store := history.New(t.TempDir())
 	var buf bytes.Buffer
-	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error { return nil })
+	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error { return nil })
 
 	q.EnqueueDelivery(testConvID, opMsgID, opText, opDelivery)
 	waitAppended(t, done)
@@ -150,7 +148,7 @@ func TestOperatorMessageHistory_StoresAttachmentIDs(t *testing.T) {
 	t.Parallel()
 	store := history.New(t.TempDir())
 	var buf bytes.Buffer
-	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error { return nil })
+	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error { return nil })
 
 	ids := []string{"att-b-0002", "att-a-0001"}
 	q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, ids)
@@ -199,7 +197,7 @@ func TestOperatorMessageHistory_StoresSender(t *testing.T) {
 	t.Parallel()
 	store := history.New(t.TempDir())
 	var buf bytes.Buffer
-	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error { return nil })
+	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error { return nil })
 
 	sentAt := time.Date(2020, 1, 2, 3, 4, 5, 120000000, time.FixedZone("EET", 2*60*60))
 	q.EnqueueSent(testConvID, opMsgID, opText, opText, nil, "desktop", "pyrycode-desktop/0.9.1", sentAt)
@@ -241,7 +239,7 @@ func TestOperatorMessageHistory_StampsAtConfirmationNotEnqueue(t *testing.T) {
 	var buf bytes.Buffer
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	q, done := opQueue(t, store, &buf, nil, func(context.Context, string, []byte) error {
+	q, done := opQueue(t, store, &buf, func(context.Context, string, []byte) error {
 		entered <- struct{}{}
 		<-release
 		return nil
@@ -266,59 +264,7 @@ func TestOperatorMessageHistory_StampsAtConfirmationNotEnqueue(t *testing.T) {
 	}
 }
 
-// #2699 AC 1 and AC 2, through a real queue: a message delivered after a failed
-// attempt is handed to the live push exactly once, as the SAME bytes and stamp
-// the log entry holds — the #2038 shape, so the queued text and attachment ids
-// go out and the delivery payload naming an on-host path never does.
-func TestOperatorMessageHistory_PushesLogEntryOnceAfterRetry(t *testing.T) {
-	t.Parallel()
-	store := history.New(t.TempDir())
-	var buf bytes.Buffer
-	pushes := make(chan operatorMessage, 4)
-	attempts := 0
-	q, done := opQueue(t, store, &buf, func(m operatorMessage) { pushes <- m },
-		func(context.Context, string, []byte) error {
-			attempts++
-			if attempts == 1 {
-				return errors.New("first attempt fails")
-			}
-			return nil
-		})
-
-	queuedID := q.EnqueueAttached(testConvID, opMsgID, opText, opDelivery, []string{"att-a-0001"})
-	waitAppended(t, done)
-
-	if len(pushes) != 1 {
-		t.Fatalf("pushes = %d, want exactly 1 across %d attempts", len(pushes), attempts)
-	}
-	got := <-pushes
-	entry := onlyEntry(t, store, testConvID)
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(got.payload, &fields); err != nil {
-		t.Fatal(err)
-	}
-	if queuedID == 0 || string(fields["queued_msg_id"]) != strconv.FormatUint(queuedID, 10) {
-		t.Fatalf("queued_msg_id = %s, want nonzero queue ID %d", fields["queued_msg_id"], queuedID)
-	}
-	if got.convID != testConvID {
-		t.Errorf("convID = %q, want %q", got.convID, testConvID)
-	}
-	if !bytes.Equal(got.payload, entry.Payload) {
-		t.Errorf("pushed payload = %s, want the log entry's bytes %s", got.payload, entry.Payload)
-	}
-	if !got.ts.Equal(entry.TS) {
-		t.Errorf("pushed ts = %v, want the log entry's stamp %v", got.ts, entry.TS)
-	}
-	raw := string(got.payload)
-	if !strings.Contains(raw, opText) || !strings.Contains(raw, `"attachment_ids":["att-a-0001"]`) {
-		t.Errorf("pushed payload lacks the queued text or attachment ids: %s", raw)
-	}
-	if strings.Contains(raw, opHostPath) {
-		t.Errorf("pushed payload leaked the on-host path: %s", raw)
-	}
-}
-
-// #2730: a send-now message is written and pushed when claude's echo of the
+// #2730: a send-now message is recorded when claude's echo of the
 // DELIVERY payload arrives, not at OnDelivered, and its content is still built
 // from msg.Text. An ordinary message on the same producer commits at once.
 func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
@@ -330,20 +276,16 @@ func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
 	place := newSendNowPlacement(ctx,
 		func(sid string) (string, bool) { return testConvID, sid == "s1" },
 		func(ctx context.Context, _ string) error { <-ctx.Done(); return ctx.Err() })
-	var pushes []operatorMessage
-	producer := newOperatorMessageHistory(store, func(m operatorMessage) { pushes = append(pushes, m) }, place, bufLogger(&buf))
+	producer := newOperatorMessageHistory(store, place, bufLogger(&buf))
 
 	place.expect(testConvID, 4, []byte(opDelivery))
 	producer(testConvID, msgqueue.QueuedMessage{ID: 4, MessageID: opMsgID, Text: opText, SentNow: true})
-	if page, err := store.Page(conversations.ConversationID(testConvID), "", 10); err != nil || len(page.Entries) != 0 || len(pushes) != 0 {
-		t.Fatalf("before the echo: entries=%d pushes=%d err=%v, want nothing committed", len(page.Entries), len(pushes), err)
+	if page, err := store.Page(conversations.ConversationID(testConvID), "", 10); err != nil || len(page.Entries) != 0 {
+		t.Fatalf("before the echo: entries=%d err=%v, want nothing committed", len(page.Entries), err)
 	}
 
 	place.echo("s1", turnevent.UserEcho{TextSHA256: sha256.Sum256([]byte(opDelivery))})
 	entry := onlyEntry(t, store, testConvID)
-	if len(pushes) != 1 || string(pushes[0].payload) != string(entry.Payload) {
-		t.Fatalf("pushes = %d, want one carrying the entry's bytes", len(pushes))
-	}
 	var payload protocol.MessagePayload
 	if err := json.Unmarshal(entry.Payload, &payload); err != nil || payload.Text != opText {
 		t.Fatalf("entry text = %q (err %v), want the queued text %q", payload.Text, err, opText)
@@ -353,32 +295,24 @@ func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
 	}
 
 	var delivered map[string]any
-	if err := json.Unmarshal(pushes[0].payload, &delivered); err != nil || delivered["sent_now"] != true {
-		t.Fatalf("send-now push must identify its delivery kind: sent_now=%v err=%v", delivered["sent_now"], err)
+	if err := json.Unmarshal(entry.Payload, &delivered); err != nil || delivered["sent_now"] != true {
+		t.Fatalf("send-now source must identify its delivery kind: sent_now=%v err=%v", delivered["sent_now"], err)
 	}
 	if delivered["queued_msg_id"] != float64(4) {
 		t.Fatalf("send-now queued_msg_id = %v, want integer 4", delivered["queued_msg_id"])
 	}
 
 	producer(testConvID, msgqueue.QueuedMessage{ID: 5, MessageID: opMsgID, Text: "plain"})
-	if len(pushes) != 2 {
-		t.Fatalf("an ordinary message pushed %d times in total, want it committed at once", len(pushes)-1)
-	}
 	var ordinary map[string]any
-	if err := json.Unmarshal(pushes[1].payload, &ordinary); err != nil {
+	if err := json.Unmarshal(historyEntries(t, store, testConvID)[1].Payload, &ordinary); err != nil {
 		t.Fatal(err)
 	}
 	if ordinary["message_id"] != delivered["message_id"] || ordinary["queued_msg_id"] != float64(5) {
 		t.Fatalf("same message_id must retain distinct queue IDs: send-now=%v ordinary=%v", delivered, ordinary)
 	}
 	page, err := store.Page(conversations.ConversationID(testConvID), "", 10)
-	if err != nil || len(page.Entries) != len(pushes) {
-		t.Fatalf("stored entries = %d, want %d; err=%v", len(page.Entries), len(pushes), err)
-	}
-	for _, push := range pushes {
-		if !slices.ContainsFunc(page.Entries, func(entry history.Entry) bool { return bytes.Equal(entry.Payload, push.payload) }) {
-			t.Errorf("push has no byte-identical stored entry: %s", push.payload)
-		}
+	if err != nil || len(page.Entries) != 2 {
+		t.Fatalf("stored entries = %d, want 2; err=%v", len(page.Entries), err)
 	}
 }
 
@@ -386,11 +320,11 @@ func TestOperatorMessageHistory_SendNowCommitsAtTheEcho(t *testing.T) {
 func TestOperatorMessageHistory_OrdinaryDeliveryDoesNotClaimSendNow(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	var pushed operatorMessage
-	producer := newOperatorMessageHistory(nil, func(m operatorMessage) { pushed = m }, nil, bufLogger(&buf))
+	store := history.New(t.TempDir())
+	producer := newOperatorMessageHistory(store, nil, bufLogger(&buf))
 	producer(testConvID, msgqueue.QueuedMessage{MessageID: "ordinary", Text: "plain"})
 	var payload map[string]any
-	if err := json.Unmarshal(pushed.payload, &payload); err != nil {
+	if err := json.Unmarshal(onlyEntry(t, store, testConvID).Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
 	if _, present := payload["sent_now"]; present {

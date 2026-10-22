@@ -102,7 +102,7 @@ func TestAcceptedDeliveryLiveRefusal(t *testing.T) {
 			m.Text = strings.Repeat("delivered ", 256)
 			done := make(chan struct{})
 			go func() {
-				operatorMessageHistory(h, nil, nil, discardLogger(), sends, history.SessionProvenance{Kind: "codex", SessionID: "receiver"})(testConvID, m)
+				operatorMessageHistory(h, nil, discardLogger(), sends, history.SessionProvenance{Kind: "codex", SessionID: "receiver"})(testConvID, m)
 				close(done)
 			}()
 			testShadowWait(t, func() bool { id, _ := h.LatestEntryID(testConvID); return id == 3 })
@@ -291,7 +291,7 @@ func TestAcceptedDeliveryAppendFailures(t *testing.T) {
 				m.Text = strings.Repeat("x", int(history.MaxSegmentBytes)+1)
 			}
 			done := make(chan struct{})
-			go func() { operatorMessageHistory(h, nil, nil, discardLogger(), sends)(testConvID, m); close(done) }()
+			go func() { operatorMessageHistory(h, nil, discardLogger(), sends)(testConvID, m); close(done) }()
 			select {
 			case <-done:
 			case <-time.After(10 * time.Second):

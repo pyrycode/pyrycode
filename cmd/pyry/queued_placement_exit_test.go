@@ -61,8 +61,6 @@ func TestQueuedPlacementOwnership(t *testing.T) {
 			place := newSendNowPlacement(ctx, resolve, busy.WaitIdle)
 			place.sendHistory = h
 			place.bindQueued(ctx, sink, store, func(string) bool { return true }, discardLogger())
-			published := make(chan operatorMessage, 8)
-			sink.setOperatorPublisher(func(m operatorMessage) { published <- m })
 			emitter := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
 			emitter.hist = store
 			installRuntimeHistory(sink, emitter, busy)
@@ -118,7 +116,7 @@ func TestQueuedPlacementOwnership(t *testing.T) {
 			case "send_now_grace", "exit_during_grace", "teardown_during_grace", "saturated_child_exits":
 				send(child, snEnd)
 				placementDrainBarrier(t, ctx, sink)
-				if len(published) != 0 {
+				if len(historyEntries(t, store, testConvID)) != 1 {
 					t.Fatal("send now skipped grace")
 				}
 				if scenario == "saturated_child_exits" {
@@ -175,7 +173,13 @@ func TestQueuedPlacementOwnership(t *testing.T) {
 				sink.forwardEvent(streamTurnEnvelope{sessionID: "foreign", child: successor, ev: echoOf("identical")})
 				placementDrainBarrier(t, ctx, sink)
 				place.takeQueued(testConvID, newEntry)
-				if len(published) != map[bool]int{true: 1}[wantOld] {
+				delivered := 0
+				for _, item := range testCanonicalUsers(t, store, testConvID) {
+					if item.Status == "delivered" {
+						delivered++
+					}
+				}
+				if delivered != map[bool]int{true: 1}[wantOld] {
 					t.Fatal("late/foreign child stole identical payload")
 				}
 				send(successor, echoOf("identical"))
@@ -262,8 +266,6 @@ func TestQueuedPlacementUnreadPipe(t *testing.T) {
 			place.sendHistory = h
 			place.bindQueued(ctx, sink, store, func(string) bool { return true }, discardLogger())
 			sink.setEchoObserver(place.echo)
-			published := make(chan operatorMessage, 8)
-			sink.setOperatorPublisher(func(m operatorMessage) { published <- m })
 			emitter := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
 			emitter.hist = store
 			installRuntimeHistory(sink, emitter, busy)
@@ -277,7 +279,7 @@ func TestQueuedPlacementUnreadPipe(t *testing.T) {
 			writer := funcWriter{write: runner.WriteUserTurn}
 			writerFor := func(string) (handlers.TurnWriter, error) { return writer, nil }
 			written := make(chan struct{}, 1)
-			record := newOperatorMessageHistory(store, nil, place, discardLogger())
+			record := newOperatorMessageHistory(store, place, discardLogger())
 			q, err := msgqueue.New(msgqueue.Config{
 				Deliver:    newInboundDeliver(writerFor, busy, time.Second, place),
 				SendNow:    newSendNowDeliver(writerFor, func(string) bool { return true }, busy, place),
@@ -372,7 +374,7 @@ func TestQueuedPlacementUnreadPipe(t *testing.T) {
 					}
 				}
 			}
-			if !found || len(published) != 0 || len(q.Snapshot(testConvID)) != 0 {
+			if !found || len(q.Snapshot(testConvID)) != 0 {
 				t.Fatal("missing recovery item, false publication or automatic replay")
 			}
 		})

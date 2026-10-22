@@ -2,12 +2,9 @@
 
 package realclaude
 
-// TestRealClaude_SendQueuedNowPlacement is the live gate for #2730: a message the
-// operator queued behind a running turn and then pushed in with send_queued_now
-// must appear on the wire where claude actually read it. Claude reads stdin
-// input written mid-turn after the tool call that was running, so the operator's
-// own `message` push has to sit after that call's tool_result and before the
-// assistant text that follows it, not at the moment the daemon wrote stdin.
+// TestRealClaude_SendQueuedNowPlacement observes the canonical user item where
+// Claude actually read input sent through send_queued_now: after the running
+// tool's result and before the assistant text that follows it.
 //
 // It composes the running-turn seam (startStreamRunningTurnHarness, whose daemon
 // runs with --dangerously-skip-permissions so no modal blocks the Bash call) with

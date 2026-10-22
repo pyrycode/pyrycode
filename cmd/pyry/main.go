@@ -622,16 +622,12 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	defer postDelivery.stopAccepting()
 	postDelivery.sessionFor = channelPostSession(convReg, pool.HarnessFor)
 	postDelivery.bind(turnBusy)
-	// operatorMessages is the hand-off from the history producer below to the
-	// live push of the operator's own message (#2699), built BEFORE msgqueue.New
-	// before its relay consumer exists. The ring that push appends to is born in the relay
-	// leg, which hands it to the emitter's Run at start.
-	operatorMessages := make(chan operatorMessage, operatorMessageQueueSize)
-	ome := newOperatorMessageEmitterV2(operatorMessages, logger)
+	// Receipts use a bounded mailbox before their relay consumer exists.
+	ome := newOperatorMessageEmitterV2(logger)
 	sends := newQueuedSendHistory(conversationHistory, logger, channelPostSession(convReg, pool.HarnessFor))
 	sends.attachmentName = storedQueuedAttachmentName(resolveInstanceDirPath(*name), convReg)
 	sends.publish = ome.notifyReceipt
-	// Queued Claude history entries and pushes wait for their echoes, which the stream drain hands over through the sink. Built only on the
+	// Queued Claude history entries wait for placement on the stream drain. Built only on the
 	// stream path, beside the tracker whose idle is its fallback; nil elsewhere,
 	// which commits at the write as before.
 	var sendNowPlace *sendNowPlacement
@@ -676,7 +672,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// placement; other deliveries commit here. The channel carry is cleared
 		// only on confirmation, never on a failed attempt or send-now delivery.
 		OnDelivered: deliveredFuncs(
-			operatorMessageHistory(conversationHistory, operatorMessageNotify(operatorMessages, logger), sendNowPlace, logger, sends),
+			operatorMessageHistory(conversationHistory, sendNowPlace, logger, sends),
 			postCarry.clearDelivered,
 			replySuggDelivered,
 		),
@@ -864,7 +860,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		resetting:    resetting,
 		debugBundler: debugBundler,
 		settings:     liveSettingsUpdater{settingsUpdaterAdapter: settingsUpdaterAdapter{pool, modelVocabulary}, live: liveBindings},
-		// #2699: pushes each delivered operator message; Run starts in startRelayV2.
+		// Receipt publication starts in startRelayV2.
 		operatorMessages: ome,
 		// #2646: the capability list is read off an adapter over the same pool and
 		// store as settings above, so it reports exactly what that one checks.

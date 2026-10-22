@@ -11,17 +11,17 @@ import (
 )
 
 // newOperatorMessageHistory records safe client text at stream placement or
-// confirmation, then publishes the same legacy payload exactly once. Composed
+// confirmation. Only the linked neutral receipt is published. Composed
 // delivery bytes and host attachment paths are absent from QueuedMessage.
-func newOperatorMessageHistory(store *history.Store, push func(operatorMessage), place *sendNowPlacement, logger *slog.Logger, source ...history.SessionProvenance) msgqueue.DeliveredFunc {
+func newOperatorMessageHistory(store *history.Store, place *sendNowPlacement, logger *slog.Logger, source ...history.SessionProvenance) msgqueue.DeliveredFunc {
 	var sends *queuedSendHistory
 	if place != nil {
 		sends = place.sendHistory
 	}
-	return operatorMessageHistory(store, push, place, logger, sends, source...)
+	return operatorMessageHistory(store, place, logger, sends, source...)
 }
 
-func operatorMessageHistory(store *history.Store, push func(operatorMessage), place *sendNowPlacement, logger *slog.Logger, sends *queuedSendHistory, source ...history.SessionProvenance) msgqueue.DeliveredFunc {
+func operatorMessageHistory(store *history.Store, place *sendNowPlacement, logger *slog.Logger, sends *queuedSendHistory, source ...history.SessionProvenance) msgqueue.DeliveredFunc {
 	return func(convID string, msg msgqueue.QueuedMessage) {
 		captured := place.takeSource(convID, msg.ID)
 		if len(source) != 0 {
@@ -66,8 +66,8 @@ func operatorMessageHistory(store *history.Store, push func(operatorMessage), pl
 			historyEntryID := appendConversationHistory(store, logger, "operator_message.history_append_err",
 				convID, protocol.TypeMessage, stored, ts, captured)
 			receipt := sends.delivered(convID, msg.ID, ref, historyEntryID, ts, captured)
-			if push != nil {
-				push(operatorMessage{convID: convID, payload: stored, ts: ts, historyEntryID: historyEntryID, receipt: receipt})
+			if receipt != nil && sends.publish != nil {
+				sends.publish(*receipt)
 			}
 		}
 		place.attach(convID, msg.ID, commit)

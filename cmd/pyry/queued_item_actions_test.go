@@ -29,7 +29,7 @@ func testBoundQueue(t *testing.T, h *queuedSendHistory, first uint64) *msgqueue.
 				h.terminal(c, m, o)
 			}
 		},
-		OnDelivered: operatorMessageHistory(h.store, func(operatorMessage) {}, nil, discardLogger(), h),
+		OnDelivered: operatorMessageHistory(h.store, nil, discardLogger(), h),
 	})
 	if err != nil {
 		t.Fatal(err)
