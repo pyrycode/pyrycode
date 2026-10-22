@@ -33,6 +33,7 @@ type mcpQueryPhone struct {
 	next   scenario.Next
 	client *fakephone.Client
 	send   *noise.CipherState
+	recv   *noise.CipherState
 }
 
 func dialMCPQueryPhone(
@@ -52,7 +53,7 @@ func dialMCPQueryPhone(
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-	return mcpQueryPhone{client: phone, send: send, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phone, recv)}
+	return mcpQueryPhone{client: phone, send: send, recv: recv, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phone, recv)}
 }
 
 func sendMCPQueryTurn(t *testing.T, phone, observer mcpQueryPhone, requestID uint64, text string) {
