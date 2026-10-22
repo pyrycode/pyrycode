@@ -755,7 +755,7 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		debugBundler = fake
 	}
 
-	relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(ctx, logger, relayWiring{
+	relayCleanup, approvalSurface, announceAttachment, announceConversation, _, pairingProvider, err := startRelay(ctx, logger, relayWiring{
 		// Private admission configuration is the immutable startup snapshot.
 		admissionTokens:  cfg.RelayAdmissionTokens,
 		instanceName:     *name,
@@ -908,7 +908,6 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 	// Runtime history construction precedes shadow quiescence readers.
 	shadow.start()
 	// Delivery runs even when startRelay returned without a relay URL.
-	postDelivery.announce = announcePost
 	postDeliveryDone := make(chan struct{})
 	go func() { postDelivery.run(ctx); close(postDeliveryDone) }()
 	defer func() {

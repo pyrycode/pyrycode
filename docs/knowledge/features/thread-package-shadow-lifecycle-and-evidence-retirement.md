@@ -21,7 +21,8 @@ legacy projection, replay insertion and fan-out to every app, including peers
 without `thread`. Successful appends preserve existing payloads, timestamps,
 visibility and producing-session provenance. Nil/failed storage cannot restore
 raw content or substitute receipts; supported live state remains separate.
-Channel-post publication remains for #3737.
+Channel-post publication is also retired (#3737); see the residual-content
+section below.
 
 `TestInteractiveContentRetired` drives interleaved main/child text, child tool
 use/result, denial and duplicate completion through the emitter and real Store.
@@ -144,9 +145,88 @@ Historical failures remain failed: the initial builder package run recorded
 16887 executed, 16881 passed, 6 failed and 4 skipped; the metadata/switch
 corrections subsequently passed 43/43 events with zero failed/skipped. The PR
 retains the earlier red retirement/focused results. Staticcheck's U1000 finding
-on `81831fd4` was resolved by removing the unused test helper, while shared
-production receipt adapters remain. This evidence covers the Linux ticket;
-macOS is outside its verification scope. Other runtime/startup and prompt-answer
-receipts, standalone banners and channel-post publication remain for #3737,
-and #3718 still owns final family acceptance. See the
+on `81831fd4` was resolved by removing the unused test helper. Shared receipt
+adapters remained at that candidate and are removed by #3737 below. This evidence
+covers the Linux ticket; macOS is outside its verification scope. Parent #3718
+still owns final family acceptance. See the
 [plan and revisions](../../specs/architecture/3736-session-content-retirement.md).
+
+## Residual content retirement (#3737)
+
+Standalone `banner` sources, runtime/startup facts, winning remote
+`prompt_answered` resolutions and channel post chunks/completion retain their
+append attempts, payloads, timestamps, visibility and captured provenance.
+No app receives raw banners, post deltas/completion, inert receipts or new
+content replay copies on initial connection, live output or reconnect, with or
+without `thread`. Nil/failed history and no clients never restore publication.
+Successful source appends feed authoritative thread items and explicit catch-up.
+Open prompts, single dismissals, controls and live state remain separate,
+with conversation/session/generation identity and ordered delivery intact.
+`historyVisibilityMetadata`/`historyEntryShown` and constructor seams survive;
+exclusive receipt/prompt/post publishers are removed. The interactive ring and
+counter still serve supported live state. Replay admission/pump retirement is
+\#3738, shared ring/`SetReplaySource` removal is #3739, and #3718's final family
+acceptance remains pending.
+
+`TestResidualContentRetired` applies actual canonical live updates and compares
+explicit catch-up across conversations with reused turn/answer IDs and original
+session provenance; repeat publication adds no duplicates.
+`TestResidualContentRetiredStorage` checks absent/failed storage, no clients and
+content-free diagnostics. `TestPromptAnswerPublicationRetired` folds all five
+actual remote decisions to canonical answer notices under the asking session,
+including after rebinding. Unauthorized, stale, invalid, duplicate, timeout and
+teardown paths retain their rejection/non-recording rules. The saved context
+remains bounded to 16 KiB without changing child input.
+
+**Removing receipt delivery must remove its wait dependency too.** A connection
+query on the answer stack can wait on the very relay loop resolving the answer;
+releasing bridge/registry locks alone does not avoid that cycle. There is now no
+receipt worker, serialization mutex or discovery call on the recording path.
+`TestPromptAnswerRelayRemainsResponsive` retains winning verdict/dismissal and
+relay progress; `TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer` holds an
+unrelated discovery query across consecutive answers, with cancelled context and
+failed storage controls. Storage failure never retries actuation or waits for
+receipt delivery. See [prompt ownership and responsiveness](history-package-producers.md#resolved-remote-prompt-answers-2973).
+
+**Durable completion owns recovery and wake eligibility.** Channel partial-write
+retry preserves ordered chunks and original source without duplicates. Failed
+completion stays pending without a wake; only a newly appended successful
+completion calls the asynchronous waker. Cleanup-only reload/retry and catch-up
+must not notify again. `TestChannelPost_RecordingReplayLiveWakeOrder` retains the
+record-before-wake proof despite its historical name, rejecting raw fan-out and
+repeated wakes. Recovery checks compare the same canonical completed post after
+partial writes and cleanup/restart. Inspect durable text/chunks/completion in
+poster helpers: a synthetic fan-out oracle would rebuild the retired contract
+and lose the actual carry, chunking and turn-identity witnesses. Active-turn,
+write-reservation and teardown boundaries remain.
+
+Linux acceptance on `895f4ff0c9bf84fe5723dacfbedff9f253a9d92d`, merged with
+main `287ecbd15727` (2026-10-22), supersedes the PR/verifier's earlier pending-live
+handoff. The dispatcher ran
+`go test -tags e2e_realclaude -timeout 30m -json ./internal/e2e/realclaude/...`:
+2250 executed, 2249 passed, 1 failed, 27 skipped (leaf counts excluding skips).
+`TestInteractiveStreamForwardsSubagentText` failed, then passed the same-tree
+named rerun, 1 executed/1 passed/0 failed/0 skipped. The stage record accepts this
+as a flaky pass; the original failed result remains failed. The first pass
+individually passed `TestInteractiveStreamStdioModalAllow`,
+`TestInteractiveStreamStdioPermissionDeny`, `TestInteractiveStreamQuestionAnswer`,
+`TestInteractiveStreamQuestionRefusal` and
+`TestInteractiveStreamHookBlockedBannerReachesTheClient`.
+The retained run is `2026-10-22T22-54-41-912Z`; accepted live stage
+`6695439568ef939d61191ec80543f212f5f06376c72a45729f78f3010fff1c65`
+records candidate, base, named results and rerun separately.
+
+[PR #3832](https://github.com/pyrycode/pyrycode/pull/3832) retains exact admitted
+focused commands and earlier failed attempts. Final focused daemon race checks
+passed 211/211 events and banner metadata checks 42/42; three channel scenarios
+each passed 1/1 and offline tagged hook fixtures 11/11, all with zero failed or
+skipped. These counts include parent/subtest events and differ from live leaf
+counts. The verifier accepted the Linux race unit gate and fake-daemon gate;
+`TestRecordedClaude/session-resume` originally failed and passed on rerun, tracked
+in [#3833](https://github.com/pyrycode/pyrycode/issues/3833). Tagged vet establishes
+compilation only; offline hook fixtures execute no Claude turns. Mixed tagged
+oracles retain the no-read refusal window, correlated ACK, later live phase,
+canonical queue delivery, actual wake and held-turn/successor order rather than
+merely deleting compatibility tests. macOS is outside this Linux ticket's
+verification scope. None of this establishes parent #3718's final family
+acceptance. See the [plan and revisions](../../specs/architecture/3737-retire-content-adapters.md).

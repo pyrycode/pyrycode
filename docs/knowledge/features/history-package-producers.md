@@ -38,8 +38,8 @@ substitute receipt is produced. Canonical folding and explicit catch-up consume
 these retained sources. Nil/failed storage cannot restore raw content delivery;
 supported live state continues independently, with content-free diagnostics.
 Coalescing, chunking and source-switch/boundary flush order remain recording
-contracts. Channel-post deltas/completion use their separate writer and retain
-publication pending #3737. See [interactive provenance](history-package-producers-interactive-provenance.md#interactive-provenance-2981)
+contracts. Channel-post deltas/completion use their separate durable writer;
+their raw publication is also retired (#3737). See [interactive provenance](history-package-producers-interactive-provenance.md#interactive-provenance-2981)
 and [thread publication](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 Background-task start/update/roster reports also retain their single append
@@ -79,9 +79,35 @@ on `9ebba3462074` records 28121/28121 race-unit, 1963/1963 fake integration and
 2268/2268 configured live leaf tests, zero failed, with 27/2/27 skipped
 respectively; historical failed results remain failed. It also distinguishes
 the 163/163 focused parent/subtest events from leaf counts and tagged compilation
-from live acceptance. These passes do not complete #3737's residual runtime,
-prompt-answer, standalone-banner/channel publication cleanup or #3718's final
-family acceptance. Shared adapters still serve those surviving producers.
+from live acceptance. They cover #3736, not parent #3718's final family acceptance.
+
+Standalone banners and runtime/startup facts now retain source recording only
+(#3737). `emit` returns after its banner append attempt; `recordRuntimeFact`
+appends directly and returns. Values, timestamps, visibility and captured source
+remain unchanged, including with no clients. No app receives raw banners,
+substitute runtime/prompt-answer receipts or new content replay copies, on
+connect, live output or reconnect, including peers without `thread` and absent/
+failed storage. Saved facts feed canonical thread items and explicit catch-up.
+Open prompts, dismissals, settings/catalogs, progress, retry, compaction live
+state and task controls remain supported with their source identity.
+
+Channel delivery retains accepted-post persistence/carry, ordered chunk
+reconciliation and the four-field `channelPostTurnEndPayload` as durable recovery
+input. A new successful completion triggers the existing asynchronous wake only
+after recording. Failed completion stays pending without a wake; cleanup-only
+retry/reload and catch-up never repeat it. Partial writes, cleanup failure and
+restart preserve one canonical completed post and original provenance. Active
+turns, write reservations and teardown still bound pending delivery.
+
+**Retain shared state when deleting exclusive publishers.** `publishLegacyHistory`,
+`legacyRuntimeReceipt` and prompt/post publication workers, queues and counters
+are removed. `historyVisibilityMetadata`/`historyEntryShown`, source payloads,
+constructor seams and ordered `daemonLiveState`/`daemonThreadPublisher` delivery
+remain. The interactive ring/counter still serve supported live state; replay
+admission/pump retirement belongs to #3738 and shared ring/`SetReplaySource`
+removal to #3739. Neither this cleanup nor its
+[counted evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737)
+completes #3718's final family acceptance.
 
 ### Producer topics
 
@@ -89,7 +115,7 @@ family acceptance. Shared adapters still serve those surviving producers.
 | --- | --- |
 | [Interactive provenance](history-package-producers-interactive-provenance.md) | Captured source, retained text and child lanes, conversation phase and channel posts. |
 | [Runtime and startup lifecycle](history-package-producers-runtime-lifecycle.md) | Boundaries, interrupted main work, agent/task identities and endings, linked-work deduplication and exactly-once restart recovery. |
-| [Legacy compatibility and verification](history-package-producers-legacy-compatibility.md) | Explicit raw visibility, nonvisual receipts, legacy unread targets, delivery ordering and producer tests. |
+| [Legacy compatibility and verification](history-package-producers-legacy-compatibility.md) | Stored visibility versus retired publication, retained live-state ordering and producer test traps. |
 
 Claude Agent/Task calls and background reports retain attribution alongside their
 existing mapped reports. See [agent/task attribution and reported endings](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
@@ -118,9 +144,9 @@ Gone and ended-with-session facts have explicit raw `shown: true`. Their raw
 payloads stay excluded from legacy live delivery and replay.
 No compatibility receipt is published for these agent facts (#3735). Their
 original durable IDs, timestamps, explicit visibility and source/lifetime facts
-remain fold inputs for canonical items and explicit catch-up. This changes no
-surviving runtime or prompt-answer producer contract; shared legacy validation
-adapters remain pending #3737. See
+remain fold inputs for canonical items and explicit catch-up. Runtime and
+prompt-answer receipts are also retired and the exclusive adapters removed
+(#3737). See
 [legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 ### Legacy transition provenance (#2982)
@@ -463,94 +489,50 @@ marks the fact explicitly `shown: true`, raising the raw shown-entry watermark
 in warm and reopened logs. The raw `prompt_answered` payload
 remains outside `legacyHistoryType` and all legacy transports.
 
-**Validated answers account for their original IDs (#3222).**
-`legacyRuntimeReceipt` delegates to `validPromptAnswerFact`, then reconstructs
-only the five-field nonvisual `banner`:
-`{conversation_id, level:"info", text:"", truncated:false, stops_turn:false}`.
-It requires a nonzero durable ID and entry timestamp, matching conversation,
-nonempty original `correlation_id`, exactly `source: remote` and nonzero
-`resolved_at` equal to the entry timestamp. All producer fields above except
-`session_id` must be present and nonnull, including explicit boolean
-`session_grant` and `truncated`. Only `allow`/`answer` with `behavior: allow`
-and `deny`/`cancel`/`refusal` with `behavior: deny` qualify; denied decisions
-cannot claim a session grant.
-
-`context` must be an object whose encoded size is at most 16 KiB. Typed decoding
-rejects unknown context/question/value fields and malformed shapes. Optional
-`tool` and `class` are strings; optional `questions` contains at most four
-questions with consecutive zero-based `index`, string `text` and explicit
-boolean `multi_select`. Each question may retain at most 128 values, each with
-required string `text` and optional string `meaning`. An empty context object
-is valid. Optional asking-session identity and original metadata provenance
-remain optional; validation never consults today's active session or stored
-`shown`. Invalid, foreign, unknown-source/decision, missing-field or unidentified
-facts remain holes. Raw decisions, prompt/question/tool context, answers,
-correlation/session identities and provenance never cross in the receipt.
-
-**Serialize successful append and replay admission together.** `recordPromptAnswer`
-uses `promptAnswerPublisher`'s dedicated mutex across its single durable append
-and `enqueue`, outside bridge and registry locks. `enqueue` records the validated
-receipt into the shared replay ring before admitting live delivery, even without
-connected clients. One ordered worker, `promptAnswerPublisher.deliver`, takes
-receipts under that mutex and releases it before `ActiveConns` or `Push`.
-Concurrent answers therefore retain append/replay order without waiting for
-connection discovery or peer delivery.
-
-The mailbox holds at most 256 pending live receipts. Overflow logs a fixed,
-content-free warning and drops only live delivery; the successful history append
-and replay admission remain intact. Context cancellation releases blocked
-delivery and clears pending live work without removing history or replay.
-Neither held delivery nor cancellation blocks recording later answers.
-`startRelayV2` installs the publisher and its shared ring
-before manager answer workers start: attaching the ring at the later interactive
-emitter setup would race early answers. Existing interactive, conversation
-membership and agent-access gates apply to the captured original conversation.
-Nil/failed appends and duplicate/losing resolutions produce no receipt.
+**Answers are source facts, without receipt publication (#3737).**
+`recordPromptAnswer` makes one best-effort append for each winning authenticated
+answer and returns. `promptAnswerPublisher`, its serialization mutex, mailbox,
+worker and receipt-only validation are removed. The bounded saved context and
+original asking-session provenance remain; canonical thread notices and explicit
+catch-up consume the fact. No app receives an inert banner or new answer replay
+copy, including peers without `thread`. Failed storage never retries actuation
+or restores publication.
 
 **Connection discovery must not run on the answer-recording path (#3279).**
-The relay manager dispatch loop can itself resolve a prompt; synchronous
-`publishLegacyHistory` fan-out from `recordPromptAnswer` then waits for
-`ActiveConns` to query that same loop. The child can receive its verdict while
-dismissals and subsequent relay traffic deadlock. Merely releasing bridge and
-registry locks does not break that cycle. Delivery must leave both the recording
-lock and the manager dispatch call stack.
-
+The relay manager dispatch loop can itself resolve a prompt. A synchronous
+`ActiveConns` query from that stack waits on the same loop: the child may receive
+its verdict while dismissal and later relay traffic deadlock. Releasing bridge
+and registry locks alone cannot break that cycle. Removing receipt delivery
+eliminates the connection query and its serialization from recording entirely.
 `TestPromptAnswerRelayRemainsResponsive` exercises all five decisions through
-the encrypted manager path and checks continued relay progress.
-`TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer` holds connection discovery
-while two answers complete, then checks ordered original history/event identities
-or cancellation with both history/replay entries retained. These race regressions
-prove the repaired boundary; they do not establish real-Claude acceptance.
-A merged repair or offline pass leaves named live acceptance pending until a
-counted full gate records each required leaf, including subtests, against the
-actual daemon source and Claude version. See
-[the separate #3256 live evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#revisions).
+the encrypted manager path and checks dismissal and continued dispatch.
+`TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer` holds an unrelated
+connection query while consecutive answers complete, including cancellation and
+failed history. Both retain their winning verdicts and one dismissal each;
+healthy storage retains original history without receipt delivery. These race
+regressions are deterministic proofs, separate from counted real-Claude
+acceptance. See the
+[retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737).
 
-History, live publication and reconnect replay use identical receipt bytes and
-the original durable ID/timestamp, without another append. Valid receipts count
-toward legacy latest regardless of absent/false/true visibility, but confer no
-presentation, prompt actuation or read-mark advancement. The raw pager is
-retired; source history, metadata and authoritative thread behavior remain. See
-[visibility versus transport eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)
-and [the durable join](../../protocol-mobile.md#legacy-receipt-identity).
-Mobile [#2098](https://github.com/pyrycode/pyrycode-mobile/issues/2098) owns the
-pending live notification gate; deterministic daemon accounting does not prove
-background completion, FCM delivery or notification preview privacy.
+The raw pager remains retired. Source metadata and shown-thread authority keep
+their contracts; receipt arrival is no longer an accounting or presentation path.
+See [stored visibility versus transport eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+Daemon prompt acceptance alone establishes neither FCM delivery nor mobile
+notification preview privacy.
 
 `TestPromptAnswerHistoryPermission` and `TestPromptAnswerHistoryQuestion` use
 the production resolvers/bridge and real store to check decisions, original
-ownership, exactly-once capture, raw legacy exclusion and safe receipts. The
+ownership, exactly-once capture and raw/receipt publication exclusion. The
 after-consumption expiry fixture in `TestPromptAnswerHistoryLosingResolution` distinguishes
 surface success from a winning parked resolution. `TestPromptAnswerHistoryRetirement`
 checks that retirement cannot erase captured ownership;
 `TestPromptAnswerHistoryUnauthenticatedCancel` prevents invented operator
 answers. Bounded-projection and storage tests cover escaping, unchanged child
-answers and content-free failures. `TestPromptAnswerReceiptsValidation` exercises
-all decision pairs and rejected fields through the retained receipt projection.
-`TestPromptAnswerReceiptsPublication` compares projected source/live/replay bytes
-and identity with and without clients, including rebinding and duplicate attempts;
-`TestPromptAnswerReceiptsConcurrent` checks serialized order under concurrent
-duplicate answers. These tests retain receipt behavior without a raw wire pager.
+answers and content-free failures. `TestPromptAnswerPublicationRetired` checks
+all five decisions, connected/disconnected clients, rebinding and duplicate
+attempts while checking canonical answer notices under the original asking-session
+provenance. `TestPromptAnswerConcurrent` checks that
+concurrent duplicate answers produce one source fact per winning approval.
 `TestInteractiveStreamStdioModalAllow`,
 `TestInteractiveStreamStdioPermissionDeny`, `TestInteractiveStreamQuestionAnswer`
 and `TestInteractiveStreamQuestionRefusal` assert the raw durable fact after

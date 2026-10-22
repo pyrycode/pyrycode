@@ -242,108 +242,60 @@ func hookBannerIsRefusal(p protocol.BannerPayload, convID string) bool {
 	return p.ConversationID == convID && bytes.Contains([]byte(p.Text), []byte(oslcapBlockReason))
 }
 
-// CheckHookBannerWindow joins retained banners to raw facts and observes queued
-// delivery through canonical items. Queued facts must never project banners.
+// CheckHookBannerWindow verifies saved refusal/opening facts and live ACK/state
+// ordering. Content and compatibility receipts must never reach the transport.
 func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.Entry, frames []protocol.Envelope) error {
 	raw := make(map[uint64]history.Entry, len(entries))
-	for _, entry := range entries {
-		raw[entry.ID] = entry
-	}
-	positions := make(map[string]int)
-	seenIDs, seenEvents := make(map[uint64]bool), make(map[uint64]bool)
-	ack, firstRunning, opening := -1, -1, -1
+	ack, firstRunning := -1, -1
 	var openingTurn, assistantTurn string
 	var refusalEntry, openingEntry history.Entry
+	for _, entry := range entries {
+		raw[entry.ID] = entry
+		if entry.Type == protocol.TypeBanner {
+			var p protocol.BannerPayload
+			if json.Unmarshal(entry.Payload, &p) == nil && hookBannerIsRefusal(p, convID) {
+				if refusalEntry.ID != 0 || p.Truncated {
+					return fmt.Errorf("duplicate or truncated refusal source")
+				}
+				refusalEntry = entry
+			}
+		}
+		if entry.Type == "main_turn_opened" {
+			var p struct {
+				Conversation string    `json:"conversation_id"`
+				Turn         string    `json:"turn_id"`
+				At           time.Time `json:"occurred_at"`
+			}
+			if json.Unmarshal(entry.Payload, &p) == nil && p.Conversation == convID {
+				if openingEntry.ID != 0 || p.Turn == "" || !p.At.Equal(entry.TS) {
+					return fmt.Errorf("invalid opening source")
+				}
+				openingEntry, openingTurn = entry, p.Turn
+			}
+		}
+	}
 	for i, env := range frames {
 		switch env.Type {
-		case protocol.TypeError, protocol.TypeUnrecognizedMessage:
-			return fmt.Errorf("unexpected envelope type %q", env.Type)
+		case protocol.TypeError, protocol.TypeUnrecognizedMessage, protocol.TypeBanner, protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			return fmt.Errorf("unexpected content envelope %q", env.Type)
 		case protocol.TypeAck:
 			if env.InReplyTo != nil && *env.InReplyTo == liveReqID {
 				ack = i
 			}
-		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
-			return fmt.Errorf("retired interactive frame %q", env.Type)
 		case protocol.TypeTurnState:
-			var p struct {
-				ConversationID string `json:"conversation_id"`
-				State          string `json:"state"`
+			var p protocol.TurnStatePayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				return fmt.Errorf("invalid lifecycle frame")
 			}
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				return fmt.Errorf("decode lifecycle frame: %w", err)
-			}
-			if p.ConversationID == convID && ack < 0 {
-				return fmt.Errorf("refused prompt emitted %q before liveness ack", env.Type)
-			}
-			if p.ConversationID == convID && p.State != "idle" && firstRunning < 0 {
-				firstRunning = i
-			}
-		case protocol.TypeBanner:
-			if env.HistoryEntryID == nil || *env.HistoryEntryID == 0 || env.EventID == nil || *env.EventID == 0 || env.TS.IsZero() {
-				return fmt.Errorf("banner lacks durable/replay identity or timestamp")
-			}
-			id := *env.HistoryEntryID
-			entry, ok := raw[id]
-			if !ok || !entry.TS.Equal(env.TS) || seenIDs[id] || seenEvents[*env.EventID] {
-				return fmt.Errorf("banner identity %d missing, duplicated or timestamp mismatched", id)
-			}
-			seenIDs[id], seenEvents[*env.EventID] = true, true
-			var p protocol.BannerPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				return fmt.Errorf("decode banner: %w", err)
-			}
-			key := "refusal"
-			if entry.Type == protocol.TypeBanner {
-				var durable protocol.BannerPayload
-				if err := json.Unmarshal(entry.Payload, &durable); err != nil || durable != p || !hookBannerIsRefusal(p, convID) || p.Truncated {
-					return fmt.Errorf("durable banner %d is not the intact hook refusal", id)
+			if p.ConversationID == convID {
+				if ack < 0 {
+					return fmt.Errorf("phase preceded liveness ack")
 				}
-				refusalEntry = entry
-			} else {
-				var fields map[string]json.RawMessage
-				if err := json.Unmarshal(env.Payload, &fields); err != nil {
-					return fmt.Errorf("decode receipt fields: %w", err)
-				}
-				for _, field := range []string{"conversation_id", "level", "text", "truncated", "stops_turn"} {
-					value, exists := fields[field]
-					if !exists || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-						return fmt.Errorf("receipt %d lacks nonnull %q", id, field)
-					}
-				}
-				if p != (protocol.BannerPayload{ConversationID: convID, Level: "info"}) {
-					return fmt.Errorf("receipt %d is not an empty info banner", id)
-				}
-				var fact struct {
-					ConversationID string    `json:"conversation_id"`
-					OccurredAt     time.Time `json:"occurred_at"`
-					TurnID         string    `json:"turn_id"`
-				}
-				if err := json.Unmarshal(entry.Payload, &fact); err != nil || fact.ConversationID != convID {
-					return fmt.Errorf("receipt %d has invalid raw fact", id)
-				}
-				switch entry.Type {
-				case "main_turn_opened":
-					if fact.TurnID == "" || !fact.OccurredAt.Equal(entry.TS) || ack < 0 || firstRunning >= 0 {
-						return fmt.Errorf("opening %d must follow ack and precede assistant text", id)
-					}
-					key, opening, openingTurn, openingEntry = "opening", i, fact.TurnID, entry
-				default:
-					return fmt.Errorf("unexpected receipt fact %q at %d", entry.Type, id)
+				if p.State != "idle" && firstRunning < 0 {
+					firstRunning = i
 				}
 			}
-			if _, exists := positions[key]; exists {
-				return fmt.Errorf("duplicate banner for %q", key)
-			}
-			positions[key] = i
 		}
-	}
-	for _, key := range []string{"refusal", "opening"} {
-		if _, exists := positions[key]; !exists {
-			return fmt.Errorf("missing banner for %q", key)
-		}
-	}
-	if len(positions) != 2 {
-		return fmt.Errorf("unexpected banners: got %d, want 2", len(positions))
 	}
 	for _, e := range entries {
 		if e.Type != protocol.TypeAssistantDelta || e.ID <= openingEntry.ID {
@@ -362,7 +314,7 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 		}
 	}
 
-	if ack < 0 || firstRunning <= opening || openingTurn != assistantTurn || openingEntry.ID <= refusalEntry.ID || openingEntry.TS.Before(refusalEntry.TS) {
+	if ack < 0 || firstRunning <= ack || refusalEntry.ID == 0 || openingTurn == "" || openingTurn != assistantTurn || openingEntry.ID <= refusalEntry.ID || openingEntry.TS.Before(refusalEntry.TS) {
 		return fmt.Errorf("opening does not identify the post-refusal assistant turn")
 	}
 	ordered := append([]history.Entry(nil), entries...)
@@ -399,7 +351,7 @@ type HookBannerConfig struct {
 }
 
 // HookBanner retains the live no-read absence window. The next send's exact ACK
-// separates buffered refusal frames from the subsequent application turn.
+// separates the refused source from the subsequent application turn.
 func HookBanner(t *testing.T, w Wire, c HookBannerConfig) {
 	t.Helper()
 	var frames []protocol.Envelope
@@ -417,19 +369,21 @@ func HookBanner(t *testing.T, w Wire, c HookBannerConfig) {
 	deadline := time.Now().Add(c.TurnBudget)
 	refused := false
 	for !refused && time.Now().Before(deadline) {
-		env := next(deadline)
-		if env.Type != protocol.TypeBanner {
-			continue
-		}
-		var p protocol.BannerPayload
-		if json.Unmarshal(env.Payload, &p) != nil {
-			t.Fatal("invalid hook banner")
-		}
-		if hookBannerIsRefusal(p, c.ConversationID) {
-			if p.Truncated {
-				t.Fatal("hook refusal truncated")
+		time.Sleep(20 * time.Millisecond)
+		for _, entry := range w.Source(c.ConversationID) {
+			if entry.Type != protocol.TypeBanner {
+				continue
 			}
-			refused = true
+			var p protocol.BannerPayload
+			if json.Unmarshal(entry.Payload, &p) != nil {
+				t.Fatal("invalid saved hook banner")
+			}
+			if hookBannerIsRefusal(p, c.ConversationID) {
+				if p.Truncated {
+					t.Fatal("hook refusal truncated")
+				}
+				refused = true
+			}
 		}
 	}
 	if !refused {

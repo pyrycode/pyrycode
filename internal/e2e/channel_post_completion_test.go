@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -145,72 +144,59 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone2.Close() })
 	send2, recv2 := driveHandshakeToOpenDaemonInteractiveResuming(t, phone2, pub, pair.Token, &cursor)
-	_, next2 := sealedConnDriver(t, phone2, "returning phone", send2, recv2)
-	var deltas []protocol.Envelope
-	var completion protocol.Envelope
-	var turn string
-	var joined strings.Builder
-	lastID := cursor
-	for completion.Type == "" {
+	seal2, next2 := sealedConnDriver(t, phone2, "returning phone", send2, recv2)
+	seal2(protocol.Envelope{ID: 3738, Type: protocol.TypeListConversations, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
+	for {
 		env, ok := next2(time.Now().Add(10 * time.Second))
 		if !ok {
-			t.Fatal("completed post not replayed")
+			t.Fatal("reconnect barrier missing")
 		}
-		if env.Type != protocol.TypeAssistantDelta && env.Type != protocol.TypeTurnEnd {
-			continue
+		if env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeTurnEnd || env.Type == protocol.TypeBanner {
+			t.Fatal("post replayed raw content")
 		}
-		if env.EventID == nil || *env.EventID <= lastID {
-			t.Fatal("replay event ids absent or unordered")
-		}
-		lastID = *env.EventID
-		if env.Type == protocol.TypeTurnEnd {
-			assertHostPostEnd(t, env.Payload, convID, turn)
-			completion = env
+		if env.Type == protocol.TypeConversations && env.InReplyTo != nil && *env.InReplyTo == 3738 {
 			break
 		}
-		var p protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			t.Fatal(err)
-		}
-		if turn == "" {
-			turn = p.TurnID
-		}
-		if p.ConversationID != convID || p.TurnID != turn || p.Seq != len(deltas) {
-			t.Fatal("replayed post split or reordered")
-		}
-		joined.WriteString(p.Text)
-		deltas = append(deltas, env)
 	}
-	if len(deltas) < 2 || joined.String() != text {
-		t.Fatal("chunked replay changed text")
+	var turn string
+	var joined strings.Builder
+	chunks, completions := 0, 0
+	for _, entry := range readHistoryEntries(home, convID) {
+		if entry.Type == protocol.TypeAssistantDelta {
+			var p protocol.AssistantDeltaPayload
+			if json.Unmarshal(entry.Payload, &p) != nil {
+				t.Fatal("invalid post source")
+			}
+			if !strings.Contains(text, p.Text) || p.TurnID == "" {
+				continue
+			}
+			if turn == "" {
+				turn = p.TurnID
+			}
+			if p.TurnID != turn || p.Seq != chunks {
+				t.Fatal("post source order changed")
+			}
+			chunks++
+			joined.WriteString(p.Text)
+		}
+		if entry.Type == protocol.TypeTurnEnd {
+			var p channelPostEndIdentity
+			if json.Unmarshal(entry.Payload, &p) == nil && p.TurnID == turn && turn != "" {
+				assertHostPostEnd(t, entry.Payload, convID, turn)
+				completions++
+			}
+		}
 	}
-	{
-		page := readHistoryEntries(home, convID)
-		var recorded []historyEntry
-		for i := 0; i < len(page); i++ {
-			var identity struct {
-				TurnID string `json:"turn_id"`
-			}
-			if err := json.Unmarshal(page[i].Payload, &identity); err != nil {
-				t.Fatal(err)
-			}
-			if identity.TurnID == turn {
-				recorded = append(recorded, page[i])
-			}
-		}
-		if len(recorded) != len(deltas)+1 {
-			t.Fatal("served history duplicates or omits post events")
-		}
-		for i, delta := range deltas {
-			if recorded[i].Type != delta.Type || !bytes.Equal(recorded[i].Payload, delta.Payload) {
-				t.Fatal("history and replay differ")
-			}
-		}
-		assertHostPostEnd(t, recorded[len(deltas)].Payload, convID, turn)
+	if chunks < 2 || completions != 1 || joined.String() != text {
+		t.Fatal("post source incomplete or duplicated")
 	}
 	quiet, quietCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer quietCancel()
 	if _, ok := fr.NextPushWake(quiet); ok {
 		t.Fatal("replay woke a device again")
 	}
+}
+
+type channelPostEndIdentity struct {
+	TurnID string `json:"turn_id"`
 }

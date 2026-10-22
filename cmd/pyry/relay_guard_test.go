@@ -81,7 +81,7 @@ func TestLocalPairingProviderWiredFromRelayConstructionToControl(t *testing.T) {
 			"return cleanup, surface, announce, announceConversation, announcePost, pairingProvider, nil",
 		},
 		formattedGoFunc(t, "main.go", "runSupervisor"): {
-			"relayCleanup, approvalSurface, announceAttachment, announceConversation, announcePost, pairingProvider, err := startRelay(",
+				"relayCleanup, approvalSurface, announceAttachment, announceConversation, _, pairingProvider, err := startRelay(",
 			"ctrl.SetPairingProvider(pairingProvider)",
 		},
 	}

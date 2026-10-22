@@ -61,12 +61,6 @@ func TestQueuedCanonicalCompletedTurn(t *testing.T) {
 			t.Fatal("queued source reached app connection", push)
 		}
 	}
-	page, _ := testLegacyReceipts(t, store)
-	for _, entry := range page {
-		if entry.Type != protocol.TypeMessage && queuedIDs[entry.ID] {
-			t.Fatal("queued fact remains in legacy history projection")
-		}
-	}
 	if !reflect.DeepEqual(users, testCanonicalUsers(t, history.New(dir), testConvID)) {
 		t.Fatal("reopened canonical state differs")
 	}
@@ -88,9 +82,6 @@ func TestQueuedCanonicalStartup(t *testing.T) {
 		users := testCanonicalUsers(t, reader, testConvID)
 		if len(users) != 1 || users[0].ID != queued[0].ID || users[0].Status != "lost" || !users[0].Shown || users[0].Active || users[0].Order != 0 {
 			t.Fatal("restart loss must stay visible and undelivered", users)
-		}
-		if page, _ := testLegacyReceipts(t, reader); len(page) != 0 {
-			t.Fatal("restart loss projected a legacy receipt")
 		}
 	}
 }

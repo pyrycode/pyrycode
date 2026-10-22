@@ -1469,16 +1469,7 @@ func startRelayV2(
 	// composition root, which hands it to channelCreator.
 	announceConversation = newConversationUpdateEmitterV2(mgr, ctx, logger).announce
 
-	// Host-side posted-message announcer (#2498): the second producer of
-	// assistant_delta, and the first that is not a supervised claude turn. Once
-	// `pyry channel post` has recorded the content, this carries it to every
-	// interactive client so a cron's message draws in an open app — before, the
-	// record sat in the durable log and no connected client learned of it.
-	//
-	// Built beside the two emitters above and in the same window — after mgr,
-	// before mgr.Run's goroutine starts below — so nothing that goroutine reads is
-	// written concurrently. Its route out is theirs: a bare func returned to the
-	// composition root, which hands it to channelPoster.
+	// Retain the constructor result seam; completed posts reach canonical threads.
 	postEmitter := newChannelPostEmitterV2(mgr, ctx, logger)
 	announcePost = postEmitter.announce
 
@@ -1517,10 +1508,6 @@ func startRelayV2(
 	// mgr.Run starts below, so streamApprovals is set before any modal_answer can
 	// dispatch on the Run goroutine — no data race on the resolver field. nil
 	// approvals (foreground/v1) leaves streamApprovals nil ⇒ nothing is actuated.
-	promptPublisher := &promptAnswerPublisher{}
-	if w.streamSink != nil {
-		promptPublisher.ring = eventring.New(eventring.MaxEventsPerConversation)
-	}
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
 		// The question arm (#1973), assigned after construction rather than passed
@@ -1533,7 +1520,6 @@ func startRelayV2(
 		// streamApprovals — no data race on the field.
 		bridge.live = &daemonLiveBindings{sink: w.streamSink, reg: w.convReg}
 		bridge.hist = w.hist
-		bridge.historyPublisher = promptPublisher
 		bridge.sessionHarness = w.sessionHarness
 		bridge.questions = questionReg
 		bridge.waker = waker
@@ -1641,8 +1627,6 @@ func startRelayV2(
 	// and called from the returned drain closure. A wiring with no sink (a test
 	// literal) leaves it nil, which is what the nil-guard at the call site is for.
 	var streamDrainCleanup func()
-	// replayRing is shared by the stream and other legacy producers; nil without a sink.
-	var replayRing *eventring.Ring
 	if w.streamSink != nil {
 		// STREAM MODE (#1081): the turn stream is fed from the stream-json runner's
 		// turnevent drain, startStreamTurnDrainV2, whose cleanup blocks until its
@@ -1658,12 +1642,10 @@ func startRelayV2(
 		// and the session-scoped replay source it registers. SetReplaySource runs at
 		// most once, because this branch does.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
-		emitter.ring = promptPublisher.ring
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// Free a removed conversation's replay events when the registry drops it
 		// (#1502); installed here because this is where the ring is born.
 		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.streamSink, w.shadow)
-		replayRing = emitter.ring
 		// The durable conversation log (#2114), assigned the same way the ring is
 		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
 		// positional parameter is not separable from them in Go. w.hist is minted
@@ -1748,12 +1730,7 @@ func startRelayV2(
 		w.setClientIdentity(mgr.ActiveConns)
 	}
 
-	// Install both post hooks before runSupervisor starts its consumer. The
-	// same ring is registered with SetReplaySource above; durable history was
-	// already successfully recorded by channelDelivery before either hook runs.
-	if replayRing != nil {
-		postEmitter.ring = replayRing
-	}
+	// Install the wake-only completion hook before the delivery consumer starts.
 	postEmitter.waker = waker
 	if w.postDelivery != nil {
 		w.postDelivery.complete = postEmitter.complete

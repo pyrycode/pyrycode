@@ -4,179 +4,75 @@ Part of [history producers](history-package-producers.md#producers-2114-2115).
 
 ## Legacy eligibility and explicit visibility (#2965)
 
-`legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
-from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
-The retained `message` source shape remains an internal history input:
-raw user-message fan-out and newly appended reconnect replay are retired for
-every app, including those without `thread` (#3732). Operator sends are observed
-through canonical thread items and explicit catch-up. Shared adapters for other
-producers remain.
-A new history-only type's raw payload is excluded from every connection's legacy
-live fan-out and reconnect replay, whether its stored `Shown` is nil,
-false or true. Validated runtime/startup and
-[remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973)
-retain receipt publication. Agent/task producers publish none (#3735), including
-mapped start/update/roster reports and neutral attribution/ending facts; shared
-validation/projection adapters remain pending #3737. [Queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
-have none (#3733), including when shown and durably identified. Apps observe
-queued sends through canonical thread items and explicit catch-up.
-Stored visibility feeds thread folding and the internal history APIs; it does
-not grant permission to reach a transport. Summary/read authority comes from
+`legacyHistoryType` retains the existing source vocabulary, including content
+that is no longer published. It is also used by stored-value classification;
+its legacy name does not make it disposable. `historyVisibilityMetadata` and
+`historyEntryShown` preserve explicit visibility for new writes and the meaning
+of older untagged entries. Visibility never grants transport eligibility.
+Summary/read authority comes from
 [shown-thread evidence](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
-Conversely, an eligible legacy event still reaches its existing live/replay recipients when `Shown` is false,
-including info banners and live status readings. This preserves
-[ADR 042's compatibility boundary](../decisions/042-daemon-built-thread.md#compatibility):
-old apps treat unknown history entries as read-mark barriers.
 
-`interactiveTurnEmitterV2.emit` appends once before checking this allowlist,
-including when no clients are connected. Retired assistant/tool/completion and
-agent start/update/roster types, both refusal notices, compaction boundaries and
-unsupported-content notices return before projection, regardless of this
-allowlist (#3734–#3736). Other unsupported facts return before ring publication unless
-`legacyRuntimeReceipt` validates their receipt projection.
-Successful appends remain readable through raw `Store.Page` after reopening.
-Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
+**Content publication is retired for every app (#3732–#3737).** Operator messages,
+assistant/tool/completion facts, agent start/update/roster reports, session
+transitions, content notices and standalone banners remain source inputs for
+canonical thread items and explicit catch-up. They produce no raw app frames,
+new content replay copies or substitute receipts, including for connections
+without `thread`. Runtime/startup, agent/task, queued-send and
+[resolved remote prompt-answer facts](history-package-producers.md#resolved-remote-prompt-answers-2973)
+also have no receipt publication. Connect-time agent roster snapshots are gone.
+Nil/failed storage and no connected clients never restore retired publication.
 
-**Receipt adapter vocabulary and surviving producers (#3026, #3030, #3031, #3032, #3222).**
-The adapter's recognized agent types below do not authorize publication:
-`recordAgentFact` and `closeAgentHistory` append source facts only (#3735), and
-mapped start/update/roster values return from `emit` before projection. Agent
-visibility and durable identity cannot restore compatibility receipts.
+`interactiveTurnEmitterV2.emit` makes one source append attempt before returning
+for retired content types, regardless of their allowlist membership. Runtime
+writers bypass `emit`: `recordRuntimeFact`, `recordAgentFact`, `closeAgentHistory`
+and startup reconciliation retain their source appends and original identities.
+`sessionTransitionEmitterV2.broadcast` still records dividers/transitions and
+runs committed-switch completion. `recordPromptAnswer` records only a winning
+authenticated remote resolution, outside bridge and registry locks.
+`publishLegacyHistory`, `legacyRuntimeReceipt`, the receipt-only prompt validator
+and `promptAnswerPublisher` are removed with their exclusive delivery state.
 
-`legacyRuntimeReceipt` handles exactly `main_turn_opened`, `main_tool_interrupted`,
-`main_turn_interrupted`, `session_divider`, `agent_call_observed`,
-`agent_call_result`, `agent_call_denied`, `background_task_observed`,
-`background_task_linked`, `background_task_outcome`, `background_task_gone`,
-`agent_ended_with_session` and `prompt_answered`.
-It emits `banner` with all five required fields:
-`{conversation_id, level:"info", text:"", truncated:false,
-stops_turn:false}`. It requires a nonzero successful durable ID, nonzero entry
-timestamp and matching conversation. Prompt answers require nonzero `resolved_at`
-equal to the entry timestamp; other supported facts require nonzero `occurred_at`.
-Only the five-field banner crosses the boundary: no send text, attachments,
-sender fields, references or raw facts. Openings and turn
-interruptions need `turn_id`; tool interruptions also need `tool_call_id`.
-Dividers need `cause` and a predecessor session, except `daemon_restart` dividers.
-`validAgentHistoryFact` requires matching conversation and nonzero `occurred_at`;
-any supplied `lifetime_id` must be valid. Observations, results, denials, task
-links, outcomes and gone require that lifetime. Observed calls need a call ID and an
-`Agent`/`Task` tool name; results need a call ID and `completed`/`failed`; denials
-need a call ID and `denied`. Task observations need a task ID, links need both
-task and call IDs, and outcomes need a task ID and any nonempty status. Gone
-requires both task and call IDs and exactly `status: gone`, retaining its
-[unknown-outcome meaning](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
-Ended-with-session facts need a nonempty cause and at least one call/task
-identity, plus either a valid lifetime or an explicit original observation
-reference. `call_observed_entry_id` requires `tool_call_id`, and
-`task_observed_entry_id` requires `task_id`; a reference cannot stand in for its
-missing identity. This admits legacy recovery with unavailable lifetime/source
-attribution without fabricating it. Receipt validation checks this shape;
-[recovery matching](history-package-producers-runtime-lifecycle.md#recover-agenttask-work-and-original-identities-3032)
-separately uses original observations and identities to suppress repeated endings.
-`validPromptAnswerFact` requires the original nonempty correlation, remote actor
-source, present/nonnull producer fields (including explicit booleans), bounded
-typed context and known decision/behavior pairs. `allow`/`answer` require `allow`;
-`deny`/`cancel`/`refusal` require `deny` without a session grant. Unknown context
-fields or invalid question/value shapes are rejected. Optional asking-session
-identity/provenance remains optional; current routing and stored visibility
-cannot authorize accounting. Only the neutral banner crosses: no decisions,
-prompt/answer/tool context, correlations, session identities or provenance.
-See the [full answer validation contract](history-package-producers.md#resolved-remote-prompt-answers-2973).
-Malformed facts and arbitrary unknown types stay holes, never harmless receipts.
-The unchanged mobile decoder counts valid info receipts toward its wire accounting
-latest, separately from the daemon's visible-content target, without drawing
-content or changing turn, permission, model or status state.
-Receipt-only delivery gives no sight; malformed/unidentified receipts and
-unaccounted holes remain barriers. Receipt accounting alone never advances a
-read mark or grants foreground presentation.
+**Supported live state has a separate owner.** Open prompts, dismissals,
+model/settings/catalogs, progress, retries, compaction readings and task controls
+remain usable with conversation/session/generation identity. Ordered
+`daemonLiveState` and `daemonThreadPublisher` delivery remain intact. The
+interactive counter/ring still serve supported state through `publishLiveState`;
+replay admission/pump retirement belongs to #3738, shared event-ring storage and
+`SetReplaySource` removal to #3739. This cleanup does not complete parent #3718's
+final family acceptance. Constructor APIs remain stable; the channel announcement
+seam is inert and its completion hook only wakes after a new durable completion.
 
-**Runtime writers bypass `emit`.** Changing only its allowlist would leave live
-and reconnect accounting incomplete. `recordRuntimeFact` appends each raw fact
-once, then uses `publishLegacyHistory` for the receipt.
-`sessionTransitionEmitterV2.broadcast` retains divider/transition appends and the
-committed-switch callback without publishing raw transitions or divider receipts
-(#3736). `recordAgentFact` and `closeAgentHistory` append only; their receipt
-publication is retired (#3735). Surviving runtime producers use the replay ring
-installed on the runtime sink before workers start. History, direct recipients
-and replay share the original ID and timestamp, with the same receipt bytes;
-there is no second durable append or ID allocator. Existing interactive and
-agent/isolation gates still apply. Nil/failed storage produces no receipt, while
-eligible legacy delivery and replay continue without durable identity. Neither
-storage failure nor adapter recognition restores retired publication. Startup
-dividers and other runtime/prompt receipts remain separate work for #3737.
-Agent/task facts also persist in history-only operation. Lifetime mint/marshal
-failures log fixed discriminants; append failures retain the common content-free
-classifier, without supplied call/task IDs, parent, status, prose or storage paths.
-`closeStartupAgentWork` appends before the restart divider without publishing
-live traffic or backfilling replay; its valid endings remain source facts for thread folding.
+**Source visibility and publication need independent assertions.** A hidden info
+banner must still be saved, even though neither it nor a shown warning reaches
+raw live/replay delivery. `TestResidualContentRetired` applies canonical live
+updates and compares explicit catch-up across conversations with reused turn and
+answer identities; `TestResidualContentRetiredStorage` checks nil/failed storage,
+no clients and content-free diagnostics. Raw `Store.Page` still exposes original
+payloads, timestamps, durable IDs and metadata after reopening. Arbitrary stored
+types do not become eligible transport content.
 
-Queued writers retain source recording, not receipt publication.
-`queuedSendHistory.accepted` appends and binds the acceptance before releasing
-readiness; `operatorMessageHistory` embeds that committed reference before
-appending the safe delivery source, then records the linked `send_delivered`.
-`terminal` records actual drops; `closeStartupSends` records unresolved restart
-loss without re-enqueueing. `validQueuedSendFact` still validates source fields,
-links and supported reasons independently of visibility. Neither
-`legacyRuntimeFact` nor `legacyRuntimeReceipt` admits any queued fact, including
-`send_written` and `send_lost`. There is no queue receipt emitter, mailbox or
-worker, and no queued live/replay fallback for connections without `thread`.
-Store appends and placement still wake thread followers; explicit catch-up
-recovers the durable lifecycle. See
+Queued recording still binds acceptance before readiness; safe delivery sources
+embed that reference before followers read them, then record linked outcomes.
+Echo placement, delayed confirmation and restart loss remain durable source
+contracts, without queue receipts or publication workers. See
 [accepted sends](history-package-producers.md#accepted-sends-and-linked-outcomes-2972).
 
-Prompt answers also bypass `emit`. `recordPromptAnswer` serializes its single
-append and replay admission under `promptAnswerPublisher`'s mutex, outside
-bridge/registry locks. Its bounded mailbox admits at most 256 pending live
-receipts; one ordered worker delivers outside the recording lock, so held
-connection discovery or peer delivery cannot block later answers. Overflow drops
-only live delivery after history/replay admission, with a content-free warning.
-Cancellation frees blocked delivery and clears pending live work while retaining
-history/replay. Synchronous fan-out would make `ActiveConns` wait on the manager
-dispatch loop that is recording the answer (#3279). Its shared ring is installed
-before answer workers start, records even without recipients and retains the
-captured conversation. Page/live/replay bytes, durable ID and
-timestamp agree; nil/failed storage and losing/duplicate resolutions produce no
-receipt. Child verdicts, dismissal and authoritative thread behavior stay intact.
-The responsive-relay and held-delivery race regressions prove that boundary;
-named real-Claude acceptance requires separate counted full-gate evidence. See
-[prompt-answer serialization and validation](history-package-producers.md#resolved-remote-prompt-answers-2973)
-and [the #3256 live evidence](../../specs/architecture/3256-shared-live-repair-evidence.md#revisions).
+**Do not query connections on the answer stack.** Synchronous discovery can wait
+on the relay dispatch loop currently resolving the answer. Removing receipt
+publication also removes its serialization mutex and worker, so later answers
+and dismissals no longer depend on receipt delivery, even with cancelled context
+or failed history. Keep original asking-session ownership and the 16 KiB saved
+projection; see [resolved remote answers](history-package-producers.md#resolved-remote-prompt-answers-2973).
 
-The daemon's [summary/read authority](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
-uses shown-thread evidence independently of receipt accounting. Raw facts,
-producer visibility metadata and internal store watermarks retain their
-contracts. The [raw pager is retired](history-package.md#reader-2116); source
-facts remain available to thread folding, while legacy live/replay receipts
-retain their accounting role.
-
-`TestLegacyRuntimeReceipts_CompletedTurn` uses the real store and `HandleFor`
-normal text/completion with runtime facts disabled as a control; it compares
-source projection, direct recipients and replay by original identity and bytes,
-then verifies raw entries and metadata survive reopening.
-`TestLegacyRuntimeReceipts_LiveReplay` checks shared source/live/replay identity
-and conversation isolation.
-An exact live banner count includes these receipts: retain every banner and
-validate expected receipts separately from refusals rather than ignoring info
-banners, which would hide duplicate receipts. `TestInteractiveStreamHookBlockedBannerReachesTheClient`
-keeps the full refusal/liveness window and separately validates the hook refusal
-and opening receipt by durable fact identity. `awaitBanner` waits
-within its existing deadline for the conversation's `oslcapBlockReason`, then
-checks the `blocked` witness. `scenario.CheckHookBannerWindow` joins `history_entry_id`
-and timestamp to raw `Store.Page` entries; legacy live/replay projects these
-distinct supported facts into indistinguishable empty info banners. It requires
-exactly one intact refusal and the liveness `main_turn_opened` receipt, rejecting
-missing, duplicate or unexpected banners, including queued receipts. The opening
-needs all five nonnull payload fields, the empty info payload, nonzero durable/
-replay IDs and timestamp; it follows the liveness ack and precedes assistant text.
-Both sends are instead verified by folding raw history into canonical delivered,
-shown, inactive `user_message` items, with acceptance IDs and later delivery
-orders. **Retiring a receipt family must also update mixed-scenario oracles**:
-merely deleting exclusive receipt tests would leave hook refusal/liveness checks
-requiring retired traffic. Keep the remaining banner identity, refusal and
-ack/text ordering checks. Tagged offline fixtures alone do not prove live
-acceptance. See the
-[hook-window lessons](e2e-realclaude-interactive-stream-hook-blocked-banner-test-go.md)
-for the refusal and liveness proof retained alongside receipt accounting.
+**Migrate mixed oracles as well as exclusive compatibility tests.** Default-tag
+compilation misses raw-channel assertions in `e2e` files and receipt checks in
+shared real-Claude scenarios. The hook-window proof now checks the retained
+refusal source and rejects raw banners, while retaining the no-read settle
+window, correlated ACK, later live phase, canonical queued delivery and original
+source identity. Dropping receipt assertions must not drop those liveness
+witnesses. Offline tagged fixture execution and compilation do not themselves
+establish a live prompt/hook round trip. See
+[retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737).
 
 The common append seam uses `AppendWithMetadata` with explicit
 `Metadata.Shown`, classified from the already-marshalled payload by
@@ -194,10 +90,10 @@ recipient gates keep their original meaning.
 | `background_task_updated` | Hidden for patch-only updates; shown when `Status` or `Summary` is nonempty. |
 | Content | Shown: `message`, `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `background_task_started`, `compaction_boundary`, `model_refusal_fallback`, `model_refusal_no_fallback`, `unrecognized_message`. |
 | `session_transition` | `clear` is shown; `idle_evict` is hidden. |
-| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Raw payloads stay off legacy transports; receipt accounting does not make hidden openings or restart/sleep dividers unread. |
-| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Raw payloads stay off legacy transports; receipts provide accounting independently of shown-thread authority and confer no foreground presentation. |
+| Runtime/startup history-only facts | `main_turn_opened` is hidden; `main_tool_interrupted` and `main_turn_interrupted` are shown; `session_divider` is hidden for `idle_sleep` and `daemon_restart`. Source facts stay off raw transports and have no receipt publication; hidden openings and restart/sleep dividers do not become unread. |
+| Agent/task history-only facts | Hidden: `agent_call_observed`, `background_task_observed`, `background_task_linked`. Shown: `agent_call_result`, `agent_call_denied`, `background_task_outcome`, `background_task_gone`, `agent_ended_with_session`. Source facts stay off raw transports and have no receipt publication; canonical shown-thread evidence governs unread state. |
 | [Accepted-send history-only facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972) | Shown: `send_accepted`, `send_delivered`, `send_lost`. Hidden: `send_dropped` for removal/give-up. All queued facts, including `send_written`, remain thread sources with no legacy receipt projection or live/replay publication. Hidden drops do not raise shown progress; restart loss stays visible/not delivered under the original acceptance ID. |
-| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Raw payloads stay off legacy transports; validated five-field nonvisual receipts preserve accounting with identical page/live/replay bytes and original durable ID/timestamp. Shown-thread authority is resolved from the fold, independently of receipt acceptance. Invalid facts remain holes; receipts confer no presentation or read-mark authority. Open prompts remain live-only. |
+| [Resolved remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973) | `prompt_answered` is shown for the fold, with optional original asking-session provenance. Canonical answer notices and explicit catch-up consume it; no raw payload or receipt is published. Open prompts and dismissals remain live-only; shown-thread authority and foreground presentation govern read marks. |
 | New history-only types | Hidden by default in the common append seam, and ineligible for legacy delivery independently of explicit visibility supplied by another producer. |
 
 **Task-update status is an open terminal-notification contract.** Any nonempty
@@ -210,35 +106,21 @@ does not rewrite or reject their payloads.
 `historyEntryShown` supplies `Metadata.Shown` for new source writes.
 `historyVisibilityMetadata` and raw store APIs remain internal contracts;
 summary delivery and read clamping use `ThreadLastShownVersion` instead of
-rescanning source payloads. Receipt validation establishes accounting only,
-independently of stored visibility. A valid banner projection cannot establish
-shown content, a read checkpoint or foreground presentation. See
+rescanning source payloads. Neither stored visibility nor a durable ID restores
+raw content delivery or establishes foreground presentation. See
 [shown-thread authority and separate test oracles](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
 
 **Carry the append result, not a second lookup or another counter (#2861).**
-`appendConversationHistory` returns the successful `Store.AppendWithMetadata`
-id as an immutable `*uint64`, shared by every direct live recipient as
-`Envelope.HistoryEntryID` for eligible legacy events. Runtime and prompt-answer
-receipts retain their own successful fact ID and original timestamp. Queued
-delivery source IDs stay internal as the linked outcome's `delivery_entry_id`;
-no queued receipt is published. Reconstructing identity at broadcast would lose
-the association with that exact append. Append once before fan-out, even without
-recipients. A transition has no ring id. The connection counter and ring
-cursor cannot substitute for the stored per-conversation id. See
-[envelope identities](protocol-package-types-envelope.md#replay-cursors-and-durable-read-marks)
-for read-mark use and reconnect replay's retained identity.
-
-**History must finish before ring publication (#2909).**
-`interactiveTurnEmitterV2.emit` obtains the append result before
-`Ring.AppendWithHistoryID` publishes the complete event; publishing first and
-adding metadata later lets concurrent replay observe an incomplete record.
-`publishLegacyHistory` passes an eligible receipt's already-committed id through
-the same ring seam without another history write. These paths retain the id even
-with no live recipients. Replay uses that original identity and never appends history;
-absent/failed storage leaves zero ring metadata and an omitted wire key for
-eligible legacy events; failed appends cannot mint a runtime or prompt-answer
-receipt. Channel posts retain their missing-id behavior, and ordinary `session_transition` frames
-remain outside the ring; runtime-divider receipts use it.
+For retained legacy live-state delivery, `appendConversationHistory` returns
+the successful `Store.AppendWithMetadata` ID as an immutable `*uint64`.
+`publishLiveState` carries that exact result through `Ring.AppendWithHistoryID`
+before fan-out, even without recipients. Publishing first and adding metadata
+later would let concurrent replay observe an incomplete record. Replay uses the
+original ID/timestamp without another history append. Nil/failed storage leaves
+zero ring metadata and an omitted wire key for supported state; it cannot
+restore retired content. The connection counter and ring cursor are different
+namespaces from the durable per-conversation ID. Channel posts have no new raw
+ring/live events; their completion payload remains durable recovery input.
 See [ring publication](eventring-package.md#concurrency).
 
 **Why this producer reads `text`, never the delivered payload.** Since #2038
@@ -361,9 +243,9 @@ again:**
   delivery and companion outcome appends without inventing linked identity.
 - **Pair queued transport silence with positive canonical lifecycle proof.**
   `TestQueuedReceiptsRetired` first creates valid, durable facts for all five
-  queued types, then checks classification and projection both reject them.
+  queued types, then checks that `legacyHistoryType` rejects each one.
   `TestQueuedSourceValidation` separately checks required source fields/reasons.
-  `TestQueuedCanonicalCompletedTurn` retains assistant live/replay controls,
+  `TestQueuedCanonicalCompletedTurn` retains assistant source/lifecycle controls,
   rejects queued publication for thread and non-thread connections, and compares
   stable acceptance-owned delivery with reopened state.
   `TestQueuedCanonicalSendNowDelayedConfirmation` checks final placement despite
@@ -434,22 +316,11 @@ again:**
   first recovery would hide observation-only suppression of the sibling task.
   `TestAgentSessionEndings_DrainOrdering` asserts ending < divider < successor
   by durable ID through the production drain, and excludes raw ending replay.
-  `TestAgentSessionEndings_ReceiptValidation` requires each recovery reference's
-  corresponding identity and rejects receipts without a successful durable ID.
-- **Validate every receipt shape independently of raw visibility.**
-  `TestAgentHistory_ReceiptValidation` removes each fact's required fields and
-  asserts receipt refusal directly. `TestAgentHistory_LegacyCompatibility`
-  compares source/live/replay identities and bytes, including after reopening,
-  and directly checks valid versus malformed/unrelated facts and absent storage
-  identities. `TestAgentHistory_GoneReceiptValidation` checks gone-fact acceptance
-  without a retired checkpoint oracle. Raw visibility alone would miss broken
-  receipt delivery; receipt acceptance alone cannot prove unread authority.
-- **Probe both approval locks during receipt delivery.**
-  `promptReceiptBroadcaster.Push` snapshots the registry while holding the bridge
-  mutex, releases it, then uses `Lookup` to acquire the registry mutex. This
-  checks that answer publication holds neither lock across peer delivery.
-  Adjacent `Lock`/`Unlock` alone triggers staticcheck SA2001; a meaningful snapshot
-  preserves the deadlock probe while passing lint.
+- **Separate source classification from retired transport (#3737).**
+  `TestHistoryProjection_InteractiveMetadata` has independent ring and recipient
+  oracles. Exclude banners from both while keeping all four stored banner
+  visibility cases; changing only the ring oracle leaves a raw-delivery promise
+  hidden in recipient counts. The shared classifier still serves durable facts.
 - **Reuse legacy IDs after recovery, not just across repeated starts.**
   `TestStartupHistoryReferenceIsolation` saves full and tool-only recovery before
   newer scoped work reuses the turn/tool IDs, then checks that the newer work
@@ -512,10 +383,11 @@ again:**
   successful retry must carry its own source.
 - **Delay a path the captured event still reaches.**
   Captured conversation ownership bypasses the old resolver, so holding that
-  resolver no longer delays switch publication. `TestRelayAgentSwitchDelayedPublication`
-  holds broadcaster `ActiveConns` snapshotting and transport sealing separately
-  to keep both consumer-delay and reset-exclusion witnesses. A delay on an
-  unused resolver would leave the ordering test without its intended witness.
+  resolver no longer delays switch completion. After raw transition retirement,
+  `TestRelayAgentSwitchDelayedPublication` pauses the retained committed-row
+  callback to keep its delay and reset-exclusion witnesses. Holding an unused
+  resolver or removed fan-out path would leave the ordering test without its
+  intended witness.
   `TestSessionTransitionHandoff_CapturesBeforeDelay` replaces lookup facts after
   enqueue; `TestSessionTransitionHandoff_RemovedExactSession` removes the actual
   pool entry and replaces the registry owner. Check raw provenance and live
@@ -530,20 +402,23 @@ again:**
   Correct text attribution alone would miss a false conversation idle.
 - **Check actual writes, transport and raw visibility recovery together.**
   `TestHistoryProjection_InteractiveMetadata` drives `emit` across the full
-  classification, comparing raw metadata with unchanged wire/ring payloads,
-  identities and recipient gates. `TestHistoryProjection_OtherProducerMetadata`
+  classification, comparing raw metadata with supported-state wire/ring payloads,
+  identities and recipient gates while rejecting retired content publication. `TestHistoryProjection_OtherProducerMetadata`
   drives clear/idle transitions, operator text and channel delivery. Both verify
   internal metadata-aware watermarks in warm and reopened stores; the interactive
   cases also preserve an older entry's absent visibility. A classifier-only test would
   miss a writer still using `Append`, and a correct raw metadata assertion alone
-  would miss hidden eligible events disappearing from legacy delivery.
+  would miss a supported-state delivery regression or restored raw content.
 - **Recovery must not fill in missing provenance.**
   `TestChannelDelivery_SessionLegacyRecovery` loads pending records with absent,
   explicit `none` and bound snapshots alongside an untagged stored prefix. It
   rejects any recovery lookup and checks that the prefix survives unchanged.
   `TestChannelDelivery_SessionRetryRecovery` fails delta/completion writes and
   rebinds before retry or restart, checking original attribution, unchanged
-  chunk identity and publication only after all writes succeed.
+  chunk identity and canonical completed content after partial-write retry,
+  cleanup failure and restart. A synthetic delta fan-out observer cannot prove
+  this contract after retirement: inspect durable chunks and completion directly,
+  retaining maximum-text splitting, turn identity and carry assertions.
 - **Separate the id sequences to prove provenance.** When history, ring and
   envelope counters coincide, substituting either live counter for the stored id
   stays green. `TestLiveProducers_HistoryEntryID` keeps history id 8, ring id 4

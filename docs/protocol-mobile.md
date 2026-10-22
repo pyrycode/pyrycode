@@ -385,8 +385,8 @@ Envelope-level fields beyond the v1 set:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive structured-stream frames and neutral receipts (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
-| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present after a successful history append on direct live interactive-turn, session-transition and neutral-receipt envelopes (#2861); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients **must fall back to history/list** for a durable read-mark target. |
+| `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive live-state frames (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
+| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present on retained legacy live-state envelopes after a successful source append (#2861, #3737); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients recover saved content through explicit thread catch-up and require foreground presentation for a durable read-mark target. |
 | `conversation_id` | nonempty string | required on delivered supplied thread live state; otherwise optional | **Thread-only supplied live-state routing (#3195/#3610).** Authoritative target for every delivered reading and generated/supplied clear, independently of session tags and request correlation. Absent source-envelope identity is stamped from `LiveState.ConversationID`; any supplied envelope/payload identity must be a nonempty string matching it. For a model catalog this is the requested target, even when the inventory came from elsewhere. Null, empty, non-string or conflicting identity rejects the reading before any clear or fresh delivery. |
 | `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means unresolved provenance; explicit `null` positively means no producing session; a nonempty string names the actual captured producer. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. A model catalog may name a bootstrap or predecessor producer; never substitute the target's session. This tag neither admits a session nor attributes every capability-merged row to that producer. Daemon provider installation (#3163) and production negotiation (#3164) are active. |
 | `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears only this family's readings in the envelope's target conversation before fresh readings for that target generation. For `model_list`, it invalidates catalog inventory independently of current-session admission. Generated and supplied clears omit `in_reply_to`. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
@@ -424,25 +424,20 @@ using the same durable per-conversation namespace as `HistoryEntry.ID` and
 start at 1 and remain stable across daemon restarts. Connection `id` resets on
 reconnect, while daemon-wide ring `event_id` is an in-memory replay cursor;
 neither can substitute for a durable history entry id in a read mark.
-Direct live paths attach the successful append's id:
-interactive-turn emission (`interactiveTurnEmitterV2.emit`), session-transition
-broadcast (`sessionTransitionEmitterV2.broadcast`), and eligible neutral receipts
-through `publishLegacyHistory`. Each logical event is appended once before
-fan-out, including when no interactive recipients are connected; all direct
-recipients receive the same history id, payload and timestamp. Session transitions
-have no ring `event_id`. Operator delivery records remain internal thread
-sources; raw user publication and queued receipts are retired (#3732, #3733).
-
-Since #2909, eligible interactive-turn and neutral-receipt ring events retain that
-original successful append's id before becoming readable for replay, including
-when no interactive recipient was connected. Authenticated reconnect replay
-carries the retained `history_entry_id` with the original payload and timestamp;
-it adds no history entry. Channel-post ring events still carry no history id,
-and session transitions remain outside ring replay.
+For retained legacy live-state delivery, `interactiveTurnEmitterV2.emit`
+appends before `publishLiveState` carries the original ID, payload and timestamp
+through the shared ring and direct fan-out, including without recipients.
+Replay retains that identity without another append. Content producers now
+return after source recording: session transitions, operator messages, channel
+posts, standalone banners and runtime/prompt-answer facts publish no raw frames
+or substitute receipts (#3732–#3737). Supplied thread live state remains on its
+separate identity-free path above. Replay admission/pump and shared-ring
+retirement remain #3738/#3739.
 
 **The field is absent on older daemons, with absent or failed history storage,
 and on non-history-backed frames, including their replay.** An absent store
-or failed append still permits live delivery and existing ring recording.
+or failed append still permits supported legacy live-state delivery and ring
+recording; it never restores retired content publication.
 **When the field is absent, clients recover content through
 [Thread query messages](#thread-query-messages).** The target conversation's
 [`last_shown_version`](#conversations), when present, supplies unread evidence
@@ -1068,9 +1063,21 @@ retained content notices feed canonical notice/compaction items and explicit
 catch-up. Recording continues without clients; nil/failed history never restores
 raw publication. Model/settings/catalogs, prompts, progress, retry and compaction
 live state and controls retain their separate delivery, source tags and ordered
-readings/clears. Standalone banners, other runtime/startup and prompt-answer
-receipts, and channel-post publication remain for #3737; parent #3718 owns final
-family acceptance.
+readings/clears.
+
+Standalone banners, runtime/startup and resolved prompt-answer receipts, and
+channel-post raw content publication are also retired for every app (#3737).
+No raw `banner`, post `assistant_delta`/`turn_end`, inert substitute receipt or
+new content replay copy is produced on initial connection, live output or
+reconnect, with or without `thread`. Source recording retains values,
+timestamps, visibility and captured provenance, including without clients;
+absent/failing storage never restores publication. With working storage,
+thread clients observe saved facts and completed posts through canonical live
+items and explicit catch-up. Open prompts, single dismissals, controls and
+ordered live state remain supported with their conversation/session/generation
+identity. Replay admission/pump retirement belongs to #3738, shared event-ring
+storage/`SetReplaySource` removal to #3739; parent #3718's final family acceptance
+remains separate.
 
 Background-agent lifecycle and roster values remain source history for canonical
 thread items and explicit catch-up (#3735). No app receives their raw content
@@ -1085,7 +1092,7 @@ explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
 appended reconnect copies to any app, including connections without `thread`
 (#3734). Supported live state remains separate. Nil or failed history does not
 restore raw content delivery or substitute receipts. Channel-post
-`assistant_delta` and `turn_end` publication remains pending #3737.
+`assistant_delta` and `turn_end` likewise remain source history only (#3737).
 
 Unchanged from v1 except where noted. Emitted types below are sent as the **decrypted payload of a `noise_msg`** (post-handshake) or as the **early-data payload of a `noise_init` / `noise_resp`** (during handshake — only `hello` and `hello_ack` ride there). Rows marked declared describe contracts ahead of production delivery.
 
@@ -1129,17 +1136,17 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `error` | either | no | `ErrorPayload` carries an optional `conversation_id` (#2443, `omitempty`). [`new_session`](#new-session-v2)'s workspace-refusal reply sets it from the daemon's resolved conversation. [`stop_background_task.refused`](#stop-background-task-v2) is the correlation-only exception: it reflects the requested conversation id, including a missing-task refusal for an unknown conversation, and asserts no membership. Other producers retain daemon-authored provenance; other replies omit the key. It also carries an optional `min_client_version` (#2576, `omitempty`), daemon-authored, never an echo of the client's own `client_version` — see [Compatibility](#compatibility). |
 | **`rekey_request`** | either | no | **New in v2.** See [Re-key](#re-key). |
 | **`turn_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`assistant_delta`** | source history; channel posts → phone | no | Interactive source history only (#3734); canonical thread updates and explicit catch-up carry interactive text. Channel posts still publish raw deltas pending #3737. See [`assistant_delta`](#assistant_delta). |
+| **`assistant_delta`** | source history only | no | Interactive and channel-post text feeds canonical thread updates and explicit catch-up (#3734, #3737). No raw frames or new replay copies for any app. See [`assistant_delta`](#assistant_delta). |
 | **`tool_use`** | source history only | no | Interactive source history only (#3734); call input and attribution feed canonical thread items. No raw frame, substitute receipt or newly appended reconnect copy for any app. |
 | **`tool_result`** | source history only | no | Interactive source history only (#3734); results update canonical tool items. No raw frame, substitute receipt or newly appended reconnect copy for any app. |
 | **`tool_denied`** | source history only | no | Interactive denial facts feed canonical tool status; no raw frame, substitute receipt or newly appended reconnect copy for any app (#3734). See [`tool_denied`](#tool_denied). |
 | **`tool_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). Updates an open tool row with `claude`'s signed elapsed-seconds reading (#2324). Push-only; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`turn_end`** | source history; channel posts → phone | no | Interactive source history only (#3734); stop shape and usage feed canonical folding. Normal completion need not create a visible item. Channel posts still publish their separate four-field completion pending #3737. See [`turn_end`](#turn_end). |
+| **`turn_end`** | source history only | no | Interactive stop shape/usage and channel-post four-field completion feed canonical folding (#3734, #3737). Normal completion need not create a visible end item. No raw frames or new replay copies for any app. See [`turn_end`](#turn_end). |
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). Since #2236 the falling edge also names the **outcome** — `compact_result` and `compact_error` — so a failed compaction is distinguishable from an ordinary one. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compaction_boundary`** | source history only | no | Retained compaction source feeds canonical compaction items; no raw live/replay publication for any app (#3736). `compacting` remains separate live state. See [source schema](#compaction_boundary). |
-| **`banner`** | binary → phone | no | **New in v2** (interactive, capability-gated). Operator-facing text `claude` printed **about** the session rather than as part of an answer — a hook's block reason, a local command's output, a loop notification (#2256). The one typed place such text arrives; before it, the daemon dropped it. Conversation-scoped, so there is no `turn_id`. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`banner`** | source history only | no | Retained standalone notice source, including a hook block reason. Canonical thread items and explicit catch-up carry saved notices; no raw banner or inert runtime/prompt-answer receipt for any app (#3737). See [`banner`](#banner). |
 | **`unrecognized_message`** | source history only | no | Retained unsupported-content source feeds canonical notices; no raw live/replay publication for any app (#3736). See [source schema](#unrecognized_message). |
 | **`background_task_started`** | source history only | no | Retained source schema; raw publication retired for every app (#3735). Canonical items represent work that can outlive its main turn. See [source schema](#background_task_started). |
 | **`background_task_updated`** | source history only | no | Retained source schema for task changes and reported outcomes; raw publication retired for every app (#3735). See [source schema](#background_task_updated). |
@@ -1221,9 +1228,21 @@ retained content notices feed canonical notice/compaction items and explicit
 catch-up. Recording continues without clients; nil/failed history never restores
 raw publication. Model/settings/catalogs, prompts, progress, retry and compaction
 live state and controls retain their separate delivery, source tags and ordered
-readings/clears. Standalone banners, other runtime/startup and prompt-answer
-receipts, and channel-post publication remain for #3737; parent #3718 owns final
-family acceptance.
+readings/clears.
+
+Standalone banners, runtime/startup and resolved prompt-answer receipts, and
+channel-post raw content publication are also retired for every app (#3737).
+No raw `banner`, post `assistant_delta`/`turn_end`, inert substitute receipt or
+new content replay copy is produced on initial connection, live output or
+reconnect, with or without `thread`. Source recording retains values,
+timestamps, visibility and captured provenance, including without clients;
+absent/failing storage never restores publication. With working storage,
+thread clients observe saved facts and completed posts through canonical live
+items and explicit catch-up. Open prompts, single dismissals, controls and
+ordered live state remain supported with their conversation/session/generation
+identity. Replay admission/pump retirement belongs to #3738, shared event-ring
+storage/`SetReplaySource` removal to #3739; parent #3718's final family acceptance
+remains separate.
 
 Background-agent lifecycle and roster values remain source history for canonical
 thread items and explicit catch-up (#3735). No app receives their raw content
@@ -1238,7 +1257,7 @@ explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
 appended reconnect copies to any app, including connections without `thread`
 (#3734). Supported live state remains separate. Nil or failed history does not
 restore raw content delivery or substitute receipts. Channel-post
-`assistant_delta` and `turn_end` publication remains pending #3737.
+`assistant_delta` and `turn_end` likewise remain source history only (#3737).
 
 `thread_item_added`, `thread_item_changed` and `thread_text_append` have a
 per-connection relay delivery contract (#3081), including the bounded codec
@@ -2650,15 +2669,13 @@ conversation, in the original durable ID space. Thread unread is
 `last_shown_version > read_up_to` when that reading is available. Hidden restart
 records do not themselves change shown progress or rewrite old marks.
 
-**Accounting is not presentation.** A list watermark, fetched history or a live/
-replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
-Submit a checkpoint only from explicit foreground presentation evidence. Known
-nonvisual receipts, including remote prompt-answer receipts,
-can account for intervening durable IDs, but unknown, malformed or unidentified
-receipts and unaccounted numeric holes remain barriers.
-The daemon's clamp bounds the requested mark; it does not establish that the
-operator saw the content. Raw history and its metadata-aware watermark remain
-unchanged for future thread consumers.
+**Accounting is not presentation.** A list watermark, fetched thread query,
+live update or replay supplies no sight of unseen content by arrival alone.
+Submit a checkpoint only from explicit foreground presentation evidence. Runtime
+and remote prompt-answer receipt publication is retired (#3737); clients must
+not wait for those banners to account for saved facts. The daemon's clamp bounds
+the requested mark but does not establish that the operator saw the content.
+Raw source metadata and internal watermarks keep their meaning.
 
 Examples of the authoritative clamp:
 
@@ -3631,11 +3648,11 @@ explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
 appended reconnect copies to any app, including connections without `thread`
 (#3734). Supported live state remains separate. Nil or failed history does not
 restore raw content delivery or substitute receipts. Channel-post
-`assistant_delta` and `turn_end` publication remains pending #3737.
+`assistant_delta` and `turn_end` likewise remain source history only (#3737).
 
-For the five retired interactive types, field tables and payload descriptions
-below document stored fold inputs, including historical envelope bounds; they
-are not app delivery promises. Other live frames are sent **binary → phone
+For retired content types, field tables and payload descriptions below document
+stored fold inputs, including historical envelope bounds; they are not app
+delivery promises. Other live frames are sent **binary → phone
 only**, subject to the negotiated `interactive` capability and existing access
 gates. Required source fields remain explicit, including `seq: 0` and
 `is_error: false`. Host-post `turn_end` retains its separate four-field payload,
@@ -3643,18 +3660,12 @@ omitting Claude result and metric fields.
 
 **Legacy replay cursor (`event_id`, #649).** Ring-backed frames in this stream carry an envelope-level `event_id` (the optional `Envelope` field above) — the daemon-resident id assigned to each structured event in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` identifies an envelope and can differ across recipients or replay, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
-Host-post deltas and completion (#2809) use the same ring registered with
-`V2SessionManager.SetReplaySource`. Their live and replay envelopes carry the
-same connection-independent event IDs; these are separate from durable history
-entry IDs. Each post is fully recorded in history before entering replay/live,
-and all its events enter the ring before its wake trigger. Replay reads retained
-events and never triggers another wake. `replayMissed` uses the daemon's active
-conversation and `hello.last_event_id`; this cursor does not select a conversation.
-The existing 1024-event per-conversation bound, preferential delta eviction and
-`resync` behavior remain. The ring survives reconnects and child respawns but
-not daemon restart; restart recovery is history-backed, with no durable replay
-across restart. A fully completed pending post is cleanup-only on reload, even
-if interruption preceded its first live push. Tail catch-up remains #2744.
+Host-post deltas and completion remain durable fold inputs (#2809, #3737).
+They create no raw live/reconnect publication or new ring events. Only a new
+successful durable completion triggers the existing asynchronous wake; failed
+completion remains pending, and cleanup-only reload/catch-up never notifies again.
+Shared replay admission, pump and event-ring infrastructure remain until
+\#3738/#3739; this ticket retires content publications, not those contracts.
 
 #### `turn_state`
 
@@ -3672,9 +3683,10 @@ On legacy interactive connections, this frame is also re-asserted on connect for
 
 Interactive text is retained source history for canonical thread updates and
 explicit catch-up. No interactive raw delta or newly appended reconnect copy is
-sent to any app; nil/failed history supplies no fallback. Supported live state
-remains separate. The channel-post producer below still publishes deltas
-pending #3737. The table describes the retained source payload.
+sent to any app; nil/failed history supplies no fallback. Channel-post deltas
+are also source-only (#3737), feeding canonical completed posts and explicit
+catch-up. Supported live state remains separate. The table describes the
+retained source payload.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3743,20 +3755,25 @@ second `message`/assistant text representation and no post `turn_state`.
 
 Acceptance can succeed during a live Claude turn, but delivery holds until its
 recorded real completion or confirmed producer stop after queued/buffered output
-is flushed and its lifecycle closed. No held post delta/completion reaches live
-delivery or served history; whole FIFO posts complete before successor turns.
-The five-minute diagnostic keeps holding. All post chunks and completion must
-record successfully before any shared replay recording, live fan-out or wake.
-Each event then enters the shared ring before its live fan-out, with the same
-`event_id` for every connection. Completion fan-out precedes the existing
-content-free wake path for the post's conversation, even without a connected
-client. Existing eligibility, connected-device suppression, coalescing and client
-mute/per-conversation notification rules remain.
+is flushed and its lifecycle closed. No held post delta/completion is appended;
+whole FIFO posts complete before successor turns. Active-turn, write-reservation
+and teardown boundaries remain; the five-minute diagnostic keeps holding.
 
-A lone delta renders live or from a served page but does not finish or notify.
-The ten historic daily posts in `7dc049bc` (2026-09-24 through 2026-10-03) retain
-recoverable text and missed alerts; they are neither migrated nor re-notified.
-Durable tail catch-up remains #2744. See
+Accepted-post persistence/carry and partial-write reconciliation preserve chunk
+text/order, turn identity and captured provenance across retry, cleanup failure
+and restart, yielding the same canonical completed post without duplicates or
+cross-conversation leakage. A failed completion stays pending with no completion
+wake. Only newly recording the durable completion triggers the existing
+asynchronous, content-free wake, even without a connected client. Cleanup-only
+reload, reconnect and catch-up do not trigger it again. Existing eligibility,
+connected-device suppression, coalescing and client mute/per-conversation
+notification rules remain.
+
+No app receives raw post `assistant_delta`/`turn_end` frames or new replay copies
+(#3737), including connections without `thread`; storage failure never restores
+publication. Thread clients recover saved completed content through canonical
+items and explicit catch-up. A lone source delta supplies no completion evidence
+or notification. Historical posts are neither migrated nor re-notified. See
 [channel-post delivery and recovery](knowledge/features/control-plane-channel-post-live-delivery.md).
 
 #### `tool_use`
@@ -3971,12 +3988,11 @@ Interactive completion remains source history for canonical thread updates and
 explicit catch-up. No raw interactive `turn_end`, substitute receipt or newly
 appended reconnect copy is sent to any app, even with nil/failed history.
 Supported live phase remains separate. Normal completion need not create a
-visible `turn_end` item. Channel-post completion still publishes pending #3737;
-only the channel-post example below describes a current raw app frame.
+visible `turn_end` item. Channel-post completion is also source-only (#3737).
 
-Claude turns retain the `TurnEndPayload` source contract below. Host posts use exactly
-this four-field completion payload in durable history, replay and live delivery
-(#2809):
+Claude turns retain the `TurnEndPayload` source contract below. Host posts retain
+exactly this four-field completion payload in durable history as recovery and
+canonical-fold input (#2809):
 
 ```json
 {"conversation_id":"<conversation>","turn_id":"<post-turn>","stop_reason":"end_turn","producer":"channel_post"}
@@ -3985,8 +4001,8 @@ this four-field completion payload in durable history, replay and live delivery
 `producer: "channel_post"` explicitly identifies daemon-authored host-post
 completion, not a Claude result. It closes only that post's fresh turn ID, at the
 safe boundary described under [`assistant_delta`](#assistant_delta). The three
-existing required completion strings let current clients consume it; `producer`
-is additional provenance. Every Claude-only field listed below — `outcome`,
+existing required completion strings identify the durable completion; `producer`
+is additional source provenance. Every Claude-only field listed below — `outcome`,
 `is_error`, `terminal_reason`, `error_category`, both durations, cost, turn count
 and all token counts — is omitted entirely, including zero/null placeholders.
 Absent fields are not evidence that Claude reported success or zero usage.
@@ -4204,85 +4220,36 @@ A repeated `active: true` carrying a new `phase` is a **phase change**, not a se
 
 #### `banner`
 
+**Retired raw publication (#3737).** Standalone banners remain durable source
+facts for [authoritative thread items and explicit catch-up](#daemon-thread-updates-v2-supplied-delivery-contract).
+No app receives raw banners, inert runtime/startup or prompt-answer receipts, or
+new banner replay copies on connect, live output or reconnect, including peers
+without `thread`. Recording retains one append attempt, original timestamp,
+visibility and captured provenance, including without clients. Absent/failing
+storage never restores publication. Open prompts, dismissals, controls and
+ordered live state remain separate supported paths.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose stream carried the text. |
-| `level` | string | **Open set.** `claude`'s own word for how the text should read — `warning` observed; `info`, `notice` and `suggestion` are its other documented values. Empty means `claude` named none this client can be offered. Bounded by the daemon and **dropped, not cut**. **`claude`-authored, not daemon-asserted** — see below. |
-| `text` | string | The text `claude` printed, verbatim. Bounded by the daemon at **4 KiB** and **cut, not dropped**. **`claude`-authored, not sanitized** — see below. |
-| `truncated` | bool | Whether the daemon cut `text` to fit that bound. |
-| `stops_turn` | bool | Whether `claude` said it will not continue past this banner. **A report, never an instruction** — see below. |
+| `level` | string | Open set of Claude-authored labels, including `warning`; empty means unavailable. Over-bound labels are dropped rather than cut. |
+| `text` | string | Claude-authored prose, bounded at 4 KiB and cut rather than dropped. |
+| `truncated` | bool | Whether the producer cut `text`. |
+| `stops_turn` | bool | Claude's report that it will not continue, never a control instruction. |
 
-`banner` (#2256) exists because nothing else on the wire could carry this text, and the
-gap was total rather than awkward. [`unrecognized_message`](#unrecognized_message) is a
-parser-gap diagnostic, [`compacting`](#compacting) and [`rate_limited`](#rate_limited)
-each report one specific machine state, and the assistant stream carries only what the
-model *said*. Text `claude` prints *about* the session had nowhere to go and was
-dropped.
+The table describes retained source content. The `informational` mapping keeps
+hook block reasons, even when no model turn opens, so banners remain
+conversation-scoped without `turn_id`. `level` and `text` have different bound
+rules because a cut token is misleading while cut prose remains useful.
+`truncated` records the producer's decision; a renderer must not infer it from
+length. An info banner without `stops_turn` is hidden; stopping info banners,
+other levels and unknown levels are shown under the unchanged stored-value
+classification.
 
-**It is conversation-scoped and carries no `turn_id`, and the producer set is what
-forces that** rather than symmetry with its neighbours. A prompt a hook refuses is never
-answered, so no turn exists to attribute the refusal to; a notification belongs to
-`claude`'s own queue and rides no turn at all. There is no turn the daemon could
-honestly name, and the frame may arrive with no turn in progress whatever.
-
-**`level` and `text` take opposite bound rules, and this is the trap worth reading
-twice.** `level` is a **token a client matches**, so an over-long one is **dropped** — a
-cut token would match no known value while still looking like one, and an emptied
-`level` is directly observable. `text` is **prose**, so an over-long one is **cut** — a
-cut sentence still reads as what it is — and `truncated` reports that. This is the same
-split [`compaction_boundary`](#compaction_boundary)'s `trigger` and
-[`compacting`](#compacting)'s `compact_error` carry across two frames, landing here on
-one. Treat an unrecognised `level` as *unknown*, [`turn_end`](#turn_end)'s `outcome`
-rule; it is not an error.
-
-**Both bounds belong to the producer.** The daemon caps `text` where it crosses the
-subprocess boundary and nowhere else, so neither the wire shape nor the bridge
-re-decides a maximum — a second cap site is a second place the limit is decided, and the
-two could disagree silently. `truncated` is therefore the daemon's own answer about
-whether it cut, never something a client should re-derive by measuring the string.
-
-**Every field is `claude`'s, and so is the fact of the banner.** This goes a step beyond
-[`compaction_boundary`](#compaction_boundary)'s class change: that frame at least
-reports a compaction the daemon can corroborate from its own parser state, whereas this
-one reports that `claude` had something to say, and nothing else on the wire confirms or
-contradicts it.
-
-**It is the first frame here whose whole purpose is arbitrary `claude`-authored prose
-with no machine state anchoring it**, and that changes what a client owes it.
-[`compacting`](#compacting)'s `compact_error` is prose attached to a compaction the
-daemon observed; [`unrecognized_message`](#unrecognized_message)'s `raw` is prose
-explicitly labelled a parser gap. A client renders **this** one as a first-class notice,
-so **text impersonating daemon chrome at `level: "warning"` is the realistic abuse**, not
-a hypothetical one. [§ Security model](#security-model)'s threat 1 lands in the outward
-direction: the daemon **bounds** `text` and **does not sanitize** it, and the render
-boundary owing control-character and terminal-escape stripping is the **client's**.
-Newlines, terminal escapes, markup, a URL and text impersonating daemon chrome all fit
-inside 4 KiB, and the observed line contains a host filesystem path and echoes the
-operator's own prompt back. Render it as **inert text** — never an HTML sink, an
-attribute or a URL — and as **`claude`'s assertion, attributed to `claude`**, never as
-the daemon's own finding.
-
-**`stops_turn` is a report, and a client owes it the same restraint the daemon does.**
-Nothing in the daemon acts on it or on any other field here — no retry, no backoff, no
-teardown, no routing — which is what keeps a fabricated banner a misleading label rather
-than an actuator. The field name reads like a lever, and that is exactly why: anything
-that let it cancel work the operator did not cancel would hand `claude` a self-service
-turn abort.
-
-**It carries no data class an interactive grant does not already receive**, which is why
-there is no narrower gate. The observed text embeds a host path and echoes the
-operator's prompt, and [`tool_use`](#tool_use)'s verbatim input fields already carry both
-to the same grant.
-
-**The frame has a producer since #2319**, which maps `claude`'s `informational` lines
-onto it — a hook's block reason among them — against a committed capture. **It has no
-second producer, and #2258 is closed as answered** (`2026-09-10`): that ticket owned
-`local_command_output` and `notification`, and the capture recorded both unobserved with
-zero frames, so neither had a field set to map. That is not a claim `claude` never sends
-them, only that neither is reachable on the input paths tried at `2.1.259`. The
-frame shipped ahead of that first producer deliberately: declaring a contract ahead of
-its producers is this spec's established sequencing, and it is what let client work start
-against a published shape.
+Text is bounded, unsanitized Claude-authored content. Render canonical notice
+content as inert text with its attribution; markup, terminal escapes and host
+paths can occur in the retained prose. Neither `stops_turn` nor another banner
+field authorizes cancellation, routing, retry or teardown.
 
 #### `unrecognized_message`
 
@@ -7849,50 +7816,35 @@ No retirement-specific error or successful empty page is returned.
 
 **Source history remains.** The daemon still appends durable per-conversation
 facts, and `internal/thread` folds those records into thread items. Storage
-paging/walk APIs, legacy live/replay publication and receipts, and shown-thread
-summary/read authority remain separate contracts. `history.unavailable` is the
-retryable read refusal when shown-thread evidence is unavailable. Lists retain
+paging/walk APIs and shown-thread summary/read authority remain separate
+contracts. Raw content and receipt publications are retired for every app.
+`history.unavailable` is the retryable read refusal when shown-thread evidence is unavailable. Lists retain
 otherwise eligible rows with unknown shown evidence omitted.
 
 #### A history entry
 
 A source entry stores a type, payload, timestamp and durable entry ID, plus
 optional visibility and session metadata. It is an internal record consumed by
-thread folding, not an independently queryable wire envelope. The retained
-legacy live/replay receipt projection below does not expose raw records.
+thread folding, not an independently queryable wire envelope. It is not
+projected into an inert receipt or a raw content envelope (#3737).
 
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | number | The **durable, per-conversation** entry id. Monotonic within one conversation's log and **stable across daemon restarts**. |
-| `type` | string | Stored fact or event type; the legacy live/replay projection uses `banner` for a validated runtime receipt. |
-| `payload` | object | Original stored payload bytes; the legacy receipt projection substitutes the nonvisual shape below. |
-| `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
+| `type` | string | Original stored fact or event type, consumed by canonical thread folding. |
+| `payload` | object | Original stored payload bytes, including retained runtime and answer facts. |
+| `ts` | string (RFC 3339) | Original durable entry timestamp. |
 
-**Known runtime and remote prompt-answer facts use nonvisual receipts (#3026, #3222).**
-`main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
-`session_divider`, validated
-[agent/task facts](knowledge/features/history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
-and validated remote `prompt_answered` facts project into legacy live/replay
-delivery as `type: "banner"` with this payload (all five keys are required and nonnull):
-
-```json
-{
-  "conversation_id": "11111111-1111-4111-8111-111111111111",
-  "level": "info",
-  "text": "",
-  "truncated": false,
-  "stops_turn": false
-}
-```
-
-The receipt retains the raw fact's original `id` and `ts`; it is not a new
-durable append or a second ID space. Raw fact payloads and metadata stay off
-legacy transports. Opening/interruption/divider projection validates matching
-conversation ownership, occurrence time and required identities: a turn ID for
-opening/turn interruption, also a tool-call ID for tool interruption, and a cause plus predecessor session
-for a divider. A `daemon_restart` divider needs no predecessor/successor session
-IDs. Missing durable identity or timestamp and malformed facts produce no
-receipt; arbitrary unknown types remain excluded without being certified harmless.
+**Runtime and remote prompt-answer facts feed canonical items (#3737).**
+`main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted`,
+`session_divider`, agent/task facts and `prompt_answered` retain their original
+source payloads, IDs, timestamps, visibility and captured provenance. Neither raw
+facts nor substitute five-field info banners are published. Hidden openings and
+restart/sleep dividers remain available to the fold without creating unread
+content. Working storage supplies canonical live items and explicit catch-up;
+absent/failing storage and no clients never enable fallback raw delivery.
+The exclusive receipt adapter and prompt publication worker are removed;
+stored-value classification and ordered thread/live-state delivery remain.
 
 **Queued-send validation is a source contract, not receipt eligibility (#3733).**
 `send_accepted`, `send_written`, `send_delivered`, `send_dropped` and `send_lost`
@@ -7916,64 +7868,32 @@ allocation remain unchanged, including hidden removal/give-up outcomes.
 Raw visibility does not authorize transport
 or certify accounting.
 
-**Remote prompt-answer validation binds to the original resolution (#3222).**
-A receipt requires matching `conversation_id`, the original nonempty
-`correlation_id`, exactly `source: "remote"`, a nonzero durable ID and entry
-timestamp, and nonzero `resolved_at` equal to that timestamp. Required producer
-fields must be present and nonnull: `conversation_id`, `correlation_id`,
-`resolved_at`, `source`, `decision`, `behavior`, boolean `session_grant`, object
-`context` and boolean `truncated`. Only `allow` or `answer` with `behavior: "allow"`
-and `deny`, `cancel` or `refusal` with `behavior: "deny"` qualify; denied decisions
-cannot claim a session grant.
+**Remote prompt-answer recording binds to the winning resolution (#3737).**
+Each winning authenticated permission allow/deny/cancel or question answer/refusal
+makes one best-effort `prompt_answered` append, preserving the effective child
+verdict and one dismissal. Invalid, stale, duplicate, timeout and teardown paths
+retain their rejection/non-recording rules. Original asking-session ownership
+survives rebinding; it is never inferred from the current session. Saved context
+is bounded to 16 KiB of encoded JSON without changing the child's full answer.
+See the [saved decision and context contract](knowledge/features/history-package-producers.md#resolved-remote-prompt-answers-2973).
 
-The encoded context is capped at 16 KiB and checked against the
-[producer's typed tool/question/value shapes](knowledge/features/history-package-producers.md#resolved-remote-prompt-answers-2973),
-rejecting unknown context fields and malformed shapes. An empty object is valid.
-Original asking-session identity and provenance remain optional; today's active
-session never supplies missing ownership. Stored `shown` alone cannot authorize
-accounting. Malformed, foreign, unknown-source/decision, missing-field and
-unidentified facts remain holes. The receipt contains only the five banner
-fields above, never decisions, prompt/question/tool context, raw answers,
-correlation/session identities or provenance. Raw `prompt_answered` payloads
-remain excluded from legacy live delivery and replay.
+No receipt validator, queue, worker or connection-discovery call remains on this
+recording path. Failed storage cannot repeat actuation, restore raw publication,
+block relay dispatch or serialize the next answer behind peer delivery, including
+with cancellation. Open prompts and dismissals remain supported live messages;
+resolved answers become canonical thread notices and explicit catch-up content.
 
-Unchanged mobile decoding/reduction understands this info banner as nonvisual
-accounting. It draws no content and changes no turn, permission, model or status
-state. Accounting grants no presentation of unseen content. Unknown, malformed
-or unidentified receipts and unaccounted holes remain read-evidence barriers;
-receipt arrival alone cannot establish sight. These live/replay receipts do not
-restore the retired raw history endpoint.
-
-**A direct live envelope's `history_entry_id` is this entry's `id` (#2861).**
-After a successful append, interactive-turn emission, session-transition
-broadcast and neutral-receipt publication attach that same
-per-conversation id to every interactive recipient's direct envelope. Reconnect
-replay of history-backed interactive-turn and neutral-receipt
-ring events carries the original append's id too (#2909), without appending another entry.
-Running runtime and validated remote prompt-answer facts, including
-dividers, publish the same receipt bytes and original durable ID/timestamp to
-live recipients and the replay ring. A winning remote prompt resolution appends once and serializes
-publication outside bridge/registry locks, recording for replay even when no
-clients are connected. Duplicate/losing resolutions add no fact or receipt.
-The captured original conversation and existing interactive, conversation
-membership and agent-access gates apply. Queued acceptance recording and binding
-still complete before placement can proceed. The delivery source embeds the
-committed acceptance reference before any follower reads it, then records the
-linked outcome. Late echoes/callbacks add no duplicate source or item. Queued
-facts produce no legacy live/replay receipts; startup reconciliation remains
-source-only, including `send_lost`, without populating the ring or sending live
-frames. Existing recipient and agent/isolation gates apply.
-Channel posts still omit it; raw `session_transition` publication is retired
-for every app (#3736). Use it as
-[`mark_conversation_read.up_to`](#marking-a-conversation-read) when the operator
-has read through that entry. It is independent of the envelope's connection
-`id` and ring `event_id`; neither is a durable read-mark target. Older daemons,
-absent or failed history storage, and non-history-backed frames (live or replayed)
-omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
-and existing ring recording proceed even when history cannot be appended;
-failed or absent storage cannot mint a runtime or prompt-answer
-receipt. Obtain a durable target only with presentation evidence, using the original
-durable identity; a list watermark alone is not a read checkpoint.
+**Retained live-state identity remains separate from source content.**
+Supported legacy live-state envelopes may carry the successful append's
+`history_entry_id`, preserved through existing ring replay without another write.
+Supplied thread live state carries neither history nor replay identity. Content
+producers now record only; channel posts and session transitions add no raw
+frames. Queued acceptance still binds before placement, safe delivery sources
+embed the reference before followers read them, and delayed callbacks cannot
+repeat the source. Source IDs, connection `id`, ring `event_id` and canonical
+item revisions are different namespaces. Obtain read targets only from explicit
+foreground presentation evidence; neither a receipt nor a list watermark
+establishes sight.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
@@ -7989,10 +7909,9 @@ absence is unknown. Hidden source records and completion-only item revisions
 can advance raw progress without raising the shown watermark.
 
 Source history retains hidden/status entries and original durable IDs, including
-visibility and session metadata. Legacy receipts disclose neither metadata nor
-raw fact payloads. Receipt delivery/accounting and internal raw-store watermark
-APIs retain their contracts; none substitutes for shown-thread authority or
-foreground presentation. The durable read mark is a position among history IDs,
+visibility and session metadata. Raw content and receipt publications are
+retired; internal raw-store watermark APIs retain their contracts. None
+substitutes for shown-thread authority or foreground presentation. The durable read mark is a position among history IDs,
 never an entry count or connection `event_id`, shared by every paired device on
 this host and raised by [`mark_conversation_read`](#marking-a-conversation-read).
 
@@ -8044,25 +7963,20 @@ the three — same omitted-key contract as `attachment_ids` above.
 
 #### Legacy receipt identity
 
-Live and replayed history-backed events retain the original successful append's
-`history_entry_id`, payload and timestamp. Join by conversation and durable ID;
-connection `id`, ring `event_id` and thread version are different namespaces.
-Several receipts can share both timestamp and banner bytes, so (`type`, `ts`)
-cannot distinguish their durable identities. For eligible legacy events without
-a durable ID, (`type`, `ts`) plus payload comparison can reconcile live/replay
-duplicates, but cannot certify a durable receipt or read target.
+Runtime and prompt-answer receipt publication is retired (#3737), alongside the
+other retired content families. This anchor remains for older references; it
+confers no receipt delivery contract. Shared replay infrastructure remains for
+\#3738/#3739, and parent #3718 owns final family acceptance.
 
-Received identity enables joining, a validated receipt accounts for its ID,
-foreground presentation establishes sight, and a correlated
-`conversation_updated.read_up_to` confirms persistence. Unknown, malformed or
-unidentified receipts and unaccounted holes remain barriers. Neither receipt
-arrival, replay nor a fetched thread query establishes presentation. Queued
-acceptance, written, delivery, drop and loss facts have no legacy receipt
-identity or projection (#3733), including for connections without `thread`.
-Their canonical item ID remains the acceptance entry ID; actual delivery order
-is separate. Clients recover the lifecycle and content through explicit
-[Thread query messages](#thread-query-messages), including hidden drops and
-visible/not-delivered restart loss.
+Join retained source facts by conversation and durable ID. Connection `id`, ring
+`event_id`, canonical item identity/revision and durable read marks serve separate
+purposes. Equal timestamps and payloads cannot identify distinct source appends.
+Live arrival, replay and a fetched query do not establish foreground presentation.
+Clients recover saved content through explicit
+[Thread query messages](#thread-query-messages), and checkpoint only shown content
+with the correlated daemon-confirmed read mark. Queued items retain acceptance
+identity with separate delivery order, including hidden drops and visible restart
+loss; they have no receipt identity or projection.
 
 ## Hosted apps (v2)
 
@@ -9030,6 +8944,14 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-22`: Retired standalone banner/runtime/prompt-answer receipt and
+  channel-post raw publication for every app (#3737), including connections
+  without `thread`. Saved facts and completed posts feed canonical items and
+  explicit catch-up. Open prompts, dismissals, controls and ordered live state
+  remain; channel completion wakes only after a new durable completion.
+  Replay infrastructure retirement remains #3738/#3739 and final family
+  acceptance remains #3718.
 
 - `2026-10-22`: Retired raw background-agent start/update/roster frames, new
   reconnect copies, synthetic agent receipt banners and connect-time roster
