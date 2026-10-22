@@ -144,16 +144,18 @@ no source and create no delivered entry; a retry captures its own receiving
 session. Existing placement order and exactly-once recording, including late
 echoes and callbacks, remain intact.
 
-`newOperatorMessageHistory` still builds history and publication content only
+`newOperatorMessageHistory` builds delivery source content only
 from the safe `msgqueue.QueuedMessage` projection: client-readable text,
 attachment IDs and existing client metadata. Composed prompts, echoed delivery
 text, host paths and private matching digests remain absent from payloads and
 logs. `appendConversationHistory` combines the captured source with existing
 visibility; raw pages expose it in warm and reopened stores. Legacy entries
 stay untagged, and callers without source information remain usable with
-absent provenance, never inferred as `none`. Legacy live/replay/page payloads,
-unread watermarks, durable identity and recipient gates retain their behavior,
-including eligible publication with absent identity on nil/failed storage.
+absent provenance, never inferred as `none`. Raw user-message fan-out and newly
+appended reconnect replay are retired for every app (#3732); retained source
+facts feed canonical thread items and explicit catch-up. Neutral receipts keep
+their original durable identity and existing eligible recipients, and failed
+storage cannot mint one.
 
 ### Accepted sends and linked outcomes (#2972)
 
@@ -227,7 +229,7 @@ entry ID, device/message/queue identities, text and attachment IDs. Ordinary
 history remains `queued`; Send now remains `written`. These are unresolved
 history states, not runnable FIFO entries: possibly consumed input is never
 automatically re-enqueued or replayed. Abandonment appends no `send_delivered`,
-publishes no delivered operator message and invents no child-exit loss reason.
+publishes no delivered receipt and invents no child-exit loss reason.
 Later callbacks or predecessor/successor events cannot revive the placement.
 
 An actually empty binding is explicit `kind: none` with no session ID. Unknown
@@ -260,10 +262,10 @@ message before publishing any prefix, even when `ForwardReader.Walk` separates
 message and outcome across chunks or segments. Coalescing callbacks cannot
 provide that guarantee. The later `send_delivered` enriches the same item.
 
-The message retains its stream position, timestamp, receiving provenance and
-exactly-once legacy push; `delivery_entry_id` points to that delivery-order
-record. Durable storage, legacy live publication and replay share the same safe
-message bytes, including the inert acceptance reference. Older messages without
+The source message retains its stream position, timestamp, receiving provenance
+and exactly-once recording; `delivery_entry_id` points to that delivery-order
+record. Raw user transport is retired; source bytes, including the inert
+acceptance reference, remain inputs to thread folding. Older messages without
 that field retain their existing outcome-based join behavior; no identity is
 inferred from text, timestamps, app IDs or reusable queue handles. See
 [delivery reference validation and prefixes](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
@@ -274,14 +276,17 @@ appends and enqueues its receipt before releasing `ready`; placement waits for
 that barrier. If notification acquired `operatorMessageEmitterV2`'s fan-out
 mutex, a stalled peer could block acceptance and therefore placement.
 `notifyReceipt` instead uses a separate mutex for a bounded mailbox and a
-nonblocking wake. `Run` and synchronous `broadcast` drain pending receipts under
-the fan-out mutex before publishing the user and its linked delivery receipt as
-one ordered batch. Receipt notification never acquires that mutex or performs
-peer I/O; fan-out holds the mailbox mutex only while taking pending items. A full
-mailbox logs a content-free discriminant and leaves durable paging as recovery. Both
-ordinary and send-now delivery retain user-before-outcome chronology across
-delayed confirmation by echo or normal completion, without duplicate content or
-receipts.
+nonblocking wake. `Run` drains pending receipts through `broadcast` under the
+fan-out mutex. After recording the source and linked delivered outcome,
+`operatorMessageHistory` submits only that outcome's neutral receipt through
+`queuedSendHistory.publish`, independently of any raw user frame. Receipt
+notification never acquires the fan-out mutex or performs peer I/O; fan-out
+holds the mailbox mutex only while taking pending items. The worker preserves
+acceptance-before-outcome receipt order, while unrelated assistant traffic can
+interleave. A full mailbox logs a content-free discriminant and leaves explicit
+thread catch-up as recovery. Parent cancellation stops the worker and cleanup
+joins it; late producers can only fill the bounded unread mailbox. Delayed
+confirmation and late echoes add no duplicate source or receipt.
 
 **Use the arbitrated terminal outcome, not a removal return value.** An
 in-flight `Remove` returning true can express a deferred request. Confirmed
@@ -304,7 +309,7 @@ attempt. See
 and [ADR 042](../decisions/042-daemon-built-thread.md).
 
 Storage remains best effort: nil/failed history preserves queue acceptance,
-delivery/removal and eligible legacy push. Nil/failed appends mint no receipt
+delivery/removal and retained placement. Nil/failed appends mint no receipt
 identity. Failed acceptance writes release the placement gate without inventing
 an ID, message acceptance reference or linked outcome; a surviving operator
 message remains an ordinary delivery. A failed message append creates no

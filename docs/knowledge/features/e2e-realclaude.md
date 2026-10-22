@@ -96,6 +96,15 @@ GitHub comment URL. Independent raw/legacy scenario, content and ownership check
 precede fresh Store/full replay comparisons at every checkpoint. Synthetic
 rejection controls exercise those readers without becoming retained records.
 
+Transport retirement must also update fresh-capture witnesses (#3732).
+Tagged compilation and replay of an older retained pair can stay green while
+`shadowWitness` still demands a raw user frame that a fresh daemon no longer
+publishes. Validate user content through raw acceptance/delivery joins and
+canonical checkpoint rows, retaining content mutation controls. The shared
+adapter still validates other producers' wire evidence; removing its unrelated
+checks would weaken the independent oracle. Receipt chronology requires
+acceptance before outcome, not receipts before unrelated assistant traffic.
+
 Queue snapshot retirement removes only `queue_state` envelopes from the
 retained `Legacy` expectation, preserving raw history, canonical items,
 attachments and capture provenance. Filter the retired envelopes without

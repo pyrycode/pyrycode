@@ -209,6 +209,18 @@ resolve an older send. The engine's lifecycle callbacks remain injected;
 [accepted sends and linked outcomes](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
 and [ADR 042](../decisions/042-daemon-built-thread.md).
 
+Retiring raw user `message` fan-out and newly appended reconnect replay (#3732)
+does not retire these source records or placement. Queue callbacks still retain
+safe content, acceptance binding, successful-write/echo or supported completion
+ordering and durable accepted/written/delivered/drop/lost facts. Apps observe the
+same acceptance-owned canonical item through thread updates and explicit catch-up,
+including after history reopening; connections without `thread` get no raw user
+fallback. Acceptance/delivered/drop receipts retain independent publication to
+their existing eligible live/replay recipients until #3733. A delivered receipt
+requires its successful linked outcome append, with the original durable ID and
+timestamp; it no longer needs a user frame. See
+[delivered notification](msgqueue-package-lifecycle.md#delivered-notification-2115).
+
 Before producers or inbound traffic start, startup scans all raw pages of each
 surviving registered conversation log. An acceptance without a durable
 delivery/drop/loss outcome gets a shown `send_lost` fact with reason
