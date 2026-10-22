@@ -16,6 +16,15 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/claudetape"
 )
 
+func testResumeReceiptPath(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "controls")
+	if err := claudetape.NewCheckpointDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "bootstrap.receipt")
+}
+
 func TestResumePredecessorHelperProcess(t *testing.T) {
 	if os.Getenv("PYRY_RESUME_PREDECESSOR_HELPER") == "1" {
 		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
@@ -45,7 +54,7 @@ func TestResumePredecessorWaitsForRetirement(t *testing.T) {
 			}
 		}
 	}()
-	path := filepath.Join(t.TempDir(), "bootstrap.receipt")
+	path := testResumeReceiptPath(t)
 	receipt := claudetape.LifecycleReceipt{Success: true, Frames: 1, OwnerPID: cmd.Process.Pid, BrokerPID: os.Getpid()}
 	if err := claudetape.PublishLifecycleControl(path, receipt); err != nil {
 		t.Fatal(err)
@@ -136,7 +145,7 @@ func TestResumePredecessorRejectsBoundary(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(&r)
 			}
-			path := filepath.Join(t.TempDir(), "receipt")
+			path := testResumeReceiptPath(t)
 			if err := claudetape.PublishLifecycleControl(path, r); err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +170,7 @@ func TestResumePredecessorDeadline(t *testing.T) {
 			name = "predecessor-present"
 		}
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "receipt")
+			path := testResumeReceiptPath(t)
 			if receiptPresent {
 				r := claudetape.LifecycleReceipt{Success: true, Frames: 1, OwnerPID: os.Getpid()}
 				if err := claudetape.PublishLifecycleControl(path, r); err != nil {
