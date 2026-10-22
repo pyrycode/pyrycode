@@ -121,6 +121,12 @@ child edits rather than repeating them. Carry forward the exact requirements:
   The live stage tally counts passing leaves; raw Go event counts also include
   parents and skipped tests. Keep both conventions explicit rather than copying
   the refinement comment's event-count description.
+- 2026-10-22: Rework for verifier finding 1 at `0d040258`: put the two required
+  placement test names on separate lines under the PR's `## Live tests` heading;
+  move the unchanged historical evidence prose to `## Live evidence and applicability`.
+  Validate the declaration with the dispatcher's existing live-test parser and
+  read the published body back. This changes gate selection metadata only;
+  existing holds and pending dispatcher-owned live acceptance remain intact.
 
 ## Evidence review — 2026-10-22
 
