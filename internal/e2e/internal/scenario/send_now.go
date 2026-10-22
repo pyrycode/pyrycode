@@ -179,6 +179,11 @@ func SendNowPlacement(t *testing.T, w Wire, convID, prompt string, turnBudget, s
 	if !terminal {
 		t.Error("queued item never became delivered")
 	}
+	for _, item := range reader.items {
+		if item.Kind == "user_message" && item.Status == "queued" && item.Active {
+			t.Errorf("queued item %d remains after send-now settled", item.ID)
+		}
+	}
 }
 
 // ClassifyQueuePlacementFrame maps an envelope to a recorded frame when it concerns

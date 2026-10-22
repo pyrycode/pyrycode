@@ -12,14 +12,14 @@ import (
 )
 
 func TestSendNowPlacementControls(t *testing.T) {
-	for _, name := range []string{"valid", "delivery-enrichment", "foreign-frames", "subagent-frames", "early-end", "result-before-queue", "zero-queue-id", "missing-result", "foreign-result", "user-before-result", "user-after-text", "duplicate-user", "wrong-user-text", "missing-marker", "foreign-end", "late-extra-end", "late-duplicate-user", "nonempty-queue", "unrecognized"} {
+	for _, name := range []string{"valid", "delivery-enrichment", "foreign-frames", "subagent-frames", "distinct-item-cleared", "early-end", "result-before-queue", "zero-queue-id", "missing-result", "foreign-result", "user-before-result", "user-after-text", "duplicate-user", "wrong-user-text", "missing-marker", "foreign-end", "late-extra-end", "late-duplicate-user", "nonempty-queue", "distinct-queued-add", "distinct-queued-catch-up", "distinct-queued-patch", "unrecognized"} {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSendNowPlacementHelperProcess$", "-test.v")
 			cmd.Env = append(os.Environ(), "PYRY_SEND_NOW_CONTROL="+name)
 			out, err := cmd.CombinedOutput()
-			valid := name == "valid" || name == "delivery-enrichment" || name == "foreign-frames" || name == "subagent-frames"
+			valid := name == "valid" || name == "delivery-enrichment" || name == "foreign-frames" || name == "subagent-frames" || name == "distinct-item-cleared"
 			if ctx.Err() != nil || (err == nil) != valid {
 				t.Fatalf("placement evidence acceptance err=%v output=%s", err, out)
 			}
@@ -47,7 +47,30 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 	end := frame(protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: "conv"})
 	empty := queueThreadFrame(t, "conv", SendNowQueuedText, 0, "delivered")
 	frames := []protocol.Envelope{use, queued, result, user, delta, end, empty}
+	var initialItems []protocol.ThreadItem
+	var distinct protocol.ThreadItemAddedPayload
+	if err := json.Unmarshal(queueThreadFrame(t, "conv", "another queued message", 8, "queued").Payload, &distinct); err != nil {
+		t.Fatal(err)
+	}
+	distinct.Item.ID, distinct.Item.Rev = 71, 1
 	switch name {
+	case "distinct-queued-add":
+		frames = append(frames, frame(protocol.TypeThreadItemAdded, distinct))
+	case "distinct-queued-catch-up":
+		initialItems = []protocol.ThreadItem{distinct.Item}
+	case "distinct-queued-patch", "distinct-item-cleared":
+		initial := distinct.Item
+		status, active := "queued", true
+		if name == "distinct-queued-patch" {
+			initial.Status, initial.Active = "dropped", false
+		} else {
+			status, active = "dropped", false
+		}
+		initialItems = []protocol.ThreadItem{initial}
+		frames = append(frames, frame(protocol.TypeThreadItemChanged, protocol.ThreadItemChangedPayload{
+			ConversationID: "conv", Epoch: "epoch", ItemID: 71, BaseRev: 1, Rev: 2,
+			Changes: map[string]json.RawMessage{"status": mustQueueJSON(t, status), "active": mustQueueJSON(t, active)},
+		}))
 	case "delivery-enrichment":
 		var p protocol.ThreadItemAddedPayload
 		if err := json.Unmarshal(empty.Payload, &p); err != nil {
@@ -99,7 +122,7 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 	wire := Wire{Send: func(kind string, payload any) uint64 {
 		if kind == protocol.TypeThreadCatchUp {
 			id := uint64(100)
-			env := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Final: true})
+			env := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Final: true, Items: initialItems})
 			env.InReplyTo = &id
 			frames = append([]protocol.Envelope{env}, frames...)
 			return 100
@@ -136,4 +159,13 @@ func TestSendNowPlacementHelperProcess(t *testing.T) {
 	if sends != 3 || len(frames) != 0 {
 		t.Fatal("actions or late-frame evidence were omitted")
 	}
+}
+
+func mustQueueJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

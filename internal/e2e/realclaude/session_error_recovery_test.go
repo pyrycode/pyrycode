@@ -142,22 +142,7 @@ func testSessionErrorRecovery(t *testing.T, bin, claudeBin string, drop bool) {
 		if !ok {
 			t.Fatal("missing recovery thread evidence")
 		}
-		if f.MessageID == "held-2859" {
-			state.queuedHeld = state.queuedHeld || f.Status == "queued"
-			state.empty = f.Status == "delivered" || f.Status == "dropped"
-		}
-		if f.Kind == "user_message" {
-			if state.delivered != "" {
-				t.Fatal("multiple recovery deliveries")
-			}
-			state.delivered, state.empty = f.MessageID, true
-		}
-		if f.Kind == "delta" {
-			state.delta = true
-		}
-		if (f.Kind == "idle" || f.Kind == "turn_end") && state.delta {
-			state.completed = true
-		}
+		state.observePlacement(t, f)
 	}
 	sealSendMessage(t, phone, send, 2, liveConvID, "held-2859", heldText)
 	deadline = time.Now().Add(20 * time.Second)
@@ -303,10 +288,39 @@ type sessionErrorObservation struct {
 	delivered                                              string
 }
 
+func (s *sessionErrorObservation) observePlacement(t *testing.T, f scenario.QueuePlacementFrame) {
+	t.Helper()
+	if f.MessageID == "held-2859" {
+		s.queuedHeld = s.queuedHeld || f.Status == "queued"
+		s.empty = f.Status == "delivered" || f.Status == "dropped"
+	}
+	if f.Kind == "user_message" {
+		if s.delivered != "" {
+			t.Fatal("multiple recovery deliveries")
+		}
+		s.delivered, s.empty = f.MessageID, true
+	}
+	if f.Kind == "delta" {
+		s.delta = true
+	}
+	if (f.Kind == "idle" || f.Kind == "turn_end") && s.delta {
+		s.completed = true
+	}
+}
+
 func (s *sessionErrorObservation) observe(t *testing.T, env protocol.Envelope) {
 	t.Helper()
 	switch env.Type {
 	case protocol.TypeSessionError:
+		if env.SessionStateCleared {
+			var conv string
+			var payload map[string]json.RawMessage
+			if json.Unmarshal(env.ConversationID, &conv) != nil || conv != liveConvID ||
+				json.Unmarshal(env.Payload, &payload) != nil || payload == nil || len(payload) != 0 {
+				t.Fatal("invalid session-error clear")
+			}
+			return
+		}
 		var p protocol.SessionErrorPayload
 		decodeSessionErrorPayload(t, env, &p)
 		if p.ConversationID != liveConvID {
@@ -319,15 +333,6 @@ func (s *sessionErrorObservation) observe(t *testing.T, env protocol.Envelope) {
 			s.blocked = true
 		default:
 			t.Fatalf("unexpected session-error code: %s", p.Code)
-		}
-	case protocol.TypeMessage:
-		var p protocol.MessagePayload
-		decodeSessionErrorPayload(t, env, &p)
-		if p.ConversationID == liveConvID && p.Role == "user" {
-			if s.delivered != "" {
-				t.Fatal("multiple user deliveries during one recovery")
-			}
-			s.delivered = p.MessageID
 		}
 	case protocol.TypeAssistantDelta:
 		var p protocol.AssistantDeltaPayload
