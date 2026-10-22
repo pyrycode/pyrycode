@@ -33,7 +33,6 @@ type mcpQueryPhone struct {
 	next   scenario.Next
 	client *fakephone.Client
 	send   *noise.CipherState
-	recv   *noise.CipherState
 }
 
 func dialMCPQueryPhone(
@@ -53,12 +52,13 @@ func dialMCPQueryPhone(
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-	return mcpQueryPhone{client: phone, send: send, recv: recv, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phone, recv)}
+	return mcpQueryPhone{client: phone, send: send, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phone, recv)}
 }
 
-func sendMCPQueryTurn(t *testing.T, phone mcpQueryPhone, requestID uint64, text string) {
+func sendMCPQueryTurn(t *testing.T, phone, observer mcpQueryPhone, requestID uint64, text string) {
 	t.Helper()
 	phone.source.Watch(mcpQueryConvID)
+	observer.source.Watch(mcpQueryConvID)
 	sendSealedEnvelope(t, phone.client, phone.send, protocol.Envelope{
 		ID:   requestID,
 		Type: protocol.TypeSendMessage,
@@ -136,7 +136,7 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 
 	// Establish the active-conversation cursor before querying, so a response that
 	// accidentally enters the shared turn sink has a live fan-out and ring target.
-	sendMCPQueryTurn(t, phoneA, mcpQueryWarmupID, mcpQueryWarmupText)
+	sendMCPQueryTurn(t, phoneA, phoneB, mcpQueryWarmupID, mcpQueryWarmupText)
 	if got := drainMCPQueryTurn(t, phoneA, mcpQueryWarmupText); got != 0 {
 		t.Fatalf("phone-a warmup MCP statuses = %d, want 0", got)
 	}
@@ -157,7 +157,7 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	var fresh protocol.MCPStatusPayload
 	deadline := time.Now().Add(10 * time.Second)
 	for statusCountA == 0 {
-		env, ok := nextAttachmentEnvelope(t, phoneA.client, phoneA.recv, deadline)
+		env, ok := phoneA.source.Next(phoneA.next, deadline)
 		if !ok {
 			t.Fatal("requesting phone received no MCP status reply")
 		}
@@ -192,8 +192,8 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	}
 
 	// A later turn is the causal read boundary: any query response admitted to the
-	// shared sink before this turn must reach both phones before their turn_end.
-	sendMCPQueryTurn(t, phoneA, mcpQueryCausalID, mcpQueryCausalText)
+	// shared sink before this turn must reach both phones before terminal live idle.
+	sendMCPQueryTurn(t, phoneA, phoneB, mcpQueryCausalID, mcpQueryCausalText)
 	statusCountA += drainMCPQueryTurn(t, phoneA, mcpQueryCausalText)
 	statusCountB := drainMCPQueryTurn(t, phoneB, mcpQueryCausalText)
 	if statusCountA != 1 {

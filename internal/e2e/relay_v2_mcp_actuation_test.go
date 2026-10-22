@@ -35,9 +35,10 @@ const (
 // exists before anything is actuated: a reply that wrongly entered the shared turn sink
 // then has a live fan-out target, so "no copy on the second client" is a real assertion
 // rather than one that passes because nothing could have been delivered anywhere.
-func sendMCPActTurn(t *testing.T, phone mcpQueryPhone, requestID uint64, text string) {
+func sendMCPActTurn(t *testing.T, phone, observer mcpQueryPhone, requestID uint64, text string) {
 	t.Helper()
 	phone.source.Watch(mcpActConvID)
+	observer.source.Watch(mcpActConvID)
 	sendSealedEnvelope(t, phone.client, phone.send, protocol.Envelope{
 		ID:   requestID,
 		Type: protocol.TypeSendMessage,
@@ -82,7 +83,7 @@ func awaitMCPActuationReply(t *testing.T, phone mcpQueryPhone, inReplyTo uint64)
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		env, ok := nextAttachmentEnvelope(t, phone.client, phone.recv, deadline)
+		env, ok := phone.source.Next(phone.next, deadline)
 		if !ok {
 			t.Fatalf("no correlated mcp_status for actuation %d", inReplyTo)
 		}
@@ -165,7 +166,7 @@ func TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh(t *testing.T) {
 	phoneA := dialMCPQueryPhone(t, home, fr, serverID, pubKey, payloadA.Token, "phone-a")
 	phoneB := dialMCPQueryPhone(t, home, fr, serverID, pubKey, payloadB.Token, "phone-b")
 
-	sendMCPActTurn(t, phoneA, mcpActWarmupID, mcpActWarmupText)
+	sendMCPActTurn(t, phoneA, phoneB, mcpActWarmupID, mcpActWarmupText)
 	if got := drainMCPActTurn(t, phoneA, mcpActWarmupText); got != 0 {
 		t.Fatalf("phone-a warmup MCP statuses = %d, want 0", got)
 	}
@@ -212,8 +213,8 @@ func TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh(t *testing.T) {
 	assertMCPActuationRefused(t, phoneB, mcpActRefusedID)
 
 	// A later turn is the causal read boundary: anything admitted to the shared sink
-	// before it must reach both phones before their turn_end.
-	sendMCPActTurn(t, phoneA, mcpActCausalID, mcpActCausalText)
+	// before it must reach both phones before terminal live idle.
+	sendMCPActTurn(t, phoneA, phoneB, mcpActCausalID, mcpActCausalText)
 	if got := drainMCPActTurn(t, phoneA, mcpActCausalText); got != 0 {
 		t.Errorf("phone-a saw %d extra MCP statuses after its two replies, want 0", got)
 	}
@@ -252,7 +253,7 @@ func assertMCPActuationRefused(t *testing.T, phone mcpQueryPhone, inReplyTo uint
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		env, ok := nextAttachmentEnvelope(t, phone.client, phone.recv, deadline)
+		env, ok := phone.source.Next(phone.next, deadline)
 		if !ok {
 			t.Fatal("the gate neither answered nor refused an unprivileged device's actuation")
 		}
