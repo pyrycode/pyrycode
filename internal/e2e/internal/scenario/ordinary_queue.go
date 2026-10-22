@@ -17,6 +17,7 @@ type OrdinaryQueueConfig struct {
 func OrdinaryQueuePlacement(t *testing.T, w Wire, c OrdinaryQueueConfig) {
 	t.Helper()
 	reader := newQueuePlacementReader(t, w, c.ConversationID)
+	reader.completionBatch = 2
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "ordinary-start", Text: c.Prompt})
 	deadline := time.Now().Add(c.Budget)
 	var bashID string

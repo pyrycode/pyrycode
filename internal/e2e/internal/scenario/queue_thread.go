@@ -14,24 +14,25 @@ import (
 // queuePlacementReader keeps canonical items across catch-up and live patches.
 // Foreign conversations never alter its revision or identity state.
 type queuePlacementReader struct {
-	t          *testing.T
-	w          Wire
-	conv       string
-	items      map[uint64]protocol.ThreadItem
-	received   map[uint64]protocol.ThreadItem
-	pending    []protocol.ThreadItem
-	version    uint64
-	epoch      string
-	checkpoint uint64
-	request    uint64
-	requested  uint64
-	retryAfter time.Time
-	sourceID   uint64
-	ends       []history.Entry
-	since      time.Time
-	running    map[string]bool
-	idles      []string
-	completed  map[string]bool
+	t               *testing.T
+	w               Wire
+	conv            string
+	items           map[uint64]protocol.ThreadItem
+	received        map[uint64]protocol.ThreadItem
+	pending         []protocol.ThreadItem
+	version         uint64
+	epoch           string
+	checkpoint      uint64
+	request         uint64
+	requested       uint64
+	retryAfter      time.Time
+	sourceID        uint64
+	ends            []history.Entry
+	since           time.Time
+	running         map[string]bool
+	idles           []string
+	completed       map[string]bool
+	completionBatch int
 }
 
 func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementReader {
@@ -109,7 +110,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				}
 			}
 		}
-		if len(r.ends) > 0 && r.checkpoint < r.ends[0].ID && r.request == 0 && !time.Now().Before(r.retryAfter) {
+		if r.checkpointReady() && r.checkpoint < r.ends[0].ID && r.request == 0 && !time.Now().Before(r.retryAfter) {
 			r.requested = r.version
 			r.request = r.w.Send(protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: r.conv, Epoch: r.epoch, Version: r.requested, Limit: 100})
 		}
@@ -120,6 +121,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 		if boundary && r.checkpoint >= r.ends[0].ID && len(r.idles) > 0 {
 			r.ends = r.ends[1:]
 			r.idles = r.idles[1:]
+			r.completionBatch = max(1, r.completionBatch-1)
 			return QueuePlacementFrame{Kind: "turn_end"}, true
 		}
 		if len(r.pending) > 0 && !boundary {
@@ -139,7 +141,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				MessageID string `json:"message_id"`
 			}
 			if err := json.Unmarshal(item.Content, &content); err != nil {
-				r.t.Fatal(err)
+				r.t.Fatalf("decode queued item content: kind=%s item=%d rev=%d: %v", item.Kind, item.ID, item.Rev, err)
 			}
 			f := QueuePlacementFrame{Text: content.Text, ToolName: content.Name, ToolUseID: content.ToolUseID, QueuedID: content.QueuedID, ItemID: item.ID, Status: item.Status, SentNow: content.SentNow, MessageID: content.MessageID}
 			f.Active, f.Shown, f.Order = item.Active, item.Shown, item.Order
@@ -195,7 +197,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 		}
 		decode := func(v any) {
 			if err := json.Unmarshal(env.Payload, v); err != nil {
-				r.t.Fatal(err)
+				r.t.Fatalf("decode queue envelope: type=%s: %v", env.Type, err)
 			}
 		}
 		switch env.Type {
@@ -265,11 +267,12 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			if err != nil {
 				r.t.Fatal(err)
 			}
-			if err := json.Unmarshal(raw, &item); err != nil {
+			var updated protocol.ThreadItem
+			if err := json.Unmarshal(raw, &updated); err != nil {
 				r.t.Fatal(err)
 			}
-			item.Rev = p.Rev
-			r.receive(item)
+			updated.Rev = p.Rev
+			r.receive(updated)
 		case protocol.TypeThreadTextAppend:
 			var p protocol.ThreadTextAppendPayload
 			decode(&p)
@@ -286,11 +289,11 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			}
 			var content map[string]json.RawMessage
 			if err := json.Unmarshal(item.Content, &content); err != nil {
-				r.t.Fatal(err)
+				r.t.Fatalf("decode append content: kind=%s item=%d rev=%d: %v", item.Kind, item.ID, item.Rev, err)
 			}
 			var text string
 			if err := json.Unmarshal(content["text"], &text); err != nil {
-				r.t.Fatal(err)
+				r.t.Fatalf("decode append text: kind=%s item=%d rev=%d: %v", item.Kind, item.ID, item.Rev, err)
 			}
 			content["text"], _ = json.Marshal(text + p.Text)
 			item.Content, _ = json.Marshal(content)
@@ -339,4 +342,24 @@ func (r *queuePlacementReader) receive(item protocol.ThreadItem) {
 	}
 	r.received[item.ID] = item
 	r.pending = append(r.pending, item)
+}
+
+// checkpointReady keeps completion queries out of a known successor's live
+// publication. Each source end needs its own observed running-to-idle boundary.
+func (r *queuePlacementReader) checkpointReady() bool {
+	batch := max(1, r.completionBatch)
+	if len(r.ends) < batch || len(r.running) != 0 {
+		return false
+	}
+	idle := 0
+	for _, end := range r.ends[:batch] {
+		for idle < len(r.idles) && r.idles[idle] != "" && r.idles[idle] != end.Session.SessionID {
+			idle++
+		}
+		if idle == len(r.idles) {
+			return false
+		}
+		idle++
+	}
+	return true
 }

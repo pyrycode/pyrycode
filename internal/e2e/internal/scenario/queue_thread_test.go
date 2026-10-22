@@ -160,8 +160,6 @@ func TestQueueCompletionNeedsFinalAndIdle(t *testing.T) {
 	}
 	frames = append(frames, idle(stamp.Add(-time.Second)), checkpoint(98, true), checkpoint(99, false))
 	check(false)
-	frames = append(frames, checkpoint(99, true))
-	check(false)
 	running := idle(stamp.Add(-500 * time.Millisecond))
 	running.Payload, _ = json.Marshal(protocol.TurnStatePayload{ConversationID: "conv", State: "responding"})
 	foreign := running
@@ -173,7 +171,9 @@ func TestQueueCompletionNeedsFinalAndIdle(t *testing.T) {
 	running.SessionID = json.RawMessage(`"producer"`)
 	currentIdle := idle(stamp.Add(-100 * time.Millisecond))
 	currentIdle.SessionID = running.SessionID
-	frames = append(frames, running, currentIdle)
+	frames = append(frames, running, currentIdle, checkpoint(98, true), checkpoint(99, false))
+	check(false)
+	frames = append(frames, checkpoint(99, true))
 	check(true)
 	check(false) // repeated source snapshots cannot complete the same turn twice
 }
@@ -199,7 +199,7 @@ func TestQueueBufferedSuccessorRevisions(t *testing.T) {
 		frame(protocol.TypeThreadItemChanged, protocol.ThreadItemChangedPayload{ConversationID: "conv", Epoch: "epoch", Version: 12, ItemID: user.ID, BaseRev: 11, Rev: 12, Changes: map[string]json.RawMessage{"status": json.RawMessage(`"delivered"`)}}),
 		frame(protocol.TypeThreadItemAdded, protocol.ThreadItemAddedPayload{ConversationID: "conv", Epoch: "epoch", Version: 13, Item: assistant}),
 		frame(protocol.TypeThreadTextAppend, protocol.ThreadTextAppendPayload{ConversationID: "conv", Epoch: "epoch", Version: 14, ItemID: assistant.ID, BaseRev: 13, Rev: 14, Text: "!"}),
-		frame(protocol.TypeThreadItemChanged, protocol.ThreadItemChangedPayload{ConversationID: "conv", Epoch: "epoch", Version: 15, ItemID: assistant.ID, BaseRev: 14, Rev: 15, Changes: map[string]json.RawMessage{"active": json.RawMessage(`false`), "status": json.RawMessage(`"done"`)}}),
+		frame(protocol.TypeThreadItemChanged, protocol.ThreadItemChangedPayload{ConversationID: "conv", Epoch: "epoch", Version: 15, ItemID: assistant.ID, BaseRev: 14, Rev: 15, Changes: map[string]json.RawMessage{"active": json.RawMessage(`false`), "status": json.RawMessage(`"done"`), "content": json.RawMessage(`{"text":"two!!"}`)}}),
 	}
 	for range 2 {
 		for _, state := range []string{"responding", "idle"} {
@@ -210,24 +210,31 @@ func TestQueueBufferedSuccessorRevisions(t *testing.T) {
 	}
 	user.Rev = 12
 	assistant.Rev, assistant.Active, assistant.Status = 15, false, "done"
-	assistant.Content = json.RawMessage(`{"text":"two!"}`)
-	var requests int
-	r := &queuePlacementReader{t: t, conv: "conv", epoch: "epoch", version: 1, checkpoint: 1, items: map[uint64]protocol.ThreadItem{}, w: Wire{
+	assistant.Content = json.RawMessage(`{"text":"two!!"}`)
+	var requests, phases int
+	r := &queuePlacementReader{t: t, conv: "conv", epoch: "epoch", version: 1, checkpoint: 1, completionBatch: 2, items: map[uint64]protocol.ThreadItem{}, w: Wire{
 		Source: func(string) []history.Entry { return source },
 		Send: func(kind string, payload any) uint64 {
 			requests++
-			if kind != protocol.TypeThreadCatchUp || requests != 1 {
+			if phases != 4 {
+				t.Fatal("completion query raced the queued successor's terminal live phase")
+			}
+			if kind != protocol.TypeThreadCatchUp || requests > 2 {
 				t.Fatal("unexpected completion query")
 			}
 			p := payload.(protocol.ThreadCatchUpPayload)
-			if p.Epoch != "epoch" || p.Version != 1 {
+			if p.Epoch != "epoch" || p.Version != 15 {
 				t.Fatal("lost canonical baseline")
 			}
 			// Full rows can repeat already received revisions while placement
 			// remains buffered behind the first source completion.
-			frames = append(frames, frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Epoch: "epoch", Version: 20, Items: []protocol.ThreadItem{user, assistant}}))
-			final := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Epoch: "epoch", Version: 20, FromVersion: &p.Version, Final: true})
-			id := uint64(99)
+			version := uint64(15)
+			if requests == 2 {
+				version = 20
+			}
+			frames = append(frames, frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Epoch: "epoch", Version: version, Items: []protocol.ThreadItem{user, assistant}}))
+			final := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Epoch: "epoch", Version: version, FromVersion: &p.Version, Final: true})
+			id := uint64(98 + requests)
 			final.InReplyTo = &id
 			frames = append(frames, final)
 			return id
@@ -238,6 +245,9 @@ func TestQueueBufferedSuccessorRevisions(t *testing.T) {
 			}
 			env := frames[0]
 			frames = frames[1:]
+			if env.Type == protocol.TypeTurnState {
+				phases++
+			}
 			return env
 		},
 	}}
@@ -255,8 +265,11 @@ func TestQueueBufferedSuccessorRevisions(t *testing.T) {
 			got = append(got, f.Kind+":"+f.Text)
 		}
 	}
-	if want := "[turn_end user_message:queued delta:two delta:! turn_end]"; fmt.Sprint(got) != want {
+	if want := "[turn_end user_message:queued delta:two delta:! delta:! turn_end]"; fmt.Sprint(got) != want {
 		t.Fatalf("placement = %v, want %s", got, want)
+	}
+	if requests != 2 || r.checkpoint != 20 {
+		t.Fatal("first completion's checkpoint certified the uncovered successor")
 	}
 	for _, want := range []protocol.ThreadItem{user, assistant} {
 		got, _ := json.Marshal(r.items[want.ID])
