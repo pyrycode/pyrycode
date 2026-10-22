@@ -96,7 +96,7 @@ arms under plain `make e2e-realclaude` when either `testdata/thread_shadow_histo
 or `testdata/thread_shadow_expected.json` is absent, without an operator flag.
 It reuses `startStreamRunningTurnHarness` for an authenticated daemon/legacy-client
 conversation and retains raw hidden facts, observed envelopes and four versioned
-snapshots. See [scenario coverage and counted provenance](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+snapshots. See [scenario coverage and counted provenance](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence).
 When both files exist, the same named checks validate the pinned pair and replay
 its checkpoints; a passing run in that mode proves retained evidence, not a new capture.
 
@@ -155,7 +155,7 @@ unconditional offline race validation, `TestThreadAgentRecordedReplay`,
 `TestThreadShellRecordedReplay` and tagged compilation/vet. A gate-generated file
 in a disposable worktree does not survive handback without that commit.
 The committed pair has completed this recovery; its report and capture identity
-are linked in the [thread overview](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+are linked in the [thread overview](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 ## CI cadence: code-review phase, no nightly workflow
 

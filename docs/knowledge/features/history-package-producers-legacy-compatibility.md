@@ -24,14 +24,15 @@ Stored visibility feeds thread folding and the internal history APIs; it does
 not grant permission to reach a transport. Summary/read authority comes from
 [shown-thread evidence](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954).
 Conversely, an eligible legacy event still reaches its existing live/replay recipients when `Shown` is false,
-including normal turn ends, info banners and live status readings. This preserves
+including info banners and live status readings. This preserves
 [ADR 042's compatibility boundary](../decisions/042-daemon-built-thread.md#compatibility):
 old apps treat unknown history entries as read-mark barriers.
 
 `interactiveTurnEmitterV2.emit` appends once before checking this allowlist,
 including when no clients are connected. Retired assistant/tool/completion and
-agent start/update/roster types return before projection, regardless of this
-allowlist. Other unsupported facts return before ring publication unless
+agent start/update/roster types, both refusal notices, compaction boundaries and
+unsupported-content notices return before projection, regardless of this
+allowlist (#3734–#3736). Other unsupported facts return before ring publication unless
 `legacyRuntimeReceipt` validates their receipt projection.
 Successful appends remain readable through raw `Store.Page` after reopening.
 Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
@@ -90,16 +91,19 @@ unaccounted holes remain barriers. Receipt accounting alone never advances a
 read mark or grants foreground presentation.
 
 **Runtime writers bypass `emit`.** Changing only its allowlist would leave live
-and reconnect accounting incomplete. `recordRuntimeFact` and
-`sessionTransitionEmitterV2.broadcast` append each raw fact once, then use
-`publishLegacyHistory` for the receipt. `recordAgentFact` and `closeAgentHistory`
-append only; their receipt publication is retired (#3735). Runtime dividers use the replay ring
+and reconnect accounting incomplete. `recordRuntimeFact` appends each raw fact
+once, then uses `publishLegacyHistory` for the receipt.
+`sessionTransitionEmitterV2.broadcast` retains divider/transition appends and the
+committed-switch callback without publishing raw transitions or divider receipts
+(#3736). `recordAgentFact` and `closeAgentHistory` append only; their receipt
+publication is retired (#3735). Surviving runtime producers use the replay ring
 installed on the runtime sink before workers start. History, direct recipients
 and replay share the original ID and timestamp, with the same receipt bytes;
 there is no second durable append or ID allocator. Existing interactive and
 agent/isolation gates still apply. Nil/failed storage produces no receipt, while
-eligible legacy delivery and replay continue without durable identity. Ordinary
-`session_transition` frames retain their separate, non-ring behavior.
+eligible legacy delivery and replay continue without durable identity. Neither
+storage failure nor adapter recognition restores retired publication. Startup
+dividers and other runtime/prompt receipts remain separate work for #3737.
 Agent/task facts also persist in history-only operation. Lifetime mint/marshal
 failures log fixed discriminants; append failures retain the common content-free
 classifier, without supplied call/task IDs, parent, status, prose or storage paths.
@@ -345,7 +349,7 @@ again:**
   independently compares stored bytes and the new name. Initialize the named
   compact subscription with catch-up before checking live acceptance, and read
   that publication before same-version catch-up can suppress it; see
-  [query/live ordering](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+  [query/live ordering](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
   Reopened content uses complete catch-up because compact interval certificates
   are not retained across store reopening.
 - **Keep storage broken through delivery and drop, not only acceptance (#3167).**

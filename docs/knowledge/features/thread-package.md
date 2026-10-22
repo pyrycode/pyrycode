@@ -18,7 +18,7 @@ hidden facts; legacy receipt projections discard facts needed by the fold.
 
 ## Shadow lifecycle and evidence
 
-[Daemon publication, lifecycle and capture evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+[Daemon publication, lifecycle and capture evidence](thread-package-shadow-lifecycle-and-evidence.md)
 covers discovery, query/live ordering, retirement and recorded evidence.
 Interactive assistant/tool/completion source folding remains authoritative while
 its compatibility publication is retired for every app (#3734), including peers
@@ -37,9 +37,20 @@ through late links, reported outcomes, saved gone/session endings and reused
 identities; task progress and bound-session stop controls remain supported.
 The counted Linux live gate passed `TestRealClaudeStopBackgroundTaskCompletion`
 and `TestRealClaudeComposerStopPreservesBackgroundTask` on `ad1cb1aec214`;
-[the linked evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+[the linked evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#shadow-lifecycle-and-evidence)
 distinguishes that acceptance from offline helpers and parent #3718's remaining
 family acceptance. Stop acceptance alone cannot establish completion.
+
+Session transitions, refusal notices, compaction boundaries and unsupported
+content likewise remain retained sources with no raw frames, new replay copies
+or substitute transition-divider receipts for any app (#3736). Canonical live
+items and explicit catch-up agree; supported live state and switch completion
+remain separate. `TestSessionContentRetired` covers session causes, lifecycle
+neutrality and source isolation; its storage controls prevent publication from
+returning when history fails. The
+[counted Linux evidence and ordering lessons](thread-package-shadow-lifecycle-and-evidence-retirement.md#session-and-content-notice-retirement-3736)
+include the subsequent deterministic and configured live passes on `9ebba3462074`.
+They do not complete #3737's residual cleanup or #3718's final family acceptance.
 
 ### Reusable fold regression corpus
 

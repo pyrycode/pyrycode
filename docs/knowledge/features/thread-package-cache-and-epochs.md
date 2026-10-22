@@ -86,7 +86,7 @@ projection checks authority again rather than reusing the former loaded reading.
 An initial refresh may therefore still omit the field, with a later eligible
 retirement restoring it. This preserves both V < H and V > H rejection and does
 not raise the shown watermark for hidden entries or completion-only revisions.
-See [offscreen summary recovery](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+See [offscreen summary recovery](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence)
 for the producer sequence and pending Mobile acceptance.
 
 `TestDaemonThreadOffscreenShownRecovery` holds a real retiring worker and then

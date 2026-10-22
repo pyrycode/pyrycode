@@ -37,7 +37,7 @@ content; only suffix-only transitions use `ThreadTextAppendPayload`. Splitting
 the combined transition into a patch followed by a same-revision append makes
 strict clients reject the suffix, leaving truncated text at the final revision.
 Preserve the fold's actual revisions so subsequent updates and full reads agree;
-see [daemon publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+see [daemon publication](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 Split the serialized logical update, not just kind-specific content: a large
 `summary` or other metadata can exceed the cap even when content fits. This

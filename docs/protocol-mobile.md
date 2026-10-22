@@ -1058,6 +1058,20 @@ This subsection covers reconnect **timing** only; the **application-layer** reco
 
 ## Application message types
 
+Session transitions, both model-refusal notices, compaction boundaries and
+unsupported-content notices are source history only (#3736). No app receives
+`session_transition`, `model_refusal_fallback`, `model_refusal_no_fallback`,
+`compaction_boundary` or `unrecognized_message` frames, new replay copies or
+substitute transition-divider receipts, including apps without `thread`.
+Retained transition and `session_divider` records feed canonical session dividers;
+retained content notices feed canonical notice/compaction items and explicit
+catch-up. Recording continues without clients; nil/failed history never restores
+raw publication. Model/settings/catalogs, prompts, progress, retry and compaction
+live state and controls retain their separate delivery, source tags and ordered
+readings/clears. Standalone banners, other runtime/startup and prompt-answer
+receipts, and channel-post publication remain for #3737; parent #3718 owns final
+family acceptance.
+
 Background-agent lifecycle and roster values remain source history for canonical
 thread items and explicit catch-up (#3735). No app receives their raw content
 frames, agent receipt banners or connect-time roster snapshots, including apps
@@ -1082,7 +1096,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `send_message` | phone → binary | no | Operator sends are observed through canonical thread items and explicit catch-up; raw user-message pushes and queued acceptance, delivery, drop and loss receipts are retired for every app. See [Queue observation and delivery identity](#queue-observation-and-delivery-identity). Carries an **optional** `attachment_ids` — the uploaded attachments this message references, so the daemon names them instead of inferring the set from upload order or arrival timing (#2036). Each element is a lowercase UUIDv4 per [The `attachment_id` shape](#the-attachment_id-shape); **at most 32 per message**, counting elements rather than distinct ids. A message naming none **omits the key entirely** — `null` and `[]` are also accepted and a receiver cannot tell the three apart. **Consumed since #2038**: the daemon names each attachment's on-host path in `claude`'s prompt, refuses an over-bound list with `protocol.malformed`, and deduplicates a repeated id. See [Naming a message's attachments](#naming-a-messages-attachments). **Two fixed literals in `text` are exceptions to ordinary message delivery**: `/clear` (#2456) and `/reset` (#3607), independent of `slash_command_list`. After trimming, either must be the first whitespace-delimited token, matched case-sensitively with Unicode whitespace boundaries; trailing text after whitespace is discarded too. `/clear extra` and `/reset extra` reset; `/clearcache`, `/resetfoo`, `/RESET`, `/Reset` and `please /reset` remain ordinary messages. Payload decoding, the attachment-count bound and conversation routing still reject invalid requests before interception. For a valid, routable match, the daemon sends the ordinary `ack` **before** calling `StartNewSession` for that conversation, using the same wrap-up, handoff and rotation routine as a named `new_session` (see [`resetting`](#resetting)). Neither literal is enqueued or delivered to claude. Its `attachment_ids` are dropped without resolution, so they cannot produce `attachment.not_found`; the handler neither touches `LastUsedAt` nor auto-names the conversation. The reset is **not gated on the negotiated `interactive` capability** the way the `resetting` frames themselves are: a non-interactive client can use either literal but does not see those frames. An absent resetter or any reset error, including a refused workspace, still drops the message with only the ordinary `ack`; there is no `new_session.workspace_refused`-shaped reply on this path. Only a successful reset invalidates held reply suggestions; refusal preserves them (see [Clear and invalidation](#reply_suggestion)). A client that renders its own optimistic echo of either literal as a sent row will not find that row in history after a reload, since the daemon never delivers the message — the session delimiter appears with nothing above it. Accepted, not a bug. Also carries an **optional `client_sent_at`** (RFC 3339, #2704): when the client says Send was tapped, on the client's own clock. An absent or unparseable value is **dropped, not refused** — the message is enqueued and delivered exactly as if the key were missing. It is never used for ordering (the client's clock may be wrong) and never logged. See [A history entry](#a-history-entry) for where it, and the sender's device name and app version, land on the stored turn. |
 | `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type; v2 assistant output uses the structured interactive stream (#699). Queued sends are observed through canonical thread items and explicit catch-up; queued acceptance, delivery, drop and loss facts produce no legacy receipts (#3733). Raw user-message pushes and their reconnect replay publication are retired for every app (#3732), including connections without `thread`. Safe delivery source records remain internal history inputs; see [Queue observation and delivery identity](#queue-observation-and-delivery-identity). |
 | `list_conversations` | phone → binary | no | |
-| `conversations` | binary → phone | no | Reply to `list_conversations`, correlated by `in_reply_to`. Every row carries **`current_session_id`** (#940): an **always-present JSON string** copied from that conversation's stored session binding, including `""` when unbound. This supplies initial session ID discovery on the first list response, before any `session_transition`, without an extra `request_session_settings` request or `/clear`. A nonempty binding does **not** guarantee a running process or a successful session-scoped mutation. Every row carries **`workspace_label`** (#2208): the operator-set display name stored for that row's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every row of every reply, so a client may treat a missing one as a malformed row rather than as an unlabelled workspace, and before any workspace is ever named every row carries `null`. It is keyed by **workspace, not conversation**: rows sharing one `cwd` carry the same value, a row never carries a neighbour's, and the only thing that changes it is [`rename_workspace`](#renaming-a-workspace) — which is how a client that renames on one device sees the new label on another. **Archived rows are not exempt**: this reply is unfiltered, and archiving a conversation does not un-name its folder. The value is a stored opaque string echoed **verbatim**; as [§ Renaming a workspace](#renaming-a-workspace) already states, its 128-byte bound is a size limit and not a safety property, so rendering it safely is the client's job. Every row also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation, `false` by default. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, which is how a client paired with an older daemon keeps notifying rather than silently going quiet. Both clients raise their own alerts from events they already receive; the daemon only stores and reports this flag. Every row also carries **`archived_at`** (#2698): an RFC3339 UTC timestamp for the moment `archive_conversation` archived this row. Archiving it again keeps the original stamp, and `unarchive_conversation` clears it back to `null`. **Nullable but never omitted** — `null` on every active row, and also on a row archived before this field existed, so a client cannot distinguish "never archived" from "archived, no stamp recorded" and falls back to ordering those rows by `last_used_at`. Clients order the Archive screen newest-archived-first by this value. `conversation_updated` does not carry this field. Every row carries **`read_up_to`**, the host operator's durable read mark, as an always-present unsigned 64-bit integer including `0`, shared by every paired client/device on this host. The only unread evidence is authoritative **`last_shown_version`** on connections that negotiated `thread`: unread is `last_shown_version > read_up_to` when that field is present. Absent shown evidence means unknown, never zero. Every otherwise eligible row survives unavailable evidence with its shown field omitted; listing succeeds without legacy history, including an empty registry. The `latest_entry_id` field and whole-list legacy-history refusal are retired (#3722). [`mark_conversation_read`](#marking-a-conversation-read) raises the durable mark and still refuses retryably when authoritative evidence is unavailable. **`agent`** (`"claude"` \| `"codex"`, #2643) is the agent that runs the row's bound session — present only for a conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, `omitempty` so it is absent, not `null`, for a conn that did not. A conversation with no bound session, or one whose bound session the daemon does not hold, reads `"claude"`. **A conn that did not negotiate `multi_agent` is not merely sent an unlabelled row: every row whose agent is `"codex"` is left out of the reply entirely**, so it receives only Claude rows, and every remaining row carries no `agent` key at all. Optional **`last_shown_version`** on negotiated thread connections comes from usable loaded status or an eligible unloaded clean certificate (#3330), whose consumed version V must exactly equal independently known current raw history progress H: absent for stale/invalid evidence or unknown progress, numeric `0` for authoritative zero including valid empty evidence at V = H = 0; see [`conversations`](#conversations). It tracks shown thread additions/text appends and preserves the stored binding and durable read mark.  Every row also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; an absent field from an older host means unpinned. All list/update producers preserve stored pins, including command-package announcements (#3538). See [pin requests](#set_conversation_pinned) for the host-local contract. |
+| `conversations` | binary → phone | no | Reply to `list_conversations`, correlated by `in_reply_to`. Every row carries **`current_session_id`** (#940): an **always-present JSON string** copied from that conversation's stored session binding, including `""` when unbound. This supplies initial session ID discovery on the first list response, without waiting for a transition frame or making an extra `request_session_settings` request or `/clear`. A nonempty binding does **not** guarantee a running process or a successful session-scoped mutation. Every row carries **`workspace_label`** (#2208): the operator-set display name stored for that row's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every row of every reply, so a client may treat a missing one as a malformed row rather than as an unlabelled workspace, and before any workspace is ever named every row carries `null`. It is keyed by **workspace, not conversation**: rows sharing one `cwd` carry the same value, a row never carries a neighbour's, and the only thing that changes it is [`rename_workspace`](#renaming-a-workspace) — which is how a client that renames on one device sees the new label on another. **Archived rows are not exempt**: this reply is unfiltered, and archiving a conversation does not un-name its folder. The value is a stored opaque string echoed **verbatim**; as [§ Renaming a workspace](#renaming-a-workspace) already states, its 128-byte bound is a size limit and not a safety property, so rendering it safely is the client's job. Every row also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation, `false` by default. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, which is how a client paired with an older daemon keeps notifying rather than silently going quiet. Both clients raise their own alerts from events they already receive; the daemon only stores and reports this flag. Every row also carries **`archived_at`** (#2698): an RFC3339 UTC timestamp for the moment `archive_conversation` archived this row. Archiving it again keeps the original stamp, and `unarchive_conversation` clears it back to `null`. **Nullable but never omitted** — `null` on every active row, and also on a row archived before this field existed, so a client cannot distinguish "never archived" from "archived, no stamp recorded" and falls back to ordering those rows by `last_used_at`. Clients order the Archive screen newest-archived-first by this value. `conversation_updated` does not carry this field. Every row carries **`read_up_to`**, the host operator's durable read mark, as an always-present unsigned 64-bit integer including `0`, shared by every paired client/device on this host. The only unread evidence is authoritative **`last_shown_version`** on connections that negotiated `thread`: unread is `last_shown_version > read_up_to` when that field is present. Absent shown evidence means unknown, never zero. Every otherwise eligible row survives unavailable evidence with its shown field omitted; listing succeeds without legacy history, including an empty registry. The `latest_entry_id` field and whole-list legacy-history refusal are retired (#3722). [`mark_conversation_read`](#marking-a-conversation-read) raises the durable mark and still refuses retryably when authoritative evidence is unavailable. **`agent`** (`"claude"` \| `"codex"`, #2643) is the agent that runs the row's bound session — present only for a conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, `omitempty` so it is absent, not `null`, for a conn that did not. A conversation with no bound session, or one whose bound session the daemon does not hold, reads `"claude"`. **A conn that did not negotiate `multi_agent` is not merely sent an unlabelled row: every row whose agent is `"codex"` is left out of the reply entirely**, so it receives only Claude rows, and every remaining row carries no `agent` key at all. Optional **`last_shown_version`** on negotiated thread connections comes from usable loaded status or an eligible unloaded clean certificate (#3330), whose consumed version V must exactly equal independently known current raw history progress H: absent for stale/invalid evidence or unknown progress, numeric `0` for authoritative zero including valid empty evidence at V = H = 0; see [`conversations`](#conversations). It tracks shown thread additions/text appends and preserves the stored binding and durable read mark.  Every row also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; an absent field from an older host means unpinned. All list/update producers preserve stored pins, including command-package announcements (#3538). See [pin requests](#set_conversation_pinned) for the host-local contract. |
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
 | `conversation_created` | binary → phone | no | Reply to `create_conversation`, correlated by `in_reply_to`. Its `cwd` is the resolved realpath the conversation's session actually spawns in for a non-null request (#2568), never the string the request sent, and is the same value `list_conversations` reports for that row from then on; a `null` request's `cwd` is the daemon's default. Carries **`workspace_label`** (#2210): the operator-set display name stored for this conversation's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every frame, so a client may treat a missing one as malformed rather than as an unlabelled workspace. A conversation created into an already-named folder is named by it immediately, from this reply, without a `list_conversations` round trip. Same value and same contract as the [`conversations`](#conversations) row's field, including that its 128-byte bound is a size limit and **not** a safety property — rendering it safely is the client's job. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the created conversation's session runs on, set only for a client that negotiated `multi_agent` — the `conversations` row's own rule. `omitempty` is load-bearing here: a request without `agent` from a client without `multi_agent` gets a reply with no `agent` key at all, byte-identical to the frame this document described before Codex conversations existed. **Since #2665, a request's `model` and `effort` become the created session's stored settings from the mint**, field by field — an absent field keeps what a mint gives without them: a Claude conversation still inherits the operator's configured model/effort, a Codex conversation still starts with neither set and runs at Codex's own defaults. A refused `model` or `effort` is answered on `create_conversation` itself (see that row) and never reaches this reply — no conversation is created. |
 | `promote_conversation` | phone → binary | no | |
@@ -1124,9 +1138,9 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). Since #2236 the falling edge also names the **outcome** — `compact_result` and `compact_error` — so a failed compaction is distinguishable from an ordinary one. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`compaction_boundary`** | binary → phone | no | **New in v2** (interactive, capability-gated). A compaction finished: what triggered it and how far the context shrank (#2237). A **separate frame** from `compacting`, not a wider one — `claude` states these values on a line that arrives *after* that frame's falling edge has shipped. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`compaction_boundary`** | source history only | no | Retained compaction source feeds canonical compaction items; no raw live/replay publication for any app (#3736). `compacting` remains separate live state. See [source schema](#compaction_boundary). |
 | **`banner`** | binary → phone | no | **New in v2** (interactive, capability-gated). Operator-facing text `claude` printed **about** the session rather than as part of an answer — a hook's block reason, a local command's output, a loop notification (#2256). The one typed place such text arrives; before it, the daemon dropped it. Conversation-scoped, so there is no `turn_id`. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`unrecognized_message`** | binary → phone | no | **New in v2** (interactive, capability-gated). The stream parser met claude output it has no mapping for — a gap in our mapping, not a claude sub-state. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`unrecognized_message`** | source history only | no | Retained unsupported-content source feeds canonical notices; no raw live/replay publication for any app (#3736). See [source schema](#unrecognized_message). |
 | **`background_task_started`** | source history only | no | Retained source schema; raw publication retired for every app (#3735). Canonical items represent work that can outlive its main turn. See [source schema](#background_task_started). |
 | **`background_task_updated`** | source history only | no | Retained source schema for task changes and reported outcomes; raw publication retired for every app (#3735). See [source schema](#background_task_updated). |
 | **`background_task_roster`** | source history only | no | Retained source schema for reported task snapshots; no raw live/replay frames or connect-time snapshots for any app (#3735). See [source schema](#background_task_roster). |
@@ -1134,13 +1148,13 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted since #1410. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`model_announced`** | binary → phone | no | **New in v2** (interactive, capability-gated). The model claude named for the current turn on its `system/init` line (#1616). **Not** the per-session override the three `model` fields elsewhere in this document carry. Shape declared by #1616, emitted since #1638. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`model_refusal_fallback`** | binary → phone | no | **New in v2** (interactive, capability-gated). Explains that claude refused a turn on one model and retried it on a fallback (#2265). It explains a changed label; [`model_announced`](#model_announced) remains authoritative for which model is running. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`model_refusal_no_fallback`** | binary → phone | no | **New in v2** (interactive, capability-gated). Explains that claude refused a turn and did not retry it on another model (#2266). It carries no fallback model or scope and does not change the authoritative model state. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`model_refusal_fallback`** | source history only | no | Retained refusal/retry source feeds canonical notices; no raw live/replay publication for any app (#3736). Current-model state remains separate. See [source schema](#model_refusal_fallback). |
+| **`model_refusal_no_fallback`** | source history only | no | Retained no-retry refusal source feeds canonical notices; no raw live/replay publication for any app (#3736). See [source schema](#model_refusal_no_fallback). |
 | **`session_facts`** | binary → phone | no | **New in v2** (interactive, capability-gated). What `claude`'s own **build** is and what permission **posture** `claude` says the child is running under, from the same `system/init` line [`model_announced`](#model_announced) is drawn from (#2253). It carries **no session identifier** — "session" names the child run these facts describe. Shape declared by #2253, emitted since #2254. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** Answers only `conversation.not_found` or `server.binary_offline` (#2540); the daemon renders no screen. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** Declared but never emitted (#2540) — `protocol.TypeScreenSnapshot` has no producer. See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`session_transition`** | source history only | no | Retained transition and `session_divider` sources feed canonical session dividers; no raw frames, new replay copies or substitute transition-divider receipts for any app (#3736). See [source schema](#session_transition). |
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`mcp_status`** | binary → phone | no | **New in v2.** The conversation-scoped MCP status payload serves both automatic publication and a fresh [`mcp_status_request`](#asking-for-mcp-status-on-demand) reply. Automatic publication occurs once per eligible daemon-configured strict child, including an empty server list. It creates one event-ring entry and one frame per connected interactive client. A query reply goes only to its requester, carries no `event_id`, and never enters the event ring. Both paths exclude bypass children and their privately loaded MCP servers. See [`mcp_status`](#mcp_status). |
 | **`mcp_status_request`** | phone → binary | no | **New in v2.** A paired interactive client requests fresh MCP status for the conversation named by `conversation_id`. The daemon queries that conversation's current live child only when its actual spawn used the daemon MCP config with `--strict-mcp-config`. One exact child response returns to the requester as [`mcp_status`](#mcp_status), correlated by `in_reply_to`. Failures return `protocol.malformed`, `conversation.not_found`, or retryable `mcp_status.unavailable`. An unconfigured resolver or a connection without the capability consumes the request without decoding or replying. See [Asking for MCP status on demand](#asking-for-mcp-status-on-demand). |
@@ -1196,6 +1210,20 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 Payload shapes inherited from v1 are preserved in git history (the v1 doc has them); additive fields and declared contracts are documented here. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
 ### Daemon thread updates (v2, supplied delivery contract)
+
+Session transitions, both model-refusal notices, compaction boundaries and
+unsupported-content notices are source history only (#3736). No app receives
+`session_transition`, `model_refusal_fallback`, `model_refusal_no_fallback`,
+`compaction_boundary` or `unrecognized_message` frames, new replay copies or
+substitute transition-divider receipts, including apps without `thread`.
+Retained transition and `session_divider` records feed canonical session dividers;
+retained content notices feed canonical notice/compaction items and explicit
+catch-up. Recording continues without clients; nil/failed history never restores
+raw publication. Model/settings/catalogs, prompts, progress, retry and compaction
+live state and controls retain their separate delivery, source tags and ordered
+readings/clears. Standalone banners, other runtime/startup and prompt-answer
+receipts, and channel-post publication remain for #3737; parent #3718 owns final
+family acceptance.
 
 Background-agent lifecycle and roster values remain source history for canonical
 thread items and explicit catch-up (#3735). No app receives their raw content
@@ -4116,6 +4144,11 @@ it drew from this one.
 
 #### `compaction_boundary`
 
+**Retired raw publication (#3736).** This retained source schema feeds
+[authoritative thread updates and explicit catch-up](#daemon-thread-updates-v2-supplied-delivery-contract).
+No app receives this frame, a new replay copy or a substitute receipt, including
+apps without `thread`; absent/failing history never restores publication.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose context was compacted. |
@@ -4123,62 +4156,19 @@ it drew from this one.
 | `pre_tokens` | int or `null` | Context size before the compaction, as `claude` stated it. **`null` means `claude` stated no such count** and is not the same as `0`. |
 | `post_tokens` | int or `null` | Context size after. Same `null`-versus-`0` rule; `claude`'s own shape makes this one optional. |
 
-`compaction_boundary` (#2237) exists so the mark a compaction leaves in a thread can
-say **why** `claude` no longer remembers something from before that point — "Conversation
-compacted, 24k → 3k tokens", with `trigger: "manual"` letting a client add "by you".
+The retained boundary creates a canonical compaction item independently of
+[`compacting`](#compacting), which remains supported live state. Claude's boundary
+line may follow that state's falling edge or arrive without an earlier active
+edge. Recording the boundary creates no turn lifecycle edge and requires no open
+turn.
 
-**It is a separate frame from [`compacting`](#compacting), and it could not have been
-a wider one.** `claude` announces a finished compaction on its own line that arrives
-**after** the closing `system/status` line the `compacting` falling edge is read off,
-so by the time the numbers exist that frame has already shipped. A client applies this
-frame to the divider it has **already drawn**.
-
-**It also arrives with no `compacting` edge before it, by design.** The daemon
-publishes this frame for a boundary line that followed no `active: true`, so an
-auto-compaction that announces itself differently is still published. Two consequences.
-It is **conversation-scoped, not turn-scoped** — there is no `turn_id`, and the frame
-may arrive with no turn in progress at all. And this frame can be the **only** evidence
-a compaction happened, so a client that draws its divider only from `compacting` will
-miss those.
-
-**`null` and `0` are different facts and a client must not collapse them.**
-`post_tokens` is optional in `claude`'s own shape. A client that reads a missing count
-as zero renders "24k → 0 tokens" for a compaction `claude` reported without a post
-count. **Degrade instead**: say the conversation was compacted, without claiming a
-size. The daemon always emits all four keys — an absent count is a literal `null`,
-never a dropped key — so a client never has to distinguish "absent" from "older
-binary".
-
-**Neither count is clamped, range-checked or ordered by the daemon.** They are
-`claude`'s numbers, not the daemon's: `post_tokens` greater than `pre_tokens` is not
-rejected and not corrected, and neither is a negative. This is
-[`rate_limited`](#rate_limited)'s `resets_at` posture. What the daemon *does*
-guarantee is that a value it could not decode as an integer produces **no frame at
-all** rather than a frame with an invented number.
-
-**Every field is `claude`'s, and so is the fact of the boundary** — which is a class
-change rather than a wider payload, and a step beyond the one #2236 made next door.
-[`compacting`](#compacting)'s `active` is a bool the **daemon** computes from a string
-comparison it makes itself, so a client can read that field as the daemon's own
-observation. Nothing here is. A fabricated line reading `pre_tokens: 999999,
-post_tokens: 1` draws a plausible compaction mark where nothing was compacted, and
-because this frame needs no preceding edge, nothing else on the wire contradicts it.
-[§ Security model](#security-model)'s threat 1 lands in the outward direction: the
-daemon **bounds** `trigger` at 256 bytes and **does not sanitize** it, and the render
-boundary owing control-character and terminal-escape stripping is the **client's**.
-`trigger` takes [`turn_end`](#turn_end)'s `outcome` rule and **not** `compact_error`'s
-— it is a short token from an open set, so switch on it against known values and treat
-an unrecognised one as *unknown*; it has none of `compact_error`'s prose latitude.
-Render the whole frame as **`claude`'s assertion**, attributed to `claude`, never as
-the daemon's own finding. **Nothing in the daemon acts on any field here** — no retry,
-no backoff, no teardown, no routing — which is what keeps a fabricated value a
-misleading label rather than an actuator.
-
-**Nothing else from `claude`'s compaction metadata crosses**, and the exclusion is
-structural rather than a scrub: the daemon's decode target declares these three fields,
-so every other key is discarded — including ones `claude` has not shipped yet. That
-line also carries three UUIDs naming entries in the **operator's own transcript**, and
-those are the reason the allowlist is stated here rather than left implicit.
+The trigger and counts are Claude-authored assertions. `trigger` is an open token,
+bounded at 256 bytes and dropped rather than cut. Missing counts remain literal
+`null`, distinct from zero; neither count is clamped, range-checked or reordered.
+Undecodable integer values produce no mapped boundary. Only the declared metadata
+is retained in this payload; transcript-entry UUIDs are excluded. Treat trigger
+text as inert, unsanitized source content and unknown tokens as unknown. Nothing
+in these fields actuates retry, backoff, teardown or routing.
 
 #### `resetting`
 
@@ -4208,7 +4198,7 @@ A repeated `active: true` carrying a new `phase` is a **phase change**, not a se
 
 **Every rising sequence ends in a falling edge, on success and on every error path.** A wrap-up turn that fails, produces nothing usable, or never runs still reaches `restarting` with `handoff: skipped`, and the respawn — whether it succeeds or not — still closes with `active: false`. A client may rely on the falling edge always arriving and needs no timeout of its own to clear the indicator.
 
-**Nothing on this frame is `claude`-authored.** `conversation_id` is the daemon's own routing key, `active` is a bool it computes, and `phase`/`handoff` are tokens it selects from named constants — a class difference from [`compacting`](#compacting) next door, whose `compact_result`/`compact_error` carry `claude`'s own unsanitized prose under [§ Security model](#security-model)'s threat 1. The handoff note's own content never crosses this wire: `handoff` reports only *whether* a note was made, never the note itself, so no render-as-inert-text rule is owed here. The `restarting` phase also does not name the new session id — that identity has its own frame, [`session_transition`](#session_transition).
+**Nothing on this frame is `claude`-authored.** `conversation_id` is the daemon's own routing key, `active` is a bool it computes, and `phase`/`handoff` are tokens it selects from named constants — a class difference from [`compacting`](#compacting) next door, whose `compact_result`/`compact_error` carry `claude`'s own unsanitized prose under [§ Security model](#security-model)'s threat 1. The handoff note's own content never crosses this wire: `handoff` reports only *whether* a note was made, never the note itself, so no render-as-inert-text rule is owed here. The `restarting` phase also does not name the new session id — read the addressable identity through [`session_settings`](#session_settings); the retained transition feeds the canonical session divider.
 
 **Producer:** `resettingEmitterV2` (#2478) emits all three edges from `activeSessionStarter.resetThenRotate` (`cmd/pyry/main.go`), synchronously off the reset-tail goroutine rather than through a `Run` hand-off — the two other v2 status producers buffer onto one because their callers are under a MUST-NOT-BLOCK contract, and this one's caller is not, so a drop-on-full send would risk the one thing this frame cannot lose: the falling edge. #2456 still owns routing a client's `/clear` into the reset routine.
 
@@ -4296,92 +4286,32 @@ against a published shape.
 
 #### `unrecognized_message`
 
+**Retired raw publication (#3736).** This retained source schema feeds
+[authoritative thread updates and explicit catch-up](#daemon-thread-updates-v2-supplied-delivery-contract).
+No app receives this frame, a new replay copy or a substitute receipt, including
+apps without `thread`; absent/failing history never restores publication.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose stream carried the unmappable output. |
-| `site` | string | Where the parser met it. Closed set: `line_type`, `assistant_block`, `user_block`, `undecodable`, `codex_method`, `codex_item`. The last two (#2608) are `codexsup.Translator`'s lanes for an unmapped Codex app-server notification method and an unmapped `ThreadItem` type; nothing reaches the wire yet — #2585 wires the translator into the daemon and is what makes a client actually see them. |
+| `site` | string | Where the parser met it. Closed set: `line_type`, `assistant_block`, `user_block`, `undecodable`, `codex_method`, `codex_item`. The last two (#2608) are `codexsup.Translator`'s lanes for an unmapped Codex app-server notification method and an unmapped `ThreadItem` type; both remain source facts without raw app publication. |
 | `message_type` | string | The offending message or content-block `type`. **Empty** when `site` is `undecodable` — nothing decoded, so no type was ever read. |
 | `raw` | string | The offending JSON, verbatim, truncated by the daemon to a fixed byte cap. A **string**, not nested JSON: a truncated blob is no longer valid JSON. |
 | `truncated` | bool | Whether the daemon cut `raw` to fit the cap. |
 
-`unrecognized_message` is **not a claude sub-state** — the one way it differs
-from its `stall` / `api_retry` / `compacting` neighbours above, which all report
-what claude is doing. This reports a gap in **our own** mapping.
+This records a gap in the stream mapping and creates a canonical notice for unsupported
+content. Known deliberately ignored input remains ignored; unsupported
+line/content-block types and undecodable input retain their existing source
+classification. The record has no `turn_id` and neither opens nor closes a turn.
+Its source conversation, agent and session remain captured independently of the
+current binding.
 
-The stream-json line parser recognises three top-level message types from claude
-(`assistant`, `user`, `result`) and a fixed set of content blocks. Everything
-else used to be dropped with a debug log, and because the production daemon runs
-at info level, that drop left no trace anywhere and no client was told. Fine for
-the types we ignore on purpose. Not fine for a type we have never seen: a claude
-version that moved something meaningful into a new message type would show
-nothing, everywhere, with nothing saying why.
-
-So the parser has **two tiers**, and the split is the whole design:
-
-- **Known and deliberately ignored, from this frame's perspective** — `system`
-  and `rate_limit_event` never produce `unrecognized_message`. `system` is
-  claude's catch-all namespace and its highest-rate emitter (`system/init`
-  fires once per turn, `system/thinking_tokens` roughly ten times), so treating
-  every subtype as surfacing-worthy by default would put a row on every turn
-  and make the frame worthless noise. As of #1380–#1385 and #1600 the daemon
-  parser maps **five** `system` subtypes internally (`task_started`,
-  `task_updated`, `background_tasks_changed`, `thinking_tokens`, `init`) to
-  daemon-owned `turnevent` types — see
-  [streamsup-package.md](knowledge/features/streamsup-package.md). The three
-  task values remain source history without raw app publication (#3735); the other readings retain their own delivery contracts. These mapped
-  types are documented below: `background_task_started`, `background_task_updated` and
-  `background_task_roster` (#1394), `thinking_tokens` as
-  `thinking_progress` (#1386), and `init` as
-  [`model_announced`](#model_announced) — the last of the five to get there, its
-  shape declared ahead of its producer (#1616 declares, #1638 emits). As of
-  #1404 the parser also maps `rate_limit_event` — a **top-level line type, not
-  a `system` subtype**, so the count of five above is unaffected — to
-  `turnevent.RateLimited`, which reaches this wire as
-  [`rate_limited`](#rate_limited) (#1405), documented below. **The count of
-  five above is stale and is deliberately not re-counted here** (#2246): #2227,
-  #2237, #2232, #2267, #2245 and #2246 have each added a parser arm since, so
-  replacing it with a sixth number would swap one wrong count for another. The
-  authority is `streamsup.emitSystemSubtype`'s case arms, which fail a build when
-  they go stale where a number in prose does not; repairing this paragraph is
-  documentation work of its own. Every other `system`
-  subtype is still silently dropped exactly as before, and none of this changes what
-  surfaces as `unrecognized_message` — a subtype the parser doesn't recognize
-  at all still falls through to the silent-drop tier, not this frame.
-- **Genuinely unrecognized** — everything else. Surfaces as this frame.
-
-The ignored list is **measured, not guessed**: claude was driven directly on the
-bare stream-json surface, three turns each on two models, one turn per run
-calling tools. The same measurement settled whether claude echoes the delivered
-prompt back as a `user` message holding a `text` block, as it does on the
-agent-run surface. **It does not**, so a `user`/`text` block appearing in future
-is a real change and surfaces.
-
-It carries **no `turn_id`** — unlike every turn-stream event above. That is not
-an oversight: the daemon could not parse the message well enough to attribute a
-turn to it honestly. It also **opens and closes no turn**. Opening one would
-wedge the conversation, because no turn end follows a message we could not
-understand.
-
-`raw` is capped at **16 KiB at construction**, so an oversized payload never
-enters the event stream or any log. That is roughly a quarter of the 65519-byte
-application-envelope cap above — note this is the v2 cap, not v1's superseded
-1 MiB — leaving room for the envelope's other fields plus the JSON escaping the
-blob picks up. Escaping is mild in practice because the payload is already JSON
-text, so its control characters arrive pre-escaped as printable pairs.
-
-**Repeats are never coalesced.** A repeat is a real repeat, and how often this
-fires is exactly the number that tells an operator to go fix something.
-
-**Consumer safety.** `raw` and `message_type` are the least trustworthy strings
-on this wire: unbounded, model-adjacent output the daemon could not interpret. A
-client MUST render them as plain text only — never through an HTML sink, an
-attribute, or a URL.
-
-**Regression alarm.** The daemon's real-claude test suite asserts that a normal
-turn produces **zero** of these frames. It goes red the day claude adds a
-message type, in the pre-ship gate rather than in front of a user. Red there
-does not mean something broke; it means the measured ignore list needs
-re-deciding.
+`raw` is bounded to 16 KiB at construction and is a string because truncation
+can leave invalid JSON. Repeats are retained separately. `raw` and `message_type`
+are untrusted source content: render as plain text, never HTML, attributes or
+URLs. Diagnostics expose no raw JSON or notice prose. Regression checks inspect
+retained source facts for unexpected unsupported content; absence of a retired
+frame cannot prove that the mapping recognized the output.
 
 #### `background_task_started`
 
@@ -5000,6 +4930,11 @@ and take security decisions from something the client itself controls.
 
 #### `model_refusal_fallback`
 
+**Retired raw publication (#3736).** This retained source schema feeds
+[authoritative thread updates and explicit catch-up](#daemon-thread-updates-v2-supplied-delivery-contract).
+No app receives this frame, a new replay copy or a substitute receipt, including
+apps without `thread`; absent/failing history never restores publication.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation in which the refusal and retry occurred. Supplied by the bridge, not by claude. |
@@ -5008,38 +4943,27 @@ and take security decisions from something the client itself controls.
 | `scope` | string | **Open string**, carried verbatim. Documented values include `session` and `local`; clients must accept others. |
 | `refusal_category` | string | **Open string**, carried verbatim. This is claude's assertion about the request, not a daemon finding. |
 | `banner` | string | Claude-authored display prose explaining the retry. Bounded but unsanitized; render as inert text attributed to claude. |
-| `truncated_fields` | array or `null` | Daemon-authored report naming published fields whose prose was cut, using this frame's wire keys. `null` when no published field was cut. |
-| `dropped_fields` | array or `null` | Daemon-authored report naming published fields emptied for exceeding a token cap, using this frame's wire keys. `null` when no published field was dropped. |
+| `truncated_fields` | array or `null` | Daemon-authored report naming retained fields whose prose was cut, using the retained schema keys. `null` when no retained field was cut. |
+| `dropped_fields` | array or `null` | Daemon-authored report naming retained fields emptied for exceeding a token cap, using the retained schema keys. `null` when no retained field was dropped. |
 
-This frame explains why a model label changed; it does **not** declare which model
-claude is currently running. [`model_announced`](#model_announced) remains the
-authority for that fact, including after a session-scoped fallback. Neither model
-identifier is normalized, expanded, date-stamped, or checked against a published
-model list.
+The retained notice explains Claude's refusal and reported fallback; it neither
+sets the current model nor initiates a retry. [`model_announced`](#model_announced)
+remains current-model authority. Model identifiers, scope, category and banner
+remain bounded, unsanitized Claude-authored values. Scope and category are open,
+inert strings. Render the banner as text attributed to Claude.
 
-Every published source value — the two model identifiers, `scope`,
-`refusal_category`, and `banner` — is claude-authored, bounded before it reaches
-this wire, and unsanitized. `scope` and `refusal_category` remain open even when a
-client recognizes a documented value; neither may drive daemon or client behavior.
-The report arrays have different provenance: the daemon creates them while bounding
-those source values. Their only possible tokens are `scope`, `original_model`,
-`fallback_model`, `refusal_category`, and `banner`, in the daemon's report order.
-Tokens for excluded or unknown fields are omitted. Both report keys are always
-present, and an excluded-only report therefore encodes as `null`, never `[]`.
-
-The frame is conversation-scoped and deliberately carries no `turn_id`, `seq`,
-`request_id`, refused and retracted message UUIDs, or `api_refusal_explanation`.
-`assistant_delta` supplies only the daemon's turn/sequence identity, while claude's
-refusal record names messages with claude message UUIDs; the daemon has no honest
-join between those namespaces. The wire therefore cannot identify or retract the
-refused partial. `banner` is the sole refusal explanation intended for display, so
-the second prose field `api_refusal_explanation` is not published.
-
-Like every frame in this section, one event is emitted through the existing
-interactive stream and reaches only connections whose `interactive` capability was
-negotiated. It neither opens, transitions, nor closes a turn.
+The daemon-authored report arrays name only retained fields in report order;
+excluded-only and nil reports encode as `null`. The source carries no `turn_id`,
+`seq`, request/message UUIDs or `api_refusal_explanation`: those source identities
+cannot honestly identify a daemon-owned partial message to retract. The notice
+creates no lifecycle edge inside or outside a turn.
 
 #### `model_refusal_no_fallback`
+
+**Retired raw publication (#3736).** This retained source schema feeds
+[authoritative thread updates and explicit catch-up](#daemon-thread-updates-v2-supplied-delivery-contract).
+No app receives this frame, a new replay copy or a substitute receipt, including
+apps without `thread`; absent/failing history never restores publication.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -5047,67 +4971,60 @@ negotiated. It neither opens, transitions, nor closes a turn.
 | `original_model` | string | The opaque model identifier claude says refused the turn, carried verbatim. |
 | `refusal_category` | string | **Open string**, carried verbatim. This is claude's assertion about the request, not a daemon finding. |
 | `banner` | string | Claude-authored display prose explaining that no retry occurred. Bounded but unsanitized; render as inert text attributed to claude. |
-| `truncated_fields` | array or `null` | Daemon-authored report naming published fields whose prose was cut, using this frame's wire keys. `null` when no published field was cut. |
-| `dropped_fields` | array or `null` | Daemon-authored report naming published fields emptied for exceeding a token cap, using this frame's wire keys. `null` when no published field was dropped. |
+| `truncated_fields` | array or `null` | Daemon-authored report naming retained fields whose prose was cut, using the retained schema keys. `null` when no retained field was cut. |
+| `dropped_fields` | array or `null` | Daemon-authored report naming retained fields emptied for exceeding a token cap, using the retained schema keys. `null` when no retained field was dropped. |
 
-This frame is the no-retry sibling of [`model_refusal_fallback`](#model_refusal_fallback).
-Clients distinguish them by the envelope type, not by optional payload fields:
-`model_refusal_no_fallback` has no `fallback_model` or `scope`, while
-`model_refusal_fallback` says claude retried on another model. Receiving this frame
-does not initiate a retry and does not declare which model is running;
-[`model_announced`](#model_announced) remains authoritative for current-model state.
+This no-retry sibling of [`model_refusal_fallback`](#model_refusal_fallback) has
+no `fallback_model` or `scope`. It does not initiate retry or change current-model
+state; [`model_announced`](#model_announced) remains authoritative. Model,
+category and banner are bounded, unsanitized Claude-authored values; the category
+is open and inert, and the banner must render as text attributed to Claude.
 
-`original_model`, `refusal_category`, and `banner` are bounded but unsanitized
-claude-authored values. The category is an open, inert assertion and must not drive
-daemon or client behavior. The report arrays are daemon-authored metadata: their only
-retained tokens are `original_model`, `refusal_category`, and `banner`, in daemon
-order. Tokens for excluded or unknown fields are omitted. Both report keys are always
-present, and nil or excluded-only reports encode as `null`, never `[]`.
-
-The frame deliberately carries no `turn_id`, `seq`, claude `request_id`, refused
-user-message UUID, or `api_refusal_explanation`. The daemon has no honest join from
-claude's request/message identities to its assistant-delta identity, and `banner` is
-the sole refusal prose clients render. The bridge also excludes its internal
-`refusal_explanation` value and report token.
-
-The emitter flushes buffered `assistant_delta` text before this frame to preserve
-wire order. The frame then reaches only connections whose `interactive` capability
-was negotiated. It neither opens, transitions, nor closes a turn and may arrive while
-no turn is open.
+Report arrays retain only the listed source fields in daemon order; nil or
+excluded-only reports encode as `null`. The source excludes `turn_id`, `seq`,
+Claude request/message UUIDs, `api_refusal_explanation` and the internal
+`refusal_explanation`. Buffered assistant text is flushed before recording this
+notice, preserving source order. It neither opens, transitions nor closes a turn
+and can be recorded while no turn is open.
 
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the twenty-three turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
-
-**The push is update-only.** Session creation (`sessions.New`, `Pool.Mint` /
-`CreateIn`, `GetOrCreateIn`) emits no transition, and the push does not report
-every session ID change. `Pool.RotateBootstrapForSelfHeal` silently rekeys the
-bootstrap session; it is an uncalled primitive with no production caller today,
-not a running recovery path. A client that only listens for transitions cannot
-discover a fresh conversation's session ID or keep IDs current in every case.
-
-Discover the stored binding from each `conversations` row's always-present
-`current_session_id` in the [application snapshot](#application-message-types),
-including `""` when unbound. The snapshot does not prove process liveness or
-that a mutation will succeed. To read the addressable session's settings, use
-[`request_session_settings`](#request_session_settings): supply the named
-conversation's `conversation_id` and read `session_settings.session_id` from
-the reply. An empty ID means **no addressable session**; keep session settings
-read-only until a later read returns an addressable ID. A populated reply can
-name a live session or a persisted dormant session, as that section describes.
+**Retired raw publication (#3736).** The table describes the retained transition
+source schema. No app receives `session_transition`, a new replay copy or a
+substitute transition-divider receipt, including apps without `thread` and with
+nil/failed history. Accepted transition records and `session_divider` facts feed
+canonical session dividers through
+[thread updates and explicit catch-up](#daemon-thread-updates-v2-supplied-delivery-contract).
 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this session-boundary marker belongs to (routing key, matching every other interactive event). |
-| `previous_session_id` | string | The session id that ended. Always present (a transition sits between two sessions). |
-| `new_session_id` | string | The session id that began. |
+| `previous_session_id` | string | The predecessor session ID; always present in accepted source records. |
+| `new_session_id` | string | The successor ID for `clear`; mirrors the evicted ID for `idle_evict`, which has no successor. |
 | `reason` | string | Why the session rotated. Closed set: `clear`, `idle_evict`, `workspace_change`. |
 | `occurred_at` | string | When the transition occurred (RFC3339Nano). |
 | `workspace_cwd` | string \| null | The new workspace directory — non-null **iff** `reason == workspace_change`; literal `null` for `clear` and `idle_evict`. |
 
-**Invariant:** `workspace_cwd` is non-null **if and only if** `reason` is `workspace_change`. The field is always present on the wire (literal `null`, never absent) so the invariant is decodable directly.
+Session creation, equal-ID/no-op changes and refused mutations create no
+transition. The source producer accepts `clear` and `idle_evict`; the declared
+schema also admits `workspace_change`. `workspace_cwd` is always present and
+non-null exactly for that declared reason. Eviction retains the evicted ID in
+both legacy source ID fields; it does not assert a successor.
 
-The **producer** is **#657**. Until a server-side workspace-change source exists, the producer emits only `clear` and `idle_evict` — yet the type admits `workspace_change` so the mobile decoder stays exhaustive and the invariant above is expressible. This ticket (#656) defines the wire shape only.
+Captured conversation, producing agent and session provenance remain
+source facts. Unknown reasons and unresolved ownership retain their rejection
+behavior. Interrupted turns, tools and agents close before the runtime divider;
+delayed predecessor output cannot close or clear the successor. Committed
+switch recording still precedes the committed-row callback and completion/flush
+barriers, including when storage fails. Cancellation completion and busy release
+remain intact.
+
+Discover the stored binding from `conversations.current_session_id`, including
+`""` when unbound. Read addressable settings with
+[`request_session_settings`](#request_session_settings) and use the returned
+`session_settings.session_id`; an empty ID keeps settings read-only. A stored
+binding alone proves neither process liveness nor mutation success. Live
+reset/status/control delivery remains separate from thread content.
 
 #### `model_list`
 
@@ -6576,7 +6493,7 @@ FIFO-held task from retained source evidence, stops that exact task and requires
 its canonical terminal item to match a post-stop saved outcome/gone fact with
 matching source provenance while the FIFO remains held. Compilation, replay,
 a skipped test, silence or control acceptance cannot satisfy that proof. See
-[the counted live evidence](knowledge/features/thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+[the counted live evidence](knowledge/features/thread-package-shadow-lifecycle-and-evidence-retirement.md#shadow-lifecycle-and-evidence).
 
 ### New session (v2)
 
@@ -6594,7 +6511,7 @@ It carries an **optional payload** with a single field, and **no nonce and no id
 
 A named `conversation_id` that the daemon cannot act on is **inert** — no restart, no reply, and never a fall-through to some other conversation. That covers an id that is not a canonical conversation id, one the daemon does not host, one with no session bound to it, and one that has **never run**: a conversation created but never messaged, since [`create_conversation`](#create_conversation) defers the child to the first message. **All of these stay silent**, deliberately: answering would make the verb an existence oracle over conversation ids, and a client that needs to know whether a conversation is addressable should ask a verb that answers. None of them is the one exception described below — that reply fires only after a rotation has already happened.
 
-**A conversation that has previously run resets even with no live child (#2521).** Before this ticket, "no live child" was one state as far as the verb could tell, and covered both a conversation that had never been messaged and one that had simply stopped, backed off, idle-evicted, or dropped from the daemon's memory across a restart — so returning to an existing chat and choosing **New session** without typing anything first did nothing, silently, on a channel that had a full history. The daemon now answers "has this conversation ever run?" from its own persisted record and, for a conversation that has, resets it exactly as it would with a live child: the pool re-keys, the [`session_transition`](#interactive-events-v2-capability-gated) fires, and the first message afterward uses the fresh identity. This holds identically whether the session is still held in memory with no running child, or was dropped entirely by a daemon restart in between — a client cannot tell the two apart and does not need to. **A named conversation that has never run stays inert**, unchanged from before.
+**A conversation that has previously run resets even with no live child (#2521).** Before this ticket, "no live child" was one state as far as the verb could tell, and covered both a conversation that had never been messaged and one that had simply stopped, backed off, idle-evicted, or dropped from the daemon's memory across a restart — so returning to an existing chat and choosing **New session** without typing anything first did nothing, silently, on a channel that had a full history. The daemon now answers "has this conversation ever run?" from its own persisted record and, for a conversation that has, resets it exactly as it would with a live child: the pool re-keys, the transition source is recorded for the canonical session divider, and the first message afterward uses the fresh identity. This holds identically whether the session is still held in memory with no running child, or was dropped entirely by a daemon restart in between — a client cannot tell the two apart and does not need to. **A named conversation that has never run stays inert**, unchanged from before.
 
 `new_session` is **gated on the `interactive` capability**: a non-interactive connection's `new_session` is inert, whether it names a conversation or not — naming one is not a way around the gate. It is **exempt from the per-device permission gate** ([#702](#security-model)) because starting a fresh session in one's own paired session is a normal paired-phone action, not a tool-permission decision. Any interactive paired phone can restart any conversation it can name; that is the same trust domain the [Security model](#security-model) already states for paired devices, and it is **not a widening** — a device could already route a `send_message` to any conversation to move the cursor there and then send a bare `new_session`. What the field removes is that two-frame dance, which only a *benign* client was unable to perform.
 
@@ -6606,9 +6523,9 @@ The outgoing `claude` receives the daemon's fixed wrap-up prompt as an ordinary 
 
 The wrap-up and rotation run off relay dispatch with per-conversation exclusion. Clients see [`resetting`](#resetting) progress through `wrapping_up` → `restarting` → inactive; late workspace-refusal reporting still follows the completed rotation, and the inactive edge precedes admission of another reset.
 
-**Since #2443, a rotation that completes but cannot move into the conversation's recorded workspace earns the verb's one reply.** #1475 wires a conversation's `change_workspace`-recorded `cwd` into the spawn site of its next rotation; when that folder has since been deleted, or re-pointed outside `$HOME`, re-confinement refuses it. The rotation still completes and the successor still comes up in the directory the runner already had — but the daemon also sends a single `error` frame ([`ErrorPayload`](#application-message-types)) correlated by `in_reply_to`, carrying `code: "new_session.workspace_refused"` ([Error codes](#error-codes)), a static `message`, `retryable: false`, and the rotated conversation's id in `conversation_id`. The id is necessary rather than decorative: a bare frame names no conversation of its own, so only the daemon's resolved id — the named conversation, or the cursor's — tells the client which one stayed put. The message never names the folder or any other filesystem detail. This is the verb's **only** reply, in every sense: an accepted workspace, a conversation with no recorded workspace, every inert arm above, and the folder vanishing *after* acceptance (a distinct, later failure) all stay exactly as silent as before #2443. A client that ignores the frame sees precisely the pre-#2443 behaviour, and this does not widen what the verb can be asked to disclose — it fires only after a rotation the client's own `session_transition` already announces. **On a conversation that took the wrap-up turn above, this reply can arrive up to several tens of seconds after the frame that triggered it** — only once the rotation it reports has actually happened, never before — so a client should not read the reply's absence-so-far as a timeout of its own.
+**Since #2443, a rotation that completes but cannot move into the conversation's recorded workspace earns the verb's one reply.** #1475 wires a conversation's `change_workspace`-recorded `cwd` into the spawn site of its next rotation; when that folder has since been deleted, or re-pointed outside `$HOME`, re-confinement refuses it. The rotation still completes and the successor still comes up in the directory the runner already had — but the daemon also sends a single `error` frame ([`ErrorPayload`](#application-message-types)) correlated by `in_reply_to`, carrying `code: "new_session.workspace_refused"` ([Error codes](#error-codes)), a static `message`, `retryable: false`, and the rotated conversation's id in `conversation_id`. The id is necessary rather than decorative: a bare frame names no conversation of its own, so only the daemon's resolved id — the named conversation, or the cursor's — tells the client which one stayed put. The message never names the folder or any other filesystem detail. This is the verb's **only** reply, in every sense: an accepted workspace, a conversation with no recorded workspace, every inert arm above, and the folder vanishing *after* acceptance (a distinct, later failure) all stay exactly as silent as before #2443. A client that ignores the frame sees precisely the pre-#2443 behaviour, and this does not widen what the verb can be asked to disclose — it fires only after the rotation whose retained sources feed the canonical session divider. **On a conversation that took the wrap-up turn above, this reply can arrive up to several tens of seconds after the frame that triggered it** — only once the rotation it reports has actually happened, never before — so a client should not read the reply's absence-so-far as a timeout of its own.
 
-The client observes the resulting break through the existing [`session_transition`](#interactive-events-v2-capability-gated) marker (`reason: clear`, #656/#657) — **there is no synchronous ack for a successful rotation.** The one correlated reply `new_session` can send, described above, reports a refusal, not a success; `new_session` is otherwise fire-and-forget, like `interrupt`, and neither its silent arms nor that one reply is part of the reconnect-replay ring or needs a correlation key beyond that single `in_reply_to`.
+The client observes the resulting break through a canonical session-divider item and explicit thread catch-up (#3736) — **there is no synchronous ack for a successful rotation.** The one correlated reply `new_session` can send, described above, reports a refusal, not a success; `new_session` is otherwise fire-and-forget, like `interrupt`, and neither its silent arms nor that one reply is part of the reconnect-replay ring or needs a correlation key beyond that single `in_reply_to`.
 
 ### Debug bundle (v2)
 
@@ -7498,7 +7415,13 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 
 `session_id` is the **addressing key** — it names the session to change, matching the `sessions.Pool.UpdateSettings(id, …)` seam.
 
-A client discovers the stored binding from `conversations.current_session_id` in the [initial snapshot](#application-message-types), reads it with the run configuration from [`session_settings`](#session_settings) below, or observes a change to it on the [`session_transition`](#interactive-events-v2-capability-gated) marker. The snapshot binding alone guarantees neither process liveness nor mutation success. **The marker alone is not a sufficient source**, and this document used to say it was. The daemon fires `session_transition` only on a clear or an idle eviction, never on session creation, so a client that had done neither never learned an id and could not write at all. That was the whole of `pyrycode-desktop#491`: the run-configuration UI rendered and stayed permanently inert. Drive `request_session_settings` when you need the current value; treat the marker as an update to it.
+A client discovers the stored binding from `conversations.current_session_id`
+in the [initial snapshot](#application-message-types) and reads the current
+addressable identity and run configuration through
+[`request_session_settings`](#request_session_settings). The snapshot binding
+alone guarantees neither process liveness nor mutation success. Raw
+`session_transition` publication is retired for every app (#3736); drive a fresh
+settings read when you need the current value.
 
 The four settings fields are **optional** and encode a *presence contract*: a field that is **absent** from the payload means "leave that setting unchanged", while a field that is **present** — including at its zero value (`""` for `model`/`effort`, `false` for `yolo`) — means "set it to this value". An **absent** `yolo` can therefore never be read as a sent `false`, and an absent `model` can never be read as an instruction to clear the stored value. (On the wire this is `omitempty` over pointer fields: an absent key, not a literal `null`.)
 
@@ -7715,15 +7638,15 @@ open through the switch, including the requester, receives these pushes in order
 2. `resetting`: `active: true`, `phase: "restarting"`, `handoff: "written"` or
    `"skipped"`, describing whether a new handover note was stored.
 3. `resetting`: `active: false`, `phase: ""`, `handoff: ""`.
-4. Exactly one [`session_transition`](#session_transition), with `reason: "clear"`,
-   the named `conversation_id` and the old/new session IDs; one durable history
-   boundary is appended.
-5. [`conversation_updated`](#conversation_updated) read from the committed row,
+4. [`conversation_updated`](#conversation_updated) read from the committed row,
    with the new `agent`.
 
 These are uncorrelated pushes, with no `session_settings_updated` or additional
 success acknowledgement. A committed binding remains a success even if old-session
-cleanup fails: the transition and row still publish once, with no refusal.
+cleanup fails: transition/divider source recording and the committed-row callback
+still run, with no refusal. Source recording precedes that callback; canonical
+thread delivery follows its own publication lane and requires explicit catch-up
+for earlier items. No raw transition or divider receipt is sent (#3736).
 Shared exclusion lasts through committed publication and Run-owned sealing,
 so a subsequent reset or switch cannot substitute a later row or agent. Queue
 pressure can delay publication but cannot discard the committed outcome.
@@ -8040,8 +7963,8 @@ linked outcome. Late echoes/callbacks add no duplicate source or item. Queued
 facts produce no legacy live/replay receipts; startup reconciliation remains
 source-only, including `send_lost`, without populating the ring or sending live
 frames. Existing recipient and agent/isolation gates apply.
-Channel posts still omit it; ordinary `session_transition` frames are not
-ring-replayed. Use it as
+Channel posts still omit it; raw `session_transition` publication is retired
+for every app (#3736). Use it as
 [`mark_conversation_read.up_to`](#marking-a-conversation-read) when the operator
 has read through that entry. It is independent of the envelope's connection
 `id` and ring `event_id`; neither is a durable read-mark target. Older daemons,

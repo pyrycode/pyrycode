@@ -117,7 +117,7 @@ from restoring released state. Cancelling a worker context alone leaves an
 unavailable view until retry or unload; it does not shut down other conversations.
 
 The daemon owns [startup discovery, retirement and final committed-version
-draining](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence). `Store.Shutdown`
+draining](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence). `Store.Shutdown`
 cancels workers; callers must finish producer draining and tail catch-up before
 invoking it to preserve final commits. Status-only polling preserves this order:
 after producers finish, shadow shutdown discovers final activity and joins

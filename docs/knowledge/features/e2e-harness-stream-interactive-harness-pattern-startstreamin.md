@@ -143,7 +143,7 @@ merged fields into that copy can overwrite buffered content while leaving its
 older length. Decode a full replacement into a fresh zero-value item.
 `TestQueueBufferedSuccessorRevisions` checks buffered additions, patches, appends,
 incremental text and final catch-up equality; `TestQueueRevisionGap` still rejects
-genuine gaps. See [canonical publication proof](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+genuine gaps. See [canonical publication proof](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication)
 and [reconnect receiver ownership](e2e-realclaude.md#reconnect-receiver-ownership).
 
 ### Observing held output without closing the phone connection

@@ -21,7 +21,7 @@ suppression and unavailable recovery at the reload boundary. Keep
 `TestCompactCatchUpReload`'s older lost-interval reset alongside the new
 saved-boundary continuity proof. See the
 [reload contract](thread-package-background-store-replay.md#loading-and-replay-readiness)
-and [authenticated idle/recovery checks](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+and [authenticated idle/recovery checks](thread-package-shadow-lifecycle-and-evidence-coordination.md#idle-retirement-query-demand-and-evidence).
 
 `TestReferenceSourceOrder` checks feed/recent/Lookup precedence, deduplicated
 miss-only requests and the all-hit no-I/O path. `TestReferenceSourceBatch` uses

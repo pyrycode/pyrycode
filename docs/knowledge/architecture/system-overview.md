@@ -193,7 +193,7 @@ joins removed work. This cache flow has no app publication capability.
 Shadow contexts outlive daemon cancellation so producer joins precede final
 fold catch-up and `Store.Shutdown`. `control.Server.Seal` joins admitted handlers
 while retaining listener ownership through final persistence, followed by
-`Close`. See [shadow lifecycle and evidence](../features/thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+`Close`. See [shadow lifecycle and evidence](../features/thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication)
 and [control admission](../features/control-plane-server-and-deadlines.md#handler-admission-and-ownership).
 
 ### Restart Cycle
