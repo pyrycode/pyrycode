@@ -82,7 +82,8 @@ func TestQueueCompletionCheckpoint(t *testing.T) {
 		content, _ := json.Marshal(map[string]string{"text": text})
 		item := protocol.ThreadItem{ID: id, Rev: id, Order: id, Kind: "assistant_message", Content: content}
 		frames = append(frames, frame(protocol.TypeThreadItemAdded, protocol.ThreadItemAddedPayload{ConversationID: "conv", Epoch: "epoch", Version: id, Item: item}, int(id)))
-		frames = append(frames, frame(protocol.TypeTurnState, protocol.TurnStatePayload{ConversationID: "conv", State: "idle"}, 11+i*10))
+		frames = append(frames, frame(protocol.TypeTurnState, protocol.TurnStatePayload{ConversationID: "conv", State: "responding"}, 3+i*10))
+		frames = append(frames, frame(protocol.TypeTurnState, protocol.TurnStatePayload{ConversationID: "conv", State: "idle"}, 9+i*10))
 	}
 	var got []string
 	for len(got) < 4 {
@@ -149,7 +150,18 @@ func TestQueueCompletionNeedsFinalAndIdle(t *testing.T) {
 	check(false)
 	frames = append(frames, checkpoint(99, true))
 	check(false)
-	frames = append(frames, idle(stamp.Add(time.Second)))
+	running := idle(stamp.Add(-500 * time.Millisecond))
+	running.Payload, _ = json.Marshal(protocol.TurnStatePayload{ConversationID: "conv", State: "responding"})
+	foreign := running
+	foreign.SessionID = json.RawMessage(`"another-producer"`)
+	foreignIdle := idle(stamp.Add(-100 * time.Millisecond))
+	foreignIdle.SessionID = foreign.SessionID
+	frames = append(frames, foreign, foreignIdle)
+	check(false)
+	running.SessionID = json.RawMessage(`"producer"`)
+	currentIdle := idle(stamp.Add(-100 * time.Millisecond))
+	currentIdle.SessionID = running.SessionID
+	frames = append(frames, running, currentIdle)
 	check(true)
 	check(false) // repeated source snapshots cannot complete the same turn twice
 }

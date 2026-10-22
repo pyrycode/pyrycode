@@ -25,7 +25,9 @@ type queuePlacementReader struct {
 	requested  uint64
 	sourceID   uint64
 	ends       []history.Entry
-	idles      []time.Time
+	since      time.Time
+	running    map[string]bool
+	idles      []string
 	completed  map[string]bool
 }
 
@@ -54,6 +56,7 @@ func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementR
 		}
 		if p.Final {
 			r.epoch, r.version, r.checkpoint = p.Epoch, p.Version, p.Version
+			r.since = time.Now().UTC()
 			return r
 		}
 	}
@@ -105,7 +108,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			r.request = r.w.Send(protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: r.conv, Epoch: r.epoch, Version: r.requested, Limit: 100})
 		}
 		boundary := len(r.ends) > 0 && (len(r.pending) == 0 || (r.pending[0].Order != 0 && r.pending[0].Order > r.ends[0].ID))
-		for len(r.ends) > 0 && len(r.idles) > 0 && r.idles[0].Before(r.ends[0].TS) {
+		for len(r.ends) > 0 && len(r.idles) > 0 && r.idles[0] != "" && r.idles[0] != r.ends[0].Session.SessionID {
 			r.idles = r.idles[1:]
 		}
 		if boundary && r.checkpoint >= r.ends[0].ID && len(r.idles) > 0 {
@@ -284,12 +287,26 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			if env.Type == protocol.TypeTurnState {
 				var p protocol.TurnStatePayload
 				decode(&p)
-				if p.ConversationID == r.conv && p.State != "idle" {
-					f.Kind = "reply_state"
-				}
-				if p.ConversationID == r.conv && p.State == "idle" {
-					r.idles = append(r.idles, env.TS)
-					f.Kind = "idle"
+				if p.ConversationID == r.conv && !env.SessionStateCleared && !env.TS.Before(r.since) {
+					var session string
+					if len(env.SessionID) > 0 && json.Unmarshal(env.SessionID, &session) != nil {
+						r.t.Fatal("invalid queue live-state session")
+					}
+					if r.running == nil {
+						r.running = map[string]bool{}
+					}
+					if p.State != "idle" {
+						r.running[session] = true
+						f.Kind = "reply_state"
+					} else {
+						// Supplied state is captured before the history append; its
+						// receive sequence, not the append timestamp, closes a turn.
+						if r.running[session] {
+							r.idles = append(r.idles, session)
+							delete(r.running, session)
+						}
+						f.Kind = "idle"
+					}
 				}
 			}
 			return f, true
