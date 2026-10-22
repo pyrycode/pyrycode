@@ -59,6 +59,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,9 +94,10 @@ func TestInteractivePerConversationLiveness_Default(t *testing.T) {
 	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
+	replyFacts1 := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 3, convID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget, replyFacts1)
 }
 
 // TestInteractivePerConversationLiveness_WorkspaceFolder is case 2: a conversation
@@ -110,9 +112,10 @@ func TestInteractivePerConversationLiveness_WorkspaceFolder(t *testing.T) {
 	folder := createWorkspaceFolderViaPhone(t, h.phone, h.initSend, h.initRecv, 2,
 		"~", fmt.Sprintf("ws-%d", nonce))
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 3, &folder)
+	replyFacts2 := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 4, convID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget, replyFacts2)
 }
 
 // TestInteractivePerConversationLiveness_ActiveSwitch is case 3: two
@@ -136,13 +139,15 @@ func TestInteractivePerConversationLiveness_ActiveSwitch(t *testing.T) {
 	convA := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
 	convB := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 3, nil)
 
+	replyFacts3 := scenario.SourceSince(t, h.home, convA)
 	sealSendMessage(t, h.phone, h.initSend, 4, convA, "m-a",
 		fmt.Sprintf("Reply with a single short word. run=%d conv=A", nonce))
-	drainForAssistantReply(t, h.phone, h.initRecv, convA, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convA, 1, perTurnReplyBudget, replyFacts3)
 
+	replyFacts4 := scenario.SourceSince(t, h.home, convB)
 	sealSendMessage(t, h.phone, h.initSend, 5, convB, "m-b",
 		fmt.Sprintf("Reply with a single short word. run=%d conv=B", nonce))
-	drainForAssistantReply(t, h.phone, h.initRecv, convB, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convB, 1, perTurnReplyBudget, replyFacts4)
 }
 
 // --- harness ----------------------------------------------------------------

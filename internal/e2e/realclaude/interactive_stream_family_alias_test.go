@@ -20,7 +20,8 @@ func TestInteractiveStreamPinnedModelFollowsItsFamily(t *testing.T) {
 		sequence++
 		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return sequence
-	}, Next: scenariohelpers.Receive(t, h.phone, h.initRecv)}
+	}, Next: scenariohelpers.PollingReceive(t, h.phone, h.initRecv)}
+	wire = scenariohelpers.ObserveSource(t, h.home, wire)
 	scenariohelpers.ModelFamily(t, wire, convID, streamModalBootstrapUUID, func(int) string {
 		return fmt.Sprintf("Reply with one short word and nothing else. run=%d", time.Now().UnixNano())
 	}, familyAliasMenuBudget, perTurnReplyBudget)

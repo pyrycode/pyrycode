@@ -86,20 +86,65 @@ completion instead.
 
 ### Proving direct live history identity
 
-Seeding a log and requesting history proves paging, but never exercises a live
-producer's metadata handoff. `TestRelayV2_LiveHistoryEntryID` seeds only prior
-entries, drives `send_message` through the daemon, receives the direct operator
-push, then requests history. Require exactly one served entry matching the live
-type, payload bytes and `TS.Equal` before comparing its `id` to the envelope's
-`history_entry_id`; checking only inside a match branch stays green when the
-entry is missing.
+Retirement separates persistence from app delivery. `TestLiveProducers_HistoryEntryID`
+uses surviving `tool_progress` and session-transition publication to compare the
+original durable entry's payload and timestamp with every emitted envelope.
+Its persisted history sequence differs from ring/envelope counters so equal
+counters cannot conceal a namespace error. Require the match explicitly rather
+than only checking inside a branch that may never run. Retired interactive
+assistant/tool/completion facts instead use source and canonical evidence below.
+See [history producers](history-package-producers.md#producers-2114-2115).
 
-Offset the persisted history sequence from the fresh ring and envelope counters,
-and assert the ids differ. Equal counters would let the wrong namespace pass as
-durable provenance. Consume intervening frames in arrival order through the
-existing decrypt helper so Noise receive nonces stay synchronized. See
-[history producers](history-package-producers.md#producers-2114-2115) for the complementary
-producer matrix, including absent storage and publication without a ring.
+### Source and canonical observation
+
+Interactive assistant/tool/completion publication is retired for every app
+(#3734). `SourceSnapshot`/`SourceSince` and `ObserveSource` read isolated test-home
+history separately from `Wire.Next`, which returns actual decrypted app
+envelopes. Capture a source watermark **before** each command. Arm each phone's
+independent `SourceObserver` before a shared warmup or causal send; arming only
+the sender leaves an observing phone unable to recognize completion. A retained
+fact is never a delivered compatibility frame. `SourceObserver.OnEntry` receives
+only source content entries: count `turn_state`, prompts and progress on the
+live reader or an assertion can silently miss them.
+
+Match conversation, producing session, turn and parent lane when selecting text
+and terminal source facts. A reused turn/message/tool ID alone cannot identify
+work across sessions. A question's pre-answer prose and post-answer continuation
+need separate watermarks without losing the active turn identity. Keep actual
+acknowledgements, recipient isolation, live phase ordering and physical
+process/FIFO/file checks alongside source content. `TestSourceTurnIdentity`,
+`TestQuestionBoundaryIsolation` and `TestSourceObserverTerminalOrdering` protect
+these boundaries; they do not turn history evidence into app delivery proof.
+
+Normal completion may fold without a visible `turn_end` item or an update at
+its history version. `queuePlacementReader` therefore pairs attributed source
+ends with actual running-to-idle evidence after the pre-command watermark and a
+correlated successful final catch-up covering each end. Supplied live timestamps
+are captured before drain-time history appends; comparing idle time to the later
+append time rejects genuine completion. Retain live receive order and supplied
+session identity instead; predecessor idle and repeated source snapshots cannot
+complete another turn.
+
+A source end alone must not start the ordinary two-turn queue's completion query
+while its successor is publishing: live updates can cancel catch-up and retire
+a sealed response. `checkpointReady` collects both terminal phase boundaries for
+that batch before querying. Each end still needs coverage; a checkpoint covering
+only the first cannot certify the successor. Only a correlated
+`thread.query_failed` with `retryable: true` permits a retry within the original
+deadline, without advancing the checkpoint. `TestQueueCompletionCheckpoint` and
+`TestQueueCompletionNeedsFinalAndIdle` reject missing final/idle evidence.
+
+Apply received canonical revisions immediately, even when reporting successor
+placement waits behind an uncertified predecessor. Otherwise a later patch sees
+an old base and falsely reports a gap. Keep received and reported item maps
+separate, retain strict base-revision checks and ignore duplicate catch-up rows.
+A copied `ThreadItem` still shares its `json.RawMessage` backing array: decoding
+merged fields into that copy can overwrite buffered content while leaving its
+older length. Decode a full replacement into a fresh zero-value item.
+`TestQueueBufferedSuccessorRevisions` checks buffered additions, patches, appends,
+incremental text and final catch-up equality; `TestQueueRevisionGap` still rejects
+genuine gaps. See [canonical publication proof](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+and [reconnect receiver ownership](e2e-realclaude.md#reconnect-receiver-ownership).
 
 ### Observing held output without closing the phone connection
 
@@ -150,20 +195,17 @@ wake during replay. See [push-wake eligibility](relay-package-push-wake.md).
 
 ### `relay_v2_stream_send_test.go` — `TestRelayV2_StreamSendMessageDrainsTurn`
 
-The first live, integrated proof of the stream-interactive path: every leg
-(config toggle, runner factory, turn drain, fakeclaude stream mode) had been
-proven in isolation, but never run together against a real spawned
-fakeclaude. The spec pairs, handshakes an interactive phone, drives one
-`send_message`, and awaits the sealed ack (accept-into-backlog — not delivery:
-`streamRunner.WriteUserTurn` can return the retryable `ErrNoLiveChild` while
-the child is between spawn and stdin-ready) together with two ordered
-milestones: `assistant_delta` carrying the **echoed** prompt (the non-vacuity
-guard — proves the full round-trip, not just "some text"), then a terminal
-`turn_state{idle}`. Details and the full wire diagram:
-[codebase/1141.md](../codebase/1141.md).
+`TestRelayV2_StreamSendMessageDrainsTurn` pairs and handshakes an interactive
+phone, captures a source watermark, sends a prompt and retains the correlated
+acknowledgement plus actual terminal live idle. The echoed prompt and completion
+come from history, matched to the seeded producing session and main turn;
+all five retired interactive wire types fail immediately. The ack still means
+acceptance into the backlog rather than child delivery. This nonempty attributed
+echo and terminal source/live boundary prove drain liveness independently of
+canonical app publication.
 
-**Ack and drain are awaited in one loop, not two (#2610).** Until #2610 the
-test awaited the ack in its own loop that skipped every non-ack envelope,
+**Retain milestones throughout acknowledgement waits (#2610).** Before source
+observation, the test awaited the ack in its own loop that skipped every non-ack envelope,
 then drained the two milestones in a second loop — the same ack-await
 frame-drop trap recorded below for the modal test
 (`relay_v2_stream_modal_test.go`, #2612). The handler enqueues the turn before it
@@ -575,10 +617,10 @@ when their single reader retains every awaited observation.
 
 `TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` and
 `TestRelayV2_StreamInterruptStopsRunningTurn` follow the latter pattern
-(#2614). Their `nextEnv` readers decode and validate the awaited
-`assistant_delta` before returning it to any wait loop, so an echo consumed
-during the correlated ack wait still satisfies the later milestone. Keep
-separate observations for each turn: new-session M1 requires turn one's
+(#2614). Their source observers retain attributed assistant text independently
+of the single live reader, so waiting for a correlated acknowledgement cannot
+discard the echo needed by the later milestone. Keep separate observations for
+each turn: new-session M1 requires turn one's
 echo, while M6 requires turn two's distinct text needle and the expected
 conversation id.
 Trailing turn-one deltas and fragments without turn two's needle cannot

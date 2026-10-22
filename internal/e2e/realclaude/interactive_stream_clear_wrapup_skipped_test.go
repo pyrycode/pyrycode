@@ -81,6 +81,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,9 +240,10 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// window would time out reporting a daemon fault that was really a missing
 	// precondition. The content is irrelevant here: unlike the sibling, nothing of this
 	// turn has to survive into a later reply.
+	completedFacts1 := scenario.SourceSince(t, home, skipConvID)
 	sealSendMessage(t, phone, initSend, plantReqID, skipConvID, "m-1",
 		"Reply with just the word ok.")
-	drainForCompletedTurn(t, phone, initRecv, skipConvID, perTurnReplyBudget)
+	drainForCompletedTurn(t, phone, initRecv, skipConvID, perTurnReplyBudget, completedFacts1)
 
 	// --- The /clear send: the window opens here --------------------------------
 	// Ordinary send_message text, the client verb rather than the new_session control

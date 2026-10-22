@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"strings"
 	"testing"
 	"time"
@@ -65,28 +66,44 @@ func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 		Home: h.home, ConversationID: convID, SessionID: streamModalBootstrapUUID, Prompt: questionAnswerTrigger(nonce),
 		SurfaceBudget: questionSurfaceBudget, UpdateBudget: questionModelUpdateBudget, TurnBudget: perTurnReplyBudget,
 	})
+	source := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change", fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
-	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, "haiku"), perTurnReplyBudget)
+	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, "haiku"), perTurnReplyBudget, source)
 }
 
-func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration) {
+func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration, sources ...scenario.SourceFacts) {
 	t.Helper()
+	next := scenario.Receive(t, phone, cs)
+	if client, ok := phone.(interface {
+		scenario.Receiver
+		Close() error
+	}); ok {
+		next = scenario.PollingReceive(t, client, cs)
+	}
 	scenario.WitnessModelTurn(t, func(deadline time.Time) protocol.Envelope {
-		env, _ := receiveQuestionEnvelope(t, phone, cs, deadline)
+		env := next(deadline)
+		if err := checkQuestionEnvelopeAlarm(env); err != nil {
+			t.Fatal(err)
+		}
 		return env
-	}, convID, expected, timeout)
+	}, convID, expected, timeout, sources...)
 }
 
 // raiseRealQuestionBatch asserts a nonempty batch before any answer is sent.
 func raiseRealQuestionBatch(t *testing.T, h *perConvHarness, reqID uint64, convID, triggerPrompt string, prior ...*strings.Builder) protocol.QuestionShownPayload {
 	t.Helper()
+	source := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), triggerPrompt)
 	var collected *strings.Builder
 	if len(prior) > 0 {
 		collected = prior[0]
 	}
-	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, collected, nil)
+	env := awaitQuestionControl(t, h, protocol.TypeQuestionShown, questionSurfaceBudget, nil)
 
+	if collected != nil {
+		_, pre := scenario.QuestionBoundary(t, source, convID)
+		collected.WriteString(pre)
+	}
 	var batch protocol.QuestionShownPayload
 	if err := json.Unmarshal(env.Payload, &batch); err != nil {
 		t.Fatalf("decode question_shown payload: %v", err)
@@ -146,30 +163,12 @@ func (p *questionAnswerTurn) observe(env protocol.Envelope) error {
 	return scenario.ObserveWitnessAnswer(env, p.convID, p.batchID, &p.text, &p.dismissed, &p.idle)
 }
 
-func (p *questionAnswerTurn) complete() bool {
-	return scenario.WitnessAnswerComplete(p.witness, p.text.String(), p.dismissed, p.idle)
+func (p *questionAnswerTurn) observeSource(entry history.Entry) error {
+	return scenario.ObserveWitnessSource(entry, p.convID, &p.text, &p.idle)
 }
 
-func drainAnsweredQuestionTurn(t *testing.T, h *perConvHarness, convID, batchID, witness string, timeout time.Duration) string {
-	t.Helper()
-	proof := questionAnswerTurn{convID: convID, batchID: batchID, witness: witness}
-	deadline := time.Now().Add(timeout)
-	for {
-		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
-		if !ok {
-			t.Fatalf("answer proof incomplete: dismissal=%v idle=%v; continuation=%q", proof.dismissed, proof.idle, truncateString(proof.text.String(), questionTextLogCap))
-		}
-		if env.Type == protocol.TypeToolResult {
-			t.Logf("question tool result: %q", truncateString(string(env.Payload), questionTextLogCap))
-		}
-		if err := proof.observe(env); err != nil {
-			t.Fatal(err)
-		}
-		if proof.complete() {
-			t.Logf("answered continuation: %q", truncateString(proof.text.String(), questionTextLogCap))
-			return proof.text.String()
-		}
-	}
+func (p *questionAnswerTurn) complete() bool {
+	return scenario.WitnessAnswerComplete(p.witness, p.text.String(), p.dismissed, p.idle)
 }
 
 // receiveQuestionEnvelope decrypts every Noise frame in order. Transport controls
@@ -232,7 +231,7 @@ func checkQuestionControl(env protocol.Envelope, parked *protocol.QuestionShownP
 
 // Retain pre-answer prose and reject resolution while the question must remain
 // outstanding, including during an in-band model update.
-func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, prior *strings.Builder, parked *protocol.QuestionShownPayload) protocol.Envelope {
+func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout time.Duration, parked *protocol.QuestionShownPayload) protocol.Envelope {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
@@ -243,12 +242,8 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 		if err := checkQuestionControl(env, parked); err != nil {
 			t.Fatal(err)
 		}
-		if env.Type == protocol.TypeAssistantDelta && prior != nil {
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			prior.WriteString(p.Text)
+		if env.Type == protocol.TypeAssistantDelta {
+			t.Fatal("retired pre-answer text reached app")
 		}
 		if env.Type == want {
 			return env
@@ -260,10 +255,10 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 func modalScenarioWire(t *testing.T, h *perConvHarness, first uint64) scenario.Wire {
 	t.Helper()
 	sequence := first
-	return scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
+	return scenario.ObserveSource(t, h.home, scenario.Wire{Next: scenario.PollingReceive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
 		id := sequence
 		sequence++
 		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: id, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return id
-	}}
+	}})
 }

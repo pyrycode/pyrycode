@@ -56,7 +56,7 @@ func TestInteractiveTurnEmitterV2_BackgroundChildAcrossMainEnd(t *testing.T) {
 			if e.turnID != laterMainID || e.currentState != "thinking" || len(pushesOfType(bcast.pushes[count:], protocol.TypeTurnState)) != 0 {
 				t.Fatal("ongoing child work changed the later main turn")
 			}
-			deltas := assistantDeltas(t, bcast.pushes)
+			deltas := assistantDeltas(t, testEmitterFacts(t, e, switchConvA, switchConvB))
 			if len(deltas) != 3 {
 				t.Fatalf("child deltas = %+v, want three flushes", deltas)
 			}
@@ -65,7 +65,7 @@ func TestInteractiveTurnEmitterV2_BackgroundChildAcrossMainEnd(t *testing.T) {
 					t.Errorf("child delta %d = %+v", i, d)
 				}
 			}
-			for _, p := range bcast.pushes {
+			for _, p := range testEmitterFacts(t, e, switchConvA, switchConvB) {
 				if !slices.Contains([]string{protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolProgress, protocol.TypeToolDenied}, p.env.Type) {
 					continue
 				}
@@ -95,7 +95,7 @@ func TestInteractiveTurnEmitterV2_BackgroundChildAcrossMainEnd(t *testing.T) {
 			if got != want {
 				t.Errorf("progress = %#v, want %#v", got, want)
 			}
-			denials := pushesOfType(bcast.pushes, protocol.TypeToolDenied)
+			denials := pushesOfType(testEmitterFacts(t, e, switchConvA, switchConvB), protocol.TypeToolDenied)
 			var denial protocol.ToolDeniedPayload
 			if err := json.Unmarshal(denials[0].env.Payload, &denial); err != nil {
 				t.Fatal(err)
@@ -115,10 +115,10 @@ func TestInteractiveTurnEmitterV2_BackgroundChildAcrossMainEnd(t *testing.T) {
 			wantOrder = append(wantOrder, protocol.TypeToolProgress, protocol.TypeToolDenied, protocol.TypeToolResult,
 				protocol.TypeAssistantDelta, protocol.TypeTurnState, protocol.TypeToolProgress, protocol.TypeToolUse,
 				protocol.TypeToolResult, protocol.TypeAssistantDelta)
-			if got := pushTypes(bcast.pushes); !slices.Equal(got, wantOrder) {
+			if got := pushTypes(testEmitterFacts(t, e, switchConvA, switchConvB)); !slices.Equal(got, wantOrder) {
 				t.Errorf("arrival order = %v, want %v", got, wantOrder)
 			}
-			if got := pushTypes(bcast.pushes[count:]); !slices.Equal(got, []string{protocol.TypeToolProgress, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeAssistantDelta}) {
+			if got := pushTypes(bcast.pushes[count:]); !slices.Equal(got, []string{protocol.TypeToolProgress}) {
 				t.Errorf("later child order = %v", got)
 			}
 			events, gap := e.ring.After(testConvID, 0)
@@ -215,7 +215,7 @@ func TestInteractiveTurnEmitterV2_ChildTeardownPerConversation(t *testing.T) {
 			if e.turns[switchConvB] != other || other.deltaBuf.Len() == 0 {
 				t.Fatal("teardown affected another conversation")
 			}
-			want := []string{protocol.TypeAssistantDelta}
+			var want []string
 			if open {
 				want = append(want, protocol.TypeTurnState)
 			}
@@ -227,7 +227,7 @@ func TestInteractiveTurnEmitterV2_ChildTeardownPerConversation(t *testing.T) {
 			if other.inTurn != open {
 				t.Fatal("other conversation lost child attribution")
 			}
-			deltas := assistantDeltas(t, bcast.pushes)
+			deltas := assistantDeltas(t, testEmitterFacts(t, e, switchConvA, switchConvB))
 			if len(deltas) != 2 || deltas[0].TurnID == deltas[1].TurnID {
 				t.Fatalf("conversation child identities = %+v", deltas)
 			}

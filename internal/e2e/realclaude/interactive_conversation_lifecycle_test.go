@@ -50,6 +50,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"slices"
@@ -138,9 +139,10 @@ func TestInteractiveConversationLifecycle(t *testing.T) {
 	// in preship. What this turn gains in exchange is a real-claude witness of the
 	// deferred first-message spawn itself. perTurnReplyBudget matches #997's first
 	// cold-turn budget and already covers that spawn.
+	replyFacts1 := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 6, convID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget, replyFacts1)
 
 	// delete — the reply carries the deleted id and the on-disk registry no longer
 	// holds the row. This drain must outlast the in-flight liveness turn's streamed

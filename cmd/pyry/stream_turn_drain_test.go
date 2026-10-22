@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
@@ -266,7 +267,8 @@ func TestStreamTurnDrainV2_FullSingleTurn(t *testing.T) {
 	active := &stubActiveSession{}
 	active.set("sess-a")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -274,7 +276,7 @@ func TestStreamTurnDrainV2_FullSingleTurn(t *testing.T) {
 
 	feedLines(sink, "sess-a", assistantTextLine("m1", "hello"), resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectFacts(4)
 	wantTypes := []string{
 		protocol.TypeTurnState,      // responding
 		protocol.TypeAssistantDelta, // hello
@@ -309,7 +311,8 @@ func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing
 	active := &stubActiveSession{}
 	active.set("sess-a")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -321,7 +324,7 @@ func TestStreamTurnDrainV2_AttributedTextExcludesThinkingAndSignature(t *testing
 		`{"type":"text","text":"` + visibleText + `"}]}}`
 	feedLines(sink, "sess-a", attributed)
 
-	got := collectEnvs(t, bcast.pushed, 1)
+	got := collectFacts(1)
 	cancel()
 	cleanup() // join before reading drain-owned lifecycle state
 	if emitter.inTurn {
@@ -378,7 +381,8 @@ func TestStreamTurnDrainV2_BackgroundForwardedUnderOwnConversation(t *testing.T)
 	active.set("sess-a")
 	active.bind("sess-b", testConvIDB)
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -386,7 +390,7 @@ func TestStreamTurnDrainV2_BackgroundForwardedUnderOwnConversation(t *testing.T)
 
 	feedLines(sink, "sess-b", assistantTextLine("mb", "for-B"), resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectFacts(4)
 	d := decodeDelta(t, got[1])
 	if d.Text != "for-B" || d.ConversationID != testConvIDB {
 		t.Errorf("assistant_delta = {text:%q conv:%q}, want {%q %q}", d.Text, d.ConversationID, "for-B", testConvIDB)
@@ -412,7 +416,8 @@ func TestStreamTurnDrainV2_ScopingForwardsActiveStamped(t *testing.T) {
 	active := &stubActiveSession{}
 	active.bind("sess-b", testConvIDB)
 	bcast := newChanBcast("conn-b")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -420,7 +425,7 @@ func TestStreamTurnDrainV2_ScopingForwardsActiveStamped(t *testing.T) {
 
 	feedLines(sink, "sess-b", assistantTextLine("mb", "for-B"), resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectFacts(4)
 	for _, env := range got {
 		var cid string
 		switch env.Type {
@@ -457,7 +462,8 @@ func TestStreamTurnDrainV2_ConcurrentFeedSingleWriter(t *testing.T) {
 	active := &stubActiveSession{}
 	active.set("sess-a")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -471,7 +477,7 @@ func TestStreamTurnDrainV2_ConcurrentFeedSingleWriter(t *testing.T) {
 
 	// A's four envelopes arrive; B's are dropped at the gate. Collecting exactly
 	// four and finding no B content proves the scoping held under concurrency.
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectFacts(4)
 	for _, env := range got {
 		if env.Type == protocol.TypeAssistantDelta {
 			d := decodeDelta(t, env)
@@ -543,7 +549,8 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	active := &stubActiveSession{}
 	active.set("sess-a")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -559,7 +566,7 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	writeLine(assistantTextLine("m1", "streamed"))
 
 	// responding first, then the coalesced delta once the ~250ms window elapses.
-	got := collectEnvs(t, bcast.pushed, 2)
+	got := collectFacts(2)
 	if got[0].Type != protocol.TypeTurnState {
 		t.Fatalf("first envelope = %s, want %s", got[0].Type, protocol.TypeTurnState)
 	}
@@ -581,7 +588,7 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	// Release another fragment only after observing the first timer flush. No
 	// result is available to flush either fragment at a turn boundary.
 	writeLine(assistantTextLine("m1", " incrementally"))
-	next := collectEnvs(t, bcast.pushed, 1)
+	next := collectFacts(1)
 	if next[0].Type != protocol.TypeAssistantDelta {
 		t.Fatalf("second window emitted %s, want assistant_delta before closure", next[0].Type)
 	}
@@ -592,7 +599,7 @@ func TestStreamTurnDrainV2_FlushTimerCoalesces(t *testing.T) {
 	}
 
 	writeLine(resultLine)
-	closed := collectEnvs(t, bcast.pushed, 2)
+	closed := collectFacts(2)
 	if !slices.Equal(envTypes(closed), []string{protocol.TypeTurnEnd, protocol.TypeTurnState}) {
 		t.Fatalf("closure order = %v", envTypes(closed))
 	}
@@ -703,7 +710,8 @@ func TestStreamTurnDrainV2_ToolEvents(t *testing.T) {
 	active := &stubActiveSession{}
 	active.set("sess-a")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil, discardLogger())
@@ -711,7 +719,7 @@ func TestStreamTurnDrainV2_ToolEvents(t *testing.T) {
 
 	feedLines(sink, "sess-a", toolUseLine, toolRsltLine, resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 5)
+	got := collectFacts(5)
 	wantTypes := []string{
 		protocol.TypeTurnState,  // responding
 		protocol.TypeToolUse,    // Read
@@ -1222,7 +1230,8 @@ func TestStreamTurnDrainV2_PostRotationForwardsStaleTailAndUnknownDrops(t *testi
 	active := &stubActiveSession{}
 	active.set("sess-old")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	drops := make(chan string, 8)
 	sink := newStreamTurnSink(0, discardLogger())
@@ -1238,7 +1247,7 @@ func TestStreamTurnDrainV2_PostRotationForwardsStaleTailAndUnknownDrops(t *testi
 
 	feedLinesTagged(sink, tag, assistantTextLine("m2", "post-rotation"), resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectFacts(4)
 	wantTypes := []string{
 		protocol.TypeTurnState,      // responding
 		protocol.TypeAssistantDelta, // post-rotation
@@ -1260,7 +1269,7 @@ func TestStreamTurnDrainV2_PostRotationForwardsStaleTailAndUnknownDrops(t *testi
 	// conversation's session history to the SAME conversation (#2739): it is
 	// attributed there rather than dropped.
 	feedLines(sink, "sess-old", assistantTextLine("m3", "late tail"), resultLine)
-	tail := collectEnvs(t, bcast.pushed, 4)
+	tail := collectFacts(4)
 	if d := decodeDelta(t, tail[1]); d.Text != "late tail" || d.ConversationID != testConvID {
 		t.Errorf("stale-tag delta = {text:%q conv:%q}, want {%q %q}", d.Text, d.ConversationID, "late tail", testConvID)
 	}
@@ -1327,7 +1336,8 @@ func TestStreamTurnDrainV2_UserEchoReachesObserverOnly(t *testing.T) {
 	active := &stubActiveSession{}
 	active.set("sess-a")
 	bcast := newChanBcast("conn-a")
-	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	emitter := testRecordedEmitter(t, cur, bcast, discardLogger())
+	collectFacts := testSourceCollector(t, func() *history.Store { return emitter.hist }, bcast.pushed)
 
 	sink := newStreamTurnSink(0, discardLogger())
 	type seen struct {
@@ -1342,7 +1352,7 @@ func TestStreamTurnDrainV2_UserEchoReachesObserverOnly(t *testing.T) {
 	echoLine := `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"sent now"}]},"parent_tool_use_id":null,"isReplay":true}`
 	feedLines(sink, "sess-a", assistantTextLine("m1", "hello"), echoLine, resultLine)
 
-	got := collectEnvs(t, bcast.pushed, 4)
+	got := collectFacts(4)
 	wantTypes := []string{protocol.TypeTurnState, protocol.TypeAssistantDelta, protocol.TypeTurnEnd, protocol.TypeTurnState}
 	if !slices.Equal(envTypes(got), wantTypes) {
 		t.Fatalf("envelope types:\n got %v\nwant %v", envTypes(got), wantTypes)

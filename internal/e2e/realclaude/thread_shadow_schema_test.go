@@ -110,7 +110,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 	var agentCall string
 	var childText strings.Builder
 	tool, result, closed := false, false, false
-	for _, env := range e.Legacy {
+	for _, env := range h.Entries {
 		var p struct {
 			ConversationID  string `json:"conversation_id"`
 			Text            string `json:"text"`
@@ -124,7 +124,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			return errors.New("invalid legacy observation")
 		}
 
-		if p.ConversationID != h.Conversation {
+		if p.ConversationID != "" && p.ConversationID != h.Conversation {
 			return errors.New("foreign legacy observation")
 		}
 		switch env.Type {
@@ -145,7 +145,7 @@ func shadowWitness(h shadowHistory, e shadowExpected) error {
 			if bytes.Contains(env.Payload, []byte("SHADOW_TOOL")) {
 				result = true
 			}
-		case protocol.TypeSessionTransition:
+		case protocol.TypeSessionTransition, "session_divider":
 			closed = true
 		}
 	}

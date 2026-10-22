@@ -3,7 +3,6 @@ package scenario
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,12 +28,14 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 	seen := map[string]bool{batchID: true}
 	modals := map[string]bool{}
 	sawDismissal, idle := false, false
-	var text strings.Builder
+	var turn sourceTurn
+	text := &turn.text
 	retries, lastAttempt, maxRetry := 0, 0, 0
 	other := map[string]int{}
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		env := w.Next(deadline)
+		env := w.Next(pollDeadline(deadline))
+		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
 		alarm(t, env)
 		if sawDismissal && env.Type != protocol.TypeApiRetry && env.Type != protocol.TypeAssistantDelta {
 			other[env.Type]++
@@ -83,13 +84,7 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 			}
 			delete(modals, dis.ModalID)
 		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid refusal continuation")
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				text.WriteString(p.Text)
-			}
+			t.Fatal("retired refusal continuation delivered on wire")
 		case protocol.TypeApiRetry:
 			var p protocol.ApiRetryPayload
 			if json.Unmarshal(env.Payload, &p) != nil {
@@ -106,7 +101,7 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid refusal turn state")
 			}
-			if p.ConversationID == convID && p.State == "idle" {
+			if turn.idle(t, env, convID) {
 				idle = true
 			}
 		}

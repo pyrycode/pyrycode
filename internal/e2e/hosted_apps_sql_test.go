@@ -157,7 +157,7 @@ await new Promise(resolve=>setTimeout(resolve,200));
 		}
 	}()
 	hostedHealthy(t, sibling)
-	sendAndAwaitEcho(t, seal, next, "turn during app recovery", 32041, conv, "sql-recovery", "channel usable", "channel usable")
+	sendAndAwaitEcho(t, home, seal, next, "turn during app recovery", 32041, conv, "sql-recovery", "channel usable", "channel usable")
 	var rows []observation
 	select {
 	case rows = <-observed:

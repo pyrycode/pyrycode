@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"slices"
 	"strings"
 	"testing"
@@ -203,7 +204,9 @@ func driveSlashCommandListRespawn(t *testing.T) slashCommandListObservation {
 	// missing emitter arm.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -216,39 +219,8 @@ func driveSlashCommandListRespawn(t *testing.T) slashCommandListObservation {
 		sendNoiseMsg(t, phoneA, ciphertext)
 	}
 
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			// One deadline per collection window, and every receive is bounded by what
-			// is left of it — never a short fixed timeout in a poll loop.
-			// coder/websocket closes the underlying connection when the read context is
-			// cancelled (fakephone.Client.ReceiveBytes' own doc), so a timed-out client
-			// cannot be reused and the first timeout must be terminal for the window.
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			// The receive nonce is sequential, so every noise_msg MUST be decrypted in
-			// receive order — filter AFTER decrypting, never before, or the CipherState
-			// desyncs and every later decrypt fails with a misleading error. A
-			// non-noise_msg control frame does not advance the nonce and is skipped.
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recvA), true
-		}
-	}
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) { return source.Next(poll, deadline) }
 
 	var obs slashCommandListObservation
 
@@ -273,6 +245,21 @@ func driveSlashCommandListRespawn(t *testing.T) slashCommandListObservation {
 	// terminator rather than a frame count, so an interleaved broadcast cannot make
 	// this flaky.
 	preKillDeadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, slashCommandListEchoNeedle) {
+				obs.sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnv(preKillDeadline)
 		if !ok {
@@ -289,16 +276,7 @@ func driveSlashCommandListRespawn(t *testing.T) slashCommandListObservation {
 			// no-cursor return takes it), but a non-zero reading here is a claim about
 			// that drop's TIMING rather than about this ticket's behaviour.
 			obs.preKillLists++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, slashCommandListEchoNeedle) {
-				obs.sawEcho = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 

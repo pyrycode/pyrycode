@@ -15,6 +15,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
@@ -35,6 +36,8 @@ type streamWatchdogFixture struct {
 	cancel  context.CancelFunc
 	done    chan error
 	dir     string
+	hist    *history.Store
+	seen    map[string]uint64
 }
 
 func newStreamWatchdogFixture(t *testing.T, approval streamApprovalConfig) *streamWatchdogFixture {
@@ -71,6 +74,8 @@ done
 	cur := &stubCursor{}
 	cur.set(testConvIDB)
 	emitter := newInteractiveTurnEmitterV2(cur, f.bcast, logger)
+	f.hist, f.seen = history.New(t.TempDir()), map[string]uint64{}
+	emitter.hist = f.hist
 	ctx, cancel := context.WithCancel(t.Context())
 	join := startStreamTurnDrainV2(ctx, f.sink, emitter, f.resolve.get, f.busy, logger)
 	t.Cleanup(func() { cancel(); join() })
@@ -150,6 +155,24 @@ func (f *streamWatchdogFixture) frame(kind string) protocol.Envelope {
 	}
 }
 
+func (f *streamWatchdogFixture) fact(kind string) history.Entry {
+	f.t.Helper()
+	var found history.Entry
+	watchdogEventually(f.t, func() bool {
+		for _, conv := range []string{testConvID, testConvIDB} {
+			for _, entry := range historyEntries(f.t, f.hist, conv) {
+				key := conv + kind
+				if entry.Type == kind && entry.ID > f.seen[key] {
+					f.seen[key], found = entry.ID, entry
+					return true
+				}
+			}
+		}
+		return false
+	})
+	return found
+}
+
 func (f *streamWatchdogFixture) quiet() {
 	f.t.Helper()
 	deadline := time.NewTimer(3 * fixtureStallIdle)
@@ -197,7 +220,7 @@ func TestStreamWatchdog_ProductionLifecycle(t *testing.T) {
 	f.quiet() // onset only, even over several more idle thresholds
 	f.responsive()
 	f.send("reply")
-	f.frame(protocol.TypeTurnEnd)
+	f.fact(protocol.TypeTurnEnd)
 	watchdogEventually(t, func() bool { return !f.busy.Busy(testConvID) })
 	f.quiet() // poll observes progress and disarms
 	f.send("owe")
@@ -238,10 +261,10 @@ func TestStreamWatchdog_Controls(t *testing.T) {
 	abort()
 	f.quiet()
 	f.send("tool")
-	f.frame(protocol.TypeAssistantDelta)
+	f.fact(protocol.TypeAssistantDelta)
 	f.quiet() // assistant output makes subsequent tool silence healthy
 	f.send("close-input")
-	f.frame(protocol.TypeAssistantDelta)
+	f.fact(protocol.TypeAssistantDelta)
 	if err := f.r.WriteUserTurn(t.Context(), testConvID, []byte("silent")); err == nil {
 		t.Fatal("closed child input accepted turn")
 	}
@@ -296,7 +319,7 @@ func (f *streamWatchdogFixture) responsive() {
 	if err := other.WriteUserTurn(ctx, testConvIDB, []byte("reply")); err != nil {
 		f.t.Fatal(err)
 	}
-	e := f.frame(protocol.TypeTurnEnd)
+	e := f.fact(protocol.TypeTurnEnd)
 	if !strings.Contains(string(e.Payload), testConvIDB) {
 		f.t.Fatalf("other conversation unresponsive: %s", e.Payload)
 	}
@@ -370,7 +393,7 @@ func TestStreamWatchdog_ResponseBeforeArming(t *testing.T) {
 			}()
 			// The factory feeds the tracker before the parser; publication proves
 			// stdout has already changed owed state while delivery is held.
-			f.frame(tc.frame)
+			f.fact(tc.frame)
 			unblock()
 			select {
 			case err := <-finished:

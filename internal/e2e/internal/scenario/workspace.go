@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +18,7 @@ type WorkspaceConfig struct {
 func WorkspaceChange(t *testing.T, w Wire, c WorkspaceConfig) {
 	t.Helper()
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "workspace-before", Text: c.FirstPrompt})
-	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false)
+	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false, w.Source)
 	id := w.Send(protocol.TypeChangeWorkspace, protocol.ChangeWorkspacePayload{ConversationID: c.ConversationID, Cwd: c.Requested})
 	env := Correlated(t, w.Next, id, c.VerbBudget)
 	var changed protocol.ConversationUpdatedPayload
@@ -33,21 +32,7 @@ func WorkspaceChange(t *testing.T, w Wire, c WorkspaceConfig) {
 		t.Fatal("workspace update was not persisted")
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "workspace-after", Text: c.SecondPrompt})
-	deadline := time.Now().Add(c.TurnBudget)
-	for time.Now().Before(deadline) {
-		env := w.Next(deadline)
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var p protocol.AssistantDeltaPayload
-		if json.Unmarshal(env.Payload, &p) != nil {
-			t.Fatal("invalid workspace reply delta")
-		}
-		if p.ConversationID == c.ConversationID && strings.TrimSpace(p.Text) != "" {
-			return
-		}
-	}
-	t.Fatal("workspace update disturbed the existing session's reply")
+	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false, w.Source)
 }
 func ConversationCwd(t *testing.T, home, convID string) string {
 	t.Helper()

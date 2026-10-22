@@ -75,7 +75,7 @@ func (c recordedScenarioContext) turn(t *testing.T, text string) {
 		}
 		return env
 	}
-	scenariohelpers.CompletedTurn(t, receive, tapeConversation, 150*time.Second, true)
+	scenariohelpers.CompletedTurn(t, receive, tapeConversation, 150*time.Second, true, c.Wire.Source)
 	if !ack {
 		t.Fatal("recorded turn lost its matching acknowledgement")
 	}
@@ -95,7 +95,7 @@ func (c recordedScenarioContext) permission(t *testing.T, prompt, option, token 
 	if shown.Prompt != "Write" {
 		t.Fatal("permission scenario did not surface Write")
 	}
-	scenariohelpers.ResolvePermission(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: receive}, tapeConversation, shown, option, token, 150*time.Second)
+	scenariohelpers.ResolvePermission(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: receive, Source: c.Wire.Source}, tapeConversation, shown, option, token, 150*time.Second)
 	if !ack {
 		t.Fatal("permission trigger lost its matching acknowledgement")
 	}
@@ -110,13 +110,13 @@ func runTapeReply(t *testing.T, c recordedScenarioContext) {
 	t.Helper()
 
 	c.Wire.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "reply", Text: "Without using tools, briefly describe reliable process supervision."})
-	scenariohelpers.CompletedTurn(t, c.Wire.Next, tapeConversation, 120*time.Second, false)
+	scenariohelpers.CompletedTurn(t, c.Wire.Next, tapeConversation, 120*time.Second, false, c.Wire.Source)
 }
 
 func runTapeQuestionAnswer(t *testing.T, c recordedScenarioContext) {
 	t.Helper()
 
-	scenariohelpers.QuestionAnswer(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: c.Wire.Next}, scenariohelpers.QuestionConfig{Home: c.Home, ConversationID: tapeConversation, SessionID: tapeSession, HistorySession: tapeSession, Prompt: scenariohelpers.RecordedQuestionPrompt(), Followup: "Without using tools, reply with a short greeting after the model change.", ExpectedModel: "claude-haiku-4-5-20251001", SurfaceBudget: 180 * time.Second, UpdateBudget: 30 * time.Second, TurnBudget: 150 * time.Second})
+	scenariohelpers.QuestionAnswer(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: c.Wire.Next, Source: c.Wire.Source}, scenariohelpers.QuestionConfig{Home: c.Home, ConversationID: tapeConversation, SessionID: tapeSession, HistorySession: tapeSession, Prompt: scenariohelpers.RecordedQuestionPrompt(), Followup: "Without using tools, reply with a short greeting after the model change.", ExpectedModel: "claude-haiku-4-5-20251001", SurfaceBudget: 180 * time.Second, UpdateBudget: 30 * time.Second, TurnBudget: 150 * time.Second})
 }
 
 func runTapeQuestionRefuse(t *testing.T, c recordedScenarioContext) {
@@ -125,7 +125,7 @@ func runTapeQuestionRefuse(t *testing.T, c recordedScenarioContext) {
 	c.Wire.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "question-refusal-trigger", Text: scenariohelpers.RecordedRefusalPrompt()})
 	batch := scenariohelpers.WaitQuestion(t, c.Wire.Next, tapeConversation, 180*time.Second)
 	c.Wire.Send(protocol.TypeQuestionRefused, protocol.QuestionRefusedPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: "e2e-1995-refusal-token"})
-	scenariohelpers.RefusedTurn(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: c.Wire.Next}, tapeConversation, batch.QuestionBatchID, 150*time.Second)
+	scenariohelpers.RefusedTurn(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: c.Wire.Next, Source: c.Wire.Source}, tapeConversation, batch.QuestionBatchID, 150*time.Second)
 	scenariohelpers.RequirePromptAnswerHistory(t, c.Home, tapeConversation, batch.QuestionBatchID, "refusal", tapeSession)
 }
 
@@ -149,7 +149,7 @@ func runTapePermissionCancel(t *testing.T, c recordedScenarioContext) {
 	if shown.Prompt != "Write" {
 		t.Fatal("cancellation did not surface Write")
 	}
-	scenariohelpers.CancelPermission(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: c.Wire.Next}, tapeConversation, shown, 30*time.Second, 60*time.Second)
+	scenariohelpers.CancelPermission(t, scenariohelpers.Wire{Send: c.Wire.Send, Next: c.Wire.Next, Source: c.Wire.Source}, tapeConversation, shown, 30*time.Second, 60*time.Second)
 	scenariohelpers.RequirePromptAnswerHistory(t, c.Home, tapeConversation, shown.ModalID, "cancel", tapeSession)
 	if c.Mode == "capture" {
 		if _, e := os.Stat(filepath.Join(c.Home, scenariohelpers.CancelPermissionWitness)); !os.IsNotExist(e) {

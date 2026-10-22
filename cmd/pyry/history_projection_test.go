@@ -91,7 +91,11 @@ func TestHistoryProjection_InteractiveMetadata(t *testing.T) {
 			}
 			evs, _ := e.ring.After(testConvID, 0)
 			assertLogMatchesRing(t, entries[1:], evs)
-			if len(bcast.pushes) != 2 {
+			wantPushes := 2
+			if testRetiredInteractiveType(tt.typ) {
+				wantPushes = 0
+			}
+			if len(bcast.pushes) != wantPushes {
 				t.Fatalf("recipient gates changed: %d pushes", len(bcast.pushes))
 			}
 			for _, p := range bcast.pushes {

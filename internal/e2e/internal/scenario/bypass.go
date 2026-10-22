@@ -41,8 +41,9 @@ func BypassQuestions(t *testing.T, w Wire, c BypassQuestionsConfig) {
 			}
 			values = append(values, options[len(options)-2].Label, c.FreeText)
 		}
+		after, _ := QuestionBoundary(t, w.Source, c.ConversationID)
 		w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: fmt.Sprintf("bypass-answer-%d", i), Answers: []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: values}}})
-		text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.Budget)
+		text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.Budget, after)
 		for _, value := range values {
 			if !strings.Contains(strings.ToLower(text), strings.ToLower(value)) {
 				t.Fatal("bypass continuation omitted an answer value")
@@ -63,7 +64,7 @@ func BypassQuestions(t *testing.T, w Wire, c BypassQuestionsConfig) {
 		RequirePromptAnswerHistory(t, c.Home, c.ConversationID, batch.QuestionBatchID, "answer", c.SessionID)
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "bypass-ordinary-tool", Text: fmt.Sprintf("Use Bash once to run exactly this command: printf '%%s' '%s' > bypass-witness.txt\nThen reply done. Do not ask a question.", c.Witness)})
-	CompletedTurn(t, w.Next, c.ConversationID, c.Budget, false)
+	CompletedTurn(t, w.Next, c.ConversationID, c.Budget, false, w.Source)
 	c.CheckWitness()
 	id := w.Send(protocol.TypeRequestSessionSettings, protocol.RequestSessionSettingsPayload{ConversationID: c.ConversationID})
 	env := Correlated(t, w.Next, id, 15*time.Second)

@@ -27,9 +27,11 @@ func CancelPermission(t *testing.T, w Wire, convID string, shown protocol.ModalS
 	}
 	w.Send(protocol.TypeModalCancel, protocol.ModalCancelPayload{ModalID: shown.ModalID})
 	deadline := time.Now().Add(dismissBudget)
-	dismissed, ended := false, false
+	dismissed := false
+	var turn sourceTurn
 	for time.Now().Before(deadline) {
 		env := w.Next(deadline)
+		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
 		if !time.Now().Before(deadline) {
 			break
 		}
@@ -47,16 +49,8 @@ func CancelPermission(t *testing.T, w Wire, convID string, shown protocol.ModalS
 			}
 			dismissed = true
 			deadline = time.Now().Add(turnBudget)
-		case protocol.TypeTurnEnd:
-			var end protocol.TurnEndPayload
-			if json.Unmarshal(env.Payload, &end) != nil {
-				t.Fatal("invalid cancellation turn_end")
-			}
-			if end.ConversationID == convID {
-				ended = true
-			}
 		}
-		if dismissed && ended {
+		if dismissed && turn.ended {
 			return
 		}
 	}

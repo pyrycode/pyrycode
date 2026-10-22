@@ -305,10 +305,10 @@ func TestHostedAppsPairedResources(t *testing.T) {
 	defer phone.Close()
 	seal, next := noiseWire(t, phone, send, recv)
 	conv := createConversationOverWire(t, seal, next, 500)
-	sendAndAwaitEcho(t, seal, next, "credit wait", 501, conv, "credit-wait", "still usable", "still usable")
+	sendAndAwaitEcho(t, home, seal, next, "credit wait", 501, conv, "credit-wait", "still usable", "still usable")
 	p.request(51, protocol.TypeAppCancel, protocol.AppCancelPayload{AppID: hostedAppID, RequestID: 50})
 	p.reply(51, protocol.TypeAppCancelled)
-	sendAndAwaitEcho(t, seal, next, "cancelled transfer", 502, conv, "cancelled-transfer", "usable again", "usable again")
+	sendAndAwaitEcho(t, home, seal, next, "cancelled transfer", 502, conv, "cancelled-transfer", "usable again", "usable again")
 	// A partial response is discarded; a new Noise generation reuses its ID.
 	p.request(60, protocol.TypeAppAssetRequest, asset("/image.bin"))
 	p.response(60, 200, binary, true)

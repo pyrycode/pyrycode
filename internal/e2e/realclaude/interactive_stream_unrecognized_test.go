@@ -186,7 +186,8 @@ func TestInteractiveStreamNoUnrecognizedOnToolTurn(t *testing.T) {
 		sequence++
 		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return sequence
-	}, Next: scenariohelpers.Receive(t, phone, initRecv)}
+	}, Next: scenariohelpers.PollingReceive(t, phone, initRecv)}
+	wire = scenariohelpers.ObserveSource(t, home, wire)
 	scenariohelpers.ToolTurn(t, wire, unrecognizedConvID, fmt.Sprintf("Use the Write tool to create a file called probe.txt containing the single "+
 		"word banana, then use the Read tool to read it back. Reply with one short word. run=%d", time.Now().UnixNano()), 180*time.Second)
 

@@ -584,7 +584,7 @@ replay, every partition and single-entry feeds agree. These recordings prove
 shell completion and omission behavior; they supply no agent-gone proof. See
 [the producer's narrower gone evidence](history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
 
-The [reusable long-history corpus](thread-package-shadow-lifecycle-and-evidence.md#reusable-fold-regression-corpus)
+The [reusable long-history corpus](thread-package-reusable-fold-regression-corpus.md#reusable-fold-regression-corpus)
 adds compact golden checkpoints without replacing these independent semantic
 and provenance assertions. `testFoldGoldenCheck` in each test package pins the
 production baseline commit `a920b90cc6bfd2f1fb8461e9f85ce6f19934afa6`, input

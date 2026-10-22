@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +122,7 @@ func TestRelayV2_StreamTurnHeldUntilPostureAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal envelope: %v", err)
 	}
+	source := scenario.SourceSince(t, home, knownConvID)
 	sendNoiseMsg(t, phone, ciphertext)
 
 	// Drain frames until the deadline, collecting the ack (the vacuity positive) and
@@ -157,6 +159,13 @@ func TestRelayV2_StreamTurnHeldUntilPostureAck(t *testing.T) {
 			}
 		case protocol.TypeAssistantDelta:
 			t.Fatalf("an assistant_delta arrived while the posture was unconfirmed: %s", string(got.Payload))
+		}
+	}
+
+	for _, entry := range source(knownConvID) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			t.Fatal("unconfirmed posture produced retained content")
 		}
 	}
 

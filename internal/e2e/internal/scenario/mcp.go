@@ -73,7 +73,7 @@ type MCPReconnectConfig struct {
 func MCPReconnect(t *testing.T, w Wire, c MCPReconnectConfig) {
 	t.Helper()
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "mcp-warm", Text: "Reply with the single word ready and nothing else. Do not use any tool."})
-	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false)
+	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false, w.Source)
 	receive := func(id uint64, budget time.Duration) protocol.MCPStatusPayload {
 		deadline := time.Now().Add(budget)
 		for time.Now().Before(deadline) {

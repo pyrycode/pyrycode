@@ -20,7 +20,7 @@ type PermissionSettingsConfig struct {
 func ConfirmedPermissionSettings(t *testing.T, w Wire, c PermissionSettingsConfig) {
 	t.Helper()
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "settings-warm", Text: "Reply with the single word ready. Do not use tools."})
-	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false)
+	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false, w.Source)
 	pid := c.ChildPID()
 	if pid <= 0 {
 		t.Fatal("no live child to compare")

@@ -26,6 +26,7 @@ package realclaude
 
 import (
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,9 +91,10 @@ func TestInteractiveSystemPromptFile_LiveSpawnArgv(t *testing.T) {
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
 
 	// Since #2085 this first message is what brings the conversation's claude up.
+	replyFacts1 := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 3, convID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget, replyFacts1)
 
 	records := sysPromptSpawnRecords(h.daemon.stderr.String())
 	if len(records) == 0 {

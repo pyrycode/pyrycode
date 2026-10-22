@@ -157,6 +157,7 @@ func TestBasicProtocolHelperProcess(t *testing.T) {
 		frames = frames[1:]
 		return env
 	}}
+	wire = testSourceWire(t, wire)
 	budget := 30 * time.Millisecond
 	switch {
 	case strings.HasPrefix(name, "announce-"):

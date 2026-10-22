@@ -88,6 +88,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -188,10 +189,11 @@ func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	// rotation is a rebind, not a first-bind. drainForCompletedTurn asserts a
 	// non-empty assistant_delta FOLLOWED BY the terminal turn_state{idle} (no
 	// content assertion — real claude's words are non-deterministic).
+	completedFacts1 := scenario.SourceSince(t, home, streamNewSessionConvID)
 	sealSendMessage(t, phone, initSend, reqID, streamNewSessionConvID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d turn=1", nonce))
 	reqID++
-	drainForCompletedTurn(t, phone, initRecv, streamNewSessionConvID, perTurnReplyBudget)
+	drainForCompletedTurn(t, phone, initRecv, streamNewSessionConvID, perTurnReplyBudget, completedFacts1)
 
 	// Baseline id (non-vacuity anchor for M2). Read after Turn 1 settles; a normal
 	// turn appends to the same transcript and never rotates, so this is the value

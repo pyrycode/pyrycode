@@ -190,14 +190,14 @@ func TestInteractiveTurnEmitterV2_OversizedDeltaFitsEnvelopeCap(t *testing.T) {
 			cur := &stubCursor{}
 			cur.set(testConvID)
 			bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-			e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+			e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 			for _, p := range tc.pieces {
 				e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: p})
 			}
 			e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-			deltas := assistantDeltas(t, bcast.pushes)
+			deltas := assistantDeltas(t, testEmitterFacts(t, e))
 			if len(deltas) < 2 {
 				t.Fatalf("emitted %d assistant_delta envelopes for %d B of text; want more than one (a single frame makes every assertion below vacuous)", len(deltas), len(text))
 			}
@@ -205,7 +205,7 @@ func TestInteractiveTurnEmitterV2_OversizedDeltaFitsEnvelopeCap(t *testing.T) {
 			// AC#1: the cap is measured on the whole envelope, because that is
 			// what forwardEnvelope marshals and seals.
 			largest := 0
-			for i, p := range bcast.pushes {
+			for i, p := range testEmitterFacts(t, e) {
 				if p.env.Type != protocol.TypeAssistantDelta {
 					continue
 				}
@@ -281,12 +281,12 @@ func TestInteractiveTurnEmitterV2_UnderCapDeltaEmitsExactlyOne(t *testing.T) {
 			cur := &stubCursor{}
 			cur.set(testConvID)
 			bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-			e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+			e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 			e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: tc.text})
 			e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-			deltas := assistantDeltas(t, bcast.pushes)
+			deltas := assistantDeltas(t, testEmitterFacts(t, e))
 			if len(deltas) != len(tc.wantSeqs) {
 				t.Fatalf("emitted %d assistant_delta envelopes; want %d", len(deltas), len(tc.wantSeqs))
 			}
@@ -326,12 +326,12 @@ func TestInteractiveTurnEmitterV2_OversizedDeltaNoLogLeak(t *testing.T) {
 		snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}},
 		pushErr:   map[string]error{"a": relay.ErrConnNotFound},
 	}
-	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+	e := testRecordedEmitter(t, cur, bcast, logger)
 
 	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: text})
 	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
 
-	if deltas := assistantDeltas(t, bcast.pushes); len(deltas) < 2 {
+	if deltas := assistantDeltas(t, testEmitterFacts(t, e)); len(deltas) < 2 {
 		t.Fatalf("emitted %d assistant_delta envelopes; want more than one (the chunked path is what this test covers)", len(deltas))
 	}
 	logs := buf.String()

@@ -15,7 +15,7 @@ func ModelFamily(t *testing.T, w Wire, convID, sessionID string, prompt func(int
 	menu := FamilyMenu(t, w, convID, menuBudget)
 	RequireOneRowPerFamily(t, menu)
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "m-2447-baseline", Text: prompt(1)})
-	baseline, seen := AnnouncedTurn(t, w.Next, convID, turnBudget)
+	baseline, seen := AnnouncedTurn(t, w.Next, convID, turnBudget, w.Source)
 	if !seen || baseline.Model == "" || baseline.ConversationID != convID {
 		t.Fatal("model family baseline lacks owned announcement")
 	}
@@ -26,7 +26,7 @@ func ModelFamily(t *testing.T, w Wire, convID, sessionID string, prompt func(int
 		t.Fatal("pinned model from offered family was refused")
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "m-2447-after-pick", Text: prompt(2)})
-	announced, seen := AnnouncedTurn(t, w.Next, convID, turnBudget)
+	announced, seen := AnnouncedTurn(t, w.Next, convID, turnBudget, w.Source)
 	if !seen || announced.ConversationID != convID {
 		t.Fatal("model family follow-up lacks owned announcement")
 	}

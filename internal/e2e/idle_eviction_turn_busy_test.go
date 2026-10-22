@@ -5,13 +5,12 @@ package e2e
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -82,30 +81,10 @@ func TestE2E_IdleEviction_DefersWhileStreamTurnOpen(t *testing.T) {
 
 	// nextEnv decrypts every noise_msg in arrival order (the receive nonce is a
 	// lockstep counter). ok=false on deadline.
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phone.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, initRecv), true
-		}
-	}
+	source := scenario.NewSourceObserver(t, home)
+	source.Watch(knownConvID)
+	poll := scenario.PollingReceive(t, phone, initRecv)
+	nextEnv := func(d time.Time) (protocol.Envelope, bool) { return source.Next(poll, d) }
 
 	sendSealedEnvelope(t, phone, initSend, protocol.Envelope{
 		ID:   sendReqID,
@@ -129,14 +108,7 @@ func TestE2E_IdleEviction_DefersWhileStreamTurnOpen(t *testing.T) {
 		if env.Type == protocol.TypeError {
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			t.Fatalf("decode assistant_delta: %v", err)
-		}
-		opened = d.ConversationID == knownConvID && strings.Contains(d.Text, msgMarker)
+		opened = strings.Contains(source.Text(knownConvID), msgMarker)
 	}
 
 	// The turn is open. Two full windows must pass without an idle eviction.
@@ -168,7 +140,7 @@ func TestE2E_IdleEviction_DefersWhileStreamTurnOpen(t *testing.T) {
 		if err := json.Unmarshal(env.Payload, &st); err != nil {
 			t.Fatalf("decode turn_state: %v", err)
 		}
-		closed = st.ConversationID == knownConvID && st.State == "idle"
+		closed = st.ConversationID == knownConvID && st.State == "idle" && source.Ended(knownConvID)
 	}
 
 	// No turn open now: the next fire evicts, at most one window late.

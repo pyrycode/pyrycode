@@ -251,7 +251,7 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 	}
 	positions := make(map[string]int)
 	seenIDs, seenEvents := make(map[uint64]bool), make(map[uint64]bool)
-	ack, firstDelta, opening := -1, -1, -1
+	ack, firstRunning, opening := -1, -1, -1
 	var openingTurn, assistantTurn string
 	var refusalEntry, openingEntry history.Entry
 	for i, env := range frames {
@@ -262,28 +262,21 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 			if env.InReplyTo != nil && *env.InReplyTo == liveReqID {
 				ack = i
 			}
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				return fmt.Errorf("decode assistant delta: %w", err)
-			}
-			if p.ConversationID == convID && p.Text != "" {
-				if ack < 0 {
-					return fmt.Errorf("assistant text before liveness ack")
-				}
-				if firstDelta < 0 {
-					firstDelta, assistantTurn = i, p.TurnID
-				}
-			}
-		case protocol.TypeTurnState, protocol.TypeTurnEnd:
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			return fmt.Errorf("retired interactive frame %q", env.Type)
+		case protocol.TypeTurnState:
 			var p struct {
 				ConversationID string `json:"conversation_id"`
+				State          string `json:"state"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				return fmt.Errorf("decode lifecycle frame: %w", err)
 			}
 			if p.ConversationID == convID && ack < 0 {
 				return fmt.Errorf("refused prompt emitted %q before liveness ack", env.Type)
+			}
+			if p.ConversationID == convID && p.State != "idle" && firstRunning < 0 {
+				firstRunning = i
 			}
 		case protocol.TypeBanner:
 			if env.HistoryEntryID == nil || *env.HistoryEntryID == 0 || env.EventID == nil || *env.EventID == 0 || env.TS.IsZero() {
@@ -330,7 +323,7 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 				}
 				switch entry.Type {
 				case "main_turn_opened":
-					if fact.TurnID == "" || !fact.OccurredAt.Equal(entry.TS) || ack < 0 || firstDelta >= 0 {
+					if fact.TurnID == "" || !fact.OccurredAt.Equal(entry.TS) || ack < 0 || firstRunning >= 0 {
 						return fmt.Errorf("opening %d must follow ack and precede assistant text", id)
 					}
 					key, opening, openingTurn, openingEntry = "opening", i, fact.TurnID, entry
@@ -352,7 +345,24 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 	if len(positions) != 2 {
 		return fmt.Errorf("unexpected banners: got %d, want 2", len(positions))
 	}
-	if ack < 0 || firstDelta <= opening || openingTurn != assistantTurn || openingEntry.ID <= refusalEntry.ID || openingEntry.TS.Before(refusalEntry.TS) {
+	for _, e := range entries {
+		if e.Type != protocol.TypeAssistantDelta || e.ID <= openingEntry.ID {
+			continue
+		}
+		var p protocol.AssistantDeltaPayload
+		if json.Unmarshal(e.Payload, &p) != nil {
+			return fmt.Errorf("invalid hook assistant source")
+		}
+		if p.ConversationID == convID && p.ParentToolUseID == "" && strings.TrimSpace(p.Text) != "" && !e.TS.Before(openingEntry.TS) {
+			if e.Session == nil || openingEntry.Session == nil || *e.Session != *openingEntry.Session {
+				return fmt.Errorf("hook source changed producing session")
+			}
+			assistantTurn = p.TurnID
+			break
+		}
+	}
+
+	if ack < 0 || firstRunning <= opening || openingTurn != assistantTurn || openingEntry.ID <= refusalEntry.ID || openingEntry.TS.Before(refusalEntry.TS) {
 		return fmt.Errorf("opening does not identify the post-refusal assistant turn")
 	}
 	ordered := append([]history.Entry(nil), entries...)
@@ -428,44 +438,31 @@ func HookBanner(t *testing.T, w Wire, c HookBannerConfig) {
 	c.CheckWitness(false)
 	time.Sleep(c.SettleBudget)
 	liveID := w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "m-live", Text: c.LivePrompt})
-	ack, text, done := false, false, false
-	deadline = time.Now().Add(c.TurnBudget)
-	for !done && time.Now().Before(deadline) {
-		env := next(deadline)
-		switch env.Type {
-		case protocol.TypeAck:
-			if env.InReplyTo != nil && *env.InReplyTo == liveID {
-				ack = true
-			}
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid hook assistant delta")
-			}
-			if p.ConversationID == c.ConversationID && strings.TrimSpace(p.Text) != "" {
-				if !ack {
-					t.Error("refused turn emitted text before next-send ACK")
-				} else {
-					text = true
-				}
-			}
-		case protocol.TypeTurnState:
+
+	ack := false
+	var turn sourceTurn
+	checked := func(d time.Time) protocol.Envelope {
+		env := next(d)
+		turn.feed(t, c.ConversationID, w.Source(c.ConversationID))
+		if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == liveID {
+			ack = true
+		}
+		if env.Type == protocol.TypeTurnState {
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid hook turn state")
+				t.Fatal("invalid hook live phase")
 			}
-			if p.ConversationID == c.ConversationID {
-				if !ack {
-					t.Error("refused turn emitted lifecycle before next-send ACK")
-				} else if text && p.State == "idle" {
-					done = true
-				}
+			if p.ConversationID == c.ConversationID && !ack {
+				t.Fatal("hook turn phase preceded correlated ack")
 			}
 		}
+		return env
 	}
-	if !ack || !text || !done {
-		t.Fatal("post-refusal turn failed ACK/text/idle milestones")
+	CompletedTurn(t, checked, c.ConversationID, c.TurnBudget, false, w.Source)
+	if !ack {
+		t.Fatal("hook liveness has no correlated acknowledgement")
 	}
+
 	c.CheckWitness(true)
 	store := history.New(filepath.Join(c.Home, ".pyry", "test"))
 	var entries []history.Entry

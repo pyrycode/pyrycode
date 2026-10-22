@@ -73,8 +73,8 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 					e := newInteractiveTurnEmitterV2(&stubCursor{}, bcast, logger)
 					e.hist, e.ring, e.nextID = store, ring, 100
 					nextID = &e.nextID
-					wantType = protocol.TypeAssistantDelta
-					e.emit(ctx, testConvID, wantType, protocol.AssistantDeltaPayload{ConversationID: testConvID, Text: text})
+					wantType = protocol.TypeToolProgress
+					e.emit(ctx, testConvID, wantType, map[string]string{"conversation_id": testConvID, "text": text})
 				case "transition":
 					e := newSessionTransitionEmitterV2(bcast, constResolver(testConvID, true), logger)
 					e.hist, e.nextID = store, 100

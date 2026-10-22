@@ -43,8 +43,17 @@ and [retained emitter state](streamsup-package-draining-turnevents-into-the-inte
 `appendConversationHistory` combines optional captured provenance with existing
 visibility metadata. Raw `Store.Page` exposes it in warm and reopened stores.
 Omitted or unknown source stays absent, never inferred as `none`; legacy entries
-remain untagged and are not rewritten. Nil/failed storage still permits eligible
-legacy delivery with absent history identity.
+remain untagged and are not rewritten. Interactive assistant text, tool
+use/results/denials and completion still receive one append attempt per emitted
+fact, without requiring clients (#3734). Successful appends preserve payloads,
+timestamps, visibility and captured provenance; source changes still flush the
+preceding buffer before recording the next source. These five types return
+before compatibility projection, replay insertion or fan-out for every app,
+including peers without `thread`. Their source folding and explicit catch-up
+remain; no raw content or substitute receipt is a fallback for nil/failed
+storage. Supported live phase/progress retains its delivery behavior independently
+of storage, and append failures retain content-free diagnostics. Channel posts
+below retain their separate publication pending #3737.
 
 Relay correlation identity is the authenticated pairing's bound Noise public
 key (`dispatch.Conn.Auth().StaticKey`), in its existing lowercase-hex form,

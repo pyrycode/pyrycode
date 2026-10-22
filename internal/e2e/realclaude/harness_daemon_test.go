@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"log/slog"
 	"net"
 	"os"
@@ -85,63 +86,11 @@ func sealSendMessage(t *testing.T, phone *fakephone.Client, cs *noise.CipherStat
 	sendNoiseMsg(t, phone, ciphertext)
 }
 
-// drainForAssistantReply reads binary→phone noise_msg frames in receive order —
-// the receive nonce is sequential, so every frame MUST be decrypted in order to
-// keep the CipherState in sync — decrypts each, and returns once it observes a
-// non-empty assistant_delta for convID (the liveness signal). The interleaved
-// ack / turn_state / tool_use / turn_end envelopes are decrypted and skipped.
-// A per-turn timeout with no such delta is the deadlock RED captures on `main`.
-func drainForAssistantReply(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, turn int, timeout time.Duration) {
+// drainForAssistantReply proves source text and settled live completion while
+// consuming every encrypted frame in receive order.
+func drainForAssistantReply(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, turn int, timeout time.Duration, sources ...scenario.SourceFacts) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("turn %d: no non-empty assistant_delta for %q within %s — the bootstrap turn stream never bound (the fresh-daemon deadlock #854 fixes)",
-				turn, convID, timeout)
-		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				t.Fatalf("turn %d: no non-empty assistant_delta for %q within %s — the bootstrap turn stream never bound (the fresh-daemon deadlock #854 fixes)",
-					turn, convID, timeout)
-			}
-			t.Fatalf("turn %d: phone receive: %v", turn, err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("turn %d: decode inner frame: %v", turn, err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) does not advance the
-			// receive nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("turn %d: decode inner data: %v", turn, err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("turn %d: phone decrypt (receive-nonce desync?): %v", turn, err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("turn %d: decode envelope: %v", turn, err)
-		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue // ack, turn_state, tool_use, turn_end, … — keep draining in order
-		}
-		var p protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
-			t.Fatalf("turn %d: decode assistant_delta payload: %v", turn, err)
-		}
-		if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-			t.Logf("turn %d: non-empty assistant_delta (seq=%d, %d bytes) for %q",
-				turn, p.Seq, len(p.Text), convID)
-			return
-		}
-	}
+	scenario.CompletedTurn(t, scenario.PollingReceive(t, phone, cs), convID, timeout, false, sources...)
 }
 
 // --- Noise wire helpers (transcribed from internal/e2e) ---------------------

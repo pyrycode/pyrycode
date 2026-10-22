@@ -104,9 +104,10 @@ func TestInteractiveStreamLiveness(t *testing.T) {
 	// A cold live session must deliver nonempty text and close within the budget.
 	// Chunk counts and generated wording are independent of basic liveness.
 	nonce := time.Now().UnixNano()
+	completedFacts1 := scenario.SourceSince(t, home, streamConvID)
 	sealSendMessage(t, phone, initSend, 2, streamConvID, "m-1",
 		fmt.Sprintf("Without using tools, briefly describe reliable process supervision. run=%d", nonce))
-	drainForCompletedTurn(t, phone, initRecv, streamConvID, 120*time.Second)
+	drainForCompletedTurn(t, phone, initRecv, streamConvID, 120*time.Second, completedFacts1)
 }
 
 // --- stream-json toggle + turn drain ----------------------------------------
@@ -154,21 +155,28 @@ const warnRateLimitStatus = scenario.WarnRateLimitStatus
 // a non-whitespace delta (M1) followed by matching terminal idle (M2). Idle before
 // M1 cannot close this turn. Unknown messages and unrecognized rate-limit statuses
 // are global alarms, including frames attributed to other conversations.
-func drainForCompletedTurn(t *testing.T, phone completedTurnReceiver, cs *noise.CipherState, convID string, timeout time.Duration) string {
+func drainForCompletedTurn(t *testing.T, phone completedTurnReceiver, cs *noise.CipherState, convID string, timeout time.Duration, sources ...scenario.SourceFacts) string {
 	t.Helper()
-	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, false)
+	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, false, sources...)
 }
 
-func drainForCompletedTurnWithoutModal(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
+func drainForCompletedTurnWithoutModal(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration, sources ...scenario.SourceFacts) string {
 	t.Helper()
-	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, true)
+	return drainForCompletedTurnOptions(t, phone, cs, convID, timeout, true, sources...)
 }
 
 type completedTurnReceiver interface {
 	ReceiveBytes(time.Duration) ([]byte, error)
 }
 
-func drainForCompletedTurnOptions(t *testing.T, phone completedTurnReceiver, cs *noise.CipherState, convID string, timeout time.Duration, rejectModal bool) string {
+func drainForCompletedTurnOptions(t *testing.T, phone completedTurnReceiver, cs *noise.CipherState, convID string, timeout time.Duration, rejectModal bool, sources ...scenario.SourceFacts) string {
 	t.Helper()
-	return scenario.CompletedTurn(t, scenario.Receive(t, phone, cs), convID, timeout, rejectModal)
+	next := scenario.Receive(t, phone, cs)
+	if client, ok := phone.(interface {
+		completedTurnReceiver
+		Close() error
+	}); ok {
+		next = scenario.PollingReceive(t, client, cs)
+	}
+	return scenario.CompletedTurn(t, next, convID, timeout, rejectModal, sources...)
 }

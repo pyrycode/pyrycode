@@ -301,7 +301,7 @@ func TestInteractiveTurnEmitterV2_SealedChildCompletionSplit(t *testing.T) {
 func testChildCompletionSplit(t *testing.T, sealed bool, text string) {
 	t.Helper()
 	ctx := context.Background()
-	_, bcast, e := newParentLaneEmitter(t, testConvID)
+	_, _, e := newParentLaneEmitter(t, testConvID)
 	e.hist, e.runtimeFacts = history.New(t.TempDir()), true
 	source := history.SessionProvenance{Kind: "claude", SessionID: "producing-session"}
 	e.handleForSource(ctx, testConvID, turnevent.ToolStart{ToolCallID: "agent", Title: "Agent"}, source, 7)
@@ -315,7 +315,7 @@ func testChildCompletionSplit(t *testing.T, sealed bool, text string) {
 	if !sealed {
 		e.handleForSource(ctx, testConvID, turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "completed"}, source, 7)
 	}
-	deltas := assistantDeltas(t, bcast.pushes)
+	deltas := assistantDeltas(t, testEmitterFacts(t, e))
 	if len(deltas) != 3 {
 		t.Fatalf("deltas=%d, want 3", len(deltas))
 	}

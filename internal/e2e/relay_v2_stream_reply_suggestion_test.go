@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,7 @@ func TestRelayV2_StreamReplySuggestionSetClearReconnect(t *testing.T) {
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
 
+	source := scenario.NewSourceObserver(t, home)
 	type nextFn = func(time.Time) (protocol.Envelope, bool)
 	dial := func(name, token string) (func(protocol.Envelope), nextFn) {
 		t.Helper()
@@ -103,7 +105,7 @@ func TestRelayV2_StreamReplySuggestionSetClearReconnect(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = phone.Close() })
 		send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-		return sealedConnDriver(t, phone, name, send, recv)
+		return sealedConnDriver(t, phone, name, send, recv, source)
 	}
 
 	// await drains one phone until a reply_suggestion for rsConvID in the wanted state
@@ -120,14 +122,13 @@ func TestRelayV2_StreamReplySuggestionSetClearReconnect(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s: deadline (wantSet=%v): suggestion=%v turn_end=%v", name, wantSet, raw != nil, sawTurnEnd)
 			}
+			sawTurnEnd = sawTurnEnd || source.Ended(rsConvID)
 			if forbidOld && bytes.Contains(env.Payload, []byte(rsSuggestion)) {
 				t.Fatalf("%s: %s frame carries the cleared suggestion text", name, env.Type)
 			}
 			switch env.Type {
 			case protocol.TypeError:
 				t.Fatalf("%s: unexpected error envelope: %s", name, string(env.Payload))
-			case protocol.TypeTurnEnd:
-				sawTurnEnd = true
 			case protocol.TypeReplySuggestion:
 				var p protocol.ReplySuggestionPayload
 				if err := json.Unmarshal(env.Payload, &p); err != nil {

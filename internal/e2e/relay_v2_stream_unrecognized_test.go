@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"strings"
 	"testing"
 	"time"
@@ -103,7 +104,9 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 	// Interactive — the capability the unrecognized_message frame is gated on.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -116,30 +119,8 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 		sendNoiseMsg(t, phoneA, ciphertext)
 	}
 
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phoneA.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone A receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone A decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recvA), true
-		}
-	}
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) { return source.Next(poll, deadline) }
 
 	sealSend(protocol.Envelope{
 		ID:   sendReqID,
@@ -162,6 +143,21 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 		sawTurnEnd   bool
 	)
 	deadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, echoNeedle) {
+				sawEcho = true
+			}
+		case protocol.TypeTurnEnd:
+			sawTurnEnd = true
+		}
+	}
+
 	for !sawTurnEnd {
 		env, ok := nextEnv(deadline)
 		if !ok {
@@ -177,16 +173,7 @@ func TestRelayV2_StreamUnrecognizedMessageReachesPhone(t *testing.T) {
 				t.Fatalf("decode unrecognized_message payload: %v", err)
 			}
 			unrecognized = append(unrecognized, p)
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, echoNeedle) {
-				sawEcho = true
-			}
-		case protocol.TypeTurnEnd:
-			sawTurnEnd = true
+
 		}
 	}
 

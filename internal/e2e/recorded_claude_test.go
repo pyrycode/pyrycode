@@ -241,6 +241,21 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: append([]string{}, definition.ClaudeArgs...), extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-workdir=" + workdir, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
 	h := &Harness{SocketPath: c.Socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
 	t.Cleanup(func() { h.Stop(t) })
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		f, err := os.CreateTemp("", "pyry-recorded-failure-*.log")
+		if err != nil {
+			t.Log("could not retain private daemon failure log")
+			return
+		}
+		_, writeErr := f.WriteString(stderr.String())
+		closeErr := f.Close()
+		if writeErr == nil && closeErr == nil {
+			t.Logf("private daemon failure log: %s", f.Name())
+		}
+	})
 	if err = h.waitForReady(); err != nil {
 		t.Fatal("recorded daemon did not become ready")
 	}
@@ -278,6 +293,13 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 		err error
 	}
 	var persistent chan reading
+	var pending chan reading
+	t.Cleanup(func() {
+		if pending != nil {
+			_ = phone.Close()
+			<-pending
+		}
+	})
 	if scenario == "native-suggestions" {
 		persistent = make(chan reading, 128)
 		stop := make(chan struct{})
@@ -303,8 +325,12 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 		for time.Now().Before(deadline) {
 			ch := persistent
 			if ch == nil {
-				ch = make(chan reading, 1)
-				go func() { raw, err := phone.ReceiveBytes(time.Until(deadline)); ch <- reading{raw, err} }()
+				if pending == nil {
+					pending = make(chan reading, 1)
+					ch, client := pending, phone
+					go func() { raw, err := client.ReceiveBytes(15 * time.Minute); ch <- reading{raw, err} }()
+				}
+				ch = pending
 			}
 			timer := time.NewTimer(time.Until(deadline))
 			defer timer.Stop()
@@ -313,6 +339,9 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 			for waiting {
 				select {
 				case result = <-ch:
+					if persistent == nil {
+						pending = nil
+					}
 					waiting = false
 				case <-timer.C:
 					return protocol.Envelope{}
@@ -332,7 +361,7 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 				return protocol.Envelope{}
 			}
 			if result.err != nil {
-				t.Fatal("test client connection ended before scenario completed")
+				t.Fatalf("test client connection ended before scenario completed: %v", result.err)
 			}
 			var inner protocol.InnerFrameV2
 			if json.Unmarshal(result.raw, &inner) != nil {
@@ -372,6 +401,10 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 	}
 	reconnect := func() {
 		_ = phone.Close()
+		if pending != nil {
+			<-pending
+			pending = nil
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		var err error
@@ -396,7 +429,8 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 			t.Fatal(err)
 		}
 	}
-	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Checkpoint: checkpoint, Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: scenariohelpers.Wire{Send: transmit, Next: next}, Sequence: &sequence, DaemonLog: stderr.String})
+	wire := scenariohelpers.ObserveSource(t, home, scenariohelpers.Wire{Send: transmit, Next: next})
+	recordedScenarioDrivers[scenario](t, recordedScenarioContext{Checkpoint: checkpoint, Source: source, Reconnect: reconnect, Home: home, Workdir: workdir, Socket: c.Socket, Mode: mode, Wire: wire, Sequence: &sequence, DaemonLog: stderr.String})
 
 	if t.Failed() {
 		return

@@ -35,19 +35,16 @@ func historyEntries(t *testing.T, store *history.Store, convID string) []history
 	return out
 }
 
-// assertLogMatchesRing is AC-1's comparison: for a conversation whose traffic
-// fits inside the ring's per-conversation bound, the log holds the same events
-// in the same order, with the same wire type, the same payload BYTES and the
-// same timestamp the fan-out carried. The durable ids differ by construction —
-// the ring's restart at 1 on every daemon start is the whole reason the log
-// exists — so they are not compared.
+// assertLogMatchesRing compares eligible source facts with their replay payloads
+// and timestamps. Retired interactive content remains only in the source log.
 func assertLogMatchesRing(t *testing.T, entries []history.Entry, evs []eventring.Event) {
 	t.Helper()
+	if len(entries) == 0 {
+		t.Fatal("fixture recorded no source facts")
+	}
+	entries = slices.DeleteFunc(slices.Clone(entries), func(e history.Entry) bool { return testRetiredInteractiveType(e.Type) })
 	if len(entries) != len(evs) {
 		t.Fatalf("log holds %d entries, ring holds %d events", len(entries), len(evs))
-	}
-	if len(evs) == 0 {
-		t.Fatal("fixture produced no events; the comparison would be vacuous")
 	}
 	for i := range evs {
 		if entries[i].Type != evs[i].Type {
@@ -76,12 +73,7 @@ func historyFixtureEvents() []turnevent.Event {
 	}
 }
 
-// AC-1: every envelope the interactive chokepoint fans out is appended to its
-// conversation's log with the same wire type, payload bytes and timestamp.
-//
-// The conversation id MUST be canonical: Append refuses any other shape with
-// ErrInvalidID, and a log that reads empty for that reason is indistinguishable
-// from a producer that was never wired at all.
+// Source content and live state are recorded once; only eligible state replays.
 func TestInteractiveTurnEmitterV2_HistoryMatchesRing(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
@@ -101,7 +93,7 @@ func TestInteractiveTurnEmitterV2_HistoryMatchesRing(t *testing.T) {
 	}
 	assertLogMatchesRing(t, historyEntries(t, store, testConvID), evs)
 
-	// The fan-out itself is unchanged: the same envelopes still reached the conn.
+	// Surviving live-state events retain their delivery count.
 	if got, want := len(bcast.pushes), len(evs); got != want {
 		t.Fatalf("pushed %d envelopes, ring recorded %d", got, want)
 	}
@@ -131,12 +123,7 @@ func TestInteractiveTurnEmitterV2_HistoryWithNoConnsOpen(t *testing.T) {
 	assertLogMatchesRing(t, historyEntries(t, store, testConvID), evs)
 }
 
-// AC-4: a failing log append suppresses neither the wire emit nor the ring
-// append, and the failure is reported with the conversation id and the error
-// identity — never the payload bytes.
-//
-// A non-canonical cursor is the cheap induction, and it is the shape several
-// existing tests here already run under.
+// Failed history preserves supported live state without restoring raw content.
 func TestInteractiveTurnEmitterV2_HistoryFailureDoesNotSuppressEmit(t *testing.T) {
 	t.Parallel()
 	const badConv = "conv-x"
@@ -154,12 +141,9 @@ func TestInteractiveTurnEmitterV2_HistoryFailureDoesNotSuppressEmit(t *testing.T
 
 	// The wire emit stands.
 	wantTypes := []string{
-		protocol.TypeTurnState,      // thinking
-		protocol.TypeTurnState,      // responding
-		protocol.TypeAssistantDelta, // hello
-		protocol.TypeToolUse,        // Read
-		protocol.TypeTurnEnd,        // end_turn
-		protocol.TypeTurnState,      // idle
+		protocol.TypeTurnState, // thinking
+		protocol.TypeTurnState, // responding
+		protocol.TypeTurnState, // idle
 	}
 	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
 		t.Fatalf("envelope type order:\n got %v\nwant %v", got, wantTypes)

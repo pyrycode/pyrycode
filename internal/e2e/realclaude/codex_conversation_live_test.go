@@ -39,6 +39,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -336,6 +338,9 @@ type codexQuestionTurn struct {
 // Sol. Every surfaced question value stays out of the live-gate log.
 func runCodexQuestionTurn(t *testing.T, h *perConvHarness, convID string, reqID uint64, model, text string) codexQuestionTurn {
 	t.Helper()
+	source := scenario.NewSourceObserver(t, h.home)
+	source.Watch(convID)
+	poll := scenario.PollingReceive(t, h.phone, h.initRecv)
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), text)
 	reqID++
 	var (
@@ -345,13 +350,27 @@ func runCodexQuestionTurn(t *testing.T, h *perConvHarness, convID string, reqID 
 		otherLabels             []string
 		reply                   strings.Builder
 	)
+	var answerMark uint64
+	source.OnEntry = func(entry history.Entry) {
+		if !asked || entry.ID <= answerMark || entry.Type != protocol.TypeAssistantDelta {
+			return
+		}
+		var p protocol.AssistantDeltaPayload
+		if json.Unmarshal(entry.Payload, &p) != nil {
+			t.Fatal("invalid Codex continuation source")
+		}
+		if p.ConversationID == convID && p.ParentToolUseID == "" {
+			reply.WriteString(p.Text)
+		}
+	}
+
 	deadline := time.Now().Add(codexTurnBudget)
 	for {
 		if asked && dismissed && ended {
 			requireCodexQuestionChoice(t, reply.String(), selected, otherLabels)
 			return codexQuestionTurn{asked: true, nextReqID: reqID}
 		}
-		env, ok := receiveEnvelope(t, h, time.Until(deadline))
+		env, ok := source.Next(poll, deadline)
 		if !ok {
 			t.Fatalf("Codex question turn on %s did not finish within %s (asked=%v dismissed=%v ended=%v)", model, codexTurnBudget, asked, dismissed, ended)
 		}
@@ -383,6 +402,9 @@ func runCodexQuestionTurn(t *testing.T, h *perConvHarness, convID string, reqID 
 				otherLabels = append(otherLabels, option.Label)
 			}
 			batchID = shown.QuestionBatchID
+			for _, entry := range scenario.SourceSnapshot(t, h.home)(convID) {
+				answerMark = entry.ID
+			}
 			asked = true
 			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 				ID:   reqID,
@@ -407,24 +429,10 @@ func runCodexQuestionTurn(t *testing.T, h *perConvHarness, convID string, reqID 
 				t.Fatalf("question_dismissed did not attribute the surfaced batch to the remote answer")
 			}
 			dismissed = true
-		case protocol.TypeAssistantDelta:
-			var delta protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &delta); err != nil {
-				t.Fatalf("decode assistant_delta: %v", err)
-			}
-			if delta.ConversationID == convID {
-				reply.WriteString(delta.Text)
-			}
-		case protocol.TypeTurnEnd:
-			var end protocol.TurnEndPayload
-			if err := json.Unmarshal(env.Payload, &end); err != nil {
-				t.Fatalf("decode turn_end: %v", err)
-			}
-			if end.ConversationID != convID {
-				continue
-			}
+
+		}
+		if source.Ended(convID) {
 			if !asked {
-				t.Logf("%s at low effort completed the question prompt without calling request_user_input", model)
 				return codexQuestionTurn{nextReqID: reqID}
 			}
 			ended = true
@@ -457,27 +465,22 @@ func requireCodexQuestionChoice(t *testing.T, reply, selected string, otherLabel
 // otherwise pass as ours. An error envelope fails the test.
 func runCodexTurn(t *testing.T, h *perConvHarness, convID string, reqID uint64, text string, answer turnevent.PermissionOptionKind) codexTurn {
 	t.Helper()
+	source := scenario.NewSourceObserver(t, h.home)
+	source.Watch(convID)
+	poll := scenario.PollingReceive(t, h.phone, h.initRecv)
 	sealSendMessage(t, h.phone, h.initSend, reqID, convID, fmt.Sprintf("m-%d", reqID), text)
 	reqID++
 	var turn codexTurn
 	answered := map[string]bool{}
 	deadline := time.Now().Add(codexTurnBudget)
 	for {
-		env, ok := receiveEnvelope(t, h, time.Until(deadline))
+		env, ok := source.Next(poll, deadline)
 		if !ok {
 			t.Fatalf("no turn_end for %q within %s (%d modal(s) answered, delta seen: %v)", convID, codexTurnBudget, turn.modals, turn.sawDelta)
 		}
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("error envelope during the Codex turn: %s", string(env.Payload))
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta: %v", err)
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				turn.sawDelta = true
-			}
 		case protocol.TypeModalShown:
 			var shown protocol.ModalShownPayload
 			if err := json.Unmarshal(env.Payload, &shown); err != nil {
@@ -514,15 +517,12 @@ func runCodexTurn(t *testing.T, h *perConvHarness, convID string, reqID uint64, 
 			if answered[dis.ModalID] && dis.Source != "remote" {
 				t.Fatalf("modal %q dismissed by %q, want remote: the answer was not ours", dis.ModalID, dis.Source)
 			}
-		case protocol.TypeTurnEnd:
-			var end protocol.TurnEndPayload
-			if err := json.Unmarshal(env.Payload, &end); err != nil {
-				t.Fatalf("decode turn_end: %v", err)
-			}
-			if end.ConversationID == convID {
-				turn.nextReqID = reqID
-				return turn
-			}
+
+		}
+		turn.sawDelta = strings.TrimSpace(source.Text(convID)) != ""
+		if source.Ended(convID) {
+			turn.nextReqID = reqID
+			return turn
 		}
 	}
 }

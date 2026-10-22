@@ -84,12 +84,12 @@ func TestActiveConversation_EmitterStampsCursor(t *testing.T) {
 		active := &activeConversation{}
 		active.set(testConvID)
 		bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-		e := newInteractiveTurnEmitterV2(active, bcast, discardLogger())
+		e := testRecordedEmitter(t, active, bcast, discardLogger())
 
 		e.Handle(context.Background(), turnevent.TextChunk{Text: "hi"})
 		e.flushDelta(context.Background())
 
-		deltas := assistantDeltas(t, bcast.pushes)
+		deltas := assistantDeltas(t, testEmitterFacts(t, e))
 		if len(deltas) != 1 {
 			t.Fatalf("want 1 assistant_delta, got %d", len(deltas))
 		}
@@ -102,7 +102,7 @@ func TestActiveConversation_EmitterStampsCursor(t *testing.T) {
 		t.Parallel()
 		active := &activeConversation{} // never routed → empty cursor
 		bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-		e := newInteractiveTurnEmitterV2(active, bcast, discardLogger())
+		e := testRecordedEmitter(t, active, bcast, discardLogger())
 
 		e.Handle(context.Background(), turnevent.TextChunk{Text: "hi"})
 		e.flushDelta(context.Background())

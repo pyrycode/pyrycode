@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -177,7 +179,8 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 	// capability was granted in hello_ack. A non-interactive handshake yields zero frames
 	// and a red that looks exactly like a dead emitter.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
-	sealSend, nextEnv := sealedConnDriver(t, phoneA, "phone A", sendA, recvA)
+	source := scenario.NewSourceObserver(t, home)
+	sealSend, nextEnv := sealedConnDriver(t, phoneA, "phone A", sendA, recvA, source)
 
 	sealSend(protocol.Envelope{
 		ID:   bgTaskFramesSendReqID,
@@ -195,6 +198,21 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 	// the parser by the time it lands.
 	var obs bgTaskFramesObservation
 	deadline := time.Now().Add(30 * time.Second)
+	source.OnEntry = func(entry history.Entry) {
+		switch entry.Type {
+		case protocol.TypeAssistantDelta:
+			var p protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatalf("decode assistant_delta payload: %v", err)
+			}
+			if strings.Contains(p.Text, bgTaskFramesNeedle) {
+				obs.sawNeedle = true
+			}
+		case protocol.TypeTurnEnd:
+			obs.sawTurnEnd = true
+		}
+	}
+
 	for !obs.sawTurnEnd {
 		env, ok := nextEnv(deadline)
 		if !ok {
@@ -213,16 +231,7 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 			obs.progress = append(obs.progress, append(json.RawMessage(nil), env.Payload...))
 		case protocol.TypeUnrecognizedMessage:
 			obs.unrecognized++
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if strings.Contains(p.Text, bgTaskFramesNeedle) {
-				obs.sawNeedle = true
-			}
-		case protocol.TypeTurnEnd:
-			obs.sawTurnEnd = true
+
 		}
 	}
 	return obs

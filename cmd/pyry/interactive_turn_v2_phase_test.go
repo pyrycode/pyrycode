@@ -23,7 +23,7 @@ func phaseEmitter(t *testing.T) (*interactiveTurnEmitterV2, *stubCursor, *fakeIn
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 	snap := &turnPhaseSnapshot{}
 	e.phases = snap
 	return e, cur, bcast, snap
@@ -153,7 +153,7 @@ func TestTurnPhaseSnapshot_PublishedBeforeFanOut(t *testing.T) {
 		snap:                 snap,
 		t:                    t,
 	}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 	e.phases = snap
 
 	for _, ev := range []turnevent.Event{
@@ -210,7 +210,7 @@ func TestTurnPhaseSnapshot_ReadDoesNotDisturbEmission(t *testing.T) {
 		cur := &stubCursor{}
 		cur.set(testConvID)
 		bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-		e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+		e := testRecordedEmitter(t, cur, bcast, discardLogger())
 		var snap *turnPhaseSnapshot
 		if withSnapshot {
 			snap = &turnPhaseSnapshot{}

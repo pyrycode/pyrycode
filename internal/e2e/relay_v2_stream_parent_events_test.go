@@ -16,6 +16,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -103,7 +105,8 @@ func TestRelayV2_StreamParentActivityDoesNotHoldQueuedProbe(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = phone.Close() })
 			send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
-			sealSend, nextEnv := sealedConnDriver(t, phone, "phone", send, recv)
+			sealSend, _ := sealedConnDriver(t, phone, "phone", send, recv)
+			nextEnv := scenario.PollingReceive(t, phone, recv)
 			firstStatus := waitForRunnerStatus(t, h, 15*time.Second, "bootstrap child running",
 				func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 
@@ -112,24 +115,41 @@ func TestRelayV2_StreamParentActivityDoesNotHoldQueuedProbe(t *testing.T) {
 				sealSend(protocol.Envelope{ID: id, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
 					Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: conv, MessageID: messageID, Text: text})})
 			}
-			await := func(deadline time.Time, matches func(protocol.Envelope) bool) {
+			snapshot := scenario.SourceSnapshot(t, home)
+			var watermark uint64
+			await := func(deadline time.Time, matches func(history.Entry) bool) {
 				t.Helper()
-				for {
-					env, ok := nextEnv(deadline)
-					if !ok {
-						t.Fatalf("expected frame never arrived; daemon stderr:\n%s", stderrTail(h, 6000))
+				for time.Now().Before(deadline) {
+					poll := time.Now().Add(20 * time.Millisecond)
+					if deadline.Before(poll) {
+						poll = deadline
 					}
+					env := nextEnv(poll)
 					if env.Type == protocol.TypeError {
 						t.Fatalf("unexpected protocol error: %s", env.Payload)
 					}
-					if matches(env) {
-						return
+					switch env.Type {
+					case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+						t.Fatal("retired raw frame received")
+					}
+					for _, entry := range snapshot(conv) {
+						if entry.ID <= watermark {
+							continue
+						}
+						watermark = entry.ID
+						if entry.Session == nil || entry.Session.SessionID != session {
+							t.Fatal("source lost producing session")
+						}
+						if matches(entry) {
+							return
+						}
 					}
 				}
+				t.Fatalf("expected source never arrived; daemon stderr:\n%s", stderrTail(h, 6000))
 			}
 			sendMessage(27810, "start-agent", "start background agent")
 			var sawAgent bool
-			await(time.Now().Add(15*time.Second), func(env protocol.Envelope) bool {
+			await(time.Now().Add(15*time.Second), func(env history.Entry) bool {
 				if env.Type == protocol.TypeToolUse {
 					var p protocol.ToolUsePayload
 					if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -148,7 +168,7 @@ func TestRelayV2_StreamParentActivityDoesNotHoldQueuedProbe(t *testing.T) {
 			if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
 				t.Fatalf("release child activity: %v", err)
 			}
-			await(time.Now().Add(15*time.Second), func(env protocol.Envelope) bool {
+			await(time.Now().Add(15*time.Second), func(env history.Entry) bool {
 				if env.Type == protocol.TypeTurnEnd {
 					t.Fatal("unexpected turn end after main completion")
 				}
@@ -198,7 +218,7 @@ func TestRelayV2_StreamParentActivityDoesNotHoldQueuedProbe(t *testing.T) {
 
 			deadline := time.Now().Add(5 * time.Second)
 			sendMessage(27820, "queued-probe", probe)
-			await(deadline, func(env protocol.Envelope) bool {
+			await(deadline, func(env history.Entry) bool {
 				if env.Type == protocol.TypeTurnEnd || env.Type == protocol.TypeToolResult {
 					t.Fatal("a result released the probe before its stdin receipt")
 				}

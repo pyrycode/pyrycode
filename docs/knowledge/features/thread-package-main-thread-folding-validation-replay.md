@@ -86,7 +86,7 @@ ancestor dependencies atomically; `TestStoreReferenceEndingRetry` checks repair
 and `Retry` for an evicted child-ending dependency.
 
 The unchanged
-[generated/shadow and recorded corpus checkpoints](thread-package-shadow-lifecycle-and-evidence.md#reusable-fold-regression-corpus)
+[generated/shadow and recorded corpus checkpoints](thread-package-reusable-fold-regression-corpus.md#reusable-fold-regression-corpus)
 constrain rendered items, revisions, consumed version and last-shown watermark.
 `TestReferenceLifecycleGuard` recursively walks retained `Fold` types through
 pointers, maps, slices, arrays and structs, rejecting private `json.RawMessage`

@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"testing"
 	"time"
 
@@ -55,6 +56,7 @@ func TestInteractivePerConversationTurnStateLiveness(t *testing.T) {
 	nonce := daemonRecordingNonce(t, time.Now().UnixNano())
 
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
+	replyFacts1 := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 3, convID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
 
@@ -65,7 +67,7 @@ func TestInteractivePerConversationTurnStateLiveness(t *testing.T) {
 	// AC2: the reply-stream path is unaffected — a non-empty assistant_delta for the
 	// same conversation still arrives. Same in-order drain discipline; the receive
 	// nonce is already advanced past the turn_state above.
-	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)
+	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget, replyFacts1)
 }
 
 // drainForTurnState reads binary→phone noise_msg frames in receive order — the

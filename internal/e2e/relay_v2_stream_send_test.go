@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"strings"
 	"testing"
 	"time"
@@ -17,55 +18,11 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// TestRelayV2_StreamSendMessageDrainsTurn is the first LIVE, end-to-end proof of
-// the stream-json interactive runner. Every leg of the wire has been proven in
-// isolation — the config toggle (selectInteractiveRunner, #1081), the stream
-// runner factory (#1109/#1098), the turn drain (startStreamTurnDrainV2 →
-// interactiveTurnEmitterV2, #1098), and the stream-json fakeclaude mode (#1140) —
-// but this is the first time all of them run TOGETHER, live, against a real spawned
-// fakeclaude.
-//
-// One interactive phone handshakes to a daemon started under
-// interactive_runner:"stream-json" (StartStreamInteractiveWithRelay writes the
-// production config toggle), drives ONE send_message, and observes the turn drain:
-//
-//	phone send_message(knownConvID, "…ping") → sessionRouter.Route (stamps the
-//	  active-conversation cursor) → boundSession.WriteUserTurn → streamsup WriteTurn →
-//	  marshalTurnEnvelope → {"type":"user",…"text":"…ping"} → fakeclaude stdin (stream
-//	  mode) → one assistant text line (echoing "…ping") + one result line → daemon
-//	  streamsup.Parser → TextChunk + TurnEnd → drain gate (sink tag == activeSession ✓)
-//	  → interactiveTurnEmitterV2 → turn_state{responding} → assistant_delta{"…ping"}
-//	  → turn_end → turn_state{idle} → sealed push → phone.
-//
-// Two ordered milestones ARE the acceptance criteria:
-//   - M1 assistant_delta carrying the ECHOED prompt (ConversationID == knownConvID).
-//     The echo is the non-vacuity guard: it proves the full
-//     phone→daemon→fakeclaude→daemon→phone round-trip, not merely "some text".
-//   - M2 terminal turn_state{idle} (ConversationID == knownConvID), observed AFTER
-//     the delta — the turn closed.
-//
-// WHY THE IDS MUST LINE UP (the one non-obvious invariant). The drain gate forwards
-// an event to the emitter only when the event's tag equals activeSession(). The
-// sink tag is the runner's construction-time cfg.SessionID = the bootstrap pool id,
-// pinned to initialUUID by seedBootstrapRegistry; the drain resolves that session
-// id to the conversation bound to it = knownConvID via seedBoundConversation. So
-// seedBootstrapRegistry(initialUUID) + seedBoundConversation(knownConvID,
-// initialUUID) is what lets the drain attribute the events. An unresolved session
-// logs stream_turn.no_conversation (#2739), which the M1 failure checks for before
-// it names a mismatch. (#2610: re-seeding either side with a different UUID was
-// observed to still drain, so a mismatch is no longer assumed to be the cause.)
-//
-// The ack is not delivery: streamRunner.WriteUserTurn returns the retryable
-// ErrNoLiveChild while the child is between spawn and stdin-ready, and the send
-// handler acks on accept-into-backlog. So the test must NOT treat the ack as the
-// turn — it drains M1/M2 as the real completion signal, and the drain wait absorbs
-// the spawn + first-turn latency.
-//
-// streamWait bounds the whole send_message → ack + turn exchange. Until #2610 the
-// test waited 15 s for the ack, then 20 s for the drain, in two loops; under the
-// full `make e2e` run the drain once burned its full 20 s. See the single loop
-// below for why that was most likely a discarded frame rather than slowness. A
-// turn that is never delivered still fails, at streamWait.
+// TestRelayV2_StreamSendMessageDrainsTurn drives an encrypted send through the
+// spawned daemon and fakeclaude. It requires a correlated acknowledgement,
+// attributed source text carrying the exact prompt, matching source completion
+// and terminal live idle. Retired content must never arrive on the wire.
+// The bootstrap registry and conversation binding identify the same producer.
 func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 	const (
 		initialUUID   = "11111111-1111-4111-8111-111111111111"
@@ -129,6 +86,7 @@ func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 	// Drive one send_message and await its sealed ack. The ack proves the turn was
 	// accepted and the active cursor stamped — it does NOT prove delivery (async; the
 	// real completion signal is the drain below).
+	source := scenario.SourceSince(t, home, knownConvID)
 	reqEnv, err := json.Marshal(protocol.Envelope{
 		ID:   sendReqID,
 		Type: protocol.TypeSendMessage,
@@ -158,6 +116,9 @@ func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 	// sawDelta is set. Read the phone conn serially on the test goroutine (the single
 	// reader, same as the interrupt / new_session specs).
 	gotAck, sawDelta, sawIdle := false, false, false
+	sawEnd := false
+	var sourceWatermark uint64
+	var sourceTurn string
 	var preAck []string // envelope types seen before the ack, for the failure record
 	deadline := time.Now().Add(streamWait)
 	for {
@@ -168,11 +129,11 @@ func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 					"received it; the turn was never accepted (frames seen meanwhile: %v)", elapsed(), streamWait, preAck)
 			}
 			if !sawDelta {
-				t.Fatalf("[t=%s] M1: interactive phone A waited %s after send_message for an assistant_delta and "+
+				t.Fatalf("[t=%s] M1: interactive phone A waited %s after send_message for retained assistant text and "+
 					"never observed one; the turn never drained end-to-end. %s\ndaemon stderr tail:\n%s",
 					elapsed(), streamWait, drainGateDropDiagnosis(h), stderrTail(h, 4000))
 			}
-			t.Fatalf("[t=%s] M2: interactive phone A observed the assistant_delta but waited %s after "+
+			t.Fatalf("[t=%s] M2: interactive phone A observed source text but waited %s after "+
 				"send_message without a terminal turn_state{idle}; the turn opened but never closed", elapsed(), streamWait)
 		}
 		raw, err := phoneA.ReceiveBytes(remaining)
@@ -190,6 +151,43 @@ func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 			continue
 		}
 		env := decryptInnerEnvelope(t, inner, recvA)
+		for _, entry := range source(knownConvID) {
+			if entry.ID <= sourceWatermark {
+				continue
+			}
+			sourceWatermark = entry.ID
+			if entry.Type != protocol.TypeAssistantDelta && entry.Type != protocol.TypeTurnEnd {
+				continue
+			}
+			if entry.Session == nil || entry.Session.SessionID != initialUUID {
+				t.Fatal("source lost producing session")
+			}
+			if entry.Type == protocol.TypeAssistantDelta {
+				var d protocol.AssistantDeltaPayload
+				if json.Unmarshal(entry.Payload, &d) != nil {
+					t.Fatal("invalid assistant source")
+				}
+				if d.ConversationID != knownConvID || d.ParentToolUseID != "" || d.TurnID == "" {
+					t.Fatal("source lost conversation or main-turn attribution")
+				}
+				if !strings.Contains(d.Text, echoNeedle) {
+					t.Fatal("source did not carry echoed prompt")
+				}
+				if sourceTurn != "" && sourceTurn != d.TurnID {
+					t.Fatal("reply crossed source turns")
+				}
+				sourceTurn, sawDelta = d.TurnID, true
+			} else {
+				var end struct {
+					protocol.TurnEndPayload
+					ParentToolUseID string `json:"parent_tool_use_id"`
+				}
+				if json.Unmarshal(entry.Payload, &end) != nil {
+					t.Fatal("invalid terminal source")
+				}
+				sawEnd = end.ConversationID == knownConvID && end.ParentToolUseID == "" && end.TurnID == sourceTurn
+			}
+		}
 		if !gotAck && env.Type != protocol.TypeAck {
 			preAck = append(preAck, string(env.Type))
 		}
@@ -204,26 +202,11 @@ func TestRelayV2_StreamSendMessageDrainsTurn(t *testing.T) {
 			}
 			gotAck = true
 			t.Logf("[t=%s] ack: interactive phone A received the send_message ack", elapsed())
-		case protocol.TypeAssistantDelta:
-			if sawDelta {
-				continue
-			}
-			var d protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &d); err != nil {
-				t.Fatalf("phone A decode assistant_delta payload: %v", err)
-			}
-			if d.ConversationID != knownConvID {
-				t.Errorf("assistant_delta ConversationID: got %q, want %q", d.ConversationID, knownConvID)
-			}
-			if !strings.Contains(d.Text, echoNeedle) {
-				t.Fatalf("M1: assistant_delta did not carry the echoed prompt; got Text=%q, want it to contain %q "+
-					"(the round-trip proof — fakeclaude echoes the sent prompt back through the daemon)", d.Text, echoNeedle)
-			}
-			sawDelta = true
-			t.Logf("[t=%s] M1: interactive phone A observed assistant_delta carrying the echoed prompt", elapsed())
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			t.Fatal("retired raw content delivered on wire")
 		case protocol.TypeTurnState:
-			if !sawDelta || sawIdle {
-				continue // the leading responding state precedes the delta
+			if !sawDelta || !sawEnd || sawIdle {
+				continue // the leading responding state precedes source completion
 			}
 			var st protocol.TurnStatePayload
 			if err := json.Unmarshal(env.Payload, &st); err != nil {

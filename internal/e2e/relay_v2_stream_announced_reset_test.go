@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"testing"
@@ -107,7 +108,9 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 	t.Cleanup(func() { _ = phoneA.Close() })
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -119,14 +122,8 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 		}
 		sendNoiseMsg(t, phoneA, cipher)
 	}
-	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return protocol.Envelope{}, false
-		}
-		return decryptInnerEnvelope(t, readInnerFrame(t, phoneA, remaining), recvA), true
-	}
+	poll := scenario.PollingReceive(t, phoneA, recvA)
+	nextEnv := func(d time.Time) (protocol.Envelope, bool) { return source.Next(poll, d) }
 	awaitReply := func(want uint64) protocol.Envelope {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
@@ -193,7 +190,7 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 				}
 				transitions = append(transitions, p)
 			}
-			if env.Type == protocol.TypeTurnEnd {
+			if source.Ended(convID) {
 				turnEnded = true
 			}
 			if turnEnded && (!wantReset || len(transitions) > 0) {

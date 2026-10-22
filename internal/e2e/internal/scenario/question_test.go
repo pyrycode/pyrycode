@@ -82,7 +82,8 @@ func TestQuestionHelperProcess(t *testing.T) {
 		frames = frames[1:]
 		return env
 	}
-	got := AnsweredTurn(t, next, "conversation", "batch", 40*time.Millisecond)
+	w := testSourceWire(t, Wire{Next: next})
+	got := AnsweredTurn(t, w.Next, "conversation", "batch", 40*time.Millisecond, w.Source)
 	RequireChoice(t, got, Choice{Chosen: "Random", Unchosen: []string{"LRU"}})
 	t.Log("all question milestones verified")
 }

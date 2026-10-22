@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,7 +116,9 @@ func TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
 
+	source := scenario.NewSourceObserver(t, home)
 	sealSend := func(env protocol.Envelope) {
+		source.Before(env)
 		t.Helper()
 		raw, err := json.Marshal(env)
 		if err != nil {
@@ -131,29 +133,10 @@ func TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester(t *testing.T) {
 
 	// One reader for the whole test so the receive CipherState nonce stays in
 	// sequence; ok=false on deadline.
+	poll := scenario.PollingReceive(t, phone, recv)
 	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phone.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recv), true
-		}
+		env, ok := source.Next(poll, deadline)
+		return env, ok
 	}
 
 	// --- M1: bring the conversation's child up. Without a live child the named
@@ -178,14 +161,7 @@ func TestRelayV2_NewSessionRefusedWorkspaceRepliesToRequester(t *testing.T) {
 		if env.Type == protocol.TypeError {
 			t.Fatalf("M1: unexpected error envelope: %s", string(env.Payload))
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			t.Fatalf("M1: decode assistant_delta payload: %v", err)
-		}
-		if d.ConversationID == convID && strings.Contains(d.Text, needle) {
+		if strings.Contains(source.Text(convID), needle) {
 			break
 		}
 	}

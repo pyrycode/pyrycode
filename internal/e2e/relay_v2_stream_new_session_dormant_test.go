@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,7 +95,7 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	phone1, send1, recv1 := dialPairedPhone(t, fr, home, payload.Token, pubKey, "phone-a")
 
 	seal1, next1 := noiseWire(t, phone1, send1, recv1)
-	sendAndAwaitEcho(t, seal1, next1, "M1", 2521, convA, "u-a1", textToA, needleToA)
+	sendAndAwaitEcho(t, home, seal1, next1, "M1", 2521, convA, "u-a1", textToA, needleToA)
 	t.Logf("[t=%s] M1: conversation A is live", elapsed())
 
 	convB := createConversationOverWire(t, seal1, next1, 2522)
@@ -104,7 +104,7 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	}
 	t.Logf("[t=%s] M2: minted conversation B = %s", elapsed(), convB)
 
-	sendAndAwaitEcho(t, seal1, next1, "M3", 2523, convB, "u-b1", textToB, needleToB)
+	sendAndAwaitEcho(t, home, seal1, next1, "M3", 2523, convB, "u-b1", textToB, needleToB)
 	preB, ok := readEntryByLabel(regPath, convB)
 	if !ok {
 		t.Fatalf("M3: conversation B (%s) has no session entry after its first message\nfile:\n%s",
@@ -188,7 +188,7 @@ func TestRelayV2_StreamNewSessionAfterDaemonRestartResetsDormantConversation(t *
 	// observable — and it is the only one that can tell "rotated" from "rotated and
 	// then resumed the retired transcript anyway", which is the failure mode AC-1
 	// names and which every registry assertion above would pass through.
-	sendAndAwaitEcho(t, seal2, next2, "M5", 2525, convB, "u-b2", textAfter, needleAfter)
+	sendAndAwaitEcho(t, home, seal2, next2, "M5", 2525, convB, "u-b2", textAfter, needleAfter)
 	waitForLogLineAll(t, h2.Stderr, []string{"spawning claude", newB}, 20*time.Second)
 	// Matched on the ID FLAGS rather than on the retired id anywhere in the line.
 	// The per-session --settings and --append-system-prompt-file paths are named
@@ -293,7 +293,7 @@ func TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation(t *testi
 	phone1, send1, recv1 := dialPairedPhone(t, fr, home, payload.Token, pubKey, "phone-a")
 
 	seal1, next1 := noiseWire(t, phone1, send1, recv1)
-	sendAndAwaitEcho(t, seal1, next1, "M1", 2531, convA, "u-a1", textToA, needleToA)
+	sendAndAwaitEcho(t, home, seal1, next1, "M1", 2531, convA, "u-a1", textToA, needleToA)
 	t.Logf("[t=%s] M1: conversation A is live", elapsed())
 
 	convB := createConversationOverWire(t, seal1, next1, 2532)
@@ -302,7 +302,7 @@ func TestRelayV2_StreamClearAfterDaemonRestartResetsDormantConversation(t *testi
 	}
 	t.Logf("[t=%s] M2: minted conversation B = %s", elapsed(), convB)
 
-	sendAndAwaitEcho(t, seal1, next1, "M3", 2533, convB, "u-b1", textToB, needleToB)
+	sendAndAwaitEcho(t, home, seal1, next1, "M3", 2533, convB, "u-b1", textToB, needleToB)
 	preB, ok := readEntryByLabel(regPath, convB)
 	if !ok {
 		t.Fatalf("M3: conversation B (%s) has no session entry after its first message\nfile:\n%s",
@@ -498,30 +498,9 @@ func noiseWire(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherSt
 		sendNoiseMsg(t, phone, ciphertext)
 	}
 
-	next = func(deadline time.Time) (protocol.Envelope, bool) {
-		t.Helper()
-		for {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				return protocol.Envelope{}, false
-			}
-			raw, err := phone.ReceiveBytes(remaining)
-			if err != nil {
-				if errors.Is(err, fakephone.ErrReceiveTimeout) {
-					return protocol.Envelope{}, false
-				}
-				t.Fatalf("phone receive: %v", err)
-			}
-			var inner protocol.InnerFrameV2
-			if err := json.Unmarshal(raw, &inner); err != nil {
-				t.Fatalf("phone decode inner frame: %v", err)
-			}
-			if inner.Type != protocol.TypeNoiseMsg {
-				continue
-			}
-			return decryptInnerEnvelope(t, inner, recv), true
-		}
-	}
+	poll := scenario.PollingReceive(t, phone, recv)
+	next = func(deadline time.Time) (protocol.Envelope, bool) { return poll(deadline), time.Now().Before(deadline) }
+
 	return seal, next
 }
 
@@ -529,9 +508,11 @@ func noiseWire(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherSt
 // echoing it. The ECHO, not the ack, is the proof the conversation's child is
 // live and serving — an ack would leave a vacuous pass available to a daemon that
 // accepted the turn and never spawned anything.
-func sendAndAwaitEcho(t *testing.T, seal func(protocol.Envelope), next func(time.Time) (protocol.Envelope, bool),
+func sendAndAwaitEcho(t *testing.T, home string, seal func(protocol.Envelope), next func(time.Time) (protocol.Envelope, bool),
 	milestone string, reqID uint64, convID, msgID, text, needle string) {
 	t.Helper()
+	source := scenario.NewSourceObserver(t, home)
+	source.Watch(convID)
 	seal(protocol.Envelope{
 		ID:   reqID,
 		Type: protocol.TypeSendMessage,
@@ -543,24 +524,18 @@ func sendAndAwaitEcho(t *testing.T, seal func(protocol.Envelope), next func(time
 		}),
 	})
 	deadline := time.Now().Add(30 * time.Second)
-	for {
-		env, ok := next(deadline)
+	acked := false
+	poll := func(d time.Time) protocol.Envelope { env, _ := next(d); return env }
+	for !acked || !strings.Contains(source.Text(convID), needle) {
+		env, ok := source.Next(poll, deadline)
 		if !ok {
-			t.Fatalf("%s: never observed an assistant_delta echoing %q for conversation %s",
-				milestone, needle, convID)
+			t.Fatalf("%s: no correlated ack and fresh source echo", milestone)
 		}
 		if env.Type == protocol.TypeError {
-			t.Fatalf("%s: unexpected error envelope: %s", milestone, string(env.Payload))
+			t.Fatal("send rejected")
 		}
-		if env.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var d protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(env.Payload, &d); err != nil {
-			t.Fatalf("%s: decode assistant_delta payload: %v", milestone, err)
-		}
-		if d.ConversationID == convID && strings.Contains(d.Text, needle) {
-			return
+		if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == reqID {
+			acked = true
 		}
 	}
 }

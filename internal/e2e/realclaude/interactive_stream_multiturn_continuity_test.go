@@ -2,52 +2,9 @@
 
 package realclaude
 
-// TestInteractiveStreamMultiTurnContinuity is the #1173 deliverable: the first
-// real-claude e2e that drives MULTIPLE sequential turns on ONE held-open
-// stream-json interactive session and proves the same live child retained
-// context across turns. The interactive stream runner (internal/streamsup)
-// exists to hold one live `claude` child's stdin open across many turns with
-// context intact, yet its only real-claude coverage today is single-turn
-// (interactive_stream_liveness #1153, interactive_stream_modal_resolution
-// #1154); every multi-turn stream behaviour is proven only against a scripted
-// fakeclaude, which cannot catch the recurring fake-green/real-red class (#949).
-// This adds the missing rung: cross-turn continuity on a held-open child.
-//
-// The setup body is TRANSCRIBED from #1153's TestInteractiveStreamLiveness
-// (interactive_stream_liveness_test.go) with two deltas: (1) it drives a
-// 3-entry turn plan over the one held-open session instead of a single send,
-// and (2) it asserts continuity by CONTENT — a planted per-run token that a
-// later turn must recall. Every Noise-wire / spawn / seed / config helper is
-// reused verbatim (same package, same build tag). No production change: the
-// stream runner already exists and is green against fakeclaude.
-//
-// Turn plan (strictly sequential, each fully drained to turn_state{idle} before
-// the next send, so no cross-turn frame bleed):
-//
-//   - Turn 1 (plant)  — instructs claude to remember a per-run-unique token.
-//   - Turn 2 (filler) — an intervening turn. Load-bearing for AC #1: it proves
-//     the child served a turn BETWEEN plant and recall without respawn; a
-//     2-turn plant→recall would not establish "≥3 turns on one held-open child".
-//   - Turn 3 (recall) — asks for the token back; its assistant_delta must
-//     contain it.
-//
-// Continuity is the observable that distinguishes "same child served all turns"
-// from "unexpected respawn" (AC #3): a freshly respawned, memory-less child has
-// no knowledge of the planted token, so the recall can only succeed if one live
-// child accumulated conversation context across turns 1→3. The token is kept
-// per-run unique (PYRY<nonce> hex) to defeat cross-run caching giving a false
-// green — the same run-nonce discipline #1153 uses. No pid/process inspection:
-// content memory is a strictly stronger "no respawn" observable than a pid probe
-// (and the harness does not expose the child pid) — a deliberate Simplicity-First
-// choice.
-//
-// The two seeds gate the drain exactly as in #1153: the stream runner tags
-// turnevents by its construction-time bootstrap pool id (pinned to
-// streamMultiTurnBootstrapUUID by seedBootstrapRegistry); the drain gate forwards
-// to the emitter only when the tag == activeSession(), which resolves
-// streamMultiTurnConvID's binding via seedBoundConversation. A UUID mismatch
-// drops every event and hangs the drain, surfacing as the M1 timeout — never a
-// silent pass.
+// Three sequential turns on one held-open child prove contextual continuity.
+// A per-run token is planted, separated from recall by a filler turn, and read
+// back from recorded source text after each live running-to-idle transition.
 
 import (
 	"context"
@@ -62,9 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -170,7 +129,7 @@ func TestInteractiveStreamMultiTurnContinuity(t *testing.T) {
 	var recallText string
 	for _, turn := range turns {
 		sealSendMessage(t, phone, initSend, turn.id, streamMultiTurnConvID, turn.msgID, turn.prompt)
-		recallText = drainForCompletedTurnText(t, phone, initRecv, streamMultiTurnConvID, perTurnReplyBudget)
+		recallText = drainForCompletedSourceText(t, phone, initRecv, home, streamMultiTurnConvID, perTurnReplyBudget)
 	}
 
 	// Continuity by content: the recall reply must echo the planted token. A
@@ -186,40 +145,16 @@ func TestInteractiveStreamMultiTurnContinuity(t *testing.T) {
 
 // --- capturing turn drain ---------------------------------------------------
 
-// drainForCompletedTurnText is a text-capturing superset of the sibling
-// drainForCompletedTurn (#1153): its milestone semantics are byte-identical — a
-// non-empty assistant_delta for convID (M1) FOLLOWED BY the terminal
-// turn_state{idle} for convID (M2), the same full-turn drain AC #2 requires —
-// with exactly one addition: it accumulates EVERY matching assistant_delta.Text
-// (not just the first) and returns the concatenation when M2 fires, so the recall
-// assertion can inspect the full reply. A separate helper (rather than editing
-// the shared drain) keeps this to one new file with no production change and
-// leaves the two merged sibling call sites untouched.
-//
-// It mirrors the sibling's frame loop: read binary→phone noise_msg frames in
-// receive order — the receive nonce is sequential, so every noise_msg MUST be
-// decrypted in order to keep the CipherState in sync — and skip non-noise_msg
-// control frames WITHOUT decrypting (they do not advance the receive nonce;
-// decrypting them would desync the CipherState). No content/echo assertion here:
-// real claude's words are non-deterministic, so M1 asserts only non-empty text;
-// the continuity check lives in the caller. On the deadline, a milestone-specific
-// t.Fatalf names the likely cause (a UUID mismatch between the two seeds drops
-// every event and hangs the drain).
-func drainForCompletedTurnText(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
+// drainForCompletedSourceText waits for the named live turn to run and return
+// idle, then reads that completed turn's text from retained source history.
+func drainForCompletedSourceText(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, home, convID string, timeout time.Duration) string {
 	t.Helper()
-	sawDelta := false
-	var text strings.Builder
+	sawRunning := false
 	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the turn never drained "+
-					"end-to-end (delivery never reached the child, or the parser / drain gate / emitter dropped it — "+
-					"most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)", convID, timeout)
-			}
-			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
-				"the turn opened but never closed", convID, timeout)
+			t.Fatalf("conversation %q did not run and close within %s", convID, timeout)
 		}
 		raw, err := phone.ReceiveBytes(remaining)
 		if err != nil {
@@ -249,35 +184,92 @@ func drainForCompletedTurnText(t *testing.T, phone *fakephone.Client, cs *noise.
 		if err := json.Unmarshal(plain, &env); err != nil {
 			t.Fatalf("decode envelope (drain): %v", err)
 		}
-		switch env.Type {
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			// M1: liveness — a non-empty streamed delta for the driving conv. No
-			// content/echo assertion (real claude's words are non-deterministic).
-			// Every matching delta is accumulated so the caller sees the full reply.
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				if !sawDelta {
-					sawDelta = true
-					t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
-				}
-				text.WriteString(p.Text)
-			}
-		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			// M2: after the delta, the terminal idle state closes the turn.
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
-				return text.String()
-			}
+		if env.Type != protocol.TypeTurnState {
+			continue
 		}
+		var phase protocol.TurnStatePayload
+		if err := json.Unmarshal(env.Payload, &phase); err != nil {
+			t.Fatal(err)
+		}
+		if phase.ConversationID != convID {
+			continue
+		}
+		if phase.State != "idle" {
+			sawRunning = true
+			continue
+		}
+		if !sawRunning {
+			continue
+		}
+		return completedSourceText(t, home, convID)
+	}
+}
+
+func completedSourceText(t *testing.T, home, convID string) string {
+	t.Helper()
+	page, err := history.New(filepath.Join(home, ".pyry", "test")).Page(conversations.ConversationID(convID), "", 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.AtStart {
+		t.Fatal("completed reply source exceeds the fixture window")
+	}
+	var ending protocol.TurnEndPayload
+	for _, entry := range page.Entries {
+		if entry.Type == protocol.TypeTurnEnd {
+			if err := json.Unmarshal(entry.Payload, &ending); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if ending.TurnID == "" {
+		t.Fatal("idle has no recorded completion")
+	}
+	var text strings.Builder
+	for i := len(page.Entries) - 1; i >= 0; i-- {
+		entry := page.Entries[i]
+		if entry.Type != protocol.TypeAssistantDelta {
+			continue
+		}
+		var delta protocol.AssistantDeltaPayload
+		if err := json.Unmarshal(entry.Payload, &delta); err != nil {
+			t.Fatal(err)
+		}
+		if delta.TurnID == ending.TurnID && delta.ParentToolUseID == "" {
+			text.WriteString(delta.Text)
+		}
+	}
+	if strings.TrimSpace(text.String()) == "" {
+		t.Fatal("completed turn recorded no nonempty reply")
+	}
+	return text.String()
+}
+
+func TestCompletedSourceText(t *testing.T) {
+	const conv = conversations.ConversationID(streamMultiTurnConvID)
+	home := t.TempDir()
+	h := history.New(filepath.Join(home, ".pyry", "test"))
+	for _, fact := range []struct {
+		typ     string
+		payload any
+	}{
+		{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "old", Text: "old reply"}},
+		{protocol.TypeTurnEnd, protocol.TurnEndPayload{TurnID: "old"}},
+		{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "new", Text: "one"}},
+		{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "new", ParentToolUseID: "child", Text: "child reply"}},
+		{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "new", Text: "two"}},
+		{protocol.TypeTurnEnd, protocol.TurnEndPayload{TurnID: "new"}},
+	} {
+		raw, err := json.Marshal(fact.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.Append(conv, fact.typ, raw, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := completedSourceText(t, home, string(conv)); got != "onetwo" {
+		t.Fatalf("completed source text = %q", got)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -202,26 +204,91 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, payload.Token)
-	seal, next := sealedConnDriver(t, phone, "phone", send, recv)
-	seal(protocol.Envelope{ID: 28110, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
-		Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: "held-user", Text: "go"})})
+	seal, wireNext := sealedConnDriver(t, phone, "phone", send, recv)
+	source := scenario.SourceSince(t, home, convID)
 	var reply strings.Builder
 	var claudeTurn string
-	for {
-		env, ok := next(time.Now().Add(15 * time.Second))
+	var terminal history.Entry
+	var mark uint64
+	var toolSeen, running bool
+	var idle time.Time
+	next := func(deadline time.Time) (protocol.Envelope, bool) {
+		poll := time.Now().Add(20 * time.Millisecond)
+		if deadline.Before(poll) {
+			poll = deadline
+		}
+		env, _ := wireNext(poll)
+		for _, e := range source(convID) {
+			if e.ID <= mark {
+				continue
+			}
+			mark = e.ID
+			var p struct {
+				Conversation string `json:"conversation_id"`
+				Turn         string `json:"turn_id"`
+				Parent       string `json:"parent_tool_use_id"`
+				Text         string `json:"text"`
+			}
+			if json.Unmarshal(e.Payload, &p) != nil {
+				t.Fatal("invalid held-turn source")
+			}
+			if p.Conversation != convID || p.Parent != "" || p.Turn == "" {
+				continue
+			}
+			if claudeTurn == "" && e.Type == protocol.TypeAssistantDelta {
+				claudeTurn = p.Turn
+			}
+			if p.Turn != claudeTurn {
+				continue
+			}
+			if e.Session == nil || e.Session.SessionID != bgConvBootstrapUUID || e.Session.Kind != "claude" {
+				t.Fatal("held-turn source lost producing session")
+			}
+			switch e.Type {
+			case protocol.TypeAssistantDelta:
+				reply.WriteString(p.Text)
+			case protocol.TypeToolUse:
+				toolSeen = true
+			case protocol.TypeTurnEnd:
+				terminal = e
+			}
+		}
+		if env.Type == protocol.TypeTurnState {
+			var p protocol.TurnStatePayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid held-turn live state")
+			}
+			if p.ConversationID == convID {
+				if p.State == "idle" && terminal.ID != 0 && !env.TS.Before(terminal.TS) && idle.IsZero() {
+					idle = env.TS
+				} else if p.State != "idle" {
+					running = true
+				}
+			}
+		}
+		switch env.Type {
+		case protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied:
+			t.Fatal("interactive tool content reached app transport")
+		case protocol.TypeAssistantDelta, protocol.TypeTurnEnd:
+			var p struct {
+				Turn string `json:"turn_id"`
+			}
+			if json.Unmarshal(env.Payload, &p) != nil || p.Turn == "" || p.Turn == claudeTurn {
+				t.Fatal("interactive content reached app transport")
+			}
+		}
+		return env, env.Type != "" || time.Now().Before(deadline)
+	}
+	seal(protocol.Envelope{ID: 28110, Type: protocol.TypeSendMessage, TS: time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: "held-user", Text: "go"})})
+	deadline := time.Now().Add(15 * time.Second)
+	for !toolSeen || !running {
+		env, ok := next(deadline)
 		if !ok {
 			t.Fatal("turn never opened")
 		}
-		if env.Type == protocol.TypeAssistantDelta {
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			reply.WriteString(p.Text)
-			claudeTurn = p.TurnID
-		}
-		if env.Type == protocol.TypeToolUse {
-			break
+		if env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeToolUse || env.Type == protocol.TypeTurnEnd {
+			t.Fatal("interactive setup published retired content")
 		}
 	}
 	p := runVerb(t, h.SocketPath, home, "channel", "post", "--name", "held", "--text", post)
@@ -231,8 +298,9 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	// The file gate proves the turn cannot finish during this observation window.
 	time.Sleep(350 * time.Millisecond)
 	seal(protocol.Envelope{ID: 28111, Type: protocol.TypeListConversations, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
+	deadline = time.Now().Add(15 * time.Second)
 	for {
-		env, ok := next(time.Now().Add(15 * time.Second))
+		env, ok := next(deadline)
 		if !ok {
 			t.Fatal("held-output barrier absent")
 		}
@@ -255,13 +323,15 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	}
 	ended := false
 	var posted protocol.AssistantDeltaPayload
+	deadline = time.Now().Add(15 * time.Second)
 	for posted.Text == "" {
-		env, ok := next(time.Now().Add(15 * time.Second))
+		env, ok := next(deadline)
 		if !ok {
 			t.Fatal("released post absent")
 		}
+		ended = terminal.ID != 0
 		if env.Type == protocol.TypeTurnEnd {
-			ended = true
+			t.Fatal("interactive completion reached app transport")
 		}
 		if env.Type != protocol.TypeAssistantDelta {
 			continue
@@ -270,11 +340,7 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			t.Fatal(err)
 		}
-		if p.TurnID == claudeTurn {
-			reply.WriteString(p.Text)
-			continue
-		}
-		if !ended || p.Text != post || p.Seq != 0 {
+		if !ended || p.TurnID == claudeTurn || p.Text != post || p.Seq != 0 {
 			t.Fatalf("post crossed completion: %+v", p)
 		}
 		posted = p
@@ -283,8 +349,10 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 		t.Fatalf("reply split or changed: %q", reply.String())
 	}
 	postEnded := false
-	for {
-		env, ok := next(time.Now().Add(15 * time.Second))
+	deadline = time.Now().Add(15 * time.Second)
+	var successor history.Entry
+	for !postEnded || successor.ID == 0 || idle.Before(terminal.TS) {
+		env, ok := next(deadline)
 		if !ok {
 			t.Fatal("post completion or successor absent")
 		}
@@ -293,20 +361,23 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 			postEnded = true
 		}
 		if env.Type == protocol.TypeAssistantDelta {
+			t.Fatal("interactive successor reached app transport")
+		}
+		for _, e := range source(convID) {
 			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
+			if e.Type == protocol.TypeAssistantDelta && json.Unmarshal(e.Payload, &p) == nil && p.TurnID != posted.TurnID && p.TurnID != claudeTurn && p.ParentToolUseID == "" {
+				if e.Session == nil || e.Session.SessionID != bgConvBootstrapUUID || p.ConversationID != convID || p.Text == "" {
+					t.Fatal("successor lost producing identity/text")
+				}
+				successor = e
 			}
-			if !postEnded || p.TurnID == posted.TurnID || p.TurnID == claudeTurn {
-				t.Fatal("successor preceded post completion")
-			}
-			break
 		}
 	}
 	page := readHistoryEntries(home, convID)
 	reply.Reset()
 	ended = false
 	var postCompletions int
+	var postEndID uint64
 	for _, e := range page {
 		if e.Type == protocol.TypeTurnEnd {
 			var p map[string]any
@@ -316,6 +387,7 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 			if p["turn_id"] == posted.TurnID {
 				assertHostPostEnd(t, e.Payload, convID, posted.TurnID)
 				postCompletions++
+				postEndID = e.ID
 			}
 			ended = true
 		}
@@ -335,6 +407,9 @@ func TestChannelPost_E2E_HeldUntilRealCompletion(t *testing.T) {
 	}
 	if postCompletions != 1 {
 		t.Fatal("served post completion not unique")
+	}
+	if terminal.ID == 0 || postEndID <= terminal.ID || successor.ID <= postEndID {
+		t.Fatal("source order did not preserve reply, post completion and successor")
 	}
 	if reply.String() != "reply-head"+bgConvNeedle {
 		t.Fatal("served history split or changed the reply")

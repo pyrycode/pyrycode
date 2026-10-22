@@ -4,7 +4,6 @@ package realclaude
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -15,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -94,7 +95,7 @@ func TestQuestionAnswerModelTurnHelperProcess(t *testing.T) {
 		return protocol.Envelope{Type: protocol.TypeModelAnnounced, Payload: mustJSON(t, protocol.ModelAnnouncedPayload{ConversationID: conv, Model: value})}
 	}
 	delta := func(conv string) protocol.Envelope {
-		return protocol.Envelope{Type: protocol.TypeAssistantDelta, Payload: mustJSON(t, protocol.AssistantDeltaPayload{ConversationID: conv, Text: "ok"})}
+		return protocol.Envelope{Type: protocol.TypeAssistantDelta, Payload: mustJSON(t, protocol.AssistantDeltaPayload{ConversationID: conv, TurnID: "turn", Text: "ok"})}
 	}
 	idle := func(conv string) protocol.Envelope {
 		return protocol.Envelope{Type: protocol.TypeTurnState, Payload: mustJSON(t, protocol.TurnStatePayload{ConversationID: conv, State: "idle"})}
@@ -142,15 +143,8 @@ func TestQuestionAnswerModelTurnHelperProcess(t *testing.T) {
 		t.Fatalf("unknown control %q", name)
 	}
 	send, recv := completedTurnCipherPair(t)
-	phone := &completedTurnFrames{}
-	for _, env := range frames {
-		cipher, err := send.Encrypt(mustJSON(t, env))
-		if err != nil {
-			t.Fatal(err)
-		}
-		phone.frames = append(phone.frames, mustJSON(t, protocol.InnerFrameV2{Type: protocol.TypeNoiseMsg, Data: base64.StdEncoding.EncodeToString(cipher)}))
-	}
-	drainQuestionModelTurn(t, phone, recv, "conv", "target", 50*time.Millisecond)
+	phone := newCompletedSourceFrames(t, send, frames)
+	drainQuestionModelTurn(t, phone, recv, "conv", "target", 50*time.Millisecond, scenario.SourceFacts(func(string) []history.Entry { return phone.source }))
 	if len(phone.frames) != 0 {
 		t.Fatal("drain left frames unread")
 	}

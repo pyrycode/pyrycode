@@ -1058,6 +1058,14 @@ This subsection covers reconnect **timing** only; the **application-layer** reco
 
 ## Application message types
 
+The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
+`tool_denied` and `turn_end` as source history for canonical thread updates and
+explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
+appended reconnect copies to any app, including connections without `thread`
+(#3734). Supported live state remains separate. Nil or failed history does not
+restore raw content delivery or substitute receipts. Channel-post
+`assistant_delta` and `turn_end` publication remains pending #3737.
+
 Unchanged from v1 except where noted. Emitted types below are sent as the **decrypted payload of a `noise_msg`** (post-handshake) or as the **early-data payload of a `noise_init` / `noise_resp`** (during handshake — only `hello` and `hello_ack` ride there). Rows marked declared describe contracts ahead of production delivery.
 
 | Type | Direction | Carries handshake early-data? | Notes |
@@ -1100,11 +1108,12 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `error` | either | no | `ErrorPayload` carries an optional `conversation_id` (#2443, `omitempty`). [`new_session`](#new-session-v2)'s workspace-refusal reply sets it from the daemon's resolved conversation. [`stop_background_task.refused`](#stop-background-task-v2) is the correlation-only exception: it reflects the requested conversation id, including a missing-task refusal for an unknown conversation, and asserts no membership. Other producers retain daemon-authored provenance; other replies omit the key. It also carries an optional `min_client_version` (#2576, `omitempty`), daemon-authored, never an echo of the client's own `client_version` — see [Compatibility](#compatibility). |
 | **`rekey_request`** | either | no | **New in v2.** See [Re-key](#re-key). |
 | **`turn_state`** | binary → phone | no | **New in v2** (interactive, capability-gated). See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). Has **two kinds of producer** since #2498: `interactiveTurnEmitterV2` derives it from claude's own supervised turn stream, and `channelPostEmitterV2` also emits it for a `pyry channel post` — a host-side control verb with no claude in the path at all, addressed to a `turn_id` it mints itself and closed with **no** `turn_state` or `turn_end`, so a turn actually running in the same conversation is left undisturbed. See [`assistant_delta`](#assistant_delta). |
-| **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
-| **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`assistant_delta`** | source history; channel posts → phone | no | Interactive source history only (#3734); canonical thread updates and explicit catch-up carry interactive text. Channel posts still publish raw deltas pending #3737. See [`assistant_delta`](#assistant_delta). |
+| **`tool_use`** | source history only | no | Interactive source history only (#3734); call input and attribution feed canonical thread items. No raw frame, substitute receipt or newly appended reconnect copy for any app. |
+| **`tool_result`** | source history only | no | Interactive source history only (#3734); results update canonical tool items. No raw frame, substitute receipt or newly appended reconnect copy for any app. |
+| **`tool_denied`** | source history only | no | Interactive denial facts feed canonical tool status; no raw frame, substitute receipt or newly appended reconnect copy for any app (#3734). See [`tool_denied`](#tool_denied). |
 | **`tool_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). Updates an open tool row with `claude`'s signed elapsed-seconds reading (#2324). Push-only; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). Since #2223 it also carries the **stop shape `claude` itself reported** — `outcome`, `is_error`, `terminal_reason` — beside the unchanged `stop_reason`, so a turn stopped by a turn cap, a budget cap or a context overflow no longer reads as a finished answer; and since #2224 the **API error category** an `assistant` message reported, `error_category`, so a rate-limited or rejected account is nameable rather than looking like a turn that ended. All four are **optional and open-set**, and they are its only `claude`-authored strings. Since #2260 it also carries four **numbers** off the same `result` line — `duration_ms`, `duration_api_ms`, `num_turns`, `cost_usd_total` — so a client can show the per-turn status line a terminal shows without re-deriving it from the transcript. **Two of those are per turn and two are session running totals**, and `duration_api_ms` is routinely the larger of the two durations. See [`turn_end`](#turn_end). |
+| **`turn_end`** | source history; channel posts → phone | no | Interactive source history only (#3734); stop shape and usage feed canonical folding. Normal completion need not create a visible item. Channel posts still publish their separate four-field completion pending #3737. See [`turn_end`](#turn_end). |
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). Since #2236 the falling edge also names the **outcome** — `compact_result` and `compact_error` — so a failed compaction is distinguishable from an ordinary one. See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -1181,6 +1190,14 @@ Payload shapes inherited from v1 are preserved in git history (the v1 doc has th
 
 ### Daemon thread updates (v2, supplied delivery contract)
 
+The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
+`tool_denied` and `turn_end` as source history for canonical thread updates and
+explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
+appended reconnect copies to any app, including connections without `thread`
+(#3734). Supported live state remains separate. Nil or failed history does not
+restore raw content delivery or substitute receipts. Channel-post
+`assistant_delta` and `turn_end` publication remains pending #3737.
+
 `thread_item_added`, `thread_item_changed` and `thread_text_append` have a
 per-connection relay delivery contract (#3081), including the bounded codec
 and continuations from #3073. **Production emits these fold-owned updates and
@@ -1196,9 +1213,10 @@ are production-installed on the real publisher store (#3236), with authenticated
 relay catch-up/page handling (#3253/#3235) and thread-only replay/resync bypass
 (#3253).
 
-Publication starts from a complete usable `Store.Observe` baseline, sending full
-additions to eligible connected peers, then follows proven `Store.Changes`
-ranges. It covers interactive output, accepted/queued/delivered/dropped sends,
+Publication acquires a usable metadata-only `Store.Changes` boundary silently,
+then follows proven change ranges. Earlier items require explicit catch-up;
+acquisition sends no historical inventory. It covers interactive output,
+accepted/queued/delivered/dropped sends,
 session dividers and channel posts. A dropped send retains its item with
 `status: "dropped"` and `shown: false`. Missing/not-loaded, rebuilding and
 unavailable views publish no partial items or fabricated watermark; usable
@@ -3564,7 +3582,22 @@ installed bounded query providers (#3236/#3253/#3235).
 
 ### Interactive events (v2, capability-gated)
 
-These twenty-three envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model, with host-post producers described below. Claude-turn payload fields remain present (no omitempty), so boundary values like `seq: 0`, `is_error: false`, and `elapsed_seconds: 0` are explicit on the wire. Host-post `turn_end` is the four-field exception: it omits all Claude result and metric fields.
+This section includes retained source schemas and supported live-session frames.
+The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
+`tool_denied` and `turn_end` as source history for canonical thread updates and
+explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
+appended reconnect copies to any app, including connections without `thread`
+(#3734). Supported live state remains separate. Nil or failed history does not
+restore raw content delivery or substitute receipts. Channel-post
+`assistant_delta` and `turn_end` publication remains pending #3737.
+
+For the five retired interactive types, field tables and payload descriptions
+below document stored fold inputs, including historical envelope bounds; they
+are not app delivery promises. Other live frames are sent **binary → phone
+only**, subject to the negotiated `interactive` capability and existing access
+gates. Required source fields remain explicit, including `seq: 0` and
+`is_error: false`. Host-post `turn_end` retains its separate four-field payload,
+omitting Claude result and metric fields.
 
 **Legacy replay cursor (`event_id`, #649).** Ring-backed frames in this stream carry an envelope-level `event_id` (the optional `Envelope` field above) — the daemon-resident id assigned to each structured event in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` identifies an envelope and can differ across recipients or replay, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -3595,6 +3628,12 @@ On legacy interactive connections, this frame is also re-asserted on connect for
 
 #### `assistant_delta`
 
+Interactive text is retained source history for canonical thread updates and
+explicit catch-up. No interactive raw delta or newly appended reconnect copy is
+sent to any app; nil/failed history supplies no fallback. Supported live state
+remains separate. The channel-post producer below still publishes deltas
+pending #3737. The table describes the retained source payload.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
@@ -3604,12 +3643,11 @@ On legacy interactive connections, this frame is also re-asserted on connect for
 | `text` | string | Incremental assistant text, coalesced (not per token). |
 | `text_complete` | bool | Optional; omitted when false. `true` retains an observed complete attributed assistant text block for this child paragraph. Absence supplies no completion evidence. |
 
-`parent_tool_use_id` is an inert grouping hint for attributed subagent prose.
-Join it to the parent `Agent` frame's `tool_use_id` to render that prose under
-the call that produced it; the identifiers cross byte-for-byte. A value that
-matches no known frame stays at top level. It is **not a capability** and grants
-no authority to look up, invoke, or otherwise act on the referenced call. The
-daemon always emits the key, using an empty string for main-thread text.
+`parent_tool_use_id` is an inert source join key for attributed subagent prose.
+The fold resolves it against the spawning Agent call in the same source scope;
+apps use the resulting canonical item's `parent`, rather than reconstructing
+raw-event joins. It grants no authority to invoke or dereference a tool call.
+The stored key is an empty string for main-thread text.
 
 The daemon's long-lived interactive `streamsup` child opts into claude's
 `--forward-subagent-text` output on both create and resume spawns. Ordinary child
@@ -3617,19 +3655,21 @@ prose therefore reaches the non-empty, parent-keyed lanes described above;
 main-thread deltas remain on the empty-parent lane. The separate `pyry agent-run`
 path does not enable this option.
 
-Only ordinary assistant text is publishable. Attributed thinking and signature
+Only ordinary assistant text is retained for thread publication. Attributed
+thinking and signature
 content is consumed without producing any mobile envelope, including when it
 arrives beside publishable child prose. This preserves [ADR 025's remote-head
 boundary](knowledge/decisions/025-mobile-remote-head-interactive-session.md): the
-phone receives typed display events, never claude's private reasoning or signature
-material.
+phone receives canonical display content and supported live progress, never
+claude's private reasoning or signature material. Neither thinking/signature
+bytes nor content enter operational logs.
 
-`text_complete` is retained in raw history as well as the wire payload. Only
+`text_complete` is retained in the raw source payload for canonical folding. Only
 `Parser.emitAssistant`'s validated complete attributed text shape supplies it;
 streamed partial deltas, uncorrelated message endings, task success and main text
 supply none. A settled companion suppressed because its text was already streamed
 cannot assert completion. Complete child text flushes earlier buffered text and
-publishes immediately in source order. If transport splitting is necessary, only
+records immediately in source order. If payload splitting is necessary, only
 the final piece carries `text_complete: true`, including a whitespace-only final
 piece of an otherwise nonblank paragraph. The marker closes that scoped
 paragraph, not the Agent or main turn. Older histories without the field retain
@@ -3643,8 +3683,8 @@ A later main turn gets a fresh main ID and starts its sequence at `0`; it does
 not reset or reattribute ongoing child lanes. Child lane identities and counters
 are scoped to the producing conversation and retained until session exit or
 conversation teardown, which flushes pending prose before releasing them.
-Moving the active-conversation cursor does not discard them. Order deltas by
-`seq` **within one `turn_id`**, not across the conversation.
+Moving the active-conversation cursor does not discard them. Source `seq` orders deltas within one retained lane; apps order canonical items
+by `order` and apply their `rev`, not source delta sequence numbers.
 Coalescing also stays lane-local: adjacent text is combined only while both
 `parent_tool_use_id` and claude's internal message id match. The daemon keeps one
 active buffer, so a main/child or child/child switch flushes the earlier text and
@@ -3660,7 +3700,7 @@ at `0` for each post. The post forms one separate completed bubble, with no
 second `message`/assistant text representation and no post `turn_state`.
 
 Acceptance can succeed during a live Claude turn, but delivery holds until its
-published real completion or confirmed producer stop after queued/buffered output
+recorded real completion or confirmed producer stop after queued/buffered output
 is flushed and its lifecycle closed. No held post delta/completion reaches live
 delivery or served history; whole FIFO posts complete before successor turns.
 The five-minute diagnostic keeps holding. All post chunks and completion must
@@ -3679,6 +3719,11 @@ Durable tail catch-up remains #2744. See
 
 #### `tool_use`
 
+This is a retained interactive source schema for canonical tool items and
+explicit catch-up. No raw `tool_use`, substitute receipt or newly appended
+reconnect copy is sent to any app, including without `thread`, even with nil or
+failed history. Supported tool progress remains separate live state.
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation this turn belongs to. |
@@ -3689,7 +3734,7 @@ Durable tail catch-up remains #2744. See
 | `input_summary` | string | Human-readable précis of the tool input (not the raw input). |
 | `input` | object (string → string) | The tool input's own top-level fields, each value the input's value verbatim. Always present, never `null`. |
 
-`input` is what a client shows to say what a call *acts on* — an `Edit`'s `file_path` beside its replaced text rather than buried inside it — where `input_summary` is the whole input compacted onto one line and cut short. Both are sent; `input_summary` keeps its exact meaning and value.
+`input` is what a client shows to say what a call *acts on* — an `Edit`'s `file_path` beside its replaced text rather than buried inside it — where `input_summary` is the whole input compacted onto one line and cut short. Both are recorded; `input_summary` keeps its exact meaning and value.
 
 Each value is the input's own value: a JSON string arrives decoded (a path is a path, an embedded newline is a newline), any other JSON type arrives as its compact JSON form (so `null`, `true`, `[1,2]` and `{"x":1}` are those literal strings). Nothing is normalised — no path is rewritten to a workspace-relative form.
 
@@ -3699,12 +3744,16 @@ Each value is the input's own value: a JSON string arrives decoded (a path is a 
 
 **Values are display strings, not capabilities.** They are model-authored text the daemon neither resolved nor validated: a `file_path` is not canonicalised and may be relative or traversing, and a `Bash` `command` value is a literal shell command line. Render them as inert text. Never open one as a path on your own filesystem, execute or re-shell one, or feed one to an HTML sink, an attribute, or a URL.
 
-**`parent_tool_use_id` is how a client nests subagent work**, and it is carried identically on [`tool_result`](#tool_result) below, so a call row and its result row group together. **Join a child to its parent on the `tool_use_id` these frames already carry** — the two are byte-identical, so no new vocabulary is needed: the row whose `tool_use_id` equals another row's `parent_tool_use_id` is that row's parent. **Empty means the main conversation**, which is every frame a turn without subagents produces. Three parallel subagents therefore read as three collapsible groups rather than thirty rows interleaved into the main thread.
-
-**Nesting is unbounded and needs no extra field.** The value is `claude`'s own, read verbatim with no branch on depth, so a call made by a subagent that a subagent spawned names the **inner** `Agent` call; following ids rebuilds the whole tree. A client that has not seen the parent row — it arrived before the client connected, or was replayed away — renders the row at top level.
+**`parent_tool_use_id` retains subagent attribution.** The source key names the
+spawning Agent/Task call and is carried identically on [`tool_result`](#tool_result).
+Empty means the main thread. Nested work names its immediate spawning call;
+the fold resolves these joins within the producing conversation/session and
+supplies canonical `parent` identity to apps. Apps must not rebuild the thread
+by joining retired raw frames. Missing parent evidence follows the fold's
+parent-repair rules; see [agent and background folding](knowledge/features/thread-package-agents-and-background-work.md).
 
 **Child tool attribution survives main completion** (#2960). When the daemon
-observed the spawning `Agent`/`Task` call, child tool frames retain that call's
+observed the spawning `Agent`/`Task` call, child tool sources retain that call's
 originating main `turn_id`, including after its `turn_end` and during later main
 turns. Nested launchers inherit their child call's origin. If the daemon did not
 observe the launcher, it uses a stable, nonempty child ID keyed by the parent
@@ -3713,7 +3762,7 @@ The first attribution observed for a child tool call stays fixed; it never
 borrows a later main turn's ID. Child `tool_use` and `tool_result`, and
 [`tool_progress`](#tool_progress) and [`tool_denied`](#tool_denied) for a known
 child call, agree on this ID without opening or closing a main turn, changing
-its phase, or publishing `turn_state`. Parent-bearing frames preserve
+its phase, or publishing `turn_state`. Parent-bearing sources preserve
 `parent_tool_use_id` verbatim. Attribution is released at session exit or
 conversation teardown, even when the main turn is already idle.
 
@@ -3721,9 +3770,16 @@ conversation teardown, even when the main turn is already idle.
 
 **Empty has exactly one meaning, and that is what makes the bound safe.** The daemon caps the value at **256 bytes** and **empties rather than cuts** one that exceeds it or that `claude` sent as a non-string — because a cut join key matches no `tool_use_id` while still looking like one, and would file a row under the wrong parent. So an emptied id degrades to top-level rendering, the behaviour before this field existed. There is deliberately no report naming which emptiness it is; unlike [`tool_denied`](#tool_denied)'s emptied fields, this one has no second meaning for a report to disambiguate.
 
-**A client built before this landed ignores the key**, and one built after it decodes a frame that lacks the key to `""` without error — the daemon always emits it, so absence means an older binary and reads as "main thread", which is what such a binary meant.
+Stored sources predating `parent_tool_use_id` decode its absence to `""`,
+retaining the historical main-thread interpretation. Transport retirement does
+not rewrite those histories.
 
 #### `tool_result`
+
+This retained interactive source updates canonical tool items and explicit
+catch-up. No raw `tool_result`, substitute receipt or newly appended reconnect
+copy is sent to any app, even with nil/failed history. Supported live state
+remains separate; the table describes the source payload.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3742,11 +3798,16 @@ not open a main turn or change its phase.
 
 **Bounds.** `result_summary` is capped at **10000 runes** (runes, not bytes). A result the daemon shortened ends in `…`; a result that legitimately ends in `…` is indistinguishable from a cut one, which is an accepted cost of the marker. **`is_error` does not change the bound** — an error result is truncated at exactly the same 10000 runes a success result is, so a client must not expect a failing tool's output to arrive whole.
 
-The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML by default, so `<`, `>`, `&` and every control byte without a short escape each cost **six bytes** on the wire, while a multi-byte rune is emitted raw at 4 bytes or fewer — six bytes per rune is therefore the ceiling for any rune count. 10000 × 6 = 60000 B of escaped content, measured at a worst case of **61363 B** against the 65519-byte application-envelope cap (§ Application-envelope size cap) with hostile identity fields. A frame over that cap is **lost, not truncated**, and `tool_result` is never-droppable control class (§ Error codes, `4413`), so the operator would see an empty row rather than a shortened one. Do not read `unrecognized.raw`'s "escaping is mild in practice" argument onto this field: that one rests on the payload already being JSON text with pre-escaped control characters, where a tool result is raw command output or file contents, and reading a TSX or HTML file is an ordinary `<`-dense result.
+The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML by default, so `<`, `>`, `&` and every control byte without a short escape each cost **six bytes** on the wire, while a multi-byte rune is emitted raw at 4 bytes or fewer — six bytes per rune is therefore the ceiling for any rune count. 10000 × 6 = 60000 B of escaped content, measured at a worst case of **61363 B** against the 65519-byte application-envelope cap (§ Application-envelope size cap) with hostile identity fields. The retired raw transport lost a frame above that cap rather than truncating it (`4413`); the retained source mapping keeps the same bound, without restoring raw publication. Do not read `unrecognized.raw`'s "escaping is mild in practice" argument onto this field: that one rests on the payload already being JSON text with pre-escaped control characters, where a tool result is raw command output or file contents, and reading a TSX or HTML file is an ordinary `<`-dense result.
 
 **`result_summary` is a display string, not a capability.** It is model-authored text the daemon neither resolved nor validated — `Bash` output is a command's stdout verbatim, a file read is a file's contents. Render it as inert text. Never feed it to an HTML sink, an attribute, or a URL, and never execute or re-shell any of it. This is the hazard § `tool_use` states for its input values, and here the `<`-dense case is the ordinary one rather than the contrived one.
 
 #### `tool_denied`
+
+This retained interactive source supplies canonical denial status and explicit
+catch-up. No raw `tool_denied`, substitute receipt or newly appended reconnect
+copy is sent to any app, even with nil/failed history. Supported permission
+prompts and other live state remain separate. The table describes source fields.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3760,18 +3821,13 @@ The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML 
 | `truncated_fields` | array or `null` | Names the fields the daemon **cut** to fit their caps, under **this frame's own wire keys**. `null` when nothing was cut. |
 | `dropped_fields` | array or `null` | Names the fields the daemon **emptied** for exceeding their caps, under this frame's own wire keys. `null` when nothing was dropped. |
 
-`tool_denied` (#2233) exists so a **blocked** tool row can look blocked rather than
-broken. Without it a refused call reaches a client only as whatever `tool_result`
-`claude` writes afterwards, which reads as a tool that failed.
-
-**It is a separate frame from [`tool_result`](#tool_result), and it could not have been
-two fields on one.** `claude` states the denial on a line that arrives **before** the
-tool result (`assistant/tool_use` -> `system/permission_denied` -> `user/tool_result`,
-measured across the three denial-bearing arms of the committed capture), so folding it in
-would need the daemon to hold cross-line state keyed by `tool_use_id`. And the
-result-line recovery that follows this frame reports denials for calls whose
-`tool_result` has **already shipped** - a field on a sent frame cannot be set afterwards.
-Join the two rows on `tool_use_id`, which a client already has.
+`tool_denied` records why a tool was **blocked**, separately from a failed
+`tool_result`. Claude can report denial before its result
+(`assistant/tool_use` -> `system/permission_denied` -> `user/tool_result`), while
+result-line recovery can also discover denial after a result was recorded.
+Retain both source facts: the fold joins their scoped `tool_use_id` and updates
+one canonical tool item. Removing this stored vocabulary along with its raw
+publication would lose denial status and attribution.
 
 For a known child call, `turn_id` retains the originating main ID or the
 parent-keyed unknown-origin fallback described under [`tool_use`](#tool_use),
@@ -3869,7 +3925,14 @@ id or elapsed value as authorization, routing input, or proof of execution.
 
 #### `turn_end`
 
-Claude turns retain the `TurnEndPayload` contract below. Host posts use exactly
+Interactive completion remains source history for canonical thread updates and
+explicit catch-up. No raw interactive `turn_end`, substitute receipt or newly
+appended reconnect copy is sent to any app, even with nil/failed history.
+Supported live phase remains separate. Normal completion need not create a
+visible `turn_end` item. Channel-post completion still publishes pending #3737;
+only the channel-post example below describes a current raw app frame.
+
+Claude turns retain the `TurnEndPayload` source contract below. Host posts use exactly
 this four-field completion payload in durable history, replay and live delivery
 (#2809):
 
@@ -3885,7 +3948,7 @@ is additional provenance. Every Claude-only field listed below — `outcome`,
 `is_error`, `terminal_reason`, `error_category`, both durations, cost, turn count
 and all token counts — is omitted entirely, including zero/null placeholders.
 Absent fields are not evidence that Claude reported success or zero usage.
-Claude-turn serialization and result reporting remain unchanged; Claude turns
+Claude-turn source serialization and result recording remain unchanged; Claude turns
 do not gain a `producer` field.
 
 | Field | Type | Meaning |

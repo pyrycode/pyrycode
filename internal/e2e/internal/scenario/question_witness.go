@@ -30,12 +30,8 @@ func AwaitWitnessQuestionControl(t *testing.T, next Next, want string, budget ti
 		if err := CheckWitnessQuestionControl(env, parked); err != nil {
 			t.Fatal(err)
 		}
-		if env.Type == protocol.TypeAssistantDelta && prior != nil {
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid pre-answer text")
-			}
-			prior.WriteString(p.Text)
+		if env.Type == protocol.TypeAssistantDelta {
+			t.Fatal("retired pre-answer text delivered on wire")
 		}
 		if env.Type == want {
 			return env
@@ -54,24 +50,15 @@ func RaiseWitnessQuestion(t *testing.T, w Wire, conv, messageID, prompt string, 
 	}
 	return batch
 }
-func WitnessAnsweredTurn(t *testing.T, next Next, conv, batch, witness string, budget time.Duration) string {
+func WitnessAnsweredTurn(t *testing.T, next Next, conv, batch, witness string, budget time.Duration, sources ...SourceFacts) string {
 	t.Helper()
-	deadline := time.Now().Add(budget)
-	var text strings.Builder
-	dismissed, idle := false, false
-	for time.Now().Before(deadline) {
-		env := next(deadline)
-		alarm(t, env)
-		if err := ObserveWitnessAnswer(env, conv, batch, &text, &dismissed, &idle); err != nil {
-			t.Fatal(err)
-		}
-		if WitnessAnswerComplete(witness, text.String(), dismissed, idle) {
-			return text.String()
-		}
+	text := AnsweredTurn(t, next, conv, batch, budget, sources...)
+	if witness == "" || !strings.Contains(text, witness) {
+		t.Fatal("answer lacks its answer-only source witness")
 	}
-	t.Fatal("answer lacks correlated remote dismissal, answer-only witness continuation or final owned idle")
-	return ""
+	return text
 }
+
 func RequireWitnessAnswerHistory(t *testing.T, home, conv, session string, batch protocol.QuestionShownPayload, answers []protocol.QuestionAnswerEntry) {
 	t.Helper()
 	RequirePromptAnswerHistory(t, home, conv, batch.QuestionBatchID, "answer", session)
@@ -99,7 +86,7 @@ func RequireWitnessAnswerHistory(t *testing.T, home, conv, session string, batch
 		t.Fatal("answer history does not contain exactly one fact for its original batch")
 	}
 }
-func WitnessModelTurn(t *testing.T, next Next, conv, expected string, budget time.Duration) {
+func WitnessModelTurn(t *testing.T, next Next, conv, expected string, budget time.Duration, sources ...SourceFacts) {
 	t.Helper()
 	seen := false
 	model := ""
@@ -127,7 +114,7 @@ func WitnessModelTurn(t *testing.T, next Next, conv, expected string, budget tim
 		}
 		return env
 	}
-	CompletedTurn(t, checked, conv, budget, true)
+	CompletedTurn(t, checked, conv, budget, true, sources...)
 	if !seen {
 		t.Fatal("the post-question turn emitted no model_announced frame")
 	}
@@ -161,12 +148,14 @@ func WitnessQuestionAnswer(t *testing.T, w Wire, c WitnessQuestionConfig) {
 		witness = NewQuestionWitness(t)
 	}
 	answers := ChooseWitnessAnswers(t, batch, false, witness)
+	after, preAnswer := QuestionBoundary(t, w.Source, c.ConversationID)
+	prior.WriteString(preAnswer)
 	if err := CheckQuestionWitness(witness, batch, c.Prompt, prior.String()); err != nil {
 		t.Fatal(err)
 	}
 	w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: "e2e-1987-answer-token", Answers: answers})
 	RequireWitnessAnswerHistory(t, c.Home, c.ConversationID, c.SessionID, batch, answers)
-	WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget)
+	WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget, after)
 }
 
 type WitnessBypassConfig struct {
@@ -197,11 +186,13 @@ func WitnessBypassQuestions(t *testing.T, w Wire, c WitnessBypassConfig) {
 			witness = NewQuestionWitness(t)
 		}
 		answers := ChooseWitnessAnswers(t, batch, multi, witness)
+		after, preAnswer := QuestionBoundary(t, w.Source, c.ConversationID)
+		prior.WriteString(preAnswer)
 		if err := CheckQuestionWitness(witness, batch, prompt, prior.String()); err != nil {
 			t.Fatal(err)
 		}
 		w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: fmt.Sprintf("bypass-answer-%d", 3+i*2), Answers: answers})
-		text := WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget)
+		text := WitnessAnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, witness, c.TurnBudget, after)
 		prior.WriteString(text)
 		n := 1
 		if multi {
@@ -217,7 +208,7 @@ func WitnessBypassQuestions(t *testing.T, w Wire, c WitnessBypassConfig) {
 	}
 	witness := c.ToolWitness()
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "bypass-ordinary-tool", Text: fmt.Sprintf("Use Bash once to run exactly this command: printf '%%s' '%s' > bypass-witness.txt\nThen reply done. Do not ask a question.", witness)})
-	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false)
+	CompletedTurn(t, w.Next, c.ConversationID, c.TurnBudget, false, w.Source)
 	c.CheckToolWitness(witness)
 	id := w.Send(protocol.TypeRequestSessionSettings, protocol.RequestSessionSettingsPayload{ConversationID: c.ConversationID})
 	env := Correlated(t, w.Next, id, 15*time.Second)

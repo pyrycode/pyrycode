@@ -63,6 +63,7 @@ package realclaude
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,6 +133,7 @@ func TestInteractiveStreamSendFile(t *testing.T) {
 	}
 
 	modalID := raiseSendFileModal(t, h, 2, convID, filename)
+	continuationSource := scenario.SourceSince(t, h.home, convID)
 
 	// Answer allow_once from the paired phone. The device gate
 	// (--allow-remote-permissions) is armed by the harness; without it ResolveAnswer
@@ -152,7 +154,7 @@ func TestInteractiveStreamSendFile(t *testing.T) {
 	// The turn resumes and closes: a non-empty continuation assistant_delta followed
 	// by the terminal turn_state{idle}. "Answered but the tool never ran" fails here
 	// before the filesystem is ever read, which keeps the two reds distinguishable.
-	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget, continuationSource)
 
 	requireSendFileAttachment(t, h.home, convID, filename)
 }

@@ -1911,9 +1911,8 @@ func TestStreamTurnDrainV2_BusyOpenThenCloseThroughParser(t *testing.T) {
 
 	feedLines(sink, "sess-a", resultLine)
 
-	// Barrier: assistant_delta, turn_end, turn_state(idle) — that order is
-	// invariant even if the ~250ms coalescing timer flushes the delta early.
-	collectEnvs(t, bcast.pushed, 3)
+	// Terminal idle follows the recorded text and completion facts.
+	collectEnvs(t, bcast.pushed, 1)
 	if busy.Busy(testConvID) {
 		t.Errorf("Busy = true after the result line's TurnEnd, want false")
 	}

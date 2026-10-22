@@ -72,7 +72,7 @@ func AttachmentRead(t *testing.T, w Wire, c AttachmentReadConfig) {
 		t.Fatal("stored attachment directory/filename differs from receipt")
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "m-attach", Text: c.Prompt, AttachmentIDs: []string{c.AttachmentID}})
-	reply := AttachmentTurn(t, w.Next, c.ConversationID, c.Budget)
+	reply := AttachmentTurn(t, w.Next, c.ConversationID, c.Budget, w.Source)
 	if !strings.Contains(reply, c.Token) {
 		t.Fatal("attachment reply omitted the file-only witness")
 	}
@@ -80,12 +80,13 @@ func AttachmentRead(t *testing.T, w Wire, c AttachmentReadConfig) {
 
 // AttachmentTurn retains the original attachment drain's alarms and milestones.
 // Parser/rate alarms were not in that live drain and are not substituted here.
-func AttachmentTurn(t *testing.T, next Next, convID string, budget time.Duration) string {
+func AttachmentTurn(t *testing.T, next Next, convID string, budget time.Duration, sources ...SourceFacts) string {
 	t.Helper()
-	var text strings.Builder
+	var turn sourceTurn
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		env := next(deadline)
+		env := next(pollDeadline(deadline))
+		turn.feed(t, convID, sourceFacts(t, sources, convID))
 		switch env.Type {
 		case protocol.TypeError, protocol.TypeModalShown:
 			t.Fatal("attachment turn was refused or parked behind a modal")
@@ -95,20 +96,14 @@ func AttachmentTurn(t *testing.T, next Next, convID string, budget time.Duration
 				t.Fatal("invalid attachment tool-use frame")
 			}
 		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid attachment reply")
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				text.WriteString(p.Text)
-			}
+			t.Fatal("retired attachment reply delivered on wire")
 		case protocol.TypeTurnState:
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid attachment turn state")
 			}
-			if p.ConversationID == convID && p.State == "idle" && text.Len() > 0 {
-				return text.String()
+			if turn.idle(t, env, convID) && strings.TrimSpace(turn.text.String()) != "" {
+				return turn.text.String()
 			}
 		}
 	}

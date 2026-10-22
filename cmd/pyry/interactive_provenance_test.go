@@ -88,7 +88,9 @@ func TestInteractiveProvenanceFactories(t *testing.T) {
 			defer func() { cancel(); join() }()
 			for {
 				env := collectEnvs(t, bcast.pushed, 1)[0]
-				if env.Type == protocol.TypeTurnEnd {
+				var phase protocol.TurnStatePayload
+				_ = json.Unmarshal(env.Payload, &phase)
+				if env.Type == protocol.TypeTurnState && phase.State == "idle" {
 					break
 				}
 			}

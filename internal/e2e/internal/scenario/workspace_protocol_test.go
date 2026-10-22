@@ -271,6 +271,7 @@ func TestWorkspaceProtocolHelperProcess(t *testing.T) {
 		time.Sleep(time.Until(deadline))
 		return protocol.Envelope{}
 	}}
+	w = testSourceWire(t, w)
 	switch {
 	case strings.HasPrefix(name, "workspace-"):
 		WorkspaceChange(t, w, WorkspaceConfig{Home: home, ConversationID: conv, Requested: "~/changed", Resolved: resolved, FirstPrompt: "first", SecondPrompt: "second", TurnBudget: budget, VerbBudget: budget})

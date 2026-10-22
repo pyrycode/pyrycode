@@ -298,21 +298,23 @@ func TestAgentHistory_LegacyCompatibility(t *testing.T) {
 	// Hidden progress at the tail retains delivery and durable identity.
 	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskProgress{TaskID: "task"}, source)
 	raw := historyEntries(t, store, testConvID)
+	raw = slices.DeleteFunc(raw, func(e history.Entry) bool { return testRetiredInteractiveType(e.Type) })
 	events, _ := e.ring.After(testConvID, 0)
 	for _, reader := range []*history.Store{store, history.New(dir)} {
 		page, _ := testLegacyReceipts(t, reader)
+		page = slices.DeleteFunc(page, func(e history.Entry) bool { return testRetiredInteractiveType(e.Type) })
 		if len(page) != len(raw) || len(events) != len(raw) || len(bcast.pushes) != len(raw) {
 			t.Fatal("receipt hole or recipient gate changed")
 		}
-		for _, original := range raw {
+		for i, original := range raw {
 			var projected history.Entry
 			for _, entry := range page {
 				if entry.ID == original.ID {
 					projected = entry
 				}
 			}
-			event := events[original.ID-1]
-			push := bcast.pushes[original.ID-1]
+			event := events[i]
+			push := bcast.pushes[i]
 			if projected.ID == 0 || event.HistoryEntryID != original.ID || push.connID != "phone" || push.env.HistoryEntryID == nil || *push.env.HistoryEntryID != original.ID || !original.TS.Equal(projected.TS) || !event.TS.Equal(projected.TS) || !push.env.TS.Equal(projected.TS) || !bytes.Equal(event.Payload, projected.Payload) || !bytes.Equal(push.env.Payload, projected.Payload) {
 				t.Fatal("durable receipt identity changed")
 			}
@@ -387,7 +389,7 @@ func TestAgentHistory_StorageFailure(t *testing.T) {
 						t.Fatal("failed append produced receipt")
 					}
 				}
-				if len(bcast.pushes) != 4 || bcast.pushes[2].env.Type != protocol.TypeBackgroundTaskStarted || bcast.pushes[3].env.Type != protocol.TypeBackgroundTaskRoster {
+				if len(bcast.pushes) != 3 || bcast.pushes[1].env.Type != protocol.TypeBackgroundTaskStarted || bcast.pushes[2].env.Type != protocol.TypeBackgroundTaskRoster {
 					t.Fatal("mapped report lost")
 				}
 			}

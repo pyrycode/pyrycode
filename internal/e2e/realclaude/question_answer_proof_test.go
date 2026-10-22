@@ -80,7 +80,12 @@ func TestQuestionAnswerTurnProof(t *testing.T) {
 			proof := questionAnswerTurn{convID: "conv", batchID: "batch", witness: witness}
 			var err error
 			for _, env := range tc.events {
-				if err = proof.observe(env); err != nil {
+				if env.Type == protocol.TypeAssistantDelta {
+					err = proof.observeSource(history.Entry{Type: env.Type, Payload: env.Payload})
+				} else {
+					err = proof.observe(env)
+				}
+				if err != nil {
 					break
 				}
 			}

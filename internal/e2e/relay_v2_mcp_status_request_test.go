@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,8 @@ const (
 )
 
 type mcpQueryPhone struct {
+	source *scenario.SourceObserver
+	next   scenario.Next
 	client *fakephone.Client
 	send   *noise.CipherState
 	recv   *noise.CipherState
@@ -35,6 +38,7 @@ type mcpQueryPhone struct {
 
 func dialMCPQueryPhone(
 	t *testing.T,
+	home string,
 	fr *fakerelay.Server,
 	serverID string,
 	pubKey []byte,
@@ -49,11 +53,13 @@ func dialMCPQueryPhone(
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-	return mcpQueryPhone{client: phone, send: send, recv: recv}
+	return mcpQueryPhone{client: phone, send: send, recv: recv, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phone, recv)}
 }
 
-func sendMCPQueryTurn(t *testing.T, phone mcpQueryPhone, requestID uint64, text string) {
+func sendMCPQueryTurn(t *testing.T, phone, observer mcpQueryPhone, requestID uint64, text string) {
 	t.Helper()
+	phone.source.Watch(mcpQueryConvID)
+	observer.source.Watch(mcpQueryConvID)
 	sendSealedEnvelope(t, phone.client, phone.send, protocol.Envelope{
 		ID:   requestID,
 		Type: protocol.TypeSendMessage,
@@ -68,31 +74,23 @@ func sendMCPQueryTurn(t *testing.T, phone mcpQueryPhone, requestID uint64, text 
 
 func drainMCPQueryTurn(t *testing.T, phone mcpQueryPhone, text string) (statuses int) {
 	t.Helper()
-	sawEcho := false
 	deadline := time.Now().Add(30 * time.Second)
-	for {
-		env, ok := nextAttachmentEnvelope(t, phone.client, phone.recv, deadline)
+	for !phone.source.Ended(mcpQueryConvID) {
+		env, ok := phone.source.Next(phone.next, deadline)
 		if !ok {
-			t.Fatalf("turn %q did not finish; echo=%v statuses=%d", strings.TrimSpace(text), sawEcho, statuses)
+			t.Fatal("source turn did not settle")
 		}
-		switch env.Type {
-		case protocol.TypeError:
-			t.Fatalf("unexpected error during turn %q: %s", strings.TrimSpace(text), env.Payload)
-		case protocol.TypeMCPStatus:
+		if env.Type == protocol.TypeError {
+			t.Fatal("turn refused")
+		}
+		if env.Type == protocol.TypeMCPStatus {
 			statuses++
-		case protocol.TypeAssistantDelta:
-			var delta protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &delta); err != nil {
-				t.Fatalf("decode assistant_delta: %v", err)
-			}
-			sawEcho = sawEcho || strings.Contains(delta.Text, strings.TrimSpace(text))
-		case protocol.TypeTurnEnd:
-			if !sawEcho {
-				t.Fatalf("turn %q ended without its echo", strings.TrimSpace(text))
-			}
-			return statuses
 		}
 	}
+	if !strings.Contains(phone.source.Text(mcpQueryConvID), strings.TrimSpace(text)) {
+		t.Fatal("settled turn lost its fresh source echo")
+	}
+	return statuses
 }
 
 func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
@@ -134,12 +132,12 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	// the bound conversation's history (#2739) makes the next request against this
 	// same child the fake's changed-state response rather than racing startup.
 	waitForHistoryType(t, home, mcpQueryConvID, protocol.TypeMCPStatus, 10*time.Second)
-	phoneA := dialMCPQueryPhone(t, fr, serverID, pubKey, payloadA.Token, "phone-a")
-	phoneB := dialMCPQueryPhone(t, fr, serverID, pubKey, payloadB.Token, "phone-b")
+	phoneA := dialMCPQueryPhone(t, home, fr, serverID, pubKey, payloadA.Token, "phone-a")
+	phoneB := dialMCPQueryPhone(t, home, fr, serverID, pubKey, payloadB.Token, "phone-b")
 
 	// Establish the active-conversation cursor before querying, so a response that
 	// accidentally enters the shared turn sink has a live fan-out and ring target.
-	sendMCPQueryTurn(t, phoneA, mcpQueryWarmupID, mcpQueryWarmupText)
+	sendMCPQueryTurn(t, phoneA, phoneB, mcpQueryWarmupID, mcpQueryWarmupText)
 	if got := drainMCPQueryTurn(t, phoneA, mcpQueryWarmupText); got != 0 {
 		t.Fatalf("phone-a warmup MCP statuses = %d, want 0", got)
 	}
@@ -160,7 +158,7 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	var fresh protocol.MCPStatusPayload
 	deadline := time.Now().Add(10 * time.Second)
 	for statusCountA == 0 {
-		env, ok := nextAttachmentEnvelope(t, phoneA.client, phoneA.recv, deadline)
+		env, ok := phoneA.source.Next(phoneA.next, deadline)
 		if !ok {
 			t.Fatal("requesting phone received no MCP status reply")
 		}
@@ -195,8 +193,8 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 	}
 
 	// A later turn is the causal read boundary: any query response admitted to the
-	// shared sink before this turn must reach both phones before their turn_end.
-	sendMCPQueryTurn(t, phoneA, mcpQueryCausalID, mcpQueryCausalText)
+	// shared sink before this turn must reach both phones before terminal live idle.
+	sendMCPQueryTurn(t, phoneA, phoneB, mcpQueryCausalID, mcpQueryCausalText)
 	statusCountA += drainMCPQueryTurn(t, phoneA, mcpQueryCausalText)
 	statusCountB := drainMCPQueryTurn(t, phoneB, mcpQueryCausalText)
 	if statusCountA != 1 {

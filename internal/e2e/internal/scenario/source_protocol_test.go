@@ -109,6 +109,7 @@ func TestSourceProtocolHelperProcess(t *testing.T) {
 			}
 			return sequence
 		}}
+		w = testSourceWire(t, w)
 		absent := 0
 		PermissionContext(t, w, PermissionContextConfig{ConversationID: "conv", Target: target, Prompt: "authored permission prompt", Outside: outside, SurfaceBudget: budget, TurnBudget: budget, Reconnect: func() {
 			again := shown
@@ -190,6 +191,7 @@ func TestSourceProtocolHelperProcess(t *testing.T) {
 		}
 		return sequence
 	}}
+	w = testSourceWire(t, w)
 	NativeSuggestions(t, w, NativeSuggestionConfig{ConversationID: "conv", Prompts: []string{"Write code"}, TurnBudget: budget, Window: budget, CheckNative: func() {
 		nativeChecked++
 		if name == "native-no-source" {

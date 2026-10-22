@@ -5,7 +5,7 @@ package e2e
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +156,7 @@ func TestE2E_SettingsChangeSurvivesTheNextRespawn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal send_message envelope: %v", err)
 	}
+	wakeSource := scenario.SourceSince(t, home, conv)
 	sendNoiseMsg(t, phone, wakeCT)
 	// The ack is not the proof — the send handler acks on accept-into-backlog,
 	// well before any child exists to serve the turn.
@@ -163,7 +164,7 @@ func TestE2E_SettingsChangeSurvivesTheNextRespawn(t *testing.T) {
 
 	// The proof: the conversation answers. On the unfixed tree the respawned
 	// child is refused at argv parse on every attempt, so nothing ever echoes.
-	waitForConversationDelta(t, phone, initRecv, conv, wakeNeedle, 25*time.Second, h)
+	waitForConversationDelta(t, phone, initRecv, conv, wakeNeedle, 25*time.Second, h, wakeSource)
 }
 
 // seedClaudeTranscript writes the transcript claude would have written for this
@@ -203,42 +204,10 @@ func seedClaudeTranscript(t *testing.T, home, sessionID string) {
 // turn_state frames and any other conversation's events are skipped rather than
 // treated as progress: the claim is that THIS conversation answered.
 func waitForConversationDelta(t *testing.T, phone *fakephone.Client, recv *noise.CipherState,
-	convID, needle string, budget time.Duration, h *Harness) {
+	convID, needle string, budget time.Duration, h *Harness, source scenario.SourceFacts) {
 	t.Helper()
-	deadline := time.Now().Add(budget)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("conversation %s never answered %q within %s — the respawn under the recomposed argv never served a turn\ndaemon stderr:\n%s",
-				convID, needle, budget, stderrTail(h, 6000))
-		}
-		rawFrame, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // re-loop into the deadline branch above
-			}
-			t.Fatalf("phone receive (drain): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(rawFrame, &inner); err != nil {
-			t.Fatalf("phone decode inner frame (drain): %v", err)
-		}
-		// Skip on the INNER type only, never on a decrypted envelope: the receive
-		// CipherState opens sealed frames in arrival order, so dropping a noise_msg
-		// undecrypted desynchronises the nonce and every later open fails.
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue
-		}
-		got := decryptInnerEnvelope(t, inner, recv)
-		if got.Type != protocol.TypeAssistantDelta {
-			continue
-		}
-		var delta protocol.AssistantDeltaPayload
-		if err := json.Unmarshal(got.Payload, &delta); err != nil {
-			t.Fatalf("phone decode assistant_delta payload: %v", err)
-		}
-		if delta.ConversationID == convID && strings.Contains(delta.Text, needle) {
-			return
-		}
+	text := scenario.CompletedTurn(t, scenario.PollingReceive(t, phone, recv), convID, budget, false, source)
+	if !strings.Contains(text, needle) {
+		t.Fatal("respawn source omitted fresh echo")
 	}
 }

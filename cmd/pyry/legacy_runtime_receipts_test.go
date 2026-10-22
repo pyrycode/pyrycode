@@ -66,6 +66,7 @@ func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
 			e.HandleFor(ctx, testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
 			rawEntries := historyEntries(t, store, testConvID)
 			entries, _ := testLegacyReceipts(t, store)
+			entries = slices.DeleteFunc(entries, func(entry history.Entry) bool { return testRetiredInteractiveType(entry.Type) })
 			versions := map[string][]history.Entry{"history": entries, "phone": nil, "peer": nil, "replay": nil}
 			addEnvelope := func(name string, env protocol.Envelope) {
 				encoded, err := json.Marshal(env)
@@ -150,11 +151,12 @@ func TestLegacyRuntimeReceipts_LiveReplay(t *testing.T) {
 	tr.broadcast(ctx, sessions.SessionTransition{ConversationID: testConvID, PreviousID: "old", NewID: "new", Cause: sessions.CauseOperatorReset, OccurredAt: historyTS})
 	page, _ := testLegacyReceipts(t, store)
 	raw := historyEntries(t, store, testConvID)
+	raw = slices.DeleteFunc(raw, func(entry history.Entry) bool { return testRetiredInteractiveType(entry.Type) })
 	events, _ := e.ring.After(testConvID, 0)
 	if len(events) != len(raw) || len(bcast.pushes) != 2*len(raw) {
 		t.Fatalf("append/live/replay counts=%d/%d/%d", len(raw), len(bcast.pushes), len(events))
 	}
-	for _, original := range raw {
+	for i, original := range raw {
 		var projected history.Entry
 		for _, entry := range page {
 			if entry.ID == original.ID {
@@ -164,7 +166,7 @@ func TestLegacyRuntimeReceipts_LiveReplay(t *testing.T) {
 		if projected.ID == 0 {
 			t.Fatalf("missing projected ID %d", original.ID)
 		}
-		event := events[original.ID-1]
+		event := events[i]
 		if event.HistoryEntryID != original.ID || event.Type != projected.Type || !event.TS.Equal(projected.TS) || !bytes.Equal(event.Payload, projected.Payload) {
 			t.Fatalf("replay differs: %+v / %+v", event, projected)
 		}
@@ -203,7 +205,7 @@ func TestLegacyRuntimeReceipts_StorageFailure(t *testing.T) {
 			e.HandleFor(context.Background(), testConvID, turnevent.TextChunk{Text: "reply"}, history.SessionProvenance{Kind: "claude", SessionID: "old"})
 			e.HandleFor(context.Background(), testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, history.SessionProvenance{Kind: "claude", SessionID: "old"})
 			events, _ := e.ring.After(testConvID, 0)
-			if len(events) != 4 || len(bcast.pushes) != 4 {
+			if len(events) != 2 || len(bcast.pushes) != 2 {
 				t.Fatalf("eligible delivery suppressed %d/%d", len(events), len(bcast.pushes))
 			}
 			for _, push := range bcast.pushes {
