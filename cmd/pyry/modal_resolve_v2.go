@@ -374,8 +374,6 @@ type streamApprovalBridge struct {
 	sessionHarness func(string) (string, bool)
 	promptOwners   map[string]promptHistoryOwner
 
-	historyPublisher *promptAnswerPublisher
-
 	// toolCallInFlight answers turnBusyTracker's conversation-keyed membership
 	// question (ToolCallInFlight, #1917) — "is this tool call in flight on this
 	// conversation?" — which is the half of ApprovalParked the correlation below

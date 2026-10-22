@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -23,7 +24,6 @@ func TestPromptAnswerRelayRemainsResponsive(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			b.ctx = ctx
-			b.historyPublisher = &promptAnswerPublisher{ring: eventring.New(32)}
 			req := permbridge.Request{ToolUseID: "tool", ToolName: "Bash", Input: json.RawMessage(`{}`), SessionID: "asking-session"}
 			if decision == "answer" || decision == "refusal" {
 				req.ToolName = questionbridge.ToolName
@@ -62,8 +62,11 @@ func TestPromptAnswerRelayRemainsResponsive(t *testing.T) {
 				t.Fatal("answer blocked relay dispatch")
 			}
 			seen := map[string]bool{}
-			for !seen[protocol.TypeBanner] || !(seen[protocol.TypeModalDismissed] || seen[protocol.TypeQuestionDismissed]) {
+			for !(seen[protocol.TypeModalDismissed] || seen[protocol.TypeQuestionDismissed]) {
 				_, e := w.read()
+				if e.Type == protocol.TypeBanner {
+					t.Fatal("retired receipt received")
+				}
 				seen[e.Type] = true
 			}
 			w.open("again", false)
@@ -74,7 +77,7 @@ func TestPromptAnswerRelayRemainsResponsive(t *testing.T) {
 // Delivery is held at the real manager query boundary while later answers arrive.
 // No lock needed by answer recording may remain held across that query.
 type heldPromptConnections struct {
-	*promptReceiptBroadcaster
+	*promptAnswerBroadcaster
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
@@ -91,19 +94,33 @@ func (p *heldPromptConnections) ActiveConns(ctx context.Context) []relay.ActiveC
 }
 
 func TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer(t *testing.T) {
-	for _, cancelled := range []bool{false, true} {
-		t.Run(fmt.Sprint("cancelled=", cancelled), func(t *testing.T) {
+	for _, mode := range []string{"healthy", "cancelled", "failed", "failed-cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			cancelled, failed := strings.Contains(mode, "cancelled"), strings.HasPrefix(mode, "failed")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			b, m, _, bc := testPromptBridge(t, history.New(t.TempDir()), discardLogger())
-			b.ctx = ctx
-			b.historyPublisher = &promptAnswerPublisher{ring: eventring.New(32)}
-			ids := make([]string, 2)
-			for i := range ids {
-				_, ids[i], _ = testPromptSurface(t, b, bc, permbridge.Request{ToolUseID: fmt.Sprint(i), ToolName: "Bash", Input: json.RawMessage(`{}`)}, time.Minute)
+			root := t.TempDir()
+			if failed {
+				root += "/occupied"
+				if err := os.WriteFile(root, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			probe := &heldPromptConnections{promptReceiptBroadcaster: &promptReceiptBroadcaster{bridge: b, conns: []relay.ActiveConn{{ConnID: "phone", Interactive: true}}}, entered: make(chan struct{}), release: make(chan struct{})}
+			logger, logs := auditLogger()
+			b, m, _, bc := testPromptBridge(t, history.New(root), logger)
+			b.ctx = ctx
+			ids := make([]string, 2)
+			pending := make([]*permbridge.Pending, 2)
+			for i := range ids {
+				pending[i], ids[i], _ = testPromptSurface(t, b, bc, permbridge.Request{ToolUseID: fmt.Sprint(i), ToolName: "Bash", Input: json.RawMessage(`{}`)}, time.Minute)
+			}
+			probe := &heldPromptConnections{promptAnswerBroadcaster: &promptAnswerBroadcaster{bridge: b, conns: []relay.ActiveConn{{ConnID: "phone", Interactive: true}}}, entered: make(chan struct{}), release: make(chan struct{})}
 			b.bcast = probe
+			// Hold an unrelated connection query while answer recording proceeds.
+			queryDone := make(chan struct{})
+			go func() { defer close(queryDone); probe.ActiveConns(ctx) }()
+			t.Cleanup(func() { cancel(); <-queryDone })
+			<-probe.entered
 			device := eligibleDevice(t)
 			resolved := make(chan bool, 1)
 			go func() { _, ok := m.ResolveAnswer(ids[0], "allow_once", "", device); resolved <- ok }()
@@ -120,6 +137,9 @@ func TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("delivery blocked first answer")
 			}
+			if cancelled {
+				cancel()
+			}
 			go func() { _, ok := m.ResolveAnswer(ids[1], "reject_once", "", device); resolved <- ok }()
 			select {
 			case ok := <-resolved:
@@ -129,30 +149,26 @@ func TestPromptAnswerBlockedDeliveryDoesNotBlockNextAnswer(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("delivery blocked next answer")
 			}
-			events, _ := b.historyPublisher.ring.After(testConvID, 0)
-			if len(events) != 2 || len(historyEntries(t, b.hist, testConvID)) != 2 {
-				t.Fatal("answers not retained before delivery")
+			if !failed && len(historyEntries(t, b.hist, testConvID)) != 2 {
+				t.Fatal("answers not retained during stalled discovery")
+			}
+			if failed && strings.Count(logs.String(), "prompt_answer.history_append_err") != 2 {
+				t.Fatal("failed answers did not attempt each append once")
+			}
+			if pending[0].Await().Behavior != "allow" || pending[1].Await().Behavior != "deny" {
+				t.Fatal("winning child verdict changed")
 			}
 			if cancelled {
 				cancel()
 			} else {
 				close(probe.release)
 			}
-			waitPromptReceipts(t, b.historyPublisher)
+			<-queryDone
 			probe.mu.Lock()
 			defer probe.mu.Unlock()
-			if cancelled {
-				if len(probe.envs) != 0 {
-					t.Fatal("cancelled delivery sent receipt")
-				}
-				return
-			}
-			if len(probe.envs) != 2 {
-				t.Fatal("receipts missing")
-			}
-			for i, e := range probe.envs {
-				if e.HistoryEntryID == nil || *e.HistoryEntryID != uint64(i+1) || e.EventID == nil || *e.EventID != events[i].ID {
-					t.Fatal("receipt order or identity changed")
+			for _, env := range probe.envs {
+				if env.Type == protocol.TypeBanner {
+					t.Fatal("retired receipt delivered")
 				}
 			}
 		})

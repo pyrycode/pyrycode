@@ -144,9 +144,8 @@ func TestThreadShadowLegacy(t *testing.T) {
 		sends.accepted(testConvID, msg)
 		operatorMessageHistory(h, nil, discardLogger(), sends)(testConvID, msg)
 		posts := newChannelPostEmitterV2(mgr, ctx, discardLogger())
-		posts.ring = e.ring
 		d := testDelivery(t, t.TempDir(), h, nil)
-		d.announce, d.complete = posts.announce, posts.complete
+		d.complete = posts.complete
 		testAccept(t, d, id, "post")
 		d.drain()
 		if err := mgr.FlushPushes(ctx); err != nil {

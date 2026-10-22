@@ -80,3 +80,7 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-22
+
+## Revisions
+
+- 2026-10-22: Caller compilation exposed the final `runSupervisor` assignment to `channelDelivery.announce` and the `newTestPosterCarrying` test installation. Remove that production assignment while preserving the relay return signature; replace the poster's synthetic fan-out observer with durable chunk inspection. `main.go` → `runSupervisor` and `channel_post_test.go` → `newTestPosterCarrying` extend the files-read map. The interactive counter/ring still serve supported live state and remain for #3738/#3739; keep only that delivery in `interactive_live_publication.go` → `publishLiveState`, after `emit` excludes content, avoiding growth of the already large emitter file. The initial retirement regression failed on old raw/replay publication as intended. Recovery regressions also compare canonical completed post content after partial-write retry and cleanup/restart; all five actual prompt decisions retain canonical notices with asking-session provenance.

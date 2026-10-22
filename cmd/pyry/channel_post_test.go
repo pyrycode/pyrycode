@@ -93,57 +93,40 @@ func addConversation(t *testing.T, reg *conversations.Registry, name string, pro
 	return id
 }
 
-// stubAnnouncer records what the poster handed the live fan-out (#2498). It
-// returns nothing, which is the hook's contract rather than a simplification:
-// a failed announcement must never turn a recorded post into a refusal.
-type stubAnnouncer struct {
-	calls []protocol.AssistantDeltaPayload
-}
-
-func (s *stubAnnouncer) announce(p protocol.AssistantDeltaPayload) {
-	s.calls = append(s.calls, p)
-}
-
-// newTestPoster builds the poster under test over the package's existing
-// quietLogger: these tests assert on returned values and recorded calls, never
-// on log lines.
+// newTestPoster drives acceptance and durable delivery without a relay.
 func newTestPoster(t *testing.T, reg *conversations.Registry, create *stubCreate, appender *stubAppender) func(name, text string) error {
 	t.Helper()
-	return newTestPosterAnnouncing(t, reg, create, appender, &stubAnnouncer{})
+	return newTestPosterCarrying(t, reg, create, appender, nil)
 }
 
-// newTestPosterAnnouncing is newTestPoster with the fan-out hook visible, for
-// the cases whose property is what reached the wire. Split rather than threaded
-// through every call site so the existing cases keep reading as what they are —
-// assertions about the durable record.
-func newTestPosterAnnouncing(t *testing.T, reg *conversations.Registry, create *stubCreate, appender *stubAppender, announcer *stubAnnouncer) func(name, text string) error {
+func newTestPosterCarrying(t *testing.T, reg *conversations.Registry, create *stubCreate, appender *stubAppender, carry *stubCarry) func(name, text string) error {
 	t.Helper()
-	return newTestPosterCarrying(t, reg, create, appender, announcer, nil)
-}
-
-// newTestPosterCarrying is newTestPosterAnnouncing with #2499's carry hook visible,
-// split from it for the reason that one was split from newTestPoster: the cases
-// above are assertions about the durable record and the wire, and threading a
-// fourth stub through every one of them would bury what each is actually about.
-// A nil carry is the poster's supported posture, not a test shortcut.
-func newTestPosterCarrying(t *testing.T, reg *conversations.Registry, create *stubCreate, appender *stubAppender, announcer *stubAnnouncer, carry *stubCarry) func(name, text string) error {
-	t.Helper()
-	var announce func(protocol.AssistantDeltaPayload)
-	if announcer != nil {
-		announce = announcer.announce
-	}
 	var record func(conversations.ConversationID, string)
 	if carry != nil {
 		record = carry.record
 	}
 	d := testDelivery(t, t.TempDir(), testPosterHistory{appender}, record)
-	d.announce = announce
-	// Old refusal scenarios now exercise the atomic acceptance boundary.
 	if appender.returnErr != nil {
 		d.save = func([]channelDeliveryPost) error { return appender.returnErr }
 	}
 	post := channelPoster(reg, create.create, "/home/op/default", d.accept, quietLogger())
 	return func(name, text string) error { err := post(name, text); d.drain(); return err }
+}
+
+func testRecordedPostDeltas(t *testing.T, appender *stubAppender) []protocol.AssistantDeltaPayload {
+	t.Helper()
+	var deltas []protocol.AssistantDeltaPayload
+	for _, call := range appender.calls {
+		if call.typ != protocol.TypeAssistantDelta {
+			continue
+		}
+		var delta protocol.AssistantDeltaPayload
+		if err := json.Unmarshal(call.payload, &delta); err != nil {
+			t.Fatal(err)
+		}
+		deltas = append(deltas, delta)
+	}
+	return deltas
 }
 
 // stubCarry captures what the poster handed #2499's carry-forward hook.
@@ -224,32 +207,20 @@ func TestChannelPoster_PostsIntoExactMatch(t *testing.T) {
 	}
 }
 
-// TestChannelPoster_AnnouncesWhatItRecorded is AC#2 as ONE assertion rather than
-// two derivations that agree today: the bytes handed to the durable log and the
-// payload handed to the live fan-out must be the same value, so a client drawing
-// the push and a client paging history draw the same message.
-//
-// It also pins the ORDER. The append runs first and the announcement second,
-// because all chunks are recorded before announcement — so a
-// first live frame always has a whole post in history. A refused acceptance
-// has pushed nothing.
-func TestChannelPoster_AnnouncesWhatItRecorded(t *testing.T) {
+// Completion follows all recorded content with the same conversation and turn.
+func TestChannelPoster_RecordsCompletionAfterContent(t *testing.T) {
 	reg, _ := newChannelTestRegistry(t, t.TempDir())
 	want := addConversation(t, reg, "questions", true, false)
 
 	create := &stubCreate{}
 	appender := &stubAppender{}
-	announcer := &stubAnnouncer{}
-	post := newTestPosterAnnouncing(t, reg, create, appender, announcer)
+	post := newTestPoster(t, reg, create, appender)
 
 	const text = "the relay is back up"
 	if err := post("questions", text); err != nil {
 		t.Fatalf("post: %v", err)
 	}
 
-	if len(announcer.calls) != 1 {
-		t.Fatalf("announce calls = %d, want 1 — one frame per single-chunk post", len(announcer.calls))
-	}
 	if len(appender.calls) != 2 {
 		t.Fatalf("append calls = %d, want 2", len(appender.calls))
 	}
@@ -258,47 +229,37 @@ func TestChannelPoster_AnnouncesWhatItRecorded(t *testing.T) {
 	if err := json.Unmarshal(appender.calls[0].payload, &recorded); err != nil {
 		t.Fatalf("decode appended payload: %v", err)
 	}
-	if announcer.calls[0] != recorded {
-		t.Errorf("announced %+v but recorded %+v; the pushed frame and the durable record are one shape",
-			announcer.calls[0], recorded)
-	}
+	testPostCompletion(t, appender.calls[1].payload, string(want), recorded.TurnID)
 	if recorded.ConversationID != string(want) {
 		t.Errorf("recorded conversation_id = %q, want the matched row %q", recorded.ConversationID, want)
 	}
 }
 
-// TestChannelPoster_AcceptanceFailureAnnouncesNothing is the other half of that
-// order: a post that could not be recorded must not appear on any client's
-// screen. A frame drawn for a message the log does not hold would vanish on the
-// next connect, which is worse than never having been drawn.
-func TestChannelPoster_AcceptanceFailureAnnouncesNothing(t *testing.T) {
+// Failed acceptance writes no content.
+func TestChannelPoster_AcceptanceFailureRecordsNothing(t *testing.T) {
 	reg, _ := newChannelTestRegistry(t, t.TempDir())
 	addConversation(t, reg, "questions", true, false)
 
 	create := &stubCreate{}
 	appender := &stubAppender{returnErr: errors.New("history: open segment: disk on fire")}
-	announcer := &stubAnnouncer{}
-	post := newTestPosterAnnouncing(t, reg, create, appender, announcer)
+	post := newTestPoster(t, reg, create, appender)
 
 	if err := post("questions", "hello"); err == nil {
 		t.Fatal("post = nil, want a failed acceptance to fail the post")
 	}
-	if len(announcer.calls) != 0 {
-		t.Errorf("announced %d frame(s) for a message that was never recorded", len(announcer.calls))
+	if len(appender.calls) != 0 {
+		t.Fatalf("failed acceptance wrote %d records", len(appender.calls))
 	}
 }
 
-// TestChannelPoster_NilAnnouncerStillRecords covers the daemon with no relay leg:
-// startRelay returns before any manager exists when no URL is configured, so the
-// hook is nil and there is nobody to tell. The post is still recorded and still
-// answers success — AC#4's no-client-attached arm.
-func TestChannelPoster_NilAnnouncerStillRecords(t *testing.T) {
+// Delivery persists without a relay or connected clients.
+func TestChannelPoster_PersistsWithoutRelay(t *testing.T) {
 	reg, _ := newChannelTestRegistry(t, t.TempDir())
 	addConversation(t, reg, "questions", true, false)
 
 	create := &stubCreate{}
 	appender := &stubAppender{}
-	post := newTestPosterAnnouncing(t, reg, create, appender, nil)
+	post := newTestPoster(t, reg, create, appender)
 
 	if err := post("questions", "hello"); err != nil {
 		t.Fatalf("post with no relay leg: %v", err)
@@ -319,8 +280,7 @@ func TestChannelPoster_EachPostMintsItsOwnTurn(t *testing.T) {
 
 	create := &stubCreate{}
 	appender := &stubAppender{}
-	announcer := &stubAnnouncer{}
-	post := newTestPosterAnnouncing(t, reg, create, appender, announcer)
+	post := newTestPoster(t, reg, create, appender)
 
 	if err := post("questions", "first"); err != nil {
 		t.Fatalf("post: %v", err)
@@ -329,12 +289,12 @@ func TestChannelPoster_EachPostMintsItsOwnTurn(t *testing.T) {
 		t.Fatalf("post: %v", err)
 	}
 
-	if len(announcer.calls) != 2 {
-		t.Fatalf("announce calls = %d, want 2", len(announcer.calls))
+	if len(testRecordedPostDeltas(t, appender)) != 2 {
+		t.Fatalf("recorded delta count = %d, want 2", len(testRecordedPostDeltas(t, appender)))
 	}
-	if announcer.calls[0].TurnID == announcer.calls[1].TurnID {
+	if testRecordedPostDeltas(t, appender)[0].TurnID == testRecordedPostDeltas(t, appender)[1].TurnID {
 		t.Errorf("both posts carry turn_id %q; a client coalesces on it and would draw one message",
-			announcer.calls[0].TurnID)
+			testRecordedPostDeltas(t, appender)[0].TurnID)
 	}
 }
 
@@ -485,8 +445,7 @@ func TestChannelPoster_ChunksAnOversizedPost(t *testing.T) {
 
 	create := &stubCreate{}
 	appender := &stubAppender{}
-	announcer := &stubAnnouncer{}
-	post := newTestPosterAnnouncing(t, reg, create, appender, announcer)
+	post := newTestPoster(t, reg, create, appender)
 
 	text := strings.Repeat("s", maxDeltaTextBytes*2+7)
 	if err := post("questions", text); err != nil {
@@ -497,11 +456,11 @@ func TestChannelPoster_ChunksAnOversizedPost(t *testing.T) {
 	if len(appender.calls) != wantChunks+1 {
 		t.Fatalf("append calls = %d, want %d", len(appender.calls), wantChunks+1)
 	}
-	if len(announcer.calls) != wantChunks {
-		t.Fatalf("announce calls = %d, want %d — every recorded chunk is pushed", len(announcer.calls), wantChunks)
+	if len(testRecordedPostDeltas(t, appender)) != wantChunks {
+		t.Fatalf("recorded delta count = %d, want %d — every chunk is recorded", len(testRecordedPostDeltas(t, appender)), wantChunks)
 	}
 
-	testPostCompletion(t, appender.calls[wantChunks].payload, announcer.calls[0].ConversationID, announcer.calls[0].TurnID)
+	testPostCompletion(t, appender.calls[wantChunks].payload, testRecordedPostDeltas(t, appender)[0].ConversationID, testRecordedPostDeltas(t, appender)[0].TurnID)
 	var rejoined strings.Builder
 	for i, call := range appender.calls[:wantChunks] {
 		if call.typ != protocol.TypeAssistantDelta {
@@ -514,15 +473,12 @@ func TestChannelPoster_ChunksAnOversizedPost(t *testing.T) {
 		if delta.Seq != i {
 			t.Errorf("chunk %d seq = %d, want %d", i, delta.Seq, i)
 		}
-		if delta.TurnID != announcer.calls[0].TurnID {
+		if delta.TurnID != testRecordedPostDeltas(t, appender)[0].TurnID {
 			t.Errorf("chunk %d turn_id = %q, want the post's single turn %q — chunks that do not "+
-				"share a turn draw as separate messages", i, delta.TurnID, announcer.calls[0].TurnID)
+				"share a turn draw as separate messages", i, delta.TurnID, testRecordedPostDeltas(t, appender)[0].TurnID)
 		}
 		if len(delta.Text) > maxDeltaTextBytes {
 			t.Errorf("chunk %d carries %d bytes, over the %d-byte bound", i, len(delta.Text), maxDeltaTextBytes)
-		}
-		if announcer.calls[i] != delta {
-			t.Errorf("chunk %d announced %+v but recorded %+v", i, announcer.calls[i], delta)
 		}
 		rejoined.WriteString(delta.Text)
 	}
@@ -564,8 +520,7 @@ func TestChannelPoster_MaximumPostFitsEnvelopeCap(t *testing.T) {
 
 			create := &stubCreate{}
 			appender := &stubAppender{}
-			announcer := &stubAnnouncer{}
-			post := newTestPosterAnnouncing(t, reg, create, appender, announcer)
+			post := newTestPoster(t, reg, create, appender)
 
 			// The largest message handleChannelPost admits, truncated to a whole
 			// number of fill runes so the input itself is valid UTF-8.
@@ -573,12 +528,12 @@ func TestChannelPoster_MaximumPostFitsEnvelopeCap(t *testing.T) {
 			if err := post("questions", text); err != nil {
 				t.Fatalf("post: %v", err)
 			}
-			if len(announcer.calls) == 0 {
-				t.Fatal("a maximum-size post announced nothing")
+			if len(testRecordedPostDeltas(t, appender)) == 0 {
+				t.Fatal("a maximum-size post recorded nothing")
 			}
 
 			var rejoined strings.Builder
-			for i, p := range announcer.calls {
+			for i, p := range testRecordedPostDeltas(t, appender) {
 				payload, err := json.Marshal(p)
 				if err != nil {
 					t.Fatalf("marshal chunk %d: %v", i, err)
@@ -748,7 +703,7 @@ func TestChannelPoster_CarriesTheWholePostForward(t *testing.T) {
 
 	carry := &stubCarry{}
 	text := strings.Repeat("q", maxDeltaTextBytes+100) // forces a multi-chunk post
-	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{}, &stubAnnouncer{}, carry)
+	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{}, carry)
 
 	if err := post("questions", text); err != nil {
 		t.Fatalf("post: %v", err)
@@ -773,7 +728,7 @@ func TestChannelPoster_RefusedPostCarriesNothing(t *testing.T) {
 	addConversation(t, reg, "questions", true, false)
 
 	carry := &stubCarry{}
-	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{returnErr: errors.New("disk full")}, &stubAnnouncer{}, carry)
+	post := newTestPosterCarrying(t, reg, &stubCreate{}, &stubAppender{returnErr: errors.New("disk full")}, carry)
 
 	if err := post("questions", "a question"); err == nil {
 		t.Fatal("post reported success though the durable acceptance failed")

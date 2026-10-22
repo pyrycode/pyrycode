@@ -43,7 +43,7 @@ func assertLogMatchesRing(t *testing.T, entries []history.Entry, evs []eventring
 		t.Fatal("fixture recorded no source facts")
 	}
 	entries = slices.DeleteFunc(slices.Clone(entries), func(e history.Entry) bool {
-		return testRetiredInteractiveType(e.Type) || testRetiredAgentType(e.Type) || testRetiredSessionContentType(e.Type)
+		return testRetiredInteractiveType(e.Type) || testRetiredAgentType(e.Type) || testRetiredSessionContentType(e.Type) || e.Type == protocol.TypeBanner
 	})
 	if len(entries) != len(evs) {
 		t.Fatalf("log holds %d entries, ring holds %d events", len(entries), len(evs))

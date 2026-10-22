@@ -450,7 +450,7 @@ func TestQueuedSendHistoryLossRetryAndUnbound(t *testing.T) {
 		if legacyHistoryType(e.Type) {
 			t.Fatalf("raw legacy eligible: %s", e.Type)
 		}
-		if _, ok := legacyRuntimeReceipt(testConvID, e.Type, e.Payload, &e.ID, e.TS); ok {
+		if legacyHistoryType(e.Type) {
 			t.Fatalf("queued fact projected legacy receipt: %s", e.Type)
 		}
 	}

@@ -31,11 +31,8 @@ func TestQueuedReceiptsRetired(t *testing.T) {
 		if !validQueuedSendFact(testConvID, entry.Type, entry.Payload) {
 			t.Fatalf("invalid retained source: %s", entry.Type)
 		}
-		if legacyRuntimeFact(entry.Type) {
+		if legacyHistoryType(entry.Type) {
 			t.Errorf("queued source remains legacy eligible: %s", entry.Type)
-		}
-		if raw, ok := legacyRuntimeReceipt(testConvID, entry.Type, entry.Payload, &entry.ID, entry.TS); ok || len(raw) != 0 {
-			t.Errorf("queued source projects a receipt: %s", entry.Type)
 		}
 	}
 	if len(seen) != 5 {

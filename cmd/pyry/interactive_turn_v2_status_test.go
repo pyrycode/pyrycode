@@ -954,23 +954,13 @@ const (
 	bannerLevelFixture = "LEVEL-SENTINEL"
 )
 
-// TestInteractiveTurnEmitterV2_BannerReachesClientWithNoLifecycleMutation is #2256's
-// AC 2 at the production path, and the ARRIVAL half is what makes it load-bearing.
-// Both switches this ticket touches default silently, so a missing Handle arm drops the
-// frame with nothing red anywhere — no compile error, no failing sibling. Asserting the
-// envelope reaches a connected client is the only assertion that dies when the arm is
-// gone; asserting the arm compiles would not.
-//
-// The values are read from the DECODED PUSH rather than from a log buffer, following
-// the session-facts test above: the eventKind test below forbids either string from
-// reaching a log at all, so an assertion that found them in log text would be passing
-// on a leak.
-func TestInteractiveTurnEmitterV2_BannerReachesClientWithNoLifecycleMutation(t *testing.T) {
+// Standalone banners retain their source values without publishing or changing lifecycle.
+func TestInteractiveTurnEmitterV2_BannerRecordsWithNoLifecycleMutation(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.Banner{
 		Level:     bannerLevelFixture,
@@ -979,13 +969,12 @@ func TestInteractiveTurnEmitterV2_BannerReachesClientWithNoLifecycleMutation(t *
 		StopsTurn: true,
 	})
 
-	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeBanner}) {
-		t.Fatalf("banner envelopes:\n got %v\nwant %v — a turn_state here would be a "+
-			"lifecycle mutation, and an empty sequence means the Handle arm is gone",
-			got, []string{protocol.TypeBanner})
+	facts := testEmitterFacts(t, e)
+	if len(bcast.pushes) != 0 || len(facts) != 1 || facts[0].env.Type != protocol.TypeBanner {
+		t.Fatal("banner source missing or raw content published")
 	}
 	var pl protocol.BannerPayload
-	if err := json.Unmarshal(pushesFor(bcast.pushes, "a")[0].env.Payload, &pl); err != nil {
+	if err := json.Unmarshal(facts[0].env.Payload, &pl); err != nil {
 		t.Fatalf("decode banner payload: %v", err)
 	}
 	if pl.ConversationID != testConvID {
