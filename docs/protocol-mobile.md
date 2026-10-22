@@ -1058,6 +1058,13 @@ This subsection covers reconnect **timing** only; the **application-layer** reco
 
 ## Application message types
 
+Background-agent lifecycle and roster values remain source history for canonical
+thread items and explicit catch-up (#3735). No app receives their raw content
+frames, agent receipt banners or connect-time roster snapshots, including apps
+without `thread`. Task progress and stop controls remain supported; stop
+acceptance alone does not establish completion. Nil/failed history cannot restore
+these publications.
+
 The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
 `tool_denied` and `turn_end` as source history for canonical thread updates and
 explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
@@ -1120,9 +1127,9 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`compaction_boundary`** | binary → phone | no | **New in v2** (interactive, capability-gated). A compaction finished: what triggered it and how far the context shrank (#2237). A **separate frame** from `compacting`, not a wider one — `claude` states these values on a line that arrives *after* that frame's falling edge has shipped. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`banner`** | binary → phone | no | **New in v2** (interactive, capability-gated). Operator-facing text `claude` printed **about** the session rather than as part of an answer — a hook's block reason, a local command's output, a loop notification (#2256). The one typed place such text arrives; before it, the daemon dropped it. Conversation-scoped, so there is no `turn_id`. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`unrecognized_message`** | binary → phone | no | **New in v2** (interactive, capability-gated). The stream parser met claude output it has no mapping for — a gap in our mapping, not a claude sub-state. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`background_task_started`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude started work that outlives the turn that spawned it (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`background_task_updated`** | binary → phone | no | **New in v2** (interactive, capability-gated). A background task claude already started changed (#1394), or **ended** (#2245). See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`background_task_started`** | source history only | no | Retained source schema; raw publication retired for every app (#3735). Canonical items represent work that can outlive its main turn. See [source schema](#background_task_started). |
+| **`background_task_updated`** | source history only | no | Retained source schema for task changes and reported outcomes; raw publication retired for every app (#3735). See [source schema](#background_task_updated). |
+| **`background_task_roster`** | source history only | no | Retained source schema for reported task snapshots; no raw live/replay frames or connect-time snapshots for any app (#3735). See [source schema](#background_task_roster). |
 | **`background_task_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). A running background task is still working, and what it is doing right now (#2246). Rate-bounded per task; absence proves nothing. Not to be confused with claude's separate `tool_progress`. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted since #1410. See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -1189,6 +1196,13 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 Payload shapes inherited from v1 are preserved in git history (the v1 doc has them); additive fields and declared contracts are documented here. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
 ### Daemon thread updates (v2, supplied delivery contract)
+
+Background-agent lifecycle and roster values remain source history for canonical
+thread items and explicit catch-up (#3735). No app receives their raw content
+frames, agent receipt banners or connect-time roster snapshots, including apps
+without `thread`. Task progress and stop controls remain supported; stop
+acceptance alone does not establish completion. Nil/failed history cannot restore
+these publications.
 
 The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
 `tool_denied` and `turn_end` as source history for canonical thread updates and
@@ -3380,7 +3394,7 @@ Defined capability strings:
 | `question` | The client understands the clarifying-question batch types — it can render a `question_shown` batch, answer it with `question_answer` / `question_refused`, and handle `question_dismissed`. **Detection only: this string grants no access.** The batch fan-out and the connect-time question reconcile gate on `interactive` alone, so a client advertising `question` by itself negotiates as non-interactive and receives none of them (#2020). |
 | `model_list` | The daemon can answer a model menu for **any** conversation, including one whose bound session has spawned no child yet — the `request_model_list` verb (#2125) plus the daemon-wide retained-vocabulary fallback it answers from (#2124). One string covers the pair because neither half is separately useful: the fallback with no verb gives a client no way to ask, and the verb with no fallback has nothing to answer for a childless conversation. **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `model_list` by itself negotiates as non-interactive, and a client advertising `interactive` without it is answered exactly as before (#2172). |
 | `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
-| `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, background-task roster, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
+| `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
 | `claude_usage` | The daemon answers [`request_claude_usage`](#claude-usage-allowance-reading) with its latest Claude usage allowance reading (#3575). **Detection only: this string grants no access and gates nothing** — `request_claude_usage` is answered through authenticated paired-client map dispatch whether or not a client advertised it, the same posture `request_claude_account` already has. A client advertises it only to know the daemon understands the verb before it asks. |
 | `thread_expansion` | **Production-installed (#3523/#3550).** Bounded body and direct-child reads; negotiated only with both providers, thread readiness and client `thread_expansion`, `thread` and `interactive`. See [Bounded expansion reads](#bounded-expansion-reads). |
@@ -4313,9 +4327,9 @@ So the parser has **two tiers**, and the split is the whole design:
   parser maps **five** `system` subtypes internally (`task_started`,
   `task_updated`, `background_tasks_changed`, `thinking_tokens`, `init`) to
   daemon-owned `turnevent` types — see
-  [streamsup-package.md](knowledge/features/streamsup-package.md). **All five
-  reach this wire** under their own daemon-owned names, and all five are
-  documented below: `background_task_started`, `background_task_updated` and
+  [streamsup-package.md](knowledge/features/streamsup-package.md). The three
+  task values remain source history without raw app publication (#3735); the other readings retain their own delivery contracts. These mapped
+  types are documented below: `background_task_started`, `background_task_updated` and
   `background_task_roster` (#1394), `thinking_tokens` as
   `thinking_progress` (#1386), and `init` as
   [`model_announced`](#model_announced) — the last of the five to get there, its
@@ -4371,6 +4385,8 @@ re-deciding.
 
 #### `background_task_started`
 
+Retained source schema; raw app publication is retired (#3735).
+
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose turn spawned the task. |
@@ -4380,120 +4396,60 @@ re-deciding.
 | `task_type` | string | claude's kind for the task (`local_bash` is the only observed value). An open string, not a closed set — one observation does not earn one. |
 | `truncated_fields` | array of string \| null | Names of the fields the daemon cut to fit their caps, using the field names in this table: `task_id`, `tool_call_id`, `description`, `task_type`. `null` when nothing was cut. |
 
-Like every frame in this section it is **binary → phone only**, reaches only a
-phone whose `interactive` capability was echoed in `hello_ack`, and carries an
-envelope-level `event_id` for replay.
+The emitter still attempts the original history append with no connected clients.
+The fold joins task/call identities within the conversation, producing session
+and durable child lifetime; it retains parent attribution and a stable canonical
+item. Work can outlive the main turn. This value carries no `turn_id` and cannot
+open/close the main turn or change its phase. A linked tool result records launch,
+not the background task's terminal outcome, even when the link arrives later.
 
-`background_task_started` (#1394) announces work that **outlives the turn that
-spawned it**. That is the whole reason the frame exists: a turn can report
-`turn_end` with `stop_reason: end_turn`, and `turn_state` can go `idle`, while a
-command claude started is provably still running. Before this frame nothing
-reaching a phone separated that from a genuine finish.
-
-It carries **no `turn_id`**, and it **opens and closes no turn** — a background
-task's lifecycle is orthogonal to its turn's, so attributing it to one would be a
-claim the daemon cannot honestly make. A client should render it as its own
-thread of activity, not as part of the turn it appeared in.
-
-Because `tool_call_id` is the same identifier `tool_use` and `tool_result` carry,
-a client joins all three with no vocabulary lookup: the `tool_use` that launched
-the command, its `tool_result`, and the background task it left running.
-
-`truncated_fields` is load-bearing, not decoration. A client that ignores it
-presents claude's cut text as complete. Every string here was bounded by the
-daemon **at construction**, so an oversized value never reaches this wire; the
-report is how a client knows which of them lost characters.
-
-**SECURITY.** `description` is, for the `local_bash` task type, the literal
-command line claude ran. It is safe to **render as inert text** and never to
-execute, re-shell, or feed to an HTML sink, an attribute, or a URL. The daemon
-bounds it but does not sanitize it — it stays untrusted, model-influenced text
-all the way to the client.
+All strings are bounded at construction. `truncated_fields` records cap cuts;
+a missing/truncated task identity cannot identify work, and a missing/truncated
+call identity cannot establish a link. `description` can contain a literal
+command line: render it as inert text, never execute it or feed it to an HTML,
+attribute or URL sink.
 
 #### `background_task_updated`
 
-| Field | Type | Meaning | Sent by |
+Retained source schema; raw app publication is retired (#3735).
+
+| Field | Type | Meaning | Source report |
 |---|---|---|---|
 | `conversation_id` | string | Conversation whose turn spawned the task. | both |
 | `task_id` | string | The join key back to the `background_task_started` that opened the task. | both |
 | `patch` | string | What **changed** about the task: claude's patch object carried whole and unparsed, as a **string**. One key has been observed (`is_backgrounded`). Empty when claude sent none. | mid-life only |
-| `status` | string | The **terminal state** claude reported: the task ended. One value has been observed (`completed`). Empty on a mid-life frame. | terminal only |
-| `summary` | string | claude's account of what the task did. Free text; in the one captured frame it is the task's own command line. Empty on a mid-life frame. | terminal only |
+| `status` | string | The **terminal state** claude reported: the task ended. One value has been observed (`completed`). Empty on a mid-life report. | terminal only |
+| `summary` | string | claude's account of what the task did. Free text; in the one captured frame it is the task's own command line. Empty on a mid-life report. | terminal only |
 | `truncated_fields` | array of string \| null | Names of the fields the daemon cut: `task_id`, `patch`, `status`, `summary`. `null` when nothing was cut. | both |
 
-Like its sibling it is **binary → phone only**, `interactive`-gated, and carries
-an envelope-level `event_id`.
+Claude's `system/task_updated` fills `patch`; `system/task_notification` fills
+`status` and `summary`. Nothing fills both sets, and no patch is synthesized.
+A nonempty status is a reported task outcome with an open string vocabulary;
+status-empty updates, summary/patch-only reports, progress and main-turn end
+establish no terminal outcome. Stop-control acceptance alone establishes none.
+The daemon records the report rather than verifying process exit.
 
-`background_task_updated` (#1394) is the peer of `background_task_started`: that
-frame opens the task, this one reports what happened to it afterwards. Join the
-two on `task_id`. Like its sibling it carries no `turn_id` and opens and closes
-no turn.
-
-**Two of claude's lines produce this one frame, and they fill disjoint fields**
-(#2245). A **mid-life** frame comes from claude's `system/task_updated` line and
-fills `patch`; a **terminal** frame comes from `system/task_notification` and
-fills `status` and `summary`. Nothing ever fills both sets.
-
-**A non-empty `status` is what says the task ended.** That is the signal for
-closing a task row a `background_task_started` opened, and before #2245 no frame
-in this family carried it. There is deliberately no field naming which line
-produced the frame: that would be content the daemon invented, on a frame whose
-`patch` is contractually claude's own bytes and nothing else. A client that wants
-one condition rather than two should test `status != ""`.
-
-**`status` is claude's report, not the daemon's detection.** The daemon does not
-verify that a task reporting a finish has stopped running — it carries the claim
-claude made. It is a **plain string, not an enumeration**: `completed` is the only
-value ever captured, and the `failed` and `stopped` states the SDK documents have
-never been observed, so a client must handle a value it has not seen before rather
-than switching exhaustively.
-
-**`output_file` is not on this frame.** claude's `task_notification` line carries
-it and it is documented as a path on the operator's host. The daemon does not
-decode it anywhere, so no value for it exists to be sent — a stronger guarantee
-than omitting it at the wire.
-
-`patch` is carried **whole and unparsed** — the daemon enumerates no keys inside
-it, because a mapping that listed the keys it knew would silently discard every
-key claude ships next. A client should treat it the same way: read the keys it
-understands, and pass the rest through or ignore it.
-
-**SECURITY.** `patch` is a **string, not nested JSON, and a client MUST NOT
-assume it parses.** The daemon truncates it at construction to fit a cap, and a
-truncated object is no longer valid JSON — typing it as raw JSON on this wire
-would be a lie that broke decoding. Feed it to a JSON parser only behind an error
-branch that falls back to rendering it as text.
-
-The render-never-execute rule is stated here rather than delegated to the sibling
-section: a patch's structured shape makes it the more tempting thing to feed
-somewhere that runs it, and a patch key may carry command text exactly as
-`description` does. Render it as inert text; never execute, re-shell, or feed it
-to an HTML sink, an attribute, or a URL.
-
-**SECURITY.** The same rule covers `summary` and `status`, and for `summary` it is
-worth restating rather than inheriting. It is model-authored free text with no
-length bound of its own, it is the **second** field in this family that can carry
-a literal command line (`background_task_started.description` is the first, and in
-the one captured terminal frame `summary` **is** the task's command), and unlike
-`patch` — which you are told to treat as an opaque blob — it is prose a client
-will actually render, so it reaches a template by the normal path rather than by a
-mistake. Render it as inert text; never execute, re-shell, or feed it to an HTML
-sink, an attribute, or a URL. Both fields are cut to the daemon's caps at
-construction and any cut is named in `truncated_fields`.
-
-One upstream limitation worth knowing: the daemon also scrubs invalid UTF-8 from
-`patch` by **deleting** the offending bytes, and `truncated_fields` reports the
-cap cut **only**. So `patch` can differ from claude's bytes without appearing in
-`truncated_fields`. It is a display blob whose JSON validity was never guaranteed
-anyway, so a client cannot act differently either way.
+`patch` remains an opaque string, whole and unparsed before bounds are applied.
+A cap can leave invalid JSON; any parser must handle failure. Invalid UTF-8 bytes
+are deleted independently of cap cuts, so `truncated_fields` reports only the
+latter. `output_file` is not decoded or retained in this schema. Treat patch,
+status and summary as inert, untrusted display data; summary can contain a
+literal command line. All cap cuts use the named `truncated_fields` entries.
 
 #### `background_task_roster`
+
+Background-agent lifecycle and roster values remain source history for canonical
+thread items and explicit catch-up. No app receives their raw content
+frames, agent receipt banners or connect-time roster snapshots, including apps
+without `thread`. Task progress and stop controls remain supported; stop
+acceptance alone does not establish completion. Nil/failed history cannot restore
+these publications.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation the roster belongs to. |
 | `tasks` | array of object | The tasks claude is tracking at this moment, in claude's own order. **Always present, never `null`** — see below. |
-| `dropped_tasks` | int | How many entries claude sent beyond the daemon's entry cap that this frame does **not** carry. `0` when nothing was dropped. |
+| `dropped_tasks` | int | How many entries claude sent beyond the daemon's entry cap and omitted from this value. `0` when nothing was dropped. |
 
 Each element of `tasks`:
 
@@ -4502,152 +4458,42 @@ Each element of `tasks`:
 | `task_id` | string | The join key back to the `background_task_started` that opened the task. |
 | `tool_call_id` | string | The launching tool call, joined from a retained `background_task_started` for the same `task_id` in this session and child lifetime. **Always present**, including `""` when no retained match exists — see below. |
 | `task_type` | string | claude's kind for the task (`local_bash` is the only observed value). |
-| `description` | string | The task's label, under a **tighter** cap than `background_task_started.description` — here it is one label in a list whose length claude chooses; a client that has the matching start can use its fuller description. |
+| `description` | string | The task's label, under a **tighter** cap than `background_task_started.description` — here it is one label in a list whose length claude chooses; the fold can retain the matching start's fuller description. |
 | `truncated_fields` | array of string \| null | Names of **this row's** cut fields: `task_id`, `task_type`, `description`, `tool_call_id`. The joined id carries its start's cut marker, added once after existing row markers. `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. |
 
-Example payload with a retained match and an unmatched row:
+The value records a snapshot in Claude's order, not a delta. `tasks` is always an
+array, including `[]`; no report is different from a reported empty roster.
+`dropped_tasks` counts omitted rows, while each row's `truncated_fields` records
+its own cut fields. An incomplete roster cannot prove a task disappeared.
 
-```json
-{
-  "conversation_id": "c1",
-  "tasks": [
-    {
-      "task_id": "task_01ABC",
-      "tool_call_id": "tool_01START",
-      "task_type": "local_bash",
-      "description": "grep -rn 'a<b&c' .",
-      "truncated_fields": ["description", "tool_call_id"]
-    },
-    {
-      "task_id": "task_02DEF",
-      "tool_call_id": "",
-      "task_type": "local_bash",
-      "description": "sleep 300",
-      "truncated_fields": null
-    }
-  ],
-  "dropped_tasks": 3
-}
-```
+Only a later **fresh complete** roster omitting previously linked work in the
+same conversation, captured source and durable lifetime, with an observed
+Agent/Task call, can save `background_task_gone`. Complete means `dropped_tasks == 0` and every task ID
+nonempty and untruncated; an empty reported roster qualifies. Gone means unknown
+outcome, not success or a reported stopped status. Retained reads, pruning and
+child-reset housekeeping establish no ending. Session closure instead saves
+`agent_ended_with_session` with the actual boundary cause. These facts feed the
+canonical fold without compatibility receipt publication. See
+[agent evidence](knowledge/features/history-package-producers-runtime-lifecycle.md#gone-requires-a-later-complete-roster-3031).
 
-Like its two siblings it is **binary → phone only** and `interactive`-gated. A
-frame emitted on the **live turn lane** carries an envelope-level `event_id`; a
-frame produced by the **connect-time reconcile** below deliberately carries
-**none** — see that note for what follows from it.
+**Launching-tool enrichment (#2753).** The runner's retained hold joins call IDs
+from bounded starts in the same session and child lifetime. A roster can precede
+its start; unmatched rows have `tool_call_id: ""`. A later retained read can gain
+the link without a fresh roster event, but sends no app snapshot and cannot
+retroactively infer gone. Joined call-ID truncation remains on the row.
 
-`background_task_roster` (#1394) is the aggregate peer of the two scalar frames:
-they report what happened to **one** task, this reports what is alive. Like them
-it carries no `turn_id` and opens and closes no turn.
+The hold retains at most **16** joins independently of the eight-row roster cap,
+protecting current-roster matches and forgetting the oldest pending match first.
+Repeated starts update without changing insertion order; each fresh roster
+prunes absent matches, including pending starts. Child exit clears joins and
+joined truncation markers while retaining the last roster. Enrichment returns
+independent copies without duplicate markers. This state still supports bound
+session task-stop targeting and identity checks.
 
-**Reconcile on (re)connect.** On any (re)connection the daemon unicasts one
-`background_task_roster` for **every** conversation whose bound session has
-reported a roster (#2077 landed the per-session retention, #2078 the reconcile,
-#2079 the daemon-side enumeration) — this is match-and-replace by stable id (see
-[§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)), keyed on
-`conversation_id`: a re-sent roster for a known conversation **replaces** that
-view in place rather than appending, and because the frame is snapshot-shaped
-full state rather than a delta, re-applying it on every connect is safe by
-construction. **#2080** proves a client that connects *after* the session
-reported receives the retained roster, with its rows and `dropped_tasks` intact,
-driving no turn and sending nothing. Correlate by `conversation_id` and **never
-by position** in the burst: the daemon walks its conversation registry in
-insertion order, that order is not a contract, and every envelope in the burst
-carries the same non-load-bearing envelope id.
-
-**The empty case is the part you cannot infer from the neighbours, and it is the
-reverse of [`slash_command_list`](#slash_command_list)'s rule in this same
-document.** Two different silences must not be collapsed:
-
-- A conversation whose session reported a roster that is **empty** is reconciled
-  as an **explicit empty snapshot** — a frame arrives carrying `"tasks": []`.
-  Nothing filters it out, because an empty roster is a *positive* statement that
-  nothing is alive (point 2 above), and that statement is exactly what a
-  reattaching client needs. `slash_command_list` filters its zero-length list;
-  this frame deliberately does not.
-- A conversation whose session has **never reported one** is simply **absent**
-  from the reconcile. No frame arrives for it, and none ever will until claude
-  changes that session's roster.
-
-So **absence means "nothing has been reported", not "nothing is alive"**, and the
-two are not interchangeable: render no background-task state at all for a
-conversation you received no frame for, and render an explicitly empty panel for
-one you received an empty frame for. A client that treats absence as an empty
-roster claims a fact the daemon did not state; one that waits for a frame before
-showing anything renders a spinner forever on a conversation that has nothing
-alive and never will.
-
-**The reconciled frame carries no `event_id`, and that is deliberate.** It is a
-current-state snapshot rather than a turn event, so it is kept out of the #647
-replay ring entirely: it is not replayed to a reconnecting client, it does not
-advance any `last_event_id` cursor, and a client's cursor-based dedup is inert
-for it. Do not key a reconciled roster on an event id, and do not treat the
-absence of one as a malformed frame — the live-lane frame described above still
-carries one, and the two paths are told apart by exactly this.
-
-Three things a client will otherwise get wrong:
-
-**1. It is a snapshot, not a delta.** The frame's name is the daemon's, not
-claude's — claude's own line is named for the *trigger* (something changed),
-while the payload is a complete picture of one moment. Treat each frame as
-replacing your view of what is running, not as amending it.
-
-**2. `tasks` is always present and never `null`, and an empty `[]` is a positive
-statement that nothing is alive.** That is the signal #1240's symptom needs, so
-the daemon forwards an empty roster rather than filtering it — an empty array
-here is the reassurance that the turn really is finished, not an absence of
-information. A client decoding into a non-optional array type never has to branch
-on `null`.
-
-**3. `dropped_tasks` is the roster's only truncation report.** There is
-deliberately no top-level `truncated_fields` on this frame, so a client grepping
-for that name finds nothing and would silently believe a capped roster is the
-whole roster. The roster's true size is `len(tasks) + dropped_tasks`. A count is
-carried rather than a name because a name-only report loses *how many* were lost;
-per-row text cuts are a property of one row and ride that row's own
-`truncated_fields`.
-
-**The roster does not infer task completion.** A terminal
-[`background_task_updated`](#background_task_updated) carries claude's reported
-status; roster replacement and join pruning synthesize no finish or diff event.
-Diffing successive snapshots is a legitimate thing for a **client** to do on its
-own terms, but it is not a completion inference the daemon makes on your behalf.
-
-Ordering within a turn is claude's, not the daemon's: a roster can arrive before
-or after the `background_task_started` for a task it lists. Join on `task_id`
-rather than assuming an order.
-
-**Launching-tool enrichment (#2753).** Claude's roster input carries only
-`task_id`, `task_type` and `description`; the daemon joins `tool_call_id` from the
-same task's retained start, using its already-bounded id (at most 256 bytes).
-`""` means no retained match, including an unseen, pruned or overflow-forgotten
-start. A roster that arrives before its start can be forwarded with an empty id;
-a later connect-time read gains the id even without another roster line. The
-start is forwarded unchanged and triggers no extra roster frame. Live rosters
-and connect-time reads use the same enrichment.
-
-Retention is bounded independently of the eight-row roster cap: **16** joins
-per session, protecting matches for the current capped roster and allowing
-pending starts for tasks not yet listed. At capacity, the oldest pending join
-is forgotten first; current-roster matches are protected. A repeated start
-updates its match without changing its insertion position. Each next roster
-discards every match it does not list, including pending starts. An empty roster
-therefore clears all matches. Neither forgetting nor pruning reports completion.
-
-Joins last only for the current child lifetime. Child exit clears all matches
-and their joined truncation markers, while the last reported roster remains
-retained. Reusing a task id after pruning or child replacement cannot inherit its
-old link. Enrichment is derived into independent copies of the raw roster, so
-repeated reads preserve existing row markers without accumulating duplicate
-`tool_call_id` markers. This adds a field to the existing frame under
-[Compatibility](#compatibility)'s additive rule; no new frame type, request verb
-or capability is introduced.
-
-**SECURITY.** Each row's `description` carries the same literal command line as
-`background_task_started.description`, under a tighter cap. The
-render-never-execute rule is repeated here per row rather than delegated because
-a **list** of command lines is a more tempting shape to feed somewhere structured
-than a single one. Render every row as inert text; never execute, re-shell, or
-feed it to an HTML sink, an attribute, or a URL.
+Each description can contain a literal command line under a tighter cap than
+its start. Render all row text as inert data; never execute or feed it to an
+HTML, attribute or URL sink. Apps obtain task lifecycle through canonical thread
+items and explicit catch-up, with supported progress readings separately.
 
 #### `background_task_progress`
 
@@ -4666,17 +4512,14 @@ including envelope session tags and `{}` family clears before fresh state.
 | `duration_ms` | int | How long the task has been running as of the emitting line, in milliseconds. **Cumulative per task**. |
 | `truncated_fields` | array of string \| null | Names of the fields the daemon cut: `task_id`, `description`, `subagent_type`, `last_tool_name`. `null` when nothing was cut. The three integers can never appear here. |
 
-Like its three siblings it is **binary → phone only**, `interactive`-gated, and
-carries an envelope-level `event_id`.
+This supported live reading is **binary → phone only** and `interactive`-gated.
+Legacy delivery carries an envelope-level `event_id`; supplied thread readings
+follow the session-scoped contract above.
 
-`background_task_progress` (#2246) is the fourth background-task frame and the
-one that fills the gap between the other three: `background_task_started` opens a
-task, `background_task_updated` reports what happened to it, `background_task_roster`
-lists what is alive, and this one says a running task is **still working**. Without
-it a client draws a task row that sits silent for however long the task runs. Join
-it to the rest on `task_id`. Like its siblings it carries no `turn_id` and opens and
-closes no turn — a background task's lifecycle is orthogonal to the turn that
-spawned it.
+`background_task_progress` (#2246) reports a running task's current activity.
+Join the reading to canonical agent work on its scoped `task_id`. Start/update/
+roster source values are retained without raw app publication (#3735). Progress
+carries no `turn_id` and cannot open/close the main turn or change its phase.
 
 **It is a separate frame from `background_task_updated`, not a wider one**, and
 the reason matters to a client rather than only to the daemon. `description` here
@@ -4708,9 +4551,8 @@ stalled; it may only mean the counter has not advanced far enough yet. Nothing i
 the daemon detects a stalled background task, and no frame reports one. There is a
 second reason absence proves nothing, and it has no workaround at the client: the
 daemon tracks a bounded number of concurrent tasks (**8**), and a task beyond that
-receives **no progress frames at all**. Its `background_task_started` and its
-terminal `background_task_updated` are unaffected, so a silent row still opens and
-closes correctly.
+receives **no progress frames at all**. Its retained start/outcome source
+recording and canonical lifecycle remain independent of this progress limit.
 
 **3. The three counters are cumulative per task and must never be summed.** Two
 frames for one task carry growing values, so adding them double-counts. Diff them
@@ -6085,6 +5927,17 @@ A client replaces its held suggestion state keyed by **`conversation_id` and `se
 
 #### Reconnect replay & resync (consumer, #647)
 
+Background-agent lifecycle and roster values remain source history for canonical
+thread items and explicit catch-up (#3735). No app receives their raw content
+frames, agent receipt banners or connect-time roster snapshots, including apps
+without `thread`. Task progress and stop controls remain supported; stop
+acceptance alone does not establish completion. Nil/failed history cannot restore
+these publications.
+
+Thread peers bypass this legacy event-ring replay and `resync`; recover each
+open conversation through explicit canonical catch-up. The ring behavior below
+applies to peers without `thread` and does not restore retired agent content.
+
 The inbound half of the [replay cursor](#interactive-events-v2-capability-gated). On mid-turn reconnect a phone advertises the latest `event_id` it saw as `hello.last_event_id` (see [`hello`](#hello-v2-specific-note)). The daemon resolves the conversation to replay from its **own** current cursor — never from anything the phone sends — and queries the bounded per-conversation event ring (ADR 025 § Backpressure / replay):
 
 - **In-ring tail.** Events with `id > last_event_id` are replayed on that connection, in ascending order, **before** the live stream resumes. Each replay frame carries the same `event_id` it had originally (so the phone advances its cursor), and is AEAD-sealed under the freshly-handshaked session keys.
@@ -6601,6 +6454,13 @@ The client observes the stop through the existing [`turn_end`](#interactive-even
 
 ### Stop background task (v2)
 
+Background-agent lifecycle and roster values remain source history for canonical
+thread items and explicit catch-up (#3735). No app receives their raw content
+frames, agent receipt banners or connect-time roster snapshots, including apps
+without `thread`. Task progress and stop controls remain supported; stop
+acceptance alone does not establish completion. Nil/failed history cannot restore
+these publications.
+
 A paired client sends `stop_background_task` to request a stop of one named
 background task (#2791). Direction **phone → binary**, v2-only; v1 rejects the
 type. The v2 manager intercepts it before ordinary dispatch, requires negotiated
@@ -6626,7 +6486,7 @@ The payload has two string fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Required, nonempty canonical conversation id (lowercase UUIDv4). There is no cursor or bootstrap-child fallback. |
-| `task_id` | string | Required, nonempty task lookup key, using the id carried by [`background_task_started`](#background_task_started), [`background_task_updated`](#background_task_updated) and roster rows, rather than `tool_call_id`. |
+| `task_id` | string | Required, nonempty task lookup key, using the task identity retained in canonical agent evidence and its source history, rather than `tool_call_id`. |
 
 ```json
 {
@@ -6705,14 +6565,18 @@ control primitive's exception is cancellation during a blocked stdin write:
 it may close the captured child's stdin to release that write, without closing
 a replacement child's stdin.
 
-Completion is separate from acceptance. The standing live test
-[`TestRealClaudeStopBackgroundTaskCompletion`](knowledge/features/e2e-realclaude-roster-after-finish-capture-test-go.md#stop-completion-needs-a-held-task-and-all-terminal-signals) observed a subsequent
-[`background_task_roster`](#background_task_roster) omitting the previously held
-task while the rig's FIFO remained held. Clients must accept that removal as
-completion rather than require a
-[`background_task_updated`](#background_task_updated) with `status: stopped`;
-that update is also valid terminal evidence when emitted. Silence alone proves
-neither acceptance nor completion.
+Completion is separate from acceptance. Clients observe a canonical terminal
+agent item through thread updates or explicit catch-up. Its evidence can be an
+actual task outcome or saved complete-roster gone fact; gone retains an unknown
+outcome and does not assert `status: stopped`. No app receives a raw task update,
+roster removal or synthetic agent receipt as confirmation.
+
+`TestRealClaudeStopBackgroundTaskCompletion` identifies the physically executing
+FIFO-held task from retained source evidence, stops that exact task and requires
+its canonical terminal item to match a post-stop saved outcome/gone fact with
+matching source provenance while the FIFO remains held. Compilation, replay,
+a skipped test, silence or control acceptance cannot satisfy that proof. See
+[the counted live evidence](knowledge/features/thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
 ### New session (v2)
 
@@ -8802,15 +8666,16 @@ bulk-backfill endpoint to use after a `resync`.
 
 **Mode B — legacy control state → current-state snapshot (the reconcile-on-connect rule).** For connections without `thread`, control state reconnects by *re-asserting current truth*, replaying no past events:
 
-- **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877), every still-outstanding clarifying-question batch (#1979/#1980), the retained slash-command menus (#2006/#2007), the retained background-task rosters (#2078/#2079), the retained model menus (#1863/#1867, widened by #2124), and the current phase of a running turn (#2712) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, a `question_shown` is unicast for every outstanding batch, each carrying the original `question_batch_id`, a [`slash_command_list`](#slash_command_list) is unicast for every conversation whose bound session currently holds one, a [`background_task_roster`](#background_task_roster) is unicast for every conversation whose bound session has reported one, a [`model_list`](#model_list) is unicast for **every conversation the registry carries** whenever any model vocabulary is retained at all — the one member of this list whose coverage is not per-conversation, because the vocabulary is machine- and account-scoped rather than conversation-scoped (see § [`model_list`](#model_list)) — and a [`turn_state`](#turn_state) is unicast for **every conversation with a turn currently running**, carrying that turn's current `thinking` or `responding` phase; a conversation that is idle gets nothing. The modal reconnect behavior is exercised in #829/#903, the slash-command menu's late-connect delivery in #2009, and the background-task roster's in #2080.
-- **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `question_batch_id` for a question batch; `conversation_id` for a slash-command menu; `conversation_id` for a background-task roster; `conversation_id` for a model menu; `conversation_id` for a turn phase — so the same connect-time re-assertion is safe to apply every time:
-  - a re-delivered `modal_shown` for a **known** `modal_id` **updates the existing modal in place** and **never double-shows**; a re-sent `question_shown` for a known `question_batch_id` **replaces that batch in place**, a re-sent `slash_command_list` for a known `conversation_id` **replaces that menu in place**, a re-sent `background_task_roster` for a known `conversation_id` **replaces that roster in place**, a re-sent `model_list` for a known `conversation_id` **replaces that model menu in place**, and a re-sent `turn_state` for a known `conversation_id` **replaces that conversation's phase in place** — it is snapshot-shaped full state, so replacing is the same rule the live lane already asks for;
+- **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877), every still-outstanding clarifying-question batch (#1979/#1980), the retained slash-command menus (#2006/#2007), the retained model menus (#1863/#1867, widened by #2124), and the current phase of a running turn (#2712) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, a `question_shown` is unicast for every outstanding batch, each carrying the original `question_batch_id`, a [`slash_command_list`](#slash_command_list) is unicast for every conversation whose bound session currently holds one, a [`model_list`](#model_list) is unicast for **every conversation the registry carries** whenever any model vocabulary is retained at all — the one member of this list whose coverage is not per-conversation, because the vocabulary is machine- and account-scoped rather than conversation-scoped (see § [`model_list`](#model_list)) — and a [`turn_state`](#turn_state) is unicast for **every conversation with a turn currently running**, carrying that turn's current `thinking` or `responding` phase; a conversation that is idle gets nothing. The modal reconnect behavior is exercised in #829/#903 and the slash-command menu's late-connect delivery in #2009.
+- **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `question_batch_id` for a question batch; `conversation_id` for a slash-command menu; `conversation_id` for a model menu; `conversation_id` for a turn phase — so the same connect-time re-assertion is safe to apply every time:
+  - a re-delivered `modal_shown` for a **known** `modal_id` **updates the existing modal in place** and **never double-shows**; a re-sent `question_shown` for a known `question_batch_id` **replaces that batch in place**, a re-sent `slash_command_list` for a known `conversation_id` **replaces that menu in place**, a re-sent `model_list` for a known `conversation_id` **replaces that model menu in place**, and a re-sent `turn_state` for a known `conversation_id` **replaces that conversation's phase in place** — it is snapshot-shaped full state, so replacing is the same rule the live lane already asks for;
   - an id the client has **already resolved** is a **no-op**;
   - control state the daemon does **not** re-assert after a fresh handshake is **gone** (reset-on-reconnect): each reconnect is a fresh Noise_IK handshake, so the client **resets** its control state and rebuilds it from whatever the daemon re-asserts — anything resolved while the client was disconnected simply does not reappear.
 
-The two modes are **complements, not alternatives**: on one and the same connect a client takes a cursor backfill for the interactive event stream and a current-state snapshot for control state. The mechanism is chosen by *what kind of data* it carries, never by *how long the client was away*. Mechanism internals live in #877 (modal reconcile), #1979 (question reconcile), #2006 (slash-command reconcile), #2078 (background-task-roster reconcile), #1863 (model-list reconcile) and #2712 (turn-phase reconcile); the answer-once security invariants are stated in [§ Modal](#modal-v2) and [§ Question](#question-v2), and are unchanged under re-delivery.
+The two modes are **complements, not alternatives**: on one and the same connect a client takes a cursor backfill for the interactive event stream and a current-state snapshot for control state. The mechanism is chosen by *what kind of data* it carries, never by *how long the client was away*. Mechanism internals live in #877 (modal reconcile), #1979 (question reconcile), #2006 (slash-command reconcile), #1863 (model-list reconcile) and #2712 (turn-phase reconcile); the answer-once security invariants are stated in [§ Modal](#modal-v2) and [§ Question](#question-v2), and are unchanged under re-delivery.
 
-The list above names the **six** remaining legacy connect-time frames. Queue
+The list above names the **five** remaining legacy connect-time frames.
+Background-task roster snapshots are retired for every app (#3735). Queue
 snapshots are retired for all capabilities (#3727). Recover queued acceptance
 and terminal state through explicit thread catch-up and live item updates as
 [Queue (v2)](#queue-v2) describes. The running turn's phase comes from the
@@ -9242,6 +9107,12 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 **Date:** 2026-05-16
 
 ## Changelog
+
+- `2026-10-22`: Retired raw background-agent start/update/roster frames, new
+  reconnect copies, synthetic agent receipt banners and connect-time roster
+  snapshots for every app (#3735). Retained source schemas feed canonical items
+  and explicit catch-up; task progress and addressed stop controls remain
+  supported. Stop acceptance alone establishes no completion.
 
 - `2026-10-21`: **Retired legacy conversation-list watermark scans (#3722).** Lists retain every otherwise eligible registry row without legacy history, and `latest_entry_id` is removed. Negotiated thread summaries use only authoritative `last_shown_version` with durable `read_up_to`; absent shown evidence is unknown, while numeric zero is known. Unavailable read authority still returns retryable `history.unavailable` without advancing the mark.
 

@@ -78,8 +78,8 @@ the first live run, not discovered after one comes back empty and gets refused a
 `TestRealClaudeStopBackgroundTaskCompletion` uses its own
 `stopHoldOperation.prompt` to request exactly one background Bash invocation of
 a rig-owned hold executable without arguments. It waits for the identified
-task's untruncated id in the daemon's roster and for the FIFO rendezvous before
-sending the client stop (#2796). Roster descriptions cannot establish task
+task's untruncated id in the daemon's retained source roster and for the FIFO
+rendezvous before sending the client stop (#2796). Roster descriptions cannot establish task
 identity: the
 [reproduced setup failure](https://github.com/pyrycode/pyrycode/issues/2848#issuecomment-5999232779)
 observed the exact background Bash command, an untruncated `local_bash` roster
@@ -160,10 +160,20 @@ its bounded, idempotent cleanup.
 
 The FIFO remains held until terminal evidence or teardown; otherwise a
 natural finish could make an unwired stop look successful. A control acceptance
-alone cannot pass. The completion drain accepts either `background_task_updated`
-with `status: stopped` for that task in the bound conversation, or a subsequent
-bound-conversation roster omitting that previously held id, without requiring
-one signal to precede the other.
+alone cannot pass. Since #3735, source observation identifies the exact held
+call/task while rejecting retired raw app envelopes. The test negotiates `thread`
+and assembles explicit catch-up through its successful final marker.
+`stopTaskTerminalItem` requires the exact call/task's inactive canonical item and
+a matching post-stop `background_task_outcome` or `background_task_gone` at its
+`EndedOrder`, with the same producing-session provenance and terminal status.
+A raw roster omission, a session-ending fact, an active acceptance or a stale
+ending cannot satisfy it. Gone retains an unknown outcome, not `stopped`.
+See [counted #3735 live acceptance](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+for the current migrated proof; compilation and offline helpers are separate.
+
+Before that migration, the terminal drain accepted a stopped update or a later
+roster omitting the held task. The earlier observations below describe that
+historical raw-frame proof, not the current app publication contract.
 
 The authenticated live gate observed **roster omission while the FIFO stayed
 held**, not a stopped update as its passing signal. Requiring the update would

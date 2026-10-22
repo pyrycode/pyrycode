@@ -36,6 +36,53 @@ checks nil/failed history, absent clients and content-free failure logs alongsid
 absent raw frames/replay. These deterministic proofs and tagged compilation do
 not establish live acceptance. See [source and canonical test observation](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#source-and-canonical-observation).
 
+Background-agent `background_task_started`, `background_task_updated` and
+`background_task_roster` values likewise retain their original append attempts,
+including without clients (#3735). `recordAgentFact` and `closeAgentHistory`
+retain neutral identities, source/lifetime attribution, outcomes and saved
+gone/session-ending causes. Mapped and neutral evidence feeds the canonical fold;
+none of these producers publishes compatibility receipts. No app receives raw
+agent content, newly appended replay copies or connect-time roster snapshots,
+including peers without `thread` and nil/failed-history operation. The runner's
+roster/join hold still supports addressed stops; task progress and other supported
+live state retain their delivery and ordering contracts.
+
+`TestAgentContentRetired` compares applied live revisions with explicit catch-up.
+Late task links preserve launch/result meaning after main-turn end; attributed
+child text, reported outcomes, complete empty versus incomplete rosters and saved
+session causes retain one agent item with a stable ID. Reused identities remain
+scoped by conversation and source; warm/reopened reads retain timestamps,
+visibility and provenance. Agent-history and session-ending families retain
+lifetime isolation. Child/background traffic cannot change the main turn.
+`TestRelayV2_AgentContentRetiredReconnect` uses an ordered control reply to prove
+absence of roster publication for both capability modes, then requires explicit
+authenticated thread catch-up to finish.
+
+**Correlate agent receipt assertions with source identity.** Agent facts and
+other runtime producers share `banner`; banning every banner would reject
+surviving sibling runtime behavior rather than isolate agent retirement. Match
+banner history IDs to agent source types in both live and replay assertions.
+Source-observing fixtures must reject retired transport envelopes: `SourceObserver` exposes retained start/update/roster
+entries separately, never fabricating compatibility delivery. See
+[source and canonical observation](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#source-and-canonical-observation).
+
+**Live stop proof is separate from deterministic evidence.** Offline helper
+passes, tagged compilation, replay and control acceptance establish no live
+completion. `TestRealClaudeStopBackgroundTaskCompletion` identifies the exact
+physically executing FIFO-held task using retained source joins, sends the
+addressed stop and requires its canonical terminal item to match a post-stop
+saved task outcome or complete-roster gone fact with producing-session
+provenance while the FIFO remains held. The dispatcher subsequently counted it
+passed, alongside `TestRealClaudeComposerStopPreservesBackgroundTask`
+on Linux at candidate `ad1cb1aec21452edd41c01ddc76a1c39e566dbcd`
+merged with main `ac0a13f59ebe` (2026-10-22). That configured live run counted
+2267 executed, 2267 passed, 0 failed and 27 skipped; skips are not evidence for
+those skipped probes. This supersedes the PR/verifier's earlier pending-live
+handoff, not parent #3718's final family acceptance. Other operating systems
+are outside this ticket's verification scope. See
+[the reviewed implementation and handoff](https://github.com/pyrycode/pyrycode/pull/3830)
+and [the plan](../../specs/architecture/3735-retire-agent-publication.md).
+
 Background discovery and per-conversation coordination inspect committed history
 versions. This covers conversations created after startup and activity after
 unload, including `channelDelivery.deliver`, which bypasses
@@ -90,7 +137,7 @@ of history size. This bound applies to `ThreadLastShownVersion`; the list
 handler's separate [legacy watermark scan](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
 can still read history. The no-relay composition
 continues folding without wire publication; surviving legacy publication retains
-its existing access gates, without restoring the five retired interactive types.
+its existing access gates, without restoring retired interactive or agent content.
 
 Reconnect skips event-ring replay/resync only for negotiated thread peers.
 Each open conversation requires explicit catch-up from its last completed
