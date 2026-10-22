@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,11 +71,12 @@ func TestInteractiveStreamDormantResetAfterRestart(t *testing.T) {
 	t.Cleanup(func() { d1.stop(t) })
 	phone1, send1, recv1 := dial()
 	fact := fmt.Sprintf("DORMANT%X", time.Now().UnixNano())
+	completedFacts1 := scenario.SourceSince(t, home, clearConvID)
 	sealSendMessage(t, phone1, send1, 29051, clearConvID, "plant",
 		"We are preparing a release with build tag "+fact+". The unfinished next step is to verify the artifacts "+
 			"for that exact tag. Preserve the exact build tag in any handoff so the next session can finish the release. "+
 			"Leave the work pending; do not write it to any file or use tools. Reply only ok.")
-	drainForCompletedTurn(t, phone1, recv1, clearConvID, perTurnReplyBudget)
+	drainForCompletedTurn(t, phone1, recv1, clearConvID, perTurnReplyBudget, completedFacts1)
 	assertPerSessionPrompt(t, d1, clearSessUUID, idSettleTimeout)
 	_ = phone1.Close()
 	d1.stop(t)

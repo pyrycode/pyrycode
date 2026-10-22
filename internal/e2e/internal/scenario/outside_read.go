@@ -22,7 +22,7 @@ func OutsideRead(t *testing.T, w Wire, convID string, deadline time.Time) (strin
 	budget := time.Until(deadline)
 
 	var (
-		text     strings.Builder
+		turn     sourceTurn
 		tools    []string
 		seenTool = map[string]struct{}{}
 		sawDelta bool
@@ -39,9 +39,29 @@ func OutsideRead(t *testing.T, w Wire, convID string, deadline time.Time) (strin
 			}
 			t.Fatalf("claude replied for %q but the turn never reached terminal turn_state{idle} "+
 				"within %s; %d byte(s) so far, %d modal(s) answered, tools %v",
-				convID, budget, text.Len(), answered, tools)
+				convID, budget, turn.text.Len(), answered, tools)
 		}
-		env := w.Next(deadline)
+		env := w.Next(pollDeadline(deadline))
+		entries := sourceFacts(t, []SourceFacts{w.Source}, convID)
+		turn.feed(t, convID, entries)
+		sawDelta = strings.TrimSpace(turn.text.String()) != ""
+		for _, entry := range entries {
+			if entry.Type != protocol.TypeToolUse {
+				continue
+			}
+			var p protocol.ToolUsePayload
+			if json.Unmarshal(entry.Payload, &p) != nil {
+				t.Fatal("invalid source tool")
+			}
+			if p.ConversationID != convID || p.ParentToolUseID != "" || p.Name == "" {
+				continue
+			}
+			if _, dup := seenTool[p.Name]; dup || len(tools) >= 8 {
+				continue
+			}
+			seenTool[p.Name] = struct{}{}
+			tools = append(tools, safeReadLabel(p.Name))
+		}
 
 		switch env.Type {
 		case protocol.TypeError:
@@ -83,41 +103,15 @@ func OutsideRead(t *testing.T, w Wire, convID string, deadline time.Time) (strin
 			answered++
 			w.Send(protocol.TypeModalAnswer, protocol.ModalAnswerPayload{ModalID: shown.ModalID, OptionID: string(turnevent.PermissionOptionKindAllowOnce), AnswerToken: "e2e-2474-posture-probe"})
 
-		case protocol.TypeToolUse:
-			var p protocol.ToolUsePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode tool_use payload: %v", err)
-			}
-			if p.ConversationID != convID || p.Name == "" {
-				continue
-			}
-			if _, dup := seenTool[p.Name]; dup || len(tools) >= 8 {
-				continue
-			}
-			// Allowlisted, not merely truncated: these names are claude-authored and
-			// reach a committed capture as well as a failure message.
-			seenTool[p.Name] = struct{}{}
-			tools = append(tools, safeReadLabel(p.Name))
-
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				text.WriteString(p.Text)
-			}
-
 		case protocol.TypeTurnState:
 			var st protocol.TurnStatePayload
 			if err := json.Unmarshal(env.Payload, &st); err != nil {
 				t.Fatalf("decode turn_state payload: %v", err)
 			}
-			if st.State != "idle" || st.ConversationID != convID || !sawDelta {
+			if !turn.idle(t, env, convID) || !sawDelta {
 				continue
 			}
-			return text.String(), tools, first, answered
+			return turn.text.String(), tools, first, answered
 		}
 	}
 }

@@ -28,6 +28,14 @@ func InterruptTurn(t *testing.T, w Wire, c InterruptConfig) {
 	started := false
 	for !started && time.Now().Before(deadline) {
 		env := w.Next(deadline)
+		if c.InitialThinking {
+			for _, e := range sourceFacts(t, []SourceFacts{w.Source}, c.ConversationID) {
+				switch e.Type {
+				case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeTurnEnd:
+					t.Fatal("initial thinking was preceded by source content or completion")
+				}
+			}
+		}
 		if env.Type == protocol.TypeTurnState {
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
@@ -74,18 +82,34 @@ func InterruptTurn(t *testing.T, w Wire, c InterruptConfig) {
 	} else {
 		w.Send(protocol.TypeInterrupt, nil)
 	}
-	WaitCancelledTurnEnd(t, w.Next, c.ConversationID, c.Budget, c.InitialThinking)
+	WaitCancelledTurnEnd(t, w.Next, c.ConversationID, c.Budget, c.InitialThinking, w.Source)
 	if !c.InitialThinking {
 		w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "m-4", Text: c.HealthPrompt})
-		CompletedTurn(t, w.Next, c.ConversationID, c.Budget, false)
+		CompletedTurn(t, w.Next, c.ConversationID, c.Budget, false, w.Source)
 	}
 }
 
-func WaitCancelledTurnEnd(t *testing.T, next Next, convID string, budget time.Duration, initialThinking bool) {
+func WaitCancelledTurnEnd(t *testing.T, next Next, convID string, budget time.Duration, initialThinking bool, sources ...SourceFacts) {
 	t.Helper()
+	var turn sourceTurn
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		env := next(deadline)
+		env := next(pollDeadline(deadline))
+		entries := sourceFacts(t, sources, convID)
+		turn.feed(t, convID, entries)
+		if initialThinking {
+			for _, e := range entries {
+				if e.Type == protocol.TypeAssistantDelta || e.Type == protocol.TypeToolUse || e.Type == protocol.TypeToolResult {
+					t.Fatal("initial thinking produced source text or tools before cancellation")
+				}
+			}
+		}
+		if turn.idle(t, env, convID) {
+			if turn.reason != "cancelled" {
+				t.Fatal("interrupted source turn ended without cancellation")
+			}
+			return
+		}
 		if env.Type == protocol.TypeUnrecognizedMessage {
 			t.Fatal("parser gap in interrupt window")
 		}
@@ -110,19 +134,6 @@ func WaitCancelledTurnEnd(t *testing.T, next Next, convID string, budget time.Du
 					t.Fatal("initial thinking produced text or tools before cancelled end")
 				}
 			}
-		}
-		if env.Type == protocol.TypeTurnEnd {
-			var p protocol.TurnEndPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid interrupt terminal frame")
-			}
-			if p.ConversationID != convID {
-				continue
-			}
-			if p.StopReason != "cancelled" {
-				t.Fatal("interrupted turn ended without cancellation")
-			}
-			return
 		}
 	}
 	t.Fatal("cancelled turn end missing")

@@ -106,7 +106,7 @@ func TestInteractiveStreamInterruptStopsInitialThinkingTurn(t *testing.T) {
 
 func checkpointHarnessWire(t *testing.T, h *perConvHarness) scenario.Wire {
 	sequence := uint64(1)
-	return scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
+	return scenario.ObserveSource(t, h.home, scenario.Wire{Next: scenario.PollingReceive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
 		sequence++
 		var raw json.RawMessage
 		if payload != nil {
@@ -114,7 +114,7 @@ func checkpointHarnessWire(t *testing.T, h *perConvHarness) scenario.Wire {
 		}
 		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: raw})
 		return sequence
-	}}
+	}})
 }
 
 // driveInitialThinkingTurn asks for a deliberately multi-step, tool-free proof.

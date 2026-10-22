@@ -65,16 +65,27 @@ func driveSharedQuestionAnswer(t *testing.T, h *perConvHarness, convID string) {
 		Home: h.home, ConversationID: convID, SessionID: streamModalBootstrapUUID, Prompt: questionAnswerTrigger(nonce),
 		SurfaceBudget: questionSurfaceBudget, UpdateBudget: questionModelUpdateBudget, TurnBudget: perTurnReplyBudget,
 	})
+	source := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 5, convID, "m-after-model-change", fmt.Sprintf("Reply with one short word. run=%d after-model-change", nonce))
-	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, "haiku"), perTurnReplyBudget)
+	drainQuestionModelTurn(t, h.phone, h.initRecv, convID, announcedTargetFor(t, "haiku"), perTurnReplyBudget, source)
 }
 
-func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration) {
+func drainQuestionModelTurn(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, convID, expected string, timeout time.Duration, sources ...scenario.SourceFacts) {
 	t.Helper()
+	next := scenario.Receive(t, phone, cs)
+	if client, ok := phone.(interface {
+		scenario.Receiver
+		Close() error
+	}); ok {
+		next = scenario.PollingReceive(t, client, cs)
+	}
 	scenario.WitnessModelTurn(t, func(deadline time.Time) protocol.Envelope {
-		env, _ := receiveQuestionEnvelope(t, phone, cs, deadline)
+		env := next(deadline)
+		if err := checkQuestionEnvelopeAlarm(env); err != nil {
+			t.Fatal(err)
+		}
 		return env
-	}, convID, expected, timeout)
+	}, convID, expected, timeout, sources...)
 }
 
 // raiseRealQuestionBatch asserts a nonempty batch before any answer is sent.
@@ -260,10 +271,10 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 func modalScenarioWire(t *testing.T, h *perConvHarness, first uint64) scenario.Wire {
 	t.Helper()
 	sequence := first
-	return scenario.Wire{Next: scenario.Receive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
+	return scenario.ObserveSource(t, h.home, scenario.Wire{Next: scenario.PollingReceive(t, h.phone, h.initRecv), Send: func(kind string, payload any) uint64 {
 		id := sequence
 		sequence++
 		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: id, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return id
-	}}
+	}})
 }

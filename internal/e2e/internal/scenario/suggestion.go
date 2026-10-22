@@ -29,25 +29,22 @@ type NativeSuggestionConfig struct {
 func NativeSuggestions(t *testing.T, w Wire, c NativeSuggestionConfig) {
 	t.Helper()
 	sawDelta, idle := false, false
+	turn := new(sourceTurn)
 	var setRev, clearRev uint64
 	observe := func(env protocol.Envelope) {
+		turn.feed(t, c.ConversationID, sourceFacts(t, []SourceFacts{w.Source}, c.ConversationID))
+		sawDelta = strings.TrimSpace(turn.text.String()) != ""
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatal("native suggestion turn was refused")
 		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid suggestion delta")
-			}
-			if p.ConversationID == c.ConversationID && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-			}
+			t.Fatal("retired suggestion content delivered on wire")
 		case protocol.TypeTurnState:
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid suggestion turn state")
 			}
-			if p.ConversationID == c.ConversationID && p.State == "idle" && sawDelta {
+			if turn.idle(t, env, c.ConversationID) && sawDelta {
 				idle = true
 			}
 		case protocol.TypeReplySuggestion:
@@ -80,10 +77,7 @@ func NativeSuggestions(t *testing.T, w Wire, c NativeSuggestionConfig) {
 	pump := func(budget time.Duration, done func() bool) bool {
 		deadline := time.Now().Add(budget)
 		for !done() && time.Now().Before(deadline) {
-			env := w.Next(deadline)
-			if env.Type == "" {
-				break
-			}
+			env := w.Next(pollDeadline(deadline))
 			observe(env)
 		}
 		return done()
@@ -93,6 +87,7 @@ func NativeSuggestions(t *testing.T, w Wire, c NativeSuggestionConfig) {
 			break
 		}
 		sawDelta, idle = false, false
+		turn = new(sourceTurn)
 		w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: fmt.Sprintf("native-suggestion-%d", i+1), Text: prompt})
 		if !pump(c.TurnBudget, func() bool { return idle }) {
 			t.Fatal("native suggestion exchange did not complete")

@@ -110,8 +110,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,10 +271,11 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// this is the one turn whose shape is not in question, so it takes the shared
 	// drain's two standing alarms (unrecognized_message, rate_limited); everything
 	// after it is the window, which owns its own negatives.
+	completedFacts1 := scenario.SourceSince(t, home, clearConvID)
 	sealSendMessage(t, phone, initSend, plantReqID, clearConvID, "m-1",
 		fmt.Sprintf("For the rest of this conversation, remember one fact about me: my build tag for this "+
 			"run is %s. I have not written it down anywhere. Reply with just the word ok.", token))
-	drainForCompletedTurn(t, phone, initRecv, clearConvID, perTurnReplyBudget)
+	drainForCompletedTurn(t, phone, initRecv, clearConvID, perTurnReplyBudget, completedFacts1)
 
 	// The precondition AC 2 rests on, checked deterministically and checked HERE. The
 	// plant turn has just minted the conversation its own session; this asserts the
@@ -296,6 +298,7 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// case-sensitively, and SendMessage's intercept sits below Route, so the id
 	// crossing into the reset is this registry key with its live binding.
 	w := newResetWindow()
+	w.source, w.sourceConv = scenario.SourceSnapshot(t, home), clearConvID
 	lifecycleRecordingBeforeReset(t, home)
 	sealSendMessage(t, phone, initSend, clearReqID, clearConvID, "m-clear", "/clear")
 
@@ -405,11 +408,12 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	//
 	// The only place the tag exists for this child remains the note in its appended
 	// system prompt, so a reply carrying it proves exactly what AC 2 asks.
+	recallSource := scenario.SourceSince(t, home, clearConvID)
 	sealSendMessage(t, phone, initSend, recallReqID, clearConvID, "m-2",
 		"What is my build tag for this run? I told it to you before this session "+
 			"started, so it is not in this transcript. Reply with only the tag "+
 			"and nothing else.")
-	reply := w.awaitRecallReply(t, phone, initRecv, clearConvID, recallReqID, prior, perTurnReplyBudget)
+	reply := w.awaitRecallReply(t, phone, initRecv, clearConvID, recallReqID, prior, perTurnReplyBudget, recallSource)
 	if !strings.Contains(strings.ToUpper(reply), token) {
 		t.Fatalf("the successor's first reply does not carry the fact the predecessor was told. TWO READINGS, "+
 			"and this test structurally cannot separate them: the reset reported handoff=%q, so a note WAS "+
@@ -536,6 +540,9 @@ type windowTransition struct {
 // negative structurally true rather than true of whatever a coarser drain happened
 // not to have consumed already.
 type resetWindow struct {
+	receive     scenario.Next
+	source      scenario.SourceFacts
+	sourceConv  string
 	edges       []protocol.ResettingPayload
 	transitions []windowTransition
 	// turnIDs names every turn the client has seen a delta for. Its only consumer is
@@ -578,31 +585,26 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 		if remaining <= 0 {
 			return protocol.Envelope{}, false
 		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // re-loop into the deadline check above
+		if w.receive == nil {
+			w.receive = scenario.PollingReceive(t, phone, cs)
+		}
+		env := w.receive(deadline)
+		if env.Type == "" {
+			return protocol.Envelope{}, false
+		}
+		if w.source != nil {
+			for _, entry := range w.source(w.sourceConv) {
+				if entry.Type != protocol.TypeAssistantDelta || entry.Session == nil {
+					continue
+				}
+				var p protocol.AssistantDeltaPayload
+				if json.Unmarshal(entry.Payload, &p) != nil {
+					t.Fatal("invalid reset source")
+				}
+				if p.ConversationID == w.sourceConv && p.TurnID != "" {
+					w.turnIDs[entry.Session.SessionID+"\x00"+p.TurnID] = struct{}{}
+				}
 			}
-			t.Fatalf("phone receive (/clear window): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (/clear window): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue // does not advance the receive nonce — skip without decrypting
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (/clear window): %v", err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (/clear window): %v", err)
 		}
 		switch env.Type {
 		case protocol.TypeUnrecognizedMessage:
@@ -636,14 +638,8 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 				t.Fatalf("decode session_transition payload: %v", err)
 			}
 			w.transitions = append(w.transitions, windowTransition{payload: p, edgesBefore: len(w.edges)})
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.TurnID != "" {
-				w.turnIDs[p.TurnID] = struct{}{}
-			}
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			t.Fatal("retired raw content reached the reset window")
 		}
 		return env, true
 	}
@@ -685,94 +681,49 @@ func (w *resetWindow) snapshotTurnIDs() map[string]struct{} {
 	return prior
 }
 
-// awaitRecallReply reads the window forward through the recall turn and returns that
-// turn's assistant text: the ack correlated on reqID, then the first non-empty
-// assistant_delta for convID whose turn id is NOT in prior, then that turn's deltas
-// accumulated to the terminal turn_state{idle} for convID.
-//
-// The three are ordered — a delta before the ack is ignored, a turn_state before the
-// delta is ignored — which keeps a leading responding state, and any idle the reset's
-// own turn-clear may produce, from closing the turn early. That mirrors
-// drainForCompletedTurn's guard.
-//
-// prior is the exclusion set, and it is what makes the caller's CONTENT assertion
-// mean anything: the predecessor's wrap-up reply is on this wire and contains the
-// planted fact by design, so a delta of a turn the window has already seen cannot be
-// allowed to answer for the successor. Only the turn id is used — no content
-// heuristic — because the successor's words are as non-deterministic as the
-// predecessor's.
+// awaitRecallReply requires the recall acknowledgement, fresh successor source
+// identity and terminal live idle. The watermark excludes all pre-reset text.
 func (w *resetWindow) awaitRecallReply(t *testing.T, phone *fakephone.Client, cs *noise.CipherState,
-	convID string, reqID uint64, prior map[string]struct{}, timeout time.Duration) string {
+	convID string, reqID uint64, prior map[string]struct{}, timeout time.Duration, source scenario.SourceFacts) string {
 	t.Helper()
-	sawAck := false
-	successorTurn := ""
-	var text strings.Builder
-	deadline := time.Now().Add(timeout)
-	for {
-		env, ok := w.next(t, phone, cs, deadline)
-		if !ok {
-			switch {
-			case !sawAck:
-				t.Fatalf("no ack for send_message #%d within %s of the reset — the turn never routed to the "+
-					"re-keyed pool entry (Route resolved %q to a session Pool.Lookup no longer holds), or the "+
-					"delivery seam never found the conversation idle", reqID, timeout, convID)
-			case successorTurn == "":
-				t.Fatalf("send_message #%d was acked but no non-empty assistant_delta for %q on a turn the "+
-					"window had not already seen reached the client within %s — either the successor never "+
-					"answered, or every delta carried a turn id from before the reset, which is the "+
-					"dark-conversation regression: the registry re-keyed without the runner's stream session "+
-					"tag rotating with it", reqID, convID, timeout)
-			default:
-				t.Fatalf("the successor's turn for %q streamed a delta but never closed with a terminal "+
-					"turn_state{idle} within %s", convID, timeout)
-			}
-		}
-		switch env.Type {
-		case protocol.TypeAck:
-			if env.InReplyTo != nil && *env.InReplyTo == reqID {
-				sawAck = true
-				t.Logf("the rotated session accepted the recall turn (ack for send_message #%d)", reqID)
-			}
-		case protocol.TypeAssistantDelta:
-			if !sawAck {
-				// Anything before the ack belongs to an earlier turn, and this is the
-				// FIRST of the two independent guards against the predecessor's wrap-up
-				// reply answering for the successor. It rests on wire order: the ack is
-				// pushed when the daemon receives the recall frame, so every delta
-				// already in flight precedes it. prior below rests on turn identity
-				// instead, and holds even where that ordering does not.
-				continue
-			}
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID != convID || strings.TrimSpace(p.Text) == "" {
-				continue
-			}
-			if _, seen := prior[p.TurnID]; seen {
-				continue // a tail of the plant turn or the predecessor's wrap-up reply
-			}
-			if successorTurn == "" {
-				successorTurn = p.TurnID
-				t.Logf("the successor answered on turn_id=%s (seq=%d) for %q", p.TurnID, p.Seq, convID)
-			}
-			if p.TurnID != successorTurn {
-				continue // a second new turn is not this one's text
-			}
-			text.WriteString(p.Text)
-		case protocol.TypeTurnState:
-			if successorTurn == "" {
-				continue // the leading responding state, and any idle the reset's turn-clear produced
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("terminal turn_state{idle} for %q — the successor's turn closed", convID)
-				return text.String()
-			}
-		}
+	if len(w.transitions) != 1 {
+		t.Fatal("recall requires one settled reset transition")
 	}
+	session := w.transitions[0].payload.NewSessionID
+	checkedSource := func(conv string) []history.Entry {
+		entries := source(conv)
+		for _, e := range entries {
+			switch e.Type {
+			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			default:
+				continue
+			}
+			if e.Session == nil || e.Session.SessionID != session {
+				t.Fatal("recall source belongs to the predecessor")
+			}
+			var p struct {
+				Turn string `json:"turn_id"`
+			}
+			if json.Unmarshal(e.Payload, &p) != nil {
+				t.Fatal("invalid recall source")
+			}
+			if _, stale := prior[session+"\x00"+p.Turn]; stale {
+				t.Fatal("recall reused a predecessor source identity")
+			}
+		}
+		return entries
+	}
+	sawAck := false
+	next := func(deadline time.Time) protocol.Envelope {
+		env, _ := w.next(t, phone, cs, deadline)
+		if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == reqID {
+			sawAck = true
+		}
+		return env
+	}
+	text := scenario.CompletedTurn(t, next, convID, timeout, false, checkedSource)
+	if !sawAck {
+		t.Fatal("recall turn lost its matching acknowledgement")
+	}
+	return text
 }

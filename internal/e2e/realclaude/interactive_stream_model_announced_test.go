@@ -115,7 +115,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
 	scenariohelpers "github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
-	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -211,7 +210,8 @@ func TestInteractiveStreamModelAnnouncedFrame(t *testing.T) {
 		sequence++
 		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return sequence
-	}, Next: scenariohelpers.Receive(t, phone, initRecv)}
+	}, Next: scenariohelpers.PollingReceive(t, phone, initRecv)}
+	wire = scenariohelpers.ObserveSource(t, home, wire)
 	scenariohelpers.ModelAnnouncement(t, wire, announcedConvID, fmt.Sprintf("Reply with a single short word. run=%d", time.Now().UnixNano()), announcedSpawnAlias, announcedTargetFor(t, announcedSpawnAlias), perTurnReplyBudget, d.stderr.String)
 
 }
@@ -315,33 +315,4 @@ func spawnBootstrapDaemonVerbose(t *testing.T, home, workdir, claudeBin, relayUR
 		t.Fatalf("realclaude: daemon not ready: %v\nstderr:\n%s", err, stderr.String())
 	}
 	return d
-}
-
-// drainForAnnouncedModel is a lean fork of drainForCompletedTurn
-// (interactive_stream_liveness_test.go): same M1(non-empty assistant_delta)→
-// M2(terminal turn_state{idle}) milestones and the same in-order noise-decrypt
-// discipline (the receive nonce is sequential, so every noise_msg MUST be
-// decrypted in arrival order or the CipherState desyncs; a non-noise_msg control
-// frame such as a rekey is skipped WITHOUT decrypting). Like
-// drainForResumedTurnText it drops the shared drain's two sentinel arms rather
-// than re-implementing them per fork.
-//
-// The behavioural delta: it records the FIRST protocol.TypeModelAnnounced payload
-// it sees and returns it, with whether one was seen, when the turn closes.
-//
-// It returns at the turn's CLOSE rather than waiting for the frame, and that is
-// load-bearing for the mutation evidence: under either mutant no frame is ever
-// emitted, so a drain that waited for one would burn its full timeout on every red
-// run — the difference between AC-3 costing one live-suite budget and costing
-// three.
-//
-// The model_announced arm carries NO conversation filter: it takes the first frame
-// of that type whatever its ConversationID and logs the id it got. Handle derives
-// that id from sup.CurrentConversation(), so it is the driving conv in practice,
-// but asserting it is outside every AC and a filter that guessed wrong would hang
-// the drain instead of failing loudly. The turn_state arm keeps its convID filter —
-// that one is the turn boundary.
-func drainForAnnouncedModel(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) (protocol.ModelAnnouncedPayload, bool) {
-	t.Helper()
-	return scenariohelpers.AnnouncedTurn(t, scenariohelpers.Receive(t, phone, cs), convID, timeout)
 }

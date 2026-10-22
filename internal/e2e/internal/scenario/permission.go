@@ -60,10 +60,11 @@ func permissionTurn(t *testing.T, w Wire, convID string, pending map[string]bool
 	}
 	retries := 0
 	idle := false
-	var text strings.Builder
+	var turn sourceTurn
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
-		env := w.Next(deadline)
+		env := w.Next(pollDeadline(deadline))
+		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
 		alarm(t, env)
 		switch env.Type {
 		case protocol.TypeQuestionShown:
@@ -90,26 +91,20 @@ func permissionTurn(t *testing.T, w Wire, convID string, pending map[string]bool
 			}
 			delete(pending, dis.ModalID)
 		case protocol.TypeAssistantDelta:
-			var delta protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &delta) != nil {
-				t.Fatal("invalid permission continuation")
-			}
-			if delta.ConversationID == convID && strings.TrimSpace(delta.Text) != "" {
-				text.WriteString(delta.Text)
-			}
+			t.Fatal("retired permission continuation delivered on wire")
 		case protocol.TypeTurnState:
 			var state protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &state) != nil {
 				t.Fatal("invalid permission turn state")
 			}
-			if state.ConversationID == convID && state.State == "idle" && (option == "reject_once" || text.Len() > 0) {
+			if turn.idle(t, env, convID) && (option == "reject_once" || strings.TrimSpace(turn.text.String()) != "") {
 				idle = true
 			}
 		}
 		if idle && len(pending) == 0 {
-			return text.String()
+			return turn.text.String()
 		}
 	}
-	t.Fatalf("permission turn did not complete: pending decisions=%d retries=%d text bytes=%d idle=%t", len(pending), retries, text.Len(), idle)
+	t.Fatalf("permission turn did not complete: pending decisions=%d retries=%d text bytes=%d idle=%t", len(pending), retries, turn.text.Len(), idle)
 	return ""
 }

@@ -224,6 +224,7 @@ func TestExtendedHelperProcess(t *testing.T) {
 		rows = rows[1:]
 		return env
 	}}
+	w = testSourceWire(t, w)
 	budget := 40 * time.Millisecond
 	switch {
 	case strings.HasPrefix(name, "family-"):

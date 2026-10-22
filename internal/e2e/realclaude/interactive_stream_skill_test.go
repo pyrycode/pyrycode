@@ -209,6 +209,7 @@ func TestInteractiveStreamSkillInvocationIsSilent(t *testing.T) {
 		sequence++
 		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return sequence
-	}, Next: scenario.Receive(t, phone, initRecv)}
+	}, Next: scenario.PollingReceive(t, phone, initRecv)}
+	w = scenario.ObserveSource(t, home, w)
 	scenario.SkillSilence(t, w, skillConvID, fmt.Sprintf("Use the %s skill, then do exactly what it says. run=%d", skillName, nonce), 180*time.Second, d.stderr.String)
 }

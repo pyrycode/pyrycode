@@ -102,6 +102,7 @@ func TestCancelPermissionHelperProcess(t *testing.T) {
 		frames = frames[1:]
 		return env
 	}}
+	wire = testSourceWire(t, wire, false)
 	turnBudget := 40 * time.Millisecond
 	if name == "separate-budgets" {
 		turnBudget = 100 * time.Millisecond

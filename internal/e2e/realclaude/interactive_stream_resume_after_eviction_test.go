@@ -72,6 +72,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,10 +195,11 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// Evictions already logged (a fire before the plant turn opened) prove nothing
 	// about the planted transcript, so the WARN wait below counts past them.
 	evictionsBeforePlant := countIdleEvictionWARNs(d.stderr.String(), evictResumeBootstrapUUID)
+	completedFacts1 := scenario.SourceSince(t, home, evictResumeConvID)
 	sealSendMessage(t, phone, initSend, 2, evictResumeConvID, "m-1",
 		fmt.Sprintf("Remember this exact token for later, but do NOT repeat it now: %s. "+
 			"Reply with just the word: ok", token))
-	drainForCompletedTurn(t, phone, initRecv, evictResumeConvID, perTurnReplyBudget)
+	drainForCompletedTurn(t, phone, initRecv, evictResumeConvID, perTurnReplyBudget, completedFacts1)
 	lifecycleRecordingBeforeIdle(t, home)
 
 	// Force + observe eviction (AC1, AC2): after the plant drain returns, poll the

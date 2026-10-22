@@ -12,8 +12,9 @@ import (
 
 // Wire keeps the real encrypted relay transport in the caller's harness.
 type Wire struct {
-	Send func(string, any) uint64
-	Next Next
+	Send   func(string, any) uint64
+	Next   Next
+	Source SourceFacts
 }
 
 type Choice struct {
@@ -66,7 +67,7 @@ func QuestionAnswer(t *testing.T, w Wire, c QuestionConfig) {
 	}
 	entries, choice := ChooseAnswers(t, batch)
 	w.Send(protocol.TypeQuestionAnswer, protocol.QuestionAnswerPayload{QuestionBatchID: batch.QuestionBatchID, AnswerToken: "e2e-1987-answer-token", Answers: entries})
-	text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.TurnBudget)
+	text := AnsweredTurn(t, w.Next, c.ConversationID, batch.QuestionBatchID, c.TurnBudget, w.Source)
 	RequireChoice(t, text, choice)
 	RequirePromptAnswerHistory(t, c.Home, c.ConversationID, batch.QuestionBatchID, "answer", c.HistorySession)
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "m-after-model-change", Text: c.Followup})
@@ -85,7 +86,7 @@ func QuestionAnswer(t *testing.T, w Wire, c QuestionConfig) {
 		}
 		return env
 	}
-	CompletedTurn(t, next, c.ConversationID, c.TurnBudget, true)
+	CompletedTurn(t, next, c.ConversationID, c.TurnBudget, true, w.Source)
 	if !seen || model != c.ExpectedModel {
 		t.Fatal("post-question turn did not announce the selected model")
 	}
@@ -134,13 +135,14 @@ func ChooseAnswers(t *testing.T, batch protocol.QuestionShownPayload) ([]protoco
 
 // AnsweredTurn retains all three milestones regardless of dismissal/idle order.
 // Idle preceding the first matching nonempty text cannot close this turn.
-func AnsweredTurn(t *testing.T, next Next, convID, batchID string, budget time.Duration) string {
+func AnsweredTurn(t *testing.T, next Next, convID, batchID string, budget time.Duration, sources ...SourceFacts) string {
 	t.Helper()
 	deadline := time.Now().Add(budget)
-	var text strings.Builder
+	var turn sourceTurn
 	dismissed, idle := false, false
 	for time.Now().Before(deadline) {
-		env := next(deadline)
+		env := next(pollDeadline(deadline))
+		turn.feed(t, convID, sourceFacts(t, sources, convID))
 		alarm(t, env)
 		switch env.Type {
 		case protocol.TypeQuestionDismissed:
@@ -150,24 +152,18 @@ func AnsweredTurn(t *testing.T, next Next, convID, batchID string, budget time.D
 			}
 			dismissed = true
 		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid question continuation")
-			}
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				text.WriteString(p.Text)
-			}
+			t.Fatal("retired question continuation delivered on wire")
 		case protocol.TypeTurnState:
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid question turn state")
 			}
-			if p.ConversationID == convID && p.State == "idle" && text.Len() > 0 {
+			if turn.idle(t, env, convID) && strings.TrimSpace(turn.text.String()) != "" {
 				idle = true
 			}
 		}
 		if dismissed && idle {
-			return text.String()
+			return turn.text.String()
 		}
 	}
 	t.Fatal("answered question lacks remote dismissal, nonempty continuation or terminal idle")

@@ -176,7 +176,8 @@ func TestInteractiveChangeWorkspace(t *testing.T) {
 		sequence++
 		sealEnvelope(t, phone, initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return sequence
-	}, Next: scenario.Receive(t, phone, initRecv)}
+	}, Next: scenario.PollingReceive(t, phone, initRecv)}
+	w = scenario.ObserveSource(t, home, w)
 	scenario.WorkspaceChange(t, w, scenario.WorkspaceConfig{Home: home, ConversationID: changeWSConvID, Requested: requested, Resolved: wantCwd, FirstPrompt: fmt.Sprintf("Reply with a single short word. run=%d turn=1", nonce), SecondPrompt: fmt.Sprintf("Reply with a single short word. run=%d turn=2", nonce), TurnBudget: perTurnReplyBudget, VerbBudget: metaVerbReplyBudget})
 }
 

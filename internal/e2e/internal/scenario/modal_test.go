@@ -174,6 +174,7 @@ func TestModalHelperProcess(t *testing.T) {
 		frames = frames[1:]
 		return env
 	}}
+	wire = testSourceWire(t, wire)
 	if refused {
 		obs := RefusedTurn(t, wire, "conv", "batch", 40*time.Millisecond)
 		if name == "refuse-reask" && (obs.ExtraRefusals != 1 || sends != 1) {

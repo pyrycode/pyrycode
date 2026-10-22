@@ -31,7 +31,8 @@ func TestInteractiveStreamRejectsModelAbsentFromCurrentMenu(t *testing.T) {
 		sequence++
 		sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: sequence, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 		return sequence
-	}, Next: scenariohelpers.Receive(t, h.phone, h.initRecv)}
+	}, Next: scenariohelpers.PollingReceive(t, h.phone, h.initRecv)}
+	wire = scenariohelpers.ObserveSource(t, h.home, wire)
 	scenariohelpers.ModelRejection(t, wire, convID, streamModalBootstrapUUID, fmt.Sprintf("Reply with one short word and nothing else. run=%d", time.Now().UnixNano()), announcedTargetFor(t, permissionDaemonModel), modelRejectionBudget, perTurnReplyBudget)
 
 }

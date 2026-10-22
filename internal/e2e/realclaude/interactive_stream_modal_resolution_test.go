@@ -114,6 +114,7 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 		validation, outcome := writePermissionOfferDiagnostic(t, permissionOfferDiagnosticPath, h.home, h.workdir, claudeVersion(), source, shown.AlwaysAllow)
 		t.Fatalf("first permission modal did not offer always-allow rules: validation=%s outcome=%s diagnostic=%s", validation, outcome, permissionOfferDiagnosticPath)
 	}
+	continuationSource := scenario.SourceSince(t, h.home, convID)
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,
 		Type: protocol.TypeModalAnswer,
@@ -125,7 +126,7 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 			AlwaysAllow: true,
 		}),
 	})
-	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	drainForCompletedTurn(t, h.phone, h.initRecv, convID, perTurnReplyBudget, continuationSource)
 	witnessPath := filepath.Join(h.workdir, witness)
 	if _, err := os.Stat(witnessPath); err != nil {
 		t.Fatalf("first session-granted command did not create its witness: %v", err)
@@ -135,8 +136,9 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 		t.Fatalf("reset session-grant witness timestamp: %v", err)
 	}
 
+	completedFacts2 := scenario.SourceSince(t, h.home, convID)
 	sealSendMessage(t, h.phone, h.initSend, 4, convID, "m-4", prompt)
-	drainForCompletedTurnWithoutModal(t, h.phone, h.initRecv, convID, perTurnReplyBudget)
+	drainForCompletedTurnWithoutModal(t, h.phone, h.initRecv, convID, perTurnReplyBudget, completedFacts2)
 	info, err := os.Stat(witnessPath)
 	if err != nil {
 		t.Fatalf("stat session-grant witness after second command: %v", err)

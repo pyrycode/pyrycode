@@ -16,7 +16,7 @@ import (
 func runTapeWitnessQuestion(t *testing.T, c recordedScenarioContext) {
 	scenario.WitnessQuestionAnswer(t, c.Wire, scenario.WitnessQuestionConfig{Home: c.Home, ConversationID: tapeConversation, SessionID: tapeSession, Prompt: scenario.RecordedWitnessQuestionPrompt(false), SurfaceBudget: 180 * time.Second, UpdateBudget: 30 * time.Second, TurnBudget: 120 * time.Second, Witness: func() string { return "answer-witness-2c1c7e934e274f70b8ce3b138653c169" }})
 	c.Wire.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: tapeConversation, MessageID: "m-after-model-change", Text: "Reply with one short word. run=tape-witness after-model-change"})
-	scenario.WitnessModelTurn(t, c.Wire.Next, tapeConversation, "claude-haiku-4-5-20251001", 120*time.Second)
+	scenario.WitnessModelTurn(t, c.Wire.Next, tapeConversation, "claude-haiku-4-5-20251001", 120*time.Second, c.Wire.Source)
 }
 func runTapeWitnessBypass(t *testing.T, c recordedScenarioContext) {
 	scenario.WitnessBypassQuestions(t, c.Wire, scenario.WitnessBypassConfig{Home: c.Home, ConversationID: tapeConversation, SessionID: tapeSession, Prompt: scenario.RecordedWitnessQuestionPrompt, SurfaceBudget: 180 * time.Second, TurnBudget: 120 * time.Second,

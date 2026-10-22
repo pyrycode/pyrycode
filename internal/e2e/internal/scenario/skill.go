@@ -45,7 +45,7 @@ func SkillSilence(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 		t.Fatal("skill prompt disclosed a file-only witness")
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "skill-probe", Text: prompt})
-	reply := CompletedTurn(t, w.Next, convID, budget, false)
+	reply := CompletedTurn(t, w.Next, convID, budget, false, w.Source)
 	if !strings.Contains(reply, SkillReplyToken) {
 		t.Fatal("skill reply did not contain its file-only token")
 	}

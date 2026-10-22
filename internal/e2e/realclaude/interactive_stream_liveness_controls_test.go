@@ -7,6 +7,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -68,7 +71,7 @@ func TestCompletedTurnDrainControls(t *testing.T) {
 			wantFailure := map[string]string{
 				"empty": "M1: never", "whitespace": "M1: never", "foreign_delta": "M1: never",
 				"foreign_idle": "M2:", "missing_idle": "M2:", "queued_idle": "M2:",
-				"whitespace_then_idle_then_text": "M2:",
+				"whitespace_then_idle_then_text": "M1: never",
 				"unrecognized":                   "a NORMAL turn produced an unrecognized_message",
 				"rate_limited":                   "UNRECOGNISED rate_limited",
 			}[name]
@@ -138,8 +141,43 @@ func TestCompletedTurnDrainHelperProcess(t *testing.T) {
 		t.Fatalf("unknown control %q", name)
 	}
 	send, recv := completedTurnCipherPair(t)
+	phone := newCompletedSourceFrames(t, send, frames)
+	got := drainForCompletedTurn(t, phone, recv, streamConvID, time.Second, scenario.SourceFacts(func(string) []history.Entry { return phone.source }))
+	if got != want || len(phone.frames) != 0 {
+		t.Fatalf("reply=%q remaining=%d, want %q and all frames consumed", got, len(phone.frames), want)
+	}
+	t.Log("drain completed with expected text")
+}
+
+func newCompletedSourceFrames(t *testing.T, send *noise.CipherState, frames []protocol.Envelope) *completedTurnFrames {
+	t.Helper()
 	phone := &completedTurnFrames{}
+	seenText := map[string]bool{}
+	var pending []history.Entry
+	var sourceID uint64
+	appendSource := func(env protocol.Envelope) {
+		sourceID++
+		pending = append(pending, history.Entry{ID: sourceID, Type: env.Type, Payload: env.Payload, Session: &history.SessionProvenance{Kind: "claude", SessionID: "fixture"}})
+	}
 	for _, env := range frames {
+		if env.Type == protocol.TypeAssistantDelta {
+			var p protocol.AssistantDeltaPayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid source fixture")
+			}
+			seenText[p.ConversationID] = true
+			appendSource(env)
+			continue
+		}
+		if env.Type == protocol.TypeTurnState {
+			var p protocol.TurnStatePayload
+			if json.Unmarshal(env.Payload, &p) != nil {
+				t.Fatal("invalid state fixture")
+			}
+			if p.State == "idle" && seenText[p.ConversationID] {
+				appendSource(protocol.Envelope{Type: protocol.TypeTurnEnd, Payload: mustJSON(t, protocol.TurnEndPayload{ConversationID: p.ConversationID, TurnID: "turn", StopReason: "end_turn"})})
+			}
+		}
 		cipher, err := send.Encrypt(mustJSON(t, env))
 		if err != nil {
 			t.Fatal(err)
@@ -147,22 +185,29 @@ func TestCompletedTurnDrainHelperProcess(t *testing.T) {
 		phone.frames = append(phone.frames, mustJSON(t, protocol.InnerFrameV2{
 			Type: protocol.TypeNoiseMsg, Data: base64.StdEncoding.EncodeToString(cipher),
 		}))
+		phone.before = append(phone.before, pending)
+		pending = nil
 	}
-	got := drainForCompletedTurn(t, phone, recv, streamConvID, time.Second)
-	if got != want || len(phone.frames) != 0 {
-		t.Fatalf("reply=%q remaining=%d, want %q and all frames consumed", got, len(phone.frames), want)
-	}
-	t.Log("drain completed with expected text")
+	phone.tail = pending
+	return phone
 }
 
-type completedTurnFrames struct{ frames [][]byte }
+type completedTurnFrames struct {
+	frames       [][]byte
+	before       [][]history.Entry
+	tail, source []history.Entry
+}
 
 func (f *completedTurnFrames) ReceiveBytes(timeout time.Duration) ([]byte, error) {
 	if len(f.frames) == 0 {
+		f.source = append(f.source, f.tail...)
+		f.tail = nil
 		time.Sleep(timeout)
 		return nil, fakephone.ErrReceiveTimeout
 	}
 	frame := f.frames[0]
+	f.source = append(f.source, f.before[0]...)
+	f.before = f.before[1:]
 	f.frames = f.frames[1:]
 	return frame, nil
 }

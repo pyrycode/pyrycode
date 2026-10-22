@@ -150,6 +150,7 @@ func TestInterruptControlHelperProcess(t *testing.T) {
 		}
 		return sequence
 	}}
+	w = testSourceWire(t, w)
 	InterruptTurn(t, w, InterruptConfig{ConversationID: "conv", Prompt: "trigger", HealthPrompt: "health", InitialThinking: thinking, Budget: 40 * time.Millisecond, Checkpoint: func(phase string) {
 		want := "responding"
 		if thinking {

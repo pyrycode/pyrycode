@@ -19,79 +19,96 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 	lanes := map[string]*subagentTextLane{
 		"": {},
 	}
+	var watermark uint64
+	var producingSession string
+	var turn sourceTurn
 	for {
-		env := w.Next(deadline)
-		if env.Type == "" {
+		live := w.Next(pollDeadline(deadline))
+		alarm(t, live)
+		if !time.Now().Before(deadline) {
 			t.Fatalf("turn did not reach terminal idle; Agent/Task id=%q main=%v child=%v",
 				agentID, lanes[""], lanes[agentID])
 		}
-		switch env.Type {
-		case protocol.TypeToolUse:
-			var p protocol.ToolUsePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode tool_use payload: %v", err)
-			}
-			if p.ConversationID != convID || (p.Name != "Agent" && p.Name != "Task") {
+		entries := sourceFacts(t, []SourceFacts{w.Source}, convID)
+		turn.feed(t, convID, entries)
+		for _, env := range entries {
+			if env.ID <= watermark {
 				continue
 			}
-			if p.ParentToolUseID != "" {
-				t.Fatalf("foreground %s call has parent_tool_use_id %q, want empty", p.Name, p.ParentToolUseID)
-			}
-			if p.ToolUseID == "" {
-				t.Fatalf("foreground %s call has an empty tool_use_id", p.Name)
-			}
-			if agentID != "" {
-				t.Fatalf("observed multiple foreground Agent/Task calls: %q and %q", agentID, p.ToolUseID)
-			}
-			t.Logf("foreground agent requested background=%t", p.Input["run_in_background"] == "true")
-			agentID = p.ToolUseID
-			lanes[agentID] = &subagentTextLane{}
-
-		case protocol.TypeToolResult:
-			var p protocol.ToolResultPayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid subagent tool result")
-			}
-			if p.ConversationID == convID && p.ToolUseID == agentID {
-				lower := strings.ToLower(p.ResultSummary)
-				t.Logf("foreground agent result: error=%t summary_bytes=%d not_found=%t model=%t permission=%t agent_type=%t usage=%t", p.IsError, len(p.ResultSummary), strings.Contains(lower, "not found"), strings.Contains(lower, "model"), strings.Contains(lower, "permission"), strings.Contains(lower, "agent type"), strings.Contains(lower, "usage"))
-			}
-
-		case protocol.TypeAssistantDelta:
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			if p.ConversationID != convID || strings.TrimSpace(p.Text) == "" {
-				continue
-			}
-			if p.ParentToolUseID != "" && p.ParentToolUseID != agentID {
-				t.Fatalf("assistant_delta parent_tool_use_id = %q before/mismatch with foreground Agent/Task id %q",
-					p.ParentToolUseID, agentID)
-			}
-			lane := lanes[p.ParentToolUseID]
-			if lane == nil {
-				t.Fatalf("assistant_delta reached unregistered parent lane %q", p.ParentToolUseID)
-			}
-			lane.observe(t, p)
-			if !mainObserved && p.ParentToolUseID == "" {
-				mainObserved = true
-				if len(observed) != 0 && observed[0] != nil {
-					if p.TurnID == "" {
-						t.Fatal("first main observation lacks a turn identity")
-					}
-					observed[0]()
+			watermark = env.ID
+			if env.Type == protocol.TypeAssistantDelta || env.Type == protocol.TypeToolUse || env.Type == protocol.TypeToolResult {
+				if env.Session == nil || env.Session.SessionID == "" {
+					t.Fatal("subagent source lost producing session")
+				}
+				if producingSession == "" {
+					producingSession = env.Session.SessionID
+				}
+				if env.Session.SessionID != producingSession {
+					t.Fatal("subagent source crossed producing sessions")
 				}
 			}
+			switch env.Type {
+			case protocol.TypeToolUse:
+				var p protocol.ToolUsePayload
+				if err := json.Unmarshal(env.Payload, &p); err != nil {
+					t.Fatalf("decode tool_use payload: %v", err)
+				}
+				if p.ConversationID != convID || (p.Name != "Agent" && p.Name != "Task") {
+					continue
+				}
+				if p.ParentToolUseID != "" {
+					t.Fatalf("foreground %s call has parent_tool_use_id %q, want empty", p.Name, p.ParentToolUseID)
+				}
+				if p.ToolUseID == "" {
+					t.Fatalf("foreground %s call has an empty tool_use_id", p.Name)
+				}
+				if agentID != "" {
+					t.Fatalf("observed multiple foreground Agent/Task calls: %q and %q", agentID, p.ToolUseID)
+				}
+				t.Logf("foreground agent requested background=%t", p.Input["run_in_background"] == "true")
+				agentID = p.ToolUseID
+				lanes[agentID] = &subagentTextLane{}
 
-		case protocol.TypeTurnState:
-			var p protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
+			case protocol.TypeToolResult:
+				var p protocol.ToolResultPayload
+				if json.Unmarshal(env.Payload, &p) != nil {
+					t.Fatal("invalid subagent tool result")
+				}
+				if p.ConversationID == convID && p.ToolUseID == agentID {
+					lower := strings.ToLower(p.ResultSummary)
+					t.Logf("foreground agent result: error=%t summary_bytes=%d not_found=%t model=%t permission=%t agent_type=%t usage=%t", p.IsError, len(p.ResultSummary), strings.Contains(lower, "not found"), strings.Contains(lower, "model"), strings.Contains(lower, "permission"), strings.Contains(lower, "agent type"), strings.Contains(lower, "usage"))
+				}
+
+			case protocol.TypeAssistantDelta:
+				var p protocol.AssistantDeltaPayload
+				if err := json.Unmarshal(env.Payload, &p); err != nil {
+					t.Fatalf("decode assistant_delta payload: %v", err)
+				}
+				if p.ConversationID != convID || strings.TrimSpace(p.Text) == "" {
+					continue
+				}
+				if p.ParentToolUseID != "" && p.ParentToolUseID != agentID {
+					t.Fatalf("assistant_delta parent_tool_use_id = %q before/mismatch with foreground Agent/Task id %q",
+						p.ParentToolUseID, agentID)
+				}
+				lane := lanes[p.ParentToolUseID]
+				if lane == nil {
+					t.Fatalf("assistant_delta reached unregistered parent lane %q", p.ParentToolUseID)
+				}
+				lane.observe(t, p)
+				if !mainObserved && p.ParentToolUseID == "" {
+					mainObserved = true
+					if len(observed) != 0 && observed[0] != nil {
+						if p.TurnID == "" {
+							t.Fatal("first main observation lacks a turn identity")
+						}
+						observed[0]()
+					}
+				}
+
 			}
-			if p.ConversationID != convID || p.State != "idle" {
-				continue
-			}
+		}
+		if turn.idle(t, live, convID) {
 			assertSubagentTextLanes(t, agentID, lanes)
 			return
 		}

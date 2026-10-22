@@ -12,30 +12,18 @@ import (
 
 // AnnouncedTurn retains the live first-announcement, nonempty reply and terminal
 // idle milestones. A missing announcement is returned explicitly to the caller.
-func AnnouncedTurn(t *testing.T, next Next, convID string, timeout time.Duration) (protocol.ModelAnnouncedPayload, bool) {
+func AnnouncedTurn(t *testing.T, next Next, convID string, timeout time.Duration, sources ...SourceFacts) (protocol.ModelAnnouncedPayload, bool) {
 	t.Helper()
 	var (
 		announced protocol.ModelAnnouncedPayload
 		seen      bool
-		sawDelta  bool
 	)
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			if !sawDelta {
-				t.Fatalf("M1: never observed a non-empty assistant_delta for %q within %s — the turn never drained "+
-					"end-to-end (delivery never reached the child, or the parser / drain gate / emitter dropped it — "+
-					"most likely a UUID mismatch between seedBootstrapRegistry and seedBoundConversation)", convID, timeout)
-			}
-			t.Fatalf("M2: observed the assistant_delta for %q but never a terminal turn_state{idle} within %s — "+
-				"the turn opened but never closed", convID, timeout)
-		}
+	checked := func(deadline time.Time) protocol.Envelope {
 		env := next(deadline)
 		switch env.Type {
 		case protocol.TypeModelAnnounced:
 			if seen {
-				continue
+				return env
 			}
 			var p protocol.ModelAnnouncedPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -43,36 +31,11 @@ func AnnouncedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 			}
 			announced, seen = p, true
 			t.Logf("captured %s for conversation %q", protocol.TypeModelAnnounced, p.ConversationID)
-		case protocol.TypeAssistantDelta:
-			if sawDelta {
-				continue
-			}
-			var p protocol.AssistantDeltaPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatalf("decode assistant_delta payload: %v", err)
-			}
-			// M1: liveness — a non-empty streamed delta for the driving conv. No
-			// content/echo assertion (real claude's words are non-deterministic).
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
-				sawDelta = true
-				t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
-			}
-		case protocol.TypeTurnState:
-			if !sawDelta {
-				continue // the leading responding state precedes the delta
-			}
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			// M2: after the delta, the terminal idle state closes the turn — return
-			// whatever announcement the turn carried, including none.
-			if st.State == "idle" && st.ConversationID == convID {
-				t.Logf("M2: terminal turn_state{idle} for %q — the turn closed (model_announced seen: %v)", convID, seen)
-				return announced, seen
-			}
 		}
+		return env
 	}
+	CompletedTurn(t, checked, convID, timeout, false, sources...)
+	return announced, seen
 }
 
 // RequireAnnouncedModel checks exact resolution, the independent alias inequality,
@@ -101,7 +64,7 @@ func RequireAnnouncedModel(t *testing.T, announced protocol.ModelAnnouncedPayloa
 func ModelAnnouncement(t *testing.T, w Wire, convID, prompt, alias, expected string, budget time.Duration, daemonLog func() string) {
 	t.Helper()
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "m-1", Text: prompt})
-	announced, seen := AnnouncedTurn(t, w.Next, convID, budget)
+	announced, seen := AnnouncedTurn(t, w.Next, convID, budget, w.Source)
 	RequireAnnouncedModel(t, announced, seen, convID, alias, expected, daemonLog())
 }
 
@@ -112,8 +75,8 @@ func ToolTurn(t *testing.T, w Wire, convID, prompt string, budget time.Duration)
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "m-1", Text: prompt})
 	tools := map[string]string{}
 	completed := map[string]bool{}
-	next := func(deadline time.Time) protocol.Envelope {
-		env := w.Next(deadline)
+	CompletedTurn(t, w.Next, convID, budget, false, w.Source)
+	for _, env := range w.Source(convID) {
 		switch env.Type {
 		case protocol.TypeToolUse:
 			var p protocol.ToolUsePayload
@@ -132,9 +95,7 @@ func ToolTurn(t *testing.T, w Wire, convID, prompt string, budget time.Duration)
 				completed[tools[p.ToolUseID]] = true
 			}
 		}
-		return env
 	}
-	CompletedTurn(t, next, convID, budget, false)
 	if !completed["Write"] || !completed["Read"] {
 		t.Fatal("parser sample lacked complete owned Write and Read round trips")
 	}
@@ -190,7 +151,7 @@ func ModelRejection(t *testing.T, w Wire, convID, sessionID, prompt, expected st
 		t.Fatal("unknown model was not rejected as non-retryable protocol.malformed")
 	}
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: convID, MessageID: "m-after-model-reject", Text: prompt})
-	announced, seen := AnnouncedTurn(t, w.Next, convID, turnBudget)
+	announced, seen := AnnouncedTurn(t, w.Next, convID, turnBudget, w.Source)
 	if !seen || announced.ConversationID != convID || announced.Model != expected {
 		t.Fatal("post-rejection turn did not retain the original resolved model")
 	}
