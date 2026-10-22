@@ -37,7 +37,7 @@ confirmation. Retirement does not wait for an unrelated successor's write.
 
 Unconfirmed successful writes retain their original accepted identity and
 content as `queued` history for ordinary delivery or `written` for Send now,
-without a delivered fact, delivered receipt or automatic input replay.
+without a delivered fact or automatic input replay. Both states remain unordered.
 A historical `queued` state does not put possibly consumed bytes back in
 the FIFO. Failed writes retain the queue's retry behavior. See
 [accepted sends and restart loss](history-package-producers.md#accepted-sends-and-linked-outcomes-2972).
@@ -52,15 +52,21 @@ The source embeds the committed acceptance reference before any reader can see
 it, so a failed companion outcome append cannot split the accepted item into a
 second user row; see [delivery prefixes](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
 
-Acceptance, delivered and drop receipts still publish independently through
-the bounded receipt mailbox. Acceptance is enqueued before releasing readiness;
-delivery appends its source and linked outcome before enqueueing the delivered
-receipt. There is no raw user frame carrying that receipt. Failed storage mints
-no receipt, and asynchronous receipt arrival need not precede unrelated assistant
-output. Original durable IDs, timestamps, neutral payloads and eligible live/
-replay recipients remain until #3733. Producers never wait on peer delivery;
-cancellation stops and joins the receipt worker. See
-[receipt validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+Queued sends are observed through canonical thread items and explicit catch-up;
+queued acceptance, delivery, drop and loss facts produce no legacy receipts
+(#3733), including for connections without `thread`. The queue receipt emitter,
+mailbox and worker are retired. Acceptance appends and binds its durable item ID
+before releasing `ref.ready`; `beforeDelivery` retains that barrier even on
+append failure. Placement records the safe delivery source and linked outcome,
+and store appends wake thread followers. Hidden removal/give-up and visible
+restart loss revise the same accepted item; recovery reads those durable facts
+without restoring a FIFO entry. See
+[accepted sends](history-package-producers.md#accepted-sends-and-linked-outcomes-2972).
+
+**Placement capacity belongs to placement.** `streamTurnSink.placementCommands`
+still uses `placementCommandQueueSize` (16). It previously shared the receipt
+mailbox's constant; deleting receipt infrastructure must not remove or resize
+the stream-drain queue that serializes placement with reply facts.
 
 With `OnAccepted` configured (#2970), its callback must finish before either
 `OnDelivered` or `OnTerminal` begins for that message, including immediate

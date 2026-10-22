@@ -424,17 +424,16 @@ using the same durable per-conversation namespace as `HistoryEntry.ID` and
 start at 1 and remain stable across daemon restarts. Connection `id` resets on
 reconnect, while daemon-wide ring `event_id` is an in-memory replay cursor;
 neither can substitute for a durable history entry id in a read mark.
-Since #2861, three direct live paths attach the successful append's id:
+Direct live paths attach the successful append's id:
 interactive-turn emission (`interactiveTurnEmitterV2.emit`), session-transition
-broadcast (`sessionTransitionEmitterV2.broadcast`), and operator-message history
-commit (`newOperatorMessageHistory`) handed to
-`operatorMessageEmitterV2.broadcast`. Each logical event is appended once before
+broadcast (`sessionTransitionEmitterV2.broadcast`), and eligible neutral receipts
+through `publishLegacyHistory`. Each logical event is appended once before
 fan-out, including when no interactive recipients are connected; all direct
 recipients receive the same history id, payload and timestamp. Session transitions
-have no ring `event_id`, and operator messages can carry `history_entry_id` even
-without a ring.
+have no ring `event_id`. Operator delivery records remain internal thread
+sources; raw user publication and queued receipts are retired (#3732, #3733).
 
-Since #2909, interactive-turn and operator-message ring events retain that
+Since #2909, eligible interactive-turn and neutral-receipt ring events retain that
 original successful append's id before becoming readable for replay, including
 when no interactive recipient was connected. Authenticated reconnect replay
 carries the retained `history_entry_id` with the original payload and timestamp;
@@ -1066,7 +1065,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `hello` | phone → binary | yes (in `noise_init`) | Includes the device-token; optional `last_event_id` for mid-turn reconnect replay (#647). Also accepts `last_seen_ts`, which **no daemon code reads** — it is decoded and dropped, drives no backfill, and a `hello` carrying it behaves identically to one omitting it (#2090). |
 | `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`; for an authorised peer, may include the daemon host's absolute `workspace_root` for resolving relative workspace paths. |
 | `send_message` | phone → binary | no | Carries an **optional** `attachment_ids` — the uploaded attachments this message references, so the daemon names them instead of inferring the set from upload order or arrival timing (#2036). Each element is a lowercase UUIDv4 per [The `attachment_id` shape](#the-attachment_id-shape); **at most 32 per message**, counting elements rather than distinct ids. A message naming none **omits the key entirely** — `null` and `[]` are also accepted and a receiver cannot tell the three apart. **Consumed since #2038**: the daemon names each attachment's on-host path in `claude`'s prompt, refuses an over-bound list with `protocol.malformed`, and deduplicates a repeated id. See [Naming a message's attachments](#naming-a-messages-attachments). **Two fixed literals in `text` are exceptions to ordinary message delivery**: `/clear` (#2456) and `/reset` (#3607), independent of `slash_command_list`. After trimming, either must be the first whitespace-delimited token, matched case-sensitively with Unicode whitespace boundaries; trailing text after whitespace is discarded too. `/clear extra` and `/reset extra` reset; `/clearcache`, `/resetfoo`, `/RESET`, `/Reset` and `please /reset` remain ordinary messages. Payload decoding, the attachment-count bound and conversation routing still reject invalid requests before interception. For a valid, routable match, the daemon sends the ordinary `ack` **before** calling `StartNewSession` for that conversation, using the same wrap-up, handoff and rotation routine as a named `new_session` (see [`resetting`](#resetting)). Neither literal is enqueued or delivered to claude. Its `attachment_ids` are dropped without resolution, so they cannot produce `attachment.not_found`; the handler neither touches `LastUsedAt` nor auto-names the conversation. The reset is **not gated on the negotiated `interactive` capability** the way the `resetting` frames themselves are: a non-interactive client can use either literal but does not see those frames. An absent resetter or any reset error, including a refused workspace, still drops the message with only the ordinary `ack`; there is no `new_session.workspace_refused`-shaped reply on this path. Only a successful reset invalidates held reply suggestions; refusal preserves them (see [Clear and invalidation](#reply_suggestion)). A client that renders its own optimistic echo of either literal as a sent row will not find that row in history after a reload, since the daemon never delivers the message — the session delimiter appears with nothing above it. Accepted, not a bug. Also carries an **optional `client_sent_at`** (RFC 3339, #2704): when the client says Send was tapped, on the client's own clock. An absent or unparseable value is **dropped, not refused** — the message is enqueued and delivered exactly as if the key were missing. It is never used for ordering (the client's clock may be wrong) and never logged. See [A history entry](#a-history-entry) for where it, and the sender's device name and app version, land on the stored turn. |
-| `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type; v2 assistant output uses the structured interactive stream (#699). Operator sends are observed through canonical thread items and explicit thread catch-up; raw user-message pushes and their reconnect replay publication are retired for every app (#3732), including connections without `thread`. Safe delivery source records remain internal history inputs. Acceptance/delivered/drop receipts retain their existing eligible live/replay recipients until #3733; see [Queue observation and delivery identity](#queue-observation-and-delivery-identity). |
+| `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type; v2 assistant output uses the structured interactive stream (#699). Queued sends are observed through canonical thread items and explicit catch-up; queued acceptance, delivery, drop and loss facts produce no legacy receipts (#3733). Raw user-message pushes and their reconnect replay publication are retired for every app (#3732), including connections without `thread`. Safe delivery source records remain internal history inputs; see [Queue observation and delivery identity](#queue-observation-and-delivery-identity). |
 | `list_conversations` | phone → binary | no | |
 | `conversations` | binary → phone | no | Reply to `list_conversations`, correlated by `in_reply_to`. Every row carries **`current_session_id`** (#940): an **always-present JSON string** copied from that conversation's stored session binding, including `""` when unbound. This supplies initial session ID discovery on the first list response, before any `session_transition`, without an extra `request_session_settings` request or `/clear`. A nonempty binding does **not** guarantee a running process or a successful session-scoped mutation. Every row carries **`workspace_label`** (#2208): the operator-set display name stored for that row's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every row of every reply, so a client may treat a missing one as a malformed row rather than as an unlabelled workspace, and before any workspace is ever named every row carries `null`. It is keyed by **workspace, not conversation**: rows sharing one `cwd` carry the same value, a row never carries a neighbour's, and the only thing that changes it is [`rename_workspace`](#renaming-a-workspace) — which is how a client that renames on one device sees the new label on another. **Archived rows are not exempt**: this reply is unfiltered, and archiving a conversation does not un-name its folder. The value is a stored opaque string echoed **verbatim**; as [§ Renaming a workspace](#renaming-a-workspace) already states, its 128-byte bound is a size limit and not a safety property, so rendering it safely is the client's job. Every row also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation, `false` by default. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, which is how a client paired with an older daemon keeps notifying rather than silently going quiet. Both clients raise their own alerts from events they already receive; the daemon only stores and reports this flag. Every row also carries **`archived_at`** (#2698): an RFC3339 UTC timestamp for the moment `archive_conversation` archived this row. Archiving it again keeps the original stamp, and `unarchive_conversation` clears it back to `null`. **Nullable but never omitted** — `null` on every active row, and also on a row archived before this field existed, so a client cannot distinguish "never archived" from "archived, no stamp recorded" and falls back to ordering those rows by `last_used_at`. Clients order the Archive screen newest-archived-first by this value. `conversation_updated` does not carry this field. Every row carries **`read_up_to`**, the host operator's durable read mark, as an always-present unsigned 64-bit integer including `0`, shared by every paired client/device on this host. The only unread evidence is authoritative **`last_shown_version`** on connections that negotiated `thread`: unread is `last_shown_version > read_up_to` when that field is present. Absent shown evidence means unknown, never zero. Every otherwise eligible row survives unavailable evidence with its shown field omitted; listing succeeds without legacy history, including an empty registry. The `latest_entry_id` field and whole-list legacy-history refusal are retired (#3722). [`mark_conversation_read`](#marking-a-conversation-read) raises the durable mark and still refuses retryably when authoritative evidence is unavailable. **`agent`** (`"claude"` \| `"codex"`, #2643) is the agent that runs the row's bound session — present only for a conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, `omitempty` so it is absent, not `null`, for a conn that did not. A conversation with no bound session, or one whose bound session the daemon does not hold, reads `"claude"`. **A conn that did not negotiate `multi_agent` is not merely sent an unlabelled row: every row whose agent is `"codex"` is left out of the reply entirely**, so it receives only Claude rows, and every remaining row carries no `agent` key at all. Optional **`last_shown_version`** on negotiated thread connections comes from usable loaded status or an eligible unloaded clean certificate (#3330), whose consumed version V must exactly equal independently known current raw history progress H: absent for stale/invalid evidence or unknown progress, numeric `0` for authoritative zero including valid empty evidence at V = H = 0; see [`conversations`](#conversations). It tracks shown thread additions/text appends and preserves the stored binding and durable read mark.  Every row also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; an absent field from an older host means unpinned. All list/update producers preserve stored pins, including command-package announcements (#3538). See [pin requests](#set_conversation_pinned) for the host-local contract. |
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
@@ -1325,6 +1324,11 @@ acceptance entry ID through queued, written and delivered revisions. Queued and
 written items have no `order`; delivery supplies actual placement order and
 receiving-session attribution. Safe text, sender/device identity, attachment IDs
 and acceptance-time stored names survive live updates and reopened catch-up.
+Queued acceptance, delivery, drop and loss facts produce no legacy receipts
+(#3733). Explicit removal/give-up revises the accepted item to hidden, inactive
+`dropped`; unresolved restart loss is shown, inactive `lost`, never delivered.
+Both terminal states remain unordered. Refused operations and shutdown alone
+create no terminal resolution.
 See [delivery placement](#queue-observation-and-delivery-identity) for echo and
 supported no-echo ordering.
 
@@ -2589,7 +2593,7 @@ records do not themselves change shown progress or rewrite old marks.
 **Accounting is not presentation.** A list watermark, fetched history or a live/
 replayed [runtime receipt](#a-history-entry) supplies no sight of unseen content.
 Submit a checkpoint only from explicit foreground presentation evidence. Known
-nonvisual receipts, including queued-send and remote prompt-answer receipts,
+nonvisual receipts, including remote prompt-answer receipts,
 can account for intervening durable IDs, but unknown, malformed or unidentified
 receipts and unaccounted numeric holes remain barriers.
 The daemon's clamp bounds the requested mark; it does not establish that the
@@ -6377,11 +6381,13 @@ and [Desktop #1906](https://github.com/pyrycode/pyrycode-desktop/issues/1906).
 
 #### Queue observation and delivery identity
 
-Operator sends are observed through canonical thread items and explicit thread
-catch-up; raw user-message pushes and their reconnect replay publication are
-retired for every app (#3732). Connections without `thread` receive no raw user
-fallback. Recover missed acceptance, written, delivery, drop and restart-loss
-revisions with explicit thread catch-up from the last completed checkpoint.
+Queued sends are observed through canonical thread items and explicit catch-up;
+queued acceptance, delivery, drop and loss facts produce no legacy receipts
+(#3733). This applies to live connections and newly appended reconnect replay,
+including connections without `thread`; there is no compatibility flag or
+release delay. Raw user-message pushes and their reconnect replay publication
+are also retired (#3732). Recover missed acceptance, written, delivery, drop and
+restart-loss revisions with explicit thread catch-up from the last completed checkpoint.
 Rebuild current queued state from every `user_message` item with `status: queued`
 and `active: true`, including catch-up and subsequent additions/changes. Delivery
 of one accepted identity does not prove that another queued item is absent.
@@ -6398,15 +6404,31 @@ neither creates a second user row. Internal delivery source records retain
 `queued_msg_id` and embed the committed `accepted_entry_id` before readers can
 consume them. Even if the companion `send_delivered` append fails, a committed
 linked source places the acceptance-owned item. Missing/failed appends fabricate
-neither acceptance identity nor a delivered receipt. Legacy acceptances without
+neither acceptance identity nor delivery. Legacy acceptances without
 a queue handle retain that absence; never infer it from a delivery or text.
+
+For example, item `100` with queue handle `7` can take these revisions. The last
+two rows are alternative resolutions of an unresolved acceptance:
+
+| Observed event | `item.id` | `status` | `order` | `shown` / `active` |
+| --- | --- | --- | --- | --- |
+| Acceptance | 100 | `queued` | omitted | true / true |
+| Successful Send now write, awaiting placement | 100 | `written` | omitted | true / true |
+| Actual delivery recorded as entry 140 | 100 | `delivered` | 140 | true / false |
+| Explicit removal or actual give-up | 100 | `dropped` | omitted | false / false |
+| Restart without durable resolution | 100 | `lost` | omitted | true / false |
+
+Each retains `content.queued_msg_id: 7`; only the queued, active item is eligible
+for dequeue/Send now, subject to the command's live acceptance binding. None of
+these events produces a queued receipt banner.
 
 **Ordinary delivery placement (#2820).** On the interactive Claude stream, an
 echoed ordinary queued delivery opens its answering turn: the delivery source
 is recorded after the preceding turn's `turn_end`, when there is one, and before
 the answering turn's first `turn_state`, assistant or tool frame. The canonical
-item takes this delivery order while retaining its acceptance ID. Thread batches
-can coalesce updates; receipt or raw event arrival is not a placement clock.
+item takes this delivery order while retaining its acceptance ID. Queued and
+written items have no `order`. Thread batches can coalesce updates; batch arrival
+is not a placement clock.
 Identical payloads or repeated `message_id` values keep distinct accepted
 identities. Interleaved ordinary and Send now deliveries match their own echoes
 in actual write order within the conversation; another conversation's echo
@@ -6423,14 +6445,18 @@ dropped-before-write attempts create no delivered entry; a successful retry
 records once. **Codex/no-stream delivery retains commit-at-write timing**, with
 the same queue identity, rather than Claude echo placement.
 
-Acceptance, delivered and drop receipts remain neutral info banners for their
-existing eligible live/replay recipients until #3733. Acceptance is enqueued
-before its outcome; the delivered receipt follows the successful linked outcome
-append and requires no raw user frame. Each receipt keeps its original durable
-ID and timestamp, carries no send text, attachments or host paths, and grants no
-presentation or read authority. Receipt delivery is asynchronous and can
-interleave with unrelated assistant traffic; explicit thread catch-up remains
-the recovery authority.
+**Drop and restart recovery.** Explicit removal or actual retry give-up records
+a hidden, inactive `dropped` item under the acceptance ID. Confirmed delivery
+wins a racing removal; refusal, retry and shutdown alone invent no outcome.
+On restart, an acceptance without durable resolution becomes a shown, inactive
+`lost` item with reason `daemon_restart`, retaining its identity and safe content.
+Drop and loss have no delivery order; neither means delivered. Loss records
+missing durable confirmation, not proof that the child never read the bytes.
+Recovery does not re-enqueue input. Warm and reopened thread state use the same
+facts, and successfully recorded loss is not repeated. No queued fact, including
+`send_written` or `send_lost`, has a legacy receipt projection. Safe text,
+sender/device identity, attachment IDs, acceptance-time stored names and captured
+receiving-session provenance remain in canonical history, isolated by conversation.
 
 #### `dequeue_message`
 
@@ -6457,8 +6483,8 @@ It asks the daemon to write the named queued message into that conversation's
 idle. There is no dedicated reply. Operator sends are observed through canonical
 thread items and explicit thread catch-up; raw user-message pushes and their
 reconnect replay publication are retired for every app (#3732), including
-connections without `thread`. No queue snapshot is emitted. Acceptance/delivered/
-drop receipts keep their existing eligible live/replay recipients until #3733.
+connections without `thread`. No queue snapshot or queued receipt is emitted
+(#3727, #3733). Observe the same accepted item through written/delivered revisions.
 
 The internal delivered source and canonical item's content carry optional
 boolean `sent_now: true` for this path; ordinary delivery omits it. The daemon
@@ -6477,7 +6503,7 @@ answering-turn completion and carried-close grace readiness. `WaitIdle`, child
 exit, teardown and cancellation cannot substitute for completion; exit during
 grace retires the unconfirmed placement. Successful write plus valid evidence
 records once, even with a delayed callback or repeated/late echo. See
-[ordinary placement and receipt ordering](#queue-observation-and-delivery-identity).
+[ordinary placement and canonical identity](#queue-observation-and-delivery-identity).
 
 It is a **no-op**, leaving the backlog as it was, when the turn is idle, the
 queue handle is unknown/already delivered, the current head has begun committing
@@ -7992,13 +8018,12 @@ legacy live/replay receipt projection below does not expose raw records.
 | `payload` | object | Original stored payload bytes; the legacy receipt projection substitutes the nonvisual shape below. |
 | `ts` | string (RFC 3339) | The original durable entry timestamp, also retained by receipts. |
 
-**Known runtime, queued-send and remote prompt-answer facts use nonvisual receipts (#3026, #3167, #3222).**
+**Known runtime and remote prompt-answer facts use nonvisual receipts (#3026, #3222).**
 `main_turn_opened`, `main_tool_interrupted`, `main_turn_interrupted` and
 `session_divider`, validated
 [agent/task facts](knowledge/features/history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
-`send_accepted`, `send_delivered`, `send_dropped`, `send_lost` and validated remote
-`prompt_answered` facts project into legacy live/replay delivery as `type: "banner"` with this
-payload (all five keys are required and nonnull):
+and validated remote `prompt_answered` facts project into legacy live/replay
+delivery as `type: "banner"` with this payload (all five keys are required and nonnull):
 
 ```json
 {
@@ -8019,23 +8044,26 @@ for a divider. A `daemon_restart` divider needs no predecessor/successor session
 IDs. Missing durable identity or timestamp and malformed facts produce no
 receipt; arbitrary unknown types remain excluded without being certified harmless.
 
-**Queued-send validation preserves the same boundary.** Every queued receipt
-requires matching `conversation_id`, a nonzero successful durable entry ID and
-a nonzero entry timestamp, plus these raw fact fields:
+**Queued-send validation is a source contract, not receipt eligibility (#3733).**
+`send_accepted`, `send_written`, `send_delivered`, `send_dropped` and `send_lost`
+produce no legacy receipts, even when valid, explicitly shown and durably
+identified. Source validation still requires matching `conversation_id`, typed
+fields and supported reasons. An optional `queued_msg_id`, when present, must be
+a positive uint64; legacy acceptance facts may omit it.
 
 | Raw fact | Additional required validation |
 | --- | --- |
 | `send_accepted` | Nonzero `accepted_at`. |
+| `send_written` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "written"`, no delivery link. |
 | `send_delivered` | Nonzero `occurred_at`, `accepted_entry_id` and `delivery_entry_id`; exactly `reason: "delivered"`. |
 | `send_dropped` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "removed"` or `"give_up"`. |
 | `send_lost` | Nonzero `occurred_at` and `accepted_entry_id`; exactly `reason: "daemon_restart"`. |
 
 Legacy callers' sender/message fields remain optional. Unknown/malformed facts,
-missing required fields and unsupported outcome reasons produce no receipt.
-Receipts carry only the five banner fields above: no send text, attachments,
-sender fields, raw references or facts. Raw facts, provenance/visibility metadata,
-raw store watermarks and durable ID allocation remain unchanged, including
-hidden removal/give-up outcomes. Raw visibility does not authorize transport
+missing required fields and unsupported outcome reasons remain invalid sources.
+Raw facts, provenance/visibility metadata, raw store watermarks and durable ID
+allocation remain unchanged, including hidden removal/give-up outcomes.
+Raw visibility does not authorize transport
 or certify accounting.
 
 **Remote prompt-answer validation binds to the original resolution (#3222).**
@@ -8072,20 +8100,19 @@ broadcast and neutral-receipt publication attach that same
 per-conversation id to every interactive recipient's direct envelope. Reconnect
 replay of history-backed interactive-turn and neutral-receipt
 ring events carries the original append's id too (#2909), without appending another entry.
-Running runtime, queued-send and validated remote prompt-answer facts, including
+Running runtime and validated remote prompt-answer facts, including
 dividers, publish the same receipt bytes and original durable ID/timestamp to
 live recipients and the replay ring. A winning remote prompt resolution appends once and serializes
 publication outside bridge/registry locks, recording for replay even when no
 clients are connected. Duplicate/losing resolutions add no fact or receipt.
 The captured original conversation and existing interactive, conversation
-membership and agent-access gates apply. Queued acceptance is recorded and its
-receipt enqueued before placement can proceed. The delivered source and linked
-outcome append before their delivered receipt is enqueued; acceptance precedes
-its outcome in the receipt mailbox. Raw user publication is retired, and receipt
-arrival need not precede unrelated assistant traffic. Late echoes or callbacks
-add no source or receipt. Startup reconciliation receipts, including `send_lost`,
-remain durable source facts for thread folding, without populating the
-ring or sending live frames. Existing recipient and agent/isolation gates apply.
+membership and agent-access gates apply. Queued acceptance recording and binding
+still complete before placement can proceed. The delivery source embeds the
+committed acceptance reference before any follower reads it, then records the
+linked outcome. Late echoes/callbacks add no duplicate source or item. Queued
+facts produce no legacy live/replay receipts; startup reconciliation remains
+source-only, including `send_lost`, without populating the ring or sending live
+frames. Existing recipient and agent/isolation gates apply.
 Channel posts still omit it; ordinary `session_transition` frames are not
 ring-replayed. Use it as
 [`mark_conversation_read.up_to`](#marking-a-conversation-read) when the operator
@@ -8094,7 +8121,7 @@ has read through that entry. It is independent of the envelope's connection
 absent or failed history storage, and non-history-backed frames (live or replayed)
 omit `history_entry_id` entirely, never as `null` or `0`. Eligible legacy delivery
 and existing ring recording proceed even when history cannot be appended;
-failed or absent storage cannot mint a runtime, queued-send or prompt-answer
+failed or absent storage cannot mint a runtime or prompt-answer
 receipt. Obtain a durable target only with presentation evidence, using the original
 durable identity; a list watermark alone is not a read checkpoint.
 
@@ -8179,9 +8206,13 @@ Received identity enables joining, a validated receipt accounts for its ID,
 foreground presentation establishes sight, and a correlated
 `conversation_updated.read_up_to` confirms persistence. Unknown, malformed or
 unidentified receipts and unaccounted holes remain barriers. Neither receipt
-arrival, replay nor a fetched thread query establishes presentation. Startup
-`send_lost` facts remain source history without live/ring publication; clients
-recover content through [Thread query messages](#thread-query-messages).
+arrival, replay nor a fetched thread query establishes presentation. Queued
+acceptance, written, delivery, drop and loss facts have no legacy receipt
+identity or projection (#3733), including for connections without `thread`.
+Their canonical item ID remains the acceptance entry ID; actual delivery order
+is separate. Clients recover the lifecycle and content through explicit
+[Thread query messages](#thread-query-messages), including hidden drops and
+visible/not-delivered restart loss.
 
 ## Hosted apps (v2)
 

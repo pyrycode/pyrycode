@@ -156,6 +156,10 @@ See [Delivered notification (#2115)](msgqueue-package-lifecycle.md#delivered-not
 for copied safe projections and the delivered, removed and give-up terminal
 outcomes. Acceptance completes before delivery observers; `OnDelivered`
 precedes the delivered terminal callback. Confirmed delivery wins removal races.
+The daemon retains acceptance recording/readiness, accepted-item binding,
+placement and thread wakeups. Queued facts produce no legacy receipts (#3733);
+there is no queue receipt worker. Apps recover the same canonical accepted item
+through explicit thread catch-up.
 
 ## Concurrency model
 
@@ -215,10 +219,12 @@ safe content, acceptance binding, successful-write/echo or supported completion
 ordering and durable accepted/written/delivered/drop/lost facts. Apps observe the
 same acceptance-owned canonical item through thread updates and explicit catch-up,
 including after history reopening; connections without `thread` get no raw user
-fallback. Acceptance/delivered/drop receipts retain independent publication to
-their existing eligible live/replay recipients until #3733. A delivered receipt
-requires its successful linked outcome append, with the original durable ID and
-timestamp; it no longer needs a user frame. See
+fallback. Queued acceptance, delivery, drop and loss facts produce no legacy
+receipts (#3733), and no queue receipt emitter, mailbox or worker remains.
+The acceptance append and item binding complete before placement can proceed;
+the delivery source embeds that committed reference before readers can see it,
+even if its companion outcome append fails. Queued/written states stay unordered
+until actual delivery supplies placement. See
 [delivered notification](msgqueue-package-lifecycle.md#delivered-notification-2115).
 
 Before producers or inbound traffic start, startup scans all raw pages of each

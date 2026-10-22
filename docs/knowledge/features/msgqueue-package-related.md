@@ -71,13 +71,13 @@ Part of [`internal/msgqueue`](msgqueue-package.md).
   `text`. `DeliveryMessage` now supplies the safe projection there for stream placement. See
   [Delivered notification](msgqueue-package-lifecycle.md#delivered-notification-2115) and
   [history-package.md § Producers](history-package-producers.md#producers-2114-2115).
-  **#2699 added a second `OnDelivered` consumer on the same call, `operatorMessageEmitterV2`, needing
-  no new engine guarantee.** The msgqueue tests already pinned `OnDelivered`'s once-per-delivery,
+  The former live operator emitter was retired with raw user publication (#3732)
+  and queued receipts (#3733); canonical recording retains the engine guarantees.
+  The msgqueue tests pin `OnDelivered`'s once-per-delivery,
   never-on-give-up, never-on-removed-head semantics (`TestQueue_OnDelivered_FiresOnceAcrossRetries`,
-  `…_SilentOnGiveUp`, `…_SilentWhenHeadRemovedBeforeCommit`) before this ticket existed; a producer
-  that only ever runs from that seam inherits them for free. The `cmd/pyry`-level test this ticket
-  added therefore covers just the shape specific to the new producer — retry-then-deliver pushed
-  exactly once, carrying the #2038 host-path-free payload — not the once/never cases again.
+  `…_SilentOnGiveUp`, `…_SilentWhenHeadRemovedBeforeCommit`); an observer
+  inherits those guarantees. Claude consumption and final placement additionally
+  require receiving-child evidence, as the lifecycle overview explains.
 - **#2729 added `SendNow`, the engine's fifth op and the second that mutates the backlog out of order
   (after `Remove`).** It writes a queued message into the conversation's running turn rather than its
   backlog slot, reusing `Remove`'s take-the-waiting-head-out-of-the-FIFO argument instead of a new one,
