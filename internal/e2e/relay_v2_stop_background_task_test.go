@@ -82,7 +82,9 @@ func TestRelayV2_StopBackgroundTaskCompletesOnlyAddressedTask(t *testing.T) {
 			if err := json.Unmarshal(entry.Payload, &p); err != nil {
 				t.Fatal(err)
 			}
-			retained = p.ConversationID == conv && len(p.Tasks) == 1 && p.Tasks[0].TaskID == taskID
+			if p.ConversationID == conv {
+				retained = len(p.Tasks) == 1 && p.Tasks[0].TaskID == taskID
+			}
 		}
 		seal(protocol.Envelope{ID: uint64(27961 + i), Type: protocol.TypeSendMessage, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: conv, MessageID: conv, Text: "hold\n"})})
 		deadline = time.Now().Add(15 * time.Second)
