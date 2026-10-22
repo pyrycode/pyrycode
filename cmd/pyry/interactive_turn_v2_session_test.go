@@ -203,7 +203,7 @@ func TestInteractiveTurnEmitterV2_ModelAnnouncedMidTurnDoesNotDisturbOpenTurn(t 
 	}
 }
 
-func TestInteractiveTurnEmitterV2_ModelRefusalFallbackFansOutToInteractiveOnly(t *testing.T) {
+func TestInteractiveTurnEmitterV2_ModelRefusalFallbackSourceOnly(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -229,14 +229,13 @@ func TestInteractiveTurnEmitterV2_ModelRefusalFallbackFansOutToInteractiveOnly(t
 
 	if got := pushTypes(pushesFor(bcast.pushes, "interactive")); !slices.Equal(got, []string{
 		protocol.TypeTurnState,
-		protocol.TypeModelRefusalFallback,
 	}) {
 		t.Fatalf("interactive frame order: got %v", got)
 	}
 	if got := len(pushesFor(bcast.pushes, "legacy")); got != 0 {
 		t.Fatalf("non-interactive connection received %d frames, want 0", got)
 	}
-	refusals := pushesOfType(bcast.pushes, protocol.TypeModelRefusalFallback)
+	refusals := pushesOfType(testEmitterFacts(t, e), protocol.TypeModelRefusalFallback)
 	if len(refusals) != 1 {
 		t.Fatalf("model_refusal_fallback pushed %d envelopes, want exactly 1", len(refusals))
 	}
@@ -293,7 +292,7 @@ func TestInteractiveTurnEmitterV2_ModelRefusalFallbackEventKindIsContentFree(t *
 	}
 }
 
-func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackFansOutToInteractiveOnly(t *testing.T) {
+func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackSourceOnly(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -317,14 +316,13 @@ func TestInteractiveTurnEmitterV2_ModelRefusalNoFallbackFansOutToInteractiveOnly
 
 	if got := pushTypes(pushesFor(bcast.pushes, "interactive")); !slices.Equal(got, []string{
 		protocol.TypeTurnState,
-		protocol.TypeModelRefusalNoFallback,
 	}) {
 		t.Fatalf("interactive frame order: got %v", got)
 	}
 	if got := len(pushesFor(bcast.pushes, "legacy")); got != 0 {
 		t.Fatalf("non-interactive connection received %d frames, want 0", got)
 	}
-	refusals := pushesOfType(bcast.pushes, protocol.TypeModelRefusalNoFallback)
+	refusals := pushesOfType(testEmitterFacts(t, e), protocol.TypeModelRefusalNoFallback)
 	if len(refusals) != 1 {
 		t.Fatalf("model_refusal_no_fallback pushed %d envelopes, want exactly 1", len(refusals))
 	}

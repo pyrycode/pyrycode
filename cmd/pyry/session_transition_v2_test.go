@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -113,21 +114,17 @@ func mixedSnapshot() *fakeInteractiveBcast {
 func TestSessionTransitionBroadcast_Clear(t *testing.T) {
 	t.Parallel()
 	bcast := mixedSnapshot()
-	e := newSessionTransitionEmitterV2(bcast, constResolver("conv-1", true), discardLogger())
+	e := newSessionTransitionEmitterV2(bcast, constResolver(testConvID, true), discardLogger())
 
+	e.hist = history.New(t.TempDir())
 	e.broadcast(context.Background(), sessions.SessionTransition{
 		PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred,
 	})
 
-	// AC#3: exactly one push, to the interactive conn; nothing to "n".
-	if got := pushesFor(bcast.pushes, "n"); len(got) != 0 {
-		t.Fatalf("non-interactive conn received %d pushes, want 0", len(got))
+	if len(bcast.pushes) != 0 {
+		t.Fatal("raw transition published")
 	}
-	to := pushesFor(bcast.pushes, "i")
-	if len(to) != 1 {
-		t.Fatalf("interactive conn received %d pushes, want 1", len(to))
-	}
-	env := to[0].env
+	env := testTransitionFact(t, e.hist, testConvID)
 	if env.Type != protocol.TypeSessionTransition {
 		t.Errorf("type: got %q, want %q", env.Type, protocol.TypeSessionTransition)
 	}
@@ -139,7 +136,7 @@ func TestSessionTransitionBroadcast_Clear(t *testing.T) {
 		t.Errorf("ids: got prev=%q new=%q, want prev=sess-a new=sess-b", p.PreviousSessionID, p.NewSessionID)
 	}
 	// AC#1: the resolved conversation_id is stamped onto the envelope.
-	if p.ConversationID != "conv-1" {
+	if p.ConversationID != testConvID {
 		t.Errorf("conversation_id: got %q, want %q", p.ConversationID, "conv-1")
 	}
 	if !p.OccurredAt.Equal(occurred) {
@@ -154,20 +151,18 @@ func TestSessionTransitionBroadcast_Clear(t *testing.T) {
 func TestSessionTransitionBroadcast_Eviction(t *testing.T) {
 	t.Parallel()
 	bcast := mixedSnapshot()
-	e := newSessionTransitionEmitterV2(bcast, constResolver("conv-1", true), discardLogger())
+	e := newSessionTransitionEmitterV2(bcast, constResolver(testConvID, true), discardLogger())
 
+	e.hist = history.New(t.TempDir())
 	e.broadcast(context.Background(), sessions.SessionTransition{
 		PreviousID: "sess-a", NewID: "", Reason: sessions.ReasonEviction, OccurredAt: occurred,
 	})
 
-	if got := pushesFor(bcast.pushes, "n"); len(got) != 0 {
-		t.Fatalf("non-interactive conn received %d pushes, want 0", len(got))
+	if len(bcast.pushes) != 0 {
+		t.Fatal("raw transition published")
 	}
-	to := pushesFor(bcast.pushes, "i")
-	if len(to) != 1 {
-		t.Fatalf("interactive conn received %d pushes, want 1", len(to))
-	}
-	p := decodeSessionTransition(t, to[0].env)
+	env := testTransitionFact(t, e.hist, testConvID)
+	p := decodeSessionTransition(t, env)
 	if p.Reason != "idle_evict" {
 		t.Errorf("reason: got %q, want %q", p.Reason, "idle_evict")
 	}
@@ -176,7 +171,7 @@ func TestSessionTransitionBroadcast_Eviction(t *testing.T) {
 		t.Errorf("ids: got prev=%q new=%q, want both sess-a", p.PreviousSessionID, p.NewSessionID)
 	}
 	// AC#1: idle_evict carries the resolved conversation_id too.
-	if p.ConversationID != "conv-1" {
+	if p.ConversationID != testConvID {
 		t.Errorf("conversation_id: got %q, want %q", p.ConversationID, "conv-1")
 	}
 	if p.WorkspaceCwd != nil {
@@ -218,31 +213,6 @@ func TestSessionTransitionBroadcast_UnknownReasonDrops(t *testing.T) {
 
 	if len(bcast.pushes) != 0 {
 		t.Fatalf("unknown reason emitted %d pushes, want 0", len(bcast.pushes))
-	}
-}
-
-// TestSessionTransitionBroadcast_PushErrorContinues proves a failing conn does
-// not abort the fan-out for the others (AC#2 robustness).
-func TestSessionTransitionBroadcast_PushErrorContinues(t *testing.T) {
-	t.Parallel()
-	bcast := &fakeInteractiveBcast{
-		snapshots: [][]relay.ActiveConn{{
-			{ConnID: "i1", Interactive: true},
-			{ConnID: "i2", Interactive: true},
-		}},
-		pushErr: map[string]error{"i1": context.DeadlineExceeded},
-	}
-	e := newSessionTransitionEmitterV2(bcast, constResolver("conv-1", true), discardLogger())
-
-	e.broadcast(context.Background(), sessions.SessionTransition{
-		PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred,
-	})
-
-	if got := pushesFor(bcast.pushes, "i1"); len(got) != 1 {
-		t.Fatalf("first (failing) conn: got %d push attempts, want 1", len(got))
-	}
-	if got := pushesFor(bcast.pushes, "i2"); len(got) != 1 {
-		t.Fatalf("second conn after a failing first: got %d pushes, want 1 (loop must continue)", len(got))
 	}
 }
 
@@ -335,8 +305,7 @@ func TestConversationForSession(t *testing.T) {
 }
 
 // TestSessionTransitionBroadcast_UnresolvableDrops proves AC#3: an unresolvable
-// binding drops the whole event (zero pushes to any conn), and the emitter
-// survives to fan out the next, resolvable transition.
+// binding records nothing, and the emitter records the next resolvable transition.
 func TestSessionTransitionBroadcast_UnresolvableDrops(t *testing.T) {
 	t.Parallel()
 	bcast := mixedSnapshot()
@@ -348,9 +317,10 @@ func TestSessionTransitionBroadcast_UnresolvableDrops(t *testing.T) {
 		if nth == 1 {
 			return "", false
 		}
-		return "conv-1", true
+		return testConvID, true
 	}
 	e := newSessionTransitionEmitterV2(bcast, resolve, discardLogger())
+	e.hist = history.New(t.TempDir())
 
 	e.broadcast(context.Background(), sessions.SessionTransition{
 		PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred,
@@ -358,13 +328,16 @@ func TestSessionTransitionBroadcast_UnresolvableDrops(t *testing.T) {
 	if len(bcast.pushes) != 0 {
 		t.Fatalf("unresolvable transition emitted %d pushes, want 0 (whole-event drop)", len(bcast.pushes))
 	}
+	if len(historyEntries(t, e.hist, testConvID)) != 0 {
+		t.Fatal("unresolved ownership recorded a transition")
+	}
 
-	// Follow-up resolvable transition still delivers — the Run-survives shape.
+	// A following resolvable transition still records its source.
 	e.broadcast(context.Background(), sessions.SessionTransition{
 		PreviousID: "sess-b", NewID: "sess-c", Reason: sessions.ReasonClear, OccurredAt: occurred,
 	})
-	if got := pushesFor(bcast.pushes, "i"); len(got) != 1 {
-		t.Fatalf("follow-up resolvable transition: interactive conn got %d pushes, want 1", len(got))
+	if len(bcast.pushes) != 0 || len(historyEntries(t, e.hist, testConvID)) != 1 {
+		t.Fatal("resolvable transition failed to record or published raw content")
 	}
 }
 
@@ -427,17 +400,7 @@ func TestTransitionClearsTurn(t *testing.T) {
 	}
 }
 
-// #1202 AC3/AC4: the pool's single observer slot is COMPOSED, not clobbered.
-// Every transition that reaches the emitter today still reaches it, and the
-// teardown clear runs alongside it — including in PTY mode, where no tracker is
-// constructed at all and the composed observer is still installed.
-//
-// chanBcast (stream_turn_drain_test.go) rather than fakeInteractiveBcast, and the
-// difference is a -race failure not a style choice: fakeInteractiveBcast's doc
-// comment records that it carries no mutex because "the emitter spawns no
-// goroutine", and startSessionTransitionStreamV2 spawns emitter.Run. chanBcast's
-// channel doubles as the barrier for that async fan-out; the busy half needs none,
-// the clear being synchronous on the observer's own goroutine.
+// The composed observer records transitions and releases busy state, including with no busy tracker. Source recording is the asynchronous drain barrier.
 func TestStartSessionTransitionStreamV2_ComposedObserver(t *testing.T) {
 	t.Parallel()
 
@@ -448,17 +411,17 @@ func TestStartSessionTransitionStreamV2_ComposedObserver(t *testing.T) {
 		wantReason string
 	}{
 		{
-			name:       "clear rotation closes the turn and still emits",
+			name:       "clear rotation closes the turn and records",
 			in:         sessions.SessionTransition{PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred},
 			wantReason: "clear",
 		},
 		{
-			name:       "eviction closes the turn and still emits",
+			name:       "eviction closes the turn and records",
 			in:         sessions.SessionTransition{PreviousID: "sess-a", NewID: "", Reason: sessions.ReasonEviction, OccurredAt: occurred},
 			wantReason: "idle_evict",
 		},
 		{
-			name:       "PTY mode: a nil tracker neither panics nor suppresses the envelope",
+			name:       "nil tracker preserves source recording",
 			nilTracker: true,
 			in:         sessions.SessionTransition{PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred},
 			wantReason: "clear",
@@ -486,7 +449,8 @@ func TestStartSessionTransitionStreamV2_ComposedObserver(t *testing.T) {
 
 			sink := &captureObserverSink{}
 			bcast := newChanBcast("conn-i")
-			cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, nil, discardLogger())
+			store := history.New(t.TempDir())
+			cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, store, discardLogger())
 			defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 			if sink.obs == nil {
@@ -498,7 +462,7 @@ func TestStartSessionTransitionStreamV2_ComposedObserver(t *testing.T) {
 				t.Errorf("Busy = true after the teardown transition, want false")
 			}
 
-			env := collectEnvs(t, bcast.pushed, 1)[0]
+			env := testTransitionFact(t, store, testConvID)
 			if env.Type != protocol.TypeSessionTransition {
 				t.Fatalf("envelope type: got %q, want %q", env.Type, protocol.TypeSessionTransition)
 			}
@@ -509,12 +473,7 @@ func TestStartSessionTransitionStreamV2_ComposedObserver(t *testing.T) {
 	}
 }
 
-// #1202: an unknown/future TransitionReason clears nothing and emits nothing —
-// the reason set is a WHITELIST inherited from toWirePayload's closed switch, not
-// "anything that is not X tears a session down". The busy half needs no barrier
-// (the clear is synchronous); the envelope half gets one from the follow-up
-// transition: the queue is FIFO and Run is serial, so receiving the SECOND
-// transition's envelope first proves the unknown one drained and produced none.
+// Unknown reasons neither clear busy state nor record a transition. A following FIFO eviction proves the drain remains usable.
 func TestStartSessionTransitionStreamV2_UnknownReasonClearsNothing(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -526,7 +485,8 @@ func TestStartSessionTransitionStreamV2_UnknownReasonClearsNothing(t *testing.T)
 
 	sink := &captureObserverSink{}
 	bcast := newChanBcast("conn-i")
-	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, nil, discardLogger())
+	store := history.New(t.TempDir())
+	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, store, discardLogger())
 	defer func() { cancel(); cleanup() }()
 
 	sink.obs(sessions.SessionTransition{
@@ -539,16 +499,12 @@ func TestStartSessionTransitionStreamV2_UnknownReasonClearsNothing(t *testing.T)
 	sink.obs(sessions.SessionTransition{
 		PreviousID: "sess-a", NewID: "", Reason: sessions.ReasonEviction, OccurredAt: occurred,
 	})
-	if p := decodeSessionTransition(t, collectEnvs(t, bcast.pushed, 1)[0]); p.Reason != "idle_evict" {
+	if p := decodeSessionTransition(t, testTransitionFact(t, store, testConvID)); p.Reason != "idle_evict" {
 		t.Errorf("first envelope reason: got %q, want %q (the unknown reason must emit nothing)", p.Reason, "idle_evict")
 	}
 }
 
-// #1202 AC3 (-race): the composed observer fired concurrently for two
-// conversations while readers poll the busy signal. N = 8 total is comfortably
-// under sessionTransitionQueueSize (16), so no transition drops on a full queue
-// and the envelope count is exact. The value is the -race run; the assertions are
-// termination, full delivery, and both conversations ending idle.
+// Concurrent observer calls retain every source fact and release both conversations while readers poll busy state.
 func TestStartSessionTransitionStreamV2_ConcurrentFires(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -559,7 +515,8 @@ func TestStartSessionTransitionStreamV2_ConcurrentFires(t *testing.T) {
 
 	sink := &captureObserverSink{}
 	bcast := newChanBcast("conn-i")
-	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, nil, discardLogger())
+	store := history.New(t.TempDir())
+	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, store, discardLogger())
 	defer func() { cancel(); cleanup() }()
 
 	const perConv = 4
@@ -602,9 +559,9 @@ func TestStartSessionTransitionStreamV2_ConcurrentFires(t *testing.T) {
 	close(stop)
 	readers.Wait()
 
-	if got := collectEnvs(t, bcast.pushed, len(drivers)*perConv); len(got) != len(drivers)*perConv {
-		t.Fatalf("got %d envelopes, want %d", len(got), len(drivers)*perConv)
-	}
+	testShadowWait(t, func() bool {
+		return len(historyEntries(t, store, testConvID))+len(historyEntries(t, store, testConvIDB)) == len(drivers)*perConv
+	})
 	if busy.Busy(testConvID) || busy.Busy(testConvIDB) {
 		t.Errorf("after balanced open/teardown cycles: Busy(A) = %v, Busy(B) = %v, want both false",
 			busy.Busy(testConvID), busy.Busy(testConvIDB))

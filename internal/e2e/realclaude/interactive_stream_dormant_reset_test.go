@@ -95,6 +95,7 @@ func TestInteractiveStreamDormantResetAfterRestart(t *testing.T) {
 	t.Cleanup(func() { d2.stop(t) })
 	phone2, send2, recv2 := dial()
 	w := newResetWindow()
+	w.watchSource(t, home, clearConvID)
 	sealEnvelope(t, phone2, send2, protocol.Envelope{
 		ID: 29052, Type: protocol.TypeNewSession, TS: time.Now().UTC(),
 		Payload: mustJSON(t, protocol.NewSessionPayload{ConversationID: clearConvID}),

@@ -27,23 +27,6 @@ func awaitSwitchPublication(t *testing.T, done <-chan struct{}) {
 	}
 }
 
-type delayedTransitionBroadcaster struct {
-	*relay.V2SessionManager
-	entered, release chan struct{}
-	delayed          atomic.Bool
-}
-
-func (b *delayedTransitionBroadcaster) ActiveConns(ctx context.Context) []relay.ActiveConn {
-	if b.delayed.CompareAndSwap(false, true) {
-		close(b.entered)
-		select {
-		case <-b.release:
-		case <-ctx.Done():
-		}
-	}
-	return b.V2SessionManager.ActiveConns(ctx)
-}
-
 func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	pool, reg, sw := relaySwitchFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,10 +68,18 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	store := history.New(t.TempDir())
 	announced := make(chan struct{}, 2)
 	announce := newConversationUpdateEmitterV2(mgr, ctx, discardLogger()).announce
-	bcast := &delayedTransitionBroadcaster{V2SessionManager: mgr, entered: entered, release: release}
-	stop := startSessionTransitionStreamV2WithHarness(ctx, pool, bcast, func(id string) (string, bool) {
+	var delayed atomic.Bool
+	stop := startSessionTransitionStreamV2WithHarness(ctx, pool, mgr, func(id string) (string, bool) {
 		return conversationForSession(reg, id)
 	}, sessionHarness(pool), nil, store, discardLogger(), func(id string) {
+		if delayed.CompareAndSwap(false, true) {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return
+			}
+		}
 		announceSwitchedConversation(reg, id, announce)
 		announced <- struct{}{}
 	})
@@ -154,13 +145,10 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	if got := adapter.SwitchAgent(ctx, protocol.SwitchAgentPayload{ConversationID: switchConvID, Agent: "claude", Model: "opus"}); got.State != relay.AgentSwitchCommitted {
 		t.Fatalf("return outcome=%+v", got)
 	}
-	for i, typ := range []string{protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated} {
+	for i, typ := range []string{protocol.TypeConversationUpdated, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeConversationUpdated} {
 		_, e := w.read()
 		if e.Type != typ {
 			t.Fatalf("frame %d=%s, want %s", i, e.Type, typ)
-		}
-		if typ == protocol.TypeBanner {
-			testLegacyReceiptEnvelope(t, e, string(switchConvID))
 		}
 		if typ == protocol.TypeConversationUpdated {
 			var p protocol.ConversationUpdatedPayload
@@ -168,17 +156,11 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := "codex"
-			if i == 8 {
+			if i == 4 {
 				want = "claude"
 			}
 			if p.Agent != want {
 				t.Fatalf("frame %d agent=%s, want %s", i, p.Agent, want)
-			}
-		}
-		if i == 1 {
-			p := decodeSessionTransition(t, e)
-			if p.NewSessionID != codexID || p.PreviousSessionID != dormantWriteTargetID {
-				t.Fatalf("wrong committed delimiter: %+v", p)
 			}
 		}
 	}
@@ -191,6 +173,12 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	for i, want := range []history.SessionProvenance{{Kind: "claude", SessionID: current.CurrentSessionID}, {Kind: "codex", SessionID: codexID}} {
 		if got := page.Entries[i].Session; got == nil || *got != want {
 			t.Fatalf("committed switch provenance=%+v, want %+v", got, want)
+		}
+		if i == 1 {
+			p := decodeSessionTransition(t, protocol.Envelope{Payload: page.Entries[i].Payload})
+			if p.NewSessionID != codexID || p.PreviousSessionID != dormantWriteTargetID {
+				t.Fatalf("wrong recorded delimiter: %+v", p)
+			}
 		}
 	}
 }
@@ -240,10 +228,9 @@ func TestRelayAgentSwitchPublicationQueuePressure(t *testing.T) {
 	}
 	cancel()
 	awaitSwitchPublication(t, done)
-	if len(bcast.pushes) != 3 || bcast.pushes[0].env.Type != protocol.TypeBanner || bcast.pushes[1].env.Type != protocol.TypeSessionTransition || bcast.pushes[2].env.Type != protocol.TypeConversationUpdated {
+	if len(bcast.pushes) != 1 || bcast.pushes[0].env.Type != protocol.TypeConversationUpdated {
 		t.Fatalf("missing ordered outcome: %+v", bcast.pushes)
 	}
-	testLegacyReceiptEnvelope(t, bcast.pushes[0].env, string(switchConvID))
 	page, err := e.hist.Page(switchConvID, "", 100)
 	page.Entries = slices.DeleteFunc(page.Entries, func(e history.Entry) bool { return !legacyHistoryType(e.Type) })
 	if err != nil || len(page.Entries) != 1 {

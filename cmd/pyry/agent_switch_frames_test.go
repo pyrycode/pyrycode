@@ -233,15 +233,15 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 		gate.release <- struct{}{}
 		seen := map[string][]protocol.Envelope{}
 		// Old peers may see the pre-commit rising edges, but Codex's result is withheld.
-		for len(seen["requester"]) < 6 || len(seen["observer"]) < 6 {
+		for len(seen["requester"]) < 4 || len(seen["observer"]) < 4 {
 			id, e := w.read()
 			seen[id] = append(seen[id], e)
 		}
 		row, _ := reg.Get(switchConvID)
 		for _, id := range []string{"requester", "observer"} {
 			events := seen[id]
-			want := []string{protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated}
-			if len(events) != 6 {
+			want := []string{protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeConversationUpdated}
+			if len(events) != 4 {
 				t.Fatalf("%s: extra outcome frames: %+v", id, events)
 			}
 			for i, e := range events {
@@ -266,14 +266,13 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 					t.Fatalf("status=%+v", status)
 				}
 			}
-			testLegacyReceiptEnvelope(t, events[3], string(switchConvID))
 			var tr protocol.SessionTransitionPayload
-			json.Unmarshal(events[4].Payload, &tr)
+			json.Unmarshal(testTransitionFact(t, store, string(switchConvID)).Payload, &tr)
 			if tr.ConversationID != switchConvID || tr.PreviousSessionID != oldID || tr.NewSessionID != row.CurrentSessionID || tr.Reason != "clear" {
 				t.Fatalf("transition=%+v", tr)
 			}
 			var updated protocol.ConversationUpdatedPayload
-			json.Unmarshal(events[5].Payload, &updated)
+			json.Unmarshal(events[3].Payload, &updated)
 			if updated.ID != switchConvID || updated.Agent != p.Agent {
 				t.Fatalf("updated=%+v", updated)
 			}
@@ -312,7 +311,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 			}
 		} else {
 			events := seen["old"]
-			want := []string{protocol.TypeResetting, protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated}
+			want := []string{protocol.TypeResetting, protocol.TypeConversationUpdated}
 			if len(events) < len(want) {
 				t.Fatalf("Claude delivery not restored: %+v", events)
 			}
@@ -421,28 +420,25 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 	}
 	gate.release <- struct{}{}
 	observer := 0
-	for observer < 6 {
+	for observer < 4 {
 		id, e := w.read()
 		if id == "requester" {
 			t.Fatal("closed requester received outcome")
 		}
 		if id == "observer" {
 			observer++
-			want := []string{protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeBanner, protocol.TypeSessionTransition, protocol.TypeConversationUpdated}
+			want := []string{protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeConversationUpdated}
 			if e.Type != want[observer-1] {
 				t.Fatalf("disconnect outcome=%+v", e)
 			}
 			if observer == 4 {
-				testLegacyReceiptEnvelope(t, e, string(switchConvID))
-			}
-			if observer == 5 {
 				var tr protocol.SessionTransitionPayload
-				json.Unmarshal(e.Payload, &tr)
+				json.Unmarshal(testTransitionFact(t, store, string(switchConvID)).Payload, &tr)
 				if tr.PreviousSessionID != oldID || tr.Reason != "clear" {
 					t.Fatalf("cleanup transition=%+v", tr)
 				}
 			}
-			if observer == 6 {
+			if observer == 4 {
 				var updated protocol.ConversationUpdatedPayload
 				json.Unmarshal(e.Payload, &updated)
 				if updated.Agent != "codex" {

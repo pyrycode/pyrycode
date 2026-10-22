@@ -251,6 +251,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// and the intercept sits below Route, so the id crossing into the reset is this
 	// registry key with its live binding.
 	w := newResetWindow()
+	w.watchSource(t, home, clearConvID)
 	lifecycleRecordingBeforeReset(t, home)
 	nativeObservation.Add("reset_send", nil, nil)
 	sealSendMessage(t, phone, initSend, clearReqID, skipConvID, "m-clear", "/clear")
@@ -297,7 +298,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// wrap-up did not.
 	tr := w.transitions[0]
 	if tr.edgesBefore < 2 {
-		t.Errorf("the session_transition reached the client after %d resetting edge(s), want it after at least "+
+		t.Errorf("the retained session_transition was recorded after %d resetting edge(s), want it after at least "+
 			"the two rising ones: the rotation that fires the transition runs BELOW the `restarting` edge on "+
 			"resetThenRotate's own goroutine, so an earlier arrival means the edges are no longer emitted from "+
 			"there", tr.edgesBefore)
@@ -331,7 +332,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// gate's log and from there into a ticket comment — never to disk.
 	t.Logf("CAPTURE (#2486): a live /clear under -pyry-wrapup-deadline=%s ran the daemon's reset to "+
 		"completion with the wrap-up abandoned — resetting{active=%v phase=%q handoff=%q} → "+
-		"resetting{active=%v phase=%q handoff=%q} → session_transition{reason=%q, conversation_id=%q, "+
+		"resetting{active=%v phase=%q handoff=%q} → retained_session_transition{reason=%q, conversation_id=%q, "+
 		"occurred_at=%s} (after %d edges) → resetting{active=%v phase=%q handoff=%q}",
 		wrapUpSkipBound,
 		w.edges[0].Active, w.edges[0].Phase, w.edges[0].Handoff,

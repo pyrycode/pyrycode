@@ -77,13 +77,14 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 					e.emit(ctx, testConvID, wantType, map[string]string{"conversation_id": testConvID, "text": text})
 				case "transition":
 					e := newSessionTransitionEmitterV2(bcast, constResolver(testConvID, true), logger)
-					e.hist, e.nextID = store, 100
-					nextID = &e.nextID
+					e.hist = store
+					counter := uint64(100)
+					nextID = &counter
 					wantType = protocol.TypeSessionTransition
 					e.broadcast(ctx, sessions.SessionTransition{PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred})
 				}
 				wantPushes := 3
-				if scenario == "no recipients" {
+				if scenario == "no recipients" || producer == "transition" {
 					wantPushes = 0
 				}
 				if len(bcast.pushes) != wantPushes || *nextID != 100+uint64(wantPushes) {

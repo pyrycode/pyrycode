@@ -16,6 +16,8 @@ type SourceObserver struct {
 	snapshot SourceFacts
 	watches  map[string]*sourceWatch
 	OnEntry  func(history.Entry)
+	// AllowUnrecognized permits tests that deliberately produce unsupported output.
+	AllowUnrecognized bool
 }
 
 type sourceWatch struct {
@@ -82,7 +84,8 @@ func (o *SourceObserver) Next(next Next, deadline time.Time) (protocol.Envelope,
 	env := next(pollDeadline(deadline))
 	switch env.Type {
 	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
-		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster:
+		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster,
+		protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 		o.t.Fatal("retired interactive content reached app transport: ", env.Type)
 	}
 	for conv, w := range o.watches {
@@ -90,9 +93,6 @@ func (o *SourceObserver) Next(next Next, deadline time.Time) (protocol.Envelope,
 		w.turn.feed(o.t, conv, entries)
 		if w.turn.idle(o.t, env, conv) {
 			w.idle = true
-		}
-		if o.OnEntry == nil {
-			continue
 		}
 		for _, e := range entries {
 			if e.ID <= w.mark {
@@ -109,12 +109,17 @@ func (o *SourceObserver) Next(next Next, deadline time.Time) (protocol.Envelope,
 			if p.Conversation != conv {
 				continue
 			}
+			if e.Type == protocol.TypeUnrecognizedMessage && !o.AllowUnrecognized {
+				o.t.Fatal("unsupported content in retained source")
+			}
 			switch e.Type {
 			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
-				protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster:
+				protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster,
+				protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 				if e.Session == nil || e.Session.SessionID == "" {
 					o.t.Fatal("observed content lacks producing session")
 				}
+			case protocol.TypeSessionTransition:
 			default:
 				continue
 			}

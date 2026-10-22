@@ -59,7 +59,7 @@ None. Current refined issue and parent archive supply the cleanup contract; old 
 
 Pending for documentation stage:
 
-- `docs/protocol-mobile.md` § Application message types, § Daemon thread updates (v2, supplied delivery contract), and the five retired message subsections: session transitions, both refusal types, compaction boundaries, unrecognized messages and divider receipts are retired for every app. Retained source records feed authoritative thread items; supported live state/controls remain separate.
+- `docs/protocol-mobile.md` § Application message types, § Daemon thread updates (v2, supplied delivery contract), and subsections `session_transition`, `model_refusal_fallback`, `model_refusal_no_fallback`, `compaction_boundary`, `unrecognized_message`: these publications and divider receipts are retired for every app. Retained source records feed authoritative thread items; supported live state/controls remain separate.
 - `docs/knowledge/features/thread-package.md` § Shadow lifecycle and evidence and `docs/knowledge/features/history-package-producers.md` § Producers: record the same source/publication distinction and counted evidence. Do not claim #3737 residual cleanup or #3718 final acceptance is complete.
 
 ## Security review
@@ -80,3 +80,7 @@ Pending for documentation stage:
 
 **Reviewer:** builder (self-review per checklist)
 **Date:** 2026-10-22
+
+## Revisions
+
+- 2026-10-22: Source review found shared fake/live integration readers still awaiting raw transitions and unsupported-content frames. Extend their existing source-observation helpers and migrate those assertions to retained facts, keeping actual live controls, isolation, fresh-spawn and cancellation checks. The live reset window compares retained transition time with actual resetting-edge time rather than requiring a retired frame's arrival; `TestResetWindowSourceTransitionOrdering` covers early source visibility and repeated polling offline under the live build tag. The delayed-switch regression now pauses the retained committed-row callback instead of the removed raw-recipient snapshot. These are necessary fixture migrations, with affected fake scenarios and helper race tests plus tagged compilation; configured live execution stays with the dispatcher. Reassessed written work may exceed the initial forecast/800-line backstop; the recorded grandchild sizing exception requires continuing this cohesive slice.

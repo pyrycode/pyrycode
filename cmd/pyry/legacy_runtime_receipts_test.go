@@ -66,7 +66,9 @@ func TestLegacyRuntimeReceipts_CompletedTurn(t *testing.T) {
 			e.HandleFor(ctx, testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
 			rawEntries := historyEntries(t, store, testConvID)
 			entries, _ := testLegacyReceipts(t, store)
-			entries = slices.DeleteFunc(entries, func(entry history.Entry) bool { return testRetiredInteractiveType(entry.Type) })
+			entries = slices.DeleteFunc(entries, func(entry history.Entry) bool {
+				return testRetiredInteractiveType(entry.Type) || entry.Type == historySessionDivider
+			})
 			versions := map[string][]history.Entry{"history": entries, "phone": nil, "peer": nil, "replay": nil}
 			addEnvelope := func(name string, env protocol.Envelope) {
 				encoded, err := json.Marshal(env)
@@ -151,7 +153,9 @@ func TestLegacyRuntimeReceipts_LiveReplay(t *testing.T) {
 	tr.broadcast(ctx, sessions.SessionTransition{ConversationID: testConvID, PreviousID: "old", NewID: "new", Cause: sessions.CauseOperatorReset, OccurredAt: historyTS})
 	page, _ := testLegacyReceipts(t, store)
 	raw := historyEntries(t, store, testConvID)
-	raw = slices.DeleteFunc(raw, func(entry history.Entry) bool { return testRetiredInteractiveType(entry.Type) })
+	raw = slices.DeleteFunc(raw, func(entry history.Entry) bool {
+		return testRetiredInteractiveType(entry.Type) || entry.Type == historySessionDivider
+	})
 	events, _ := e.ring.After(testConvID, 0)
 	if len(events) != len(raw) || len(bcast.pushes) != 2*len(raw) {
 		t.Fatalf("append/live/replay counts=%d/%d/%d", len(raw), len(bcast.pushes), len(events))

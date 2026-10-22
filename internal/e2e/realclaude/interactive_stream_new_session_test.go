@@ -245,15 +245,24 @@ func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	}
 	t.Logf("M2: registry rotated %s → %s — the id rotated and the bound runner restarted fresh", idBefore, idAfter)
 
-	// --- session_transition (M3, AC2 "the client observes …") ------------------
-	// notifyTransition(ReasonClear) fans a session_transition to every interactive
-	// conn — the phone-side observable of the fresh-session break. drainForControlEvent
-	// returns the FIRST session_transition (Fatals on any TypeError); it is the
-	// rotation FROM idBefore even in the rare double-actuation case, so prev==idBefore
-	// always holds. Assert new is a valid stem != idBefore rather than tying it to
-	// idAfter (a second stacked rotation could advance idAfter past this transition's
-	// new id).
-	transition := drainForControlEvent(t, phone, initRecv, protocol.TypeSessionTransition, rotateBudget)
+	// M3 reads the retained rotation independently of app delivery.
+	var transition protocol.Envelope
+	transitionDeadline := time.Now().Add(rotateBudget)
+	for time.Now().Before(transitionDeadline) {
+		for _, p := range scenario.SourceSnapshot(t, home).Transitions(t, streamNewSessionConvID) {
+			if p.PreviousSessionID == idBefore {
+				transition.Payload, _ = json.Marshal(p)
+				break
+			}
+		}
+		if transition.Payload != nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if transition.Payload == nil {
+		t.Fatal("retained reset transition unavailable")
+	}
 	var st protocol.SessionTransitionPayload
 	if err := json.Unmarshal(transition.Payload, &st); err != nil {
 		t.Fatalf("decode session_transition payload: %v", err)
@@ -271,7 +280,7 @@ func TestInteractiveStreamNewSessionRotatesAndSpawnsFresh(t *testing.T) {
 	if st.ConversationID != streamNewSessionConvID {
 		t.Errorf("session_transition ConversationID: got %q, want %q", st.ConversationID, streamNewSessionConvID)
 	}
-	t.Logf("M3: observed session_transition{clear, %s → %s} for the conversation — the client saw the rotation",
+	t.Logf("M3: observed session_transition{clear, %s → %s} for the conversation — the source retained the rotation",
 		st.PreviousSessionID, st.NewSessionID)
 
 	// --- Turn 2: the rotated session serves a subsequent turn (M4, AC3) --------

@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -172,6 +173,15 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 			}),
 		})
 		var transitions []protocol.SessionTransitionPayload
+		source.OnEntry = func(entry history.Entry) {
+			if entry.Type == protocol.TypeSessionTransition {
+				var p protocol.SessionTransitionPayload
+				if json.Unmarshal(entry.Payload, &p) != nil {
+					t.Fatal("invalid retained transition")
+				}
+				transitions = append(transitions, p)
+			}
+		}
 		turnEnded := false
 		deadline := time.Now().Add(30 * time.Second)
 		for {
@@ -182,13 +192,6 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 			}
 			if env.Type == protocol.TypeError {
 				t.Fatalf("unexpected error envelope during the turn: %s", string(env.Payload))
-			}
-			if env.Type == protocol.TypeSessionTransition {
-				var p protocol.SessionTransitionPayload
-				if err := json.Unmarshal(env.Payload, &p); err != nil {
-					t.Fatalf("decode session_transition payload: %v", err)
-				}
-				transitions = append(transitions, p)
 			}
 			if source.Ended(convID) {
 				turnEnded = true

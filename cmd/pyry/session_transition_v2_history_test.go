@@ -43,10 +43,10 @@ func TestSessionTransitionHistory_CapturedProvenance(t *testing.T) {
 					wantID, wireReason = "previous", "idle_evict"
 				}
 				e.broadcast(context.Background(), tr)
-				if len(bcast.pushes) != 1 || bcast.pushes[0].connID != "i" {
-					t.Fatalf("recipient gate: %+v", bcast.pushes)
+				if len(bcast.pushes) != 0 {
+					t.Fatalf("raw transition published: %+v", bcast.pushes)
 				}
-				env := bcast.pushes[0].env
+				env := testTransitionFact(t, store, testConvID)
 				wantPayload := protocol.SessionTransitionPayload{ConversationID: testConvID, PreviousSessionID: "previous",
 					NewSessionID: wantID, Reason: wireReason, OccurredAt: occurred}
 				wantJSON, err := json.Marshal(wantPayload)
@@ -126,10 +126,10 @@ func TestSessionTransitionHandoff_CapturesBeforeDelay(t *testing.T) {
 					e.broadcast(context.Background(), queued)
 					entries := historyEntries(t, e.hist, testConvID)
 					want := history.SessionProvenance{Kind: kind, SessionID: sid}
-					if len(entries) != 1 || entries[0].Session == nil || *entries[0].Session != want || len(bcast.pushes) != 1 {
+					if len(entries) != 1 || entries[0].Session == nil || *entries[0].Session != want || len(bcast.pushes) != 0 {
 						t.Fatalf("delayed attribution: entries=%+v pushes=%+v", entries, bcast.pushes)
 					}
-					if got := decodeSessionTransition(t, bcast.pushes[0].env); got.ConversationID != testConvID {
+					if got := decodeSessionTransition(t, testTransitionFact(t, e.hist, testConvID)); got.ConversationID != testConvID {
 						t.Fatalf("delayed routing: %+v", got)
 					}
 				})
@@ -150,7 +150,7 @@ func TestSessionTransitionHandoff_LookupMissStaysUntagged(t *testing.T) {
 	available = true
 	e.broadcast(context.Background(), queued)
 	entries := historyEntries(t, e.hist, testConvID)
-	if len(entries) != 1 || entries[0].Session != nil || len(bcast.pushes) != 1 {
+	if len(entries) != 1 || entries[0].Session != nil || len(bcast.pushes) != 0 {
 		t.Fatalf("late lookup invented provenance: %+v", entries)
 	}
 }
@@ -184,7 +184,7 @@ func TestSessionTransitionHandoff_RemovedExactSession(t *testing.T) {
 			if len(entries) != 1 || entries[0].Session == nil || *entries[0].Session != want {
 				t.Fatalf("removed source=%+v, want %+v", entries, want)
 			}
-			if got := decodeSessionTransition(t, bcast.pushes[0].env); got.ConversationID != switchConvID {
+			if got := decodeSessionTransition(t, testTransitionFact(t, e.hist, switchConvID)); got.ConversationID != switchConvID {
 				t.Fatalf("replacement owner overrode captured routing: %+v", got)
 			}
 		})
@@ -296,8 +296,8 @@ func TestSessionTransitionHistory_UnavailableProvenance(t *testing.T) {
 			e.broadcast(context.Background(), sessions.SessionTransition{Reason: sessions.ReasonClear,
 				ConversationID: testConvID, NewID: sessions.SessionID(tc.sid), NextAgent: tc.agent})
 			entries := historyEntries(t, e.hist, testConvID)
-			if len(bcast.pushes) != 1 || len(entries) != 1 || entries[0].Session != nil {
-				t.Fatalf("eligible untagged delivery: pushes=%d entries=%+v", len(bcast.pushes), entries)
+			if len(bcast.pushes) != 0 || len(entries) != 1 || entries[0].Session != nil {
+				t.Fatalf("untagged source or publication: pushes=%d entries=%+v", len(bcast.pushes), entries)
 			}
 		})
 	}
@@ -315,21 +315,13 @@ func TestSessionTransitionHistory_UnavailableStorage(t *testing.T) {
 		e.hist = store
 		e.broadcast(context.Background(), sessions.SessionTransition{Reason: sessions.ReasonClear, ConversationID: testConvID,
 			NewID: "successor", NextAgent: "codex"})
-		if len(bcast.pushes) != 1 || bcast.pushes[0].env.HistoryEntryID != nil {
-			t.Fatalf("unavailable store suppressed delivery or invented identity: %+v", bcast.pushes)
+		if len(bcast.pushes) != 0 {
+			t.Fatalf("unavailable store restored publication: %+v", bcast.pushes)
 		}
 	}
 }
 
-// AC-3: a session transition is appended ONCE per transition, carrying one
-// timestamp shared with the fan-out — not one entry and not one timestamp per
-// connected conn. Three interactive conns is what makes the difference visible:
-// before the hoist, broadcast minted time.Now() inside the per-conn loop, so the
-// three envelopes carried three distinct timestamps and no single log entry
-// could match them all.
-//
-// This is also the only place a session boundary is retained at all: this
-// producer deliberately skips the #647 replay ring.
+// Each accepted transition has one source append regardless of recipient count.
 func TestSessionTransitionEmitterV2_HistoryOncePerTransition(t *testing.T) {
 	t.Parallel()
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
@@ -345,27 +337,18 @@ func TestSessionTransitionEmitterV2_HistoryOncePerTransition(t *testing.T) {
 		PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred,
 	})
 
-	if len(bcast.pushes) != 3 {
-		t.Fatalf("fanned out %d envelopes, want one per interactive conn (3)", len(bcast.pushes))
+	if len(bcast.pushes) != 0 {
+		t.Fatalf("published %d raw envelopes, want none", len(bcast.pushes))
 	}
 	entries := historyEntries(t, store, testConvID)
 	if len(entries) != 1 {
 		t.Fatalf("log holds %d entries for one transition, want exactly 1", len(entries))
 	}
 	got := entries[0]
-	if got.Type != protocol.TypeSessionTransition {
+	if got.Type != protocol.TypeSessionTransition || got.TS.IsZero() {
 		t.Fatalf("entry type = %q, want %q", got.Type, protocol.TypeSessionTransition)
 	}
-	for i, p := range bcast.pushes {
-		if !got.TS.Equal(p.env.TS) {
-			t.Fatalf("entry ts = %s but conn %d's envelope carries %s; the fan-out timestamp is not hoisted",
-				got.TS, i, p.env.TS)
-		}
-		if !bytes.Equal(got.Payload, p.env.Payload) {
-			t.Fatalf("entry payload differs from conn %d's envelope:\n log %s\nwire %s", i, got.Payload, p.env.Payload)
-		}
-	}
-	if decoded := decodeSessionTransition(t, bcast.pushes[0].env); decoded.ConversationID != testConvID {
+	if decoded := decodeSessionTransition(t, testTransitionFact(t, store, testConvID)); decoded.ConversationID != testConvID {
 		t.Fatalf("stamped conversation_id = %q, want %q", decoded.ConversationID, testConvID)
 	}
 }
@@ -411,15 +394,8 @@ func TestSessionTransitionEmitterV2_DroppedTransitionsWriteNothing(t *testing.T)
 
 			e.broadcast(context.Background(), tt.trans)
 
-			wantPushes := 0
-			if tt.trans.Cause == sessions.CauseRecovery {
-				wantPushes = 1
-			}
-			if len(bcast.pushes) != wantPushes {
-				t.Fatalf("fanned out %d envelopes; want %d receipts", len(bcast.pushes), wantPushes)
-			}
-			if wantPushes == 1 {
-				testLegacyReceiptEnvelope(t, bcast.pushes[0].env, testConvID)
+			if len(bcast.pushes) != 0 {
+				t.Fatal("transition published a raw frame or divider receipt")
 			}
 			entries := historyEntries(t, store, testConvID)
 			if tt.trans.Cause == sessions.CauseRecovery {
