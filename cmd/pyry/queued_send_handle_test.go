@@ -99,7 +99,7 @@ func TestQueuedSendHandleActions(t *testing.T) {
 				}
 				return nil
 			}}
-			cfg.OnDelivered = operatorMessageHistory(h, func(operatorMessage) {}, nil, discardLogger(), sendHistory)
+			cfg.OnDelivered = operatorMessageHistory(h, nil, discardLogger(), sendHistory)
 			q, err := msgqueue.New(msgqueue.Config{Logger: cfg.Logger, Deliver: cfg.Deliver, SendNow: cfg.SendNow, OnDelivered: cfg.OnDelivered, OnTerminal: func(c string, m msgqueue.QueuedMessage, o msgqueue.TerminalOutcome) {
 				if m.ID == 7 {
 					sendHistory.terminal(c, m, o)

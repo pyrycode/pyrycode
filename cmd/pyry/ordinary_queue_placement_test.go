@@ -34,13 +34,9 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 				cursor.set(testConvID)
 				emitter := newInteractiveTurnEmitterV2(cursor, bcast, discardLogger())
 				emitter.hist = store
-				messages := make(chan operatorMessage, 16)
-				ome := newOperatorMessageEmitterV2(messages, discardLogger())
 				place.bindQueued(ctx, sink, store, func(string) bool { return true }, discardLogger())
-				sink.setOperatorPublisher(func(m operatorMessage) { ome.broadcast(ctx, bcast, emitter.ring, m) })
-				stopPush := startOperatorMessageStreamV2(ctx, ome, bcast, emitter.ring)
 				stopDrain := startStreamTurnDrainV2(ctx, sink, emitter, active.get, busy, discardLogger())
-				defer func() { cancel(); stopDrain(); stopPush() }()
+				defer func() { cancel(); stopDrain() }()
 				callback := make(chan struct{})
 				entered := make(chan struct{}, 1)
 				wrote := make(chan string, 2)
@@ -49,7 +45,7 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 					return nil
 				}}
 				deliver := newInboundDeliver(func(string) (handlers.TurnWriter, error) { return writer, nil }, busy, time.Second, place)
-				record := newOperatorMessageHistory(store, operatorMessageNotify(messages, discardLogger()), place, discardLogger())
+				record := newOperatorMessageHistory(store, place, discardLogger())
 				q, err := msgqueue.New(msgqueue.Config{Deliver: deliver, OnDelivered: func(conv string, msg msgqueue.QueuedMessage) {
 					entered <- struct{}{}
 					select {
@@ -95,25 +91,20 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 				if releaseAfterEnd || noEcho {
 					send(snEnd)
 				}
-				want := 2
+				want := 1
 				if releaseAfterEnd || noEcho {
-					want = 5
+					want = 4
 				}
 				got := collectEnvs(t, bcast.pushed, want)
-				messageIndex := slices.IndexFunc(got, func(e protocol.Envelope) bool { return e.Type == protocol.TypeMessage })
-				if messageIndex < 0 {
-					t.Fatalf("confirmation held: got %v, want user message", envTypes(got))
+				users := testCanonicalUsers(t, store, testConvID)
+				if len(users) != 1 || users[0].Summary != "safe user text" || users[0].Status != "delivered" || users[0].Order == 0 {
+					t.Fatalf("placed canonical item: %+v", users)
 				}
-				if !noEcho && messageIndex != 0 {
-					t.Fatalf("message follows reply: %v", envTypes(got))
+				var placed protocol.MessagePayload
+				if json.Unmarshal(users[0].Content, &placed) != nil || placed.QueuedMsgID != id {
+					t.Fatal("placement lost queue identity")
 				}
-				var payload protocol.MessagePayload
-				if err := json.Unmarshal(got[messageIndex].Payload, &payload); err != nil {
-					t.Fatal(err)
-				}
-				if payload.QueuedMsgID != id || payload.Text != "safe user text" {
-					t.Fatalf("unsafe or wrong identity: %+v", payload)
-				}
+
 				close(callback)
 				send(echoOf("composed /host/private prompt"))
 				if !releaseAfterEnd && !noEcho {
@@ -132,26 +123,17 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 					t.Fatalf("replay=%d live=%d gap=%v", len(replay), len(got), gap)
 				}
 				for i, e := range replay {
-					h := entries.Entries[len(got)-1-i]
-					if h.Type != got[i].Type || !h.TS.Equal(got[i].TS) || !bytes.Equal(h.Payload, got[i].Payload) {
-						t.Fatalf("history order differs at %d", i)
-					}
-					if e.Type != got[i].Type || e.ID != *got[i].EventID || !e.TS.Equal(got[i].TS) || !bytes.Equal(e.Payload, got[i].Payload) {
-						t.Fatalf("replay order differs at %d", i)
+					if e.Type == protocol.TypeMessage || e.Type != got[i].Type || e.ID != *got[i].EventID || !e.TS.Equal(got[i].TS) || !bytes.Equal(e.Payload, got[i].Payload) {
+						t.Fatal("raw user publication or replay mismatch")
 					}
 				}
-				var users int
-				for _, e := range entries.Entries {
-					if e.Type == protocol.TypeMessage {
-						users++
-						if !e.TS.Equal(got[messageIndex].TS) {
-							t.Fatal("history timestamp differs")
-						}
-					}
+				if len(testCanonicalUsers(t, store, testConvID)) != 1 {
+					t.Fatal("late callback duplicated canonical item")
 				}
-				if users != 1 {
-					t.Fatalf("history user count=%d", users)
+				if len(entries.Entries) == 0 {
+					t.Fatal("history lost")
 				}
+
 			})
 		}
 	}
@@ -188,14 +170,12 @@ func TestOrdinaryQueuePlacement_IdenticalWritesInterleaveWithSendNow(t *testing.
 	sink.setEchoObserver(place.echo)
 	emitter := newInteractiveTurnEmitterV2(&stubCursor{}, bcast, discardLogger())
 	emitter.hist = store
-	ome := newOperatorMessageEmitterV2(nil, discardLogger())
-	sink.setOperatorPublisher(func(m operatorMessage) { ome.broadcast(ctx, bcast, emitter.ring, m) })
 	stop := startStreamTurnDrainV2(ctx, sink, emitter, resolve, busy, discardLogger())
 	defer func() { cancel(); stop() }()
 	writes := make(chan struct{}, 3)
 	writer := funcWriter{write: func(context.Context, string, []byte) error { writes <- struct{}{}; return nil }}
 	writerFor := func(string) (handlers.TurnWriter, error) { return writer, nil }
-	record := newOperatorMessageHistory(store, nil, place, discardLogger())
+	record := newOperatorMessageHistory(store, place, discardLogger())
 	held := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	q, err := msgqueue.New(msgqueue.Config{
@@ -238,14 +218,14 @@ func TestOrdinaryQueuePlacement_IdenticalWritesInterleaveWithSendNow(t *testing.
 	}
 	send(echoOf("identical delivery"))
 	send(snOpener)
-	first := collectEnvs(t, bcast.pushed, 2)
+	collectEnvs(t, bcast.pushed, 1)
 	id2 := q.EnqueueDelivery(testConvID, "duplicate", "safe", "identical delivery")
 	if !q.SendNow(testConvID, id2) {
 		t.Fatal("send-now refused")
 	}
 	waitWrite()
 	send(echoOf("identical delivery"))
-	second := collectEnvs(t, bcast.pushed, 1)
+	placementDrainBarrier(t, ctx, sink)
 	id3 := q.EnqueueDelivery(testConvID, "duplicate", "safe", "identical delivery")
 	close(held)
 	send(snEnd)
@@ -258,19 +238,18 @@ func TestOrdinaryQueuePlacement_IdenticalWritesInterleaveWithSendNow(t *testing.
 	send(echoOf("identical delivery"))
 	send(snOpener)
 	send(snEnd)
-	third := collectEnvs(t, bcast.pushed, 5)
-	for i, group := range [][]protocol.Envelope{first, second, third} {
+	collectEnvs(t, bcast.pushed, 4)
+	users := testCanonicalUsers(t, store, testConvID)
+	if len(users) != 3 {
+		t.Fatalf("canonical users: %+v", users)
+	}
+	for i, item := range users {
 		var p protocol.MessagePayload
-		if group[0].Type != protocol.TypeMessage {
-			t.Fatal(envTypes(group))
-		}
-		if err := json.Unmarshal(group[0].Payload, &p); err != nil {
-			t.Fatal(err)
-		}
-		if p.QueuedMsgID != []uint64{id1, id2, id3}[i] || p.MessageID != "duplicate" || p.SentNow != (i == 1) {
-			t.Fatalf("wrong matched write: %+v", p)
+		if json.Unmarshal(item.Content, &p) != nil || p.QueuedMsgID != []uint64{id1, id2, id3}[i] || p.MessageID != "duplicate" || p.SentNow != (i == 1) {
+			t.Fatalf("wrong matched write: %+v", item)
 		}
 	}
+
 	page, err := store.Page(testConvID, "", 100)
 	if err != nil {
 		t.Fatal(err)
@@ -295,12 +274,11 @@ func TestOrdinaryQueuePlacement_FailedWriteRetriesOnce(t *testing.T) {
 	resolve := func(string) (string, bool) { return testConvID, true }
 	busy := newTurnBusyTracker(resolve, discardLogger())
 	place := newSendNowPlacement(ctx, resolve, busy.WaitIdle)
-	place.bindQueued(ctx, sink, nil, func(string) bool { return true }, discardLogger())
+	store := history.New(t.TempDir())
+	place.bindQueued(ctx, sink, store, func(string) bool { return true }, discardLogger())
 	sink.setEchoObserver(place.echo)
 	bcast := newChanBcast("phone")
 	emitter := newInteractiveTurnEmitterV2(&stubCursor{}, bcast, discardLogger())
-	ome := newOperatorMessageEmitterV2(nil, discardLogger())
-	sink.setOperatorPublisher(func(m operatorMessage) { ome.broadcast(ctx, bcast, emitter.ring, m) })
 	stop := startStreamTurnDrainV2(ctx, sink, emitter, resolve, busy, discardLogger())
 	defer func() { cancel(); stop() }()
 	var attempts int
@@ -319,7 +297,7 @@ func TestOrdinaryQueuePlacement_FailedWriteRetriesOnce(t *testing.T) {
 		}
 		return nil
 	}}
-	record := newOperatorMessageHistory(nil, nil, place, discardLogger())
+	record := newOperatorMessageHistory(store, place, discardLogger())
 	q, err := msgqueue.New(msgqueue.Config{Deliver: newInboundDeliver(func(string) (handlers.TurnWriter, error) { return writer, nil }, busy, time.Second, place), OnDelivered: record, RetryInterval: time.Millisecond, Logger: discardLogger()})
 	if err != nil {
 		t.Fatal(err)
@@ -340,10 +318,15 @@ func TestOrdinaryQueuePlacement_FailedWriteRetriesOnce(t *testing.T) {
 	sink.sinkFor("s1")(echoOf("composed"))
 	sink.sinkFor("s1")(snOpener)
 	sink.sinkFor("s1")(snEnd)
-	got := collectEnvs(t, bcast.pushed, 5)
+	got := collectEnvs(t, bcast.pushed, 4)
+	for _, env := range got {
+		if env.Type == protocol.TypeMessage {
+			t.Fatal("raw user frame")
+		}
+	}
+	users := testCanonicalUsers(t, store, testConvID)
 	var p protocol.MessagePayload
-	json.Unmarshal(got[0].Payload, &p)
-	if got[0].Type != protocol.TypeMessage || p.QueuedMsgID != id {
-		t.Fatal("retry lost identity")
+	if len(users) != 1 || json.Unmarshal(users[0].Content, &p) != nil || p.QueuedMsgID != id {
+		t.Fatal("retry lost canonical identity")
 	}
 }

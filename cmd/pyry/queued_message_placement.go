@@ -24,7 +24,7 @@ func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink,
 		}
 	}
 	p.record = func(convID string, msg msgqueue.QueuedMessage, source ...history.SessionProvenance) {
-		operatorMessageHistory(store, sink.publishOperator, nil, logger, p.sendHistory, source...)(convID, msg)
+		operatorMessageHistory(store, nil, logger, p.sendHistory, source...)(convID, msg)
 	}
 	p.dispatch = func(commit func()) { sink.dispatchPlacement(ctx, commit) }
 	p.isClaude = isClaude
@@ -32,16 +32,6 @@ func (p *sendNowPlacement) bindQueued(ctx context.Context, sink *streamTurnSink,
 	sink.placement = p
 	idle := p.idle
 	sink.placementIdle.Store(&idle)
-}
-
-func (s *streamTurnSink) setOperatorPublisher(fn func(operatorMessage)) {
-	s.operatorPublisher.Store(&fn)
-}
-
-func (s *streamTurnSink) publishOperator(m operatorMessage) {
-	if fn := s.operatorPublisher.Load(); fn != nil {
-		(*fn)(m)
-	}
 }
 
 func (s *streamTurnSink) observePlacementIdle(sessionID string) {

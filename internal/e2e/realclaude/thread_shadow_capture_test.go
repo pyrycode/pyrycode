@@ -68,7 +68,7 @@ func TestThreadShadowHistoryCapture(t *testing.T) {
 			t.Fatal("shadow conversation did not complete")
 		}
 		switch env.Type {
-		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeMessage, protocol.TypeTurnEnd, protocol.TypeSessionTransition:
+		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeTurnEnd, protocol.TypeSessionTransition:
 			var owner struct {
 				Conversation string `json:"conversation_id"`
 			}

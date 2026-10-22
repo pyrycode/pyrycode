@@ -85,9 +85,7 @@ func TestOperatorDeliveryProvenance_Placement(t *testing.T) {
 			// The binding has switched kinds before placement selection. The receiving writer still owns the turn.
 			place.bindQueued(ctx, sink, store, func(string) bool { return tc.kind != "claude" }, logger)
 			place.dispatch = func(commit func()) { commit() }
-			published := make(chan operatorMessage, 4)
-			sink.setOperatorPublisher(func(m operatorMessage) { published <- m })
-			record := newOperatorMessageHistory(store, func(m operatorMessage) { published <- m }, place, logger)
+			record := newOperatorMessageHistory(store, place, logger)
 			received := make(chan struct{}, 1)
 			writer := &provenanceWriter{source: history.SessionProvenance{Kind: tc.kind, SessionID: "receiving-B"}}
 			writer.write = func(_ context.Context, _ string, payload []byte) error {
@@ -145,12 +143,9 @@ func TestOperatorDeliveryProvenance_Placement(t *testing.T) {
 			} else {
 				place.idle("receiving-B")
 			}
-			var pushed operatorMessage
-			select {
-			case pushed = <-published:
-			case <-time.After(5 * time.Second):
-				t.Fatal("no placed operator publication")
-			}
+			testShadowWait(t, func() bool { return len(historyEntries(t, store, testConvID)) == 2 })
+			entry := historyEntries(t, store, testConvID)[1]
+
 			if tc.kind != "codex" {
 				close(release)
 				awaitProvenanceSignal(t, completed)
@@ -159,14 +154,14 @@ func TestOperatorDeliveryProvenance_Placement(t *testing.T) {
 			place.idle("receiving-B")
 			want := protocol.MessagePayload{ConversationID: testConvID, MessageID: "client-message", QueuedMsgID: id, Role: "user", Text: "safe text", AttachmentIDs: []string{"attachment-id"}, DeviceName: "phone", ClientVersion: "1.2.3", ClientSentAt: tap.Format(time.RFC3339Nano), SentNow: tc.now}
 			var got protocol.MessagePayload
-			if err := json.Unmarshal(pushed.payload, &got); err != nil {
+			if err := json.Unmarshal(entry.Payload, &got); err != nil {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("safe projection=%#v want %#v", got, want)
 			}
-			if pushed.historyEntryID == nil || *pushed.historyEntryID != 2 {
-				t.Fatalf("identity=%v", pushed.historyEntryID)
+			if entry.ID != 2 {
+				t.Fatalf("identity=%v", entry.ID)
 			}
 			source := history.SessionProvenance{Kind: tc.kind, SessionID: "receiving-B"}
 			for _, reader := range []*history.Store{store, history.New(dir)} {
@@ -178,7 +173,7 @@ func TestOperatorDeliveryProvenance_Placement(t *testing.T) {
 				if e.Session == nil || *e.Session != source {
 					t.Fatalf("source=%+v want %+v", e.Session, source)
 				}
-				if e.Shown == nil || !*e.Shown || !bytes.Equal(e.Payload, pushed.payload) || !e.TS.Equal(pushed.ts) {
+				if e.Shown == nil || !*e.Shown || !bytes.Equal(e.Payload, entry.Payload) || !e.TS.Equal(entry.TS) {
 					t.Fatalf("metadata or payload changed: %+v", e)
 				}
 				if page.Entries[1].Session != nil || page.Entries[1].Shown != nil {
@@ -191,15 +186,14 @@ func TestOperatorDeliveryProvenance_Placement(t *testing.T) {
 			}
 			digest := sha256.Sum256([]byte("composed /host/private attachment"))
 			for _, secret := range []string{"/host/private", "composed", hex.EncodeToString(digest[:]), "receiving-B", "successor-C"} {
-				if bytes.Contains(pushed.payload, []byte(secret)) || bytes.Contains(logs.Bytes(), []byte(secret)) {
+				if bytes.Contains(entry.Payload, []byte(secret)) || bytes.Contains(logs.Bytes(), []byte(secret)) {
 					t.Fatalf("private delivery data leaked: %q", secret)
 				}
 			}
-			select {
-			case <-published:
-				t.Fatal("late callback/echo duplicated publication")
-			default:
+			if len(historyEntries(t, store, testConvID)) != 2 {
+				t.Fatal("late callback/echo duplicated source")
 			}
+
 		})
 	}
 }
@@ -217,7 +211,7 @@ func TestOperatorDeliveryProvenance_WaitsAndRetry(t *testing.T) {
 			sink := newStreamTurnSink(8, logger)
 			place.bindQueued(ctx, sink, store, func(string) bool { return kind == "claude" }, logger)
 			completed := make(chan struct{})
-			record := newOperatorMessageHistory(store, nil, place, logger)
+			record := newOperatorMessageHistory(store, place, logger)
 			failed := make(chan struct{}, 1)
 			activated := make(chan struct{}, 1)
 			release := make(chan struct{})
@@ -327,7 +321,7 @@ func TestOperatorDeliveryProvenance_ReceivingSessionRotation(t *testing.T) {
 			callback := make(chan struct{}, 1)
 			confirm := make(chan struct{})
 			completed := make(chan struct{})
-			record := newOperatorMessageHistory(store, nil, place, discardLogger())
+			record := newOperatorMessageHistory(store, place, discardLogger())
 			q, err := msgqueue.New(msgqueue.Config{
 				Deliver: newInboundDeliver(func(c string) (handlers.TurnWriter, error) {
 					w, err := router.resolve(c)

@@ -6,6 +6,11 @@ Part of [history producers](history-package-producers.md#producers-2114-2115).
 
 `legacyHistoryType` is a fixed allowlist of the existing producer vocabulary
 from `turnbridge.MapEvent`/`MapState`, operator messages and session transitions.
+The retained `message` source shape remains an internal history input:
+raw user-message fan-out and newly appended reconnect replay are retired for
+every app, including those without `thread` (#3732). Operator sends are observed
+through canonical thread items and explicit catch-up. Shared adapters for other
+producers remain.
 A new history-only type's raw payload is excluded from every connection's legacy
 live fan-out and reconnect replay, whether its stored `Shown` is nil,
 false or true. Only the validated runtime/startup,
@@ -98,11 +103,15 @@ classifier, without supplied call/task IDs, parent, status, prose or storage pat
 live traffic or backfilling replay; its valid endings remain source facts for thread folding.
 
 Queued writers also bypass `emit`: `queuedSendHistory.accepted` and `terminal`
-append before notifying the operator emitter of acceptance/removal/give-up
-receipts. `operatorMessageHistory` carries the delivered receipt with its
-committed user message, so serialized publication drains acceptance first, then
-publishes user before outcome. A page-only projection would leave live/replay
-checkpoint holes. Shared bytes, durable ID/timestamp and existing recipient,
+append before notifying the receipt-only operator emitter of acceptance/removal/
+give-up receipts. `operatorMessageHistory` retains the safe delivery source
+append, including its committed acceptance reference, then appends the linked
+`send_delivered` fact and hands only its validated neutral receipt to
+`queuedSendHistory.publish`. Acceptance is enqueued before its readiness barrier
+opens, so its receipt precedes its outcome. No raw user frame is needed or
+published, and receipts may interleave with unrelated assistant output. A
+page-only receipt projection would leave live/replay checkpoint holes. Shared
+receipt bytes, durable ID/timestamp and existing recipient,
 access and isolation gates apply on every lane. Receipt notification uses the
 [separate bounded mailbox](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
 to keep queue callbacks independent of peer delivery. `closeStartupSends` stays
@@ -202,13 +211,14 @@ shown content, a read checkpoint or foreground presentation. See
 **Carry the append result, not a second lookup or another counter (#2861).**
 `appendConversationHistory` returns the successful `Store.AppendWithMetadata`
 id as an immutable `*uint64`, shared by every direct live recipient as
-`Envelope.HistoryEntryID`. The operator commit carries it with the safe payload
-and placement timestamp through `operatorMessage` to
-`operatorMessageEmitterV2.broadcast`; reconstructing it at broadcast would lose
-the association with that exact append. Append once before fan-out, even without
-recipients. A transition has no ring id, and an operator emitter needs no ring
-to carry this durable identity. The connection counter and ring cursor cannot
-substitute for the stored per-conversation id. See
+`Envelope.HistoryEntryID`. Queued receipts carry their own successful fact ID,
+neutral payload and original timestamp through `operatorMessage` to
+`operatorMessageEmitterV2.broadcast`; the delivery source ID stays internal as
+the linked outcome's `delivery_entry_id`. Reconstructing identity at broadcast
+would lose the association with that exact append. Append once before fan-out,
+even without recipients. A transition has no ring id, and a receipt emitter
+needs no ring to carry this durable identity. The connection counter and ring
+cursor cannot substitute for the stored per-conversation id. See
 [envelope identities](protocol-package-types-envelope.md#replay-cursors-and-durable-read-marks)
 for read-mark use and reconnect replay's retained identity.
 
@@ -219,7 +229,8 @@ adding metadata later lets concurrent replay observe an incomplete record.
 `operatorMessageEmitterV2.broadcast` passes the already-committed id through the
 same ring seam without another history write. Both paths retain the id even with
 no live recipients. Replay uses that original identity and never appends history;
-absent/failed storage leaves zero ring metadata and an omitted wire key. Channel
+absent/failed storage leaves zero ring metadata and an omitted wire key for
+eligible legacy events, but cannot mint a queued receipt. Channel
 posts retain their missing-id behavior, and ordinary `session_transition` frames
 remain outside the ring; runtime-divider receipts use it.
 See [ring publication](eventring-package.md#concurrency).
@@ -253,7 +264,7 @@ earlier draft proposed writing the log from `turnevent`'s representation.
 That cannot work: `turnevent`'s variant set carries no operator message, no
 conversation id, no session transition and no question batch — the operator's
 own typed text goes `send_message` → msgqueue → delivery → the child's stdin,
-and the content this producer stores and pushes always comes from
+and the content this producer stores always comes from
 `QueuedMessage.Text`, never from `turnevent`. (**Since #2730, claude does echo
 the delivered text back** under `--replay-user-messages`, as a digest-only
 `turnevent.UserEcho` — see [streamsup-package-turn-io-envelope-write-stdout-parser.md
@@ -263,15 +274,14 @@ source; it only times a queued commit this producer was already going to
 make — see below.) A log written purely from `turnevent` would hold
 assistant text and tool rows and none of what the operator typed.
 
-**Echo placement must own history, live publication and replay together
-(#2730, #2820).** Committing history at an echo while handing the live push
-to `operatorMessageEmitterV2.Run` on another goroutine still lets reply
-frames overtake the user message in live arrival and replay event-id order.
-Queue-backed stream Claude writes therefore prepare their safe commit before
-writing, and `sendNowPlacement.echo` commits synchronously on the stream
-drain, through `streamTurnSink.publishOperator` and the late-bound
-`operatorMessageEmitterV2.broadcast` sharing the interactive emitter's ring.
-One placement timestamp and payload serve history, ring and every connection.
+**Echo placement owns source order; receipt delivery is asynchronous
+(#2730, #2820, #3732).** Queue-backed stream Claude writes prepare their safe
+commit before writing, and `sendNowPlacement.echo` commits synchronously on the
+stream drain. Moving source recording to the receipt worker would let reply
+facts overtake the delivery and corrupt canonical thread order. The source
+append wakes thread followers, and the linked outcome's receipt uses the
+separate bounded mailbox. Receipt arrival and replay event IDs do not determine
+item placement.
 The later `OnDelivered` callback acknowledges the managed entry; it cannot
 delay, move or repeat placement, even after the answering turn has ended.
 
@@ -319,6 +329,13 @@ rule would be defeated by relaying them.
 **Test-shape traps worth knowing before touching these producers
 again:**
 
+- **Wait for recording after removing a transport callback (#3732).**
+  A raw-publication callback may also be a fixture's completion signal. Removing
+  it can make canonical assertions race the source append even when queue
+  acceptance and the command ack have finished. `TestDaemonThreadOffscreenShownRecovery`
+  signals after `operatorMessageHistory` returns and waits before checking
+  catch-up content. Keep that recording barrier when converting mixed tests
+  away from retired transport.
 - **Change stored metadata to prove acceptance facts are durable (#3693).**
   `TestQueuedAttachmentWire` renames the stored leaf after acceptance, then
   reopens history/thread state and compares fresh daemon content with the
@@ -332,11 +349,10 @@ again:**
   are not retained across store reopening.
 - **Keep storage broken through delivery and drop, not only acceptance (#3167).**
   `TestQueuedSendHistoryFailures` repairs storage before user delivery, so it
-  cannot prove failed user/outcome appends preserve eligible delivery without
-  minting receipts. `TestQueuedLegacyReceipts_StorageFailure` persists acceptance,
-  then blocks storage through delivery and removal; the existing user still
-  reaches live/replay without durable identity, no outcome receipt appears and
-  stored allocation stays unchanged.
+  cannot prove failed user/outcome appends mint no receipts.
+  `TestQueuedLegacyReceipts_StorageFailure` persists acceptance, then blocks
+  storage through delivery and removal: raw user frames stay absent from live/
+  replay, no outcome receipt appears and stored allocation stays unchanged.
 - **Compare receipt identity on every surviving delivery lane.**
   `TestQueuedLegacyReceipts_CompletedTurn` compares source projection, live and
   replay bytes, original durable identities and warm/reopened raw entries.
@@ -522,10 +538,11 @@ again:**
   envelope counters coincide, substituting either live counter for the stored id
   stays green. `TestLiveProducers_HistoryEntryID` keeps history id 8, ring id 4
   and envelope ids 101–103 distinct, then compares the stored type, payload and
-  timestamp across all three producers. Include no recipients, absent/failed
-  storage and an operator without a ring: tests only with recipients miss skipped
-  appends when nobody is connected, while requiring a ring misses the independent
-  history-to-push handoff.
+  timestamp across the interactive and transition producers. Include no
+  recipients and absent/failed storage: tests only with recipients miss skipped
+  appends when nobody is connected. `TestOperatorReceiptOptionalTransport`
+  separately checks receipt identity with no recipients and without a ring;
+  requiring a ring would miss the independent history-to-receipt handoff.
 - **A shared-timestamp assertion needs three fan-out targets, not two.**
   `broadcast` used to mint `time.Now()` inside its per-conn loop; with only
   two connections, a per-conn timestamp and a correctly hoisted one are

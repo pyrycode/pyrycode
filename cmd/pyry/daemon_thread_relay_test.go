@@ -304,7 +304,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 	initialSends := testSendHistory(h)
 	initialMessage := msgqueue.QueuedMessage{ID: 2, MessageID: "delivered", Text: "delivered", TS: time.Now().UTC()}
 	initialSends.accepted(testConvID, initialMessage)
-	operatorMessageHistory(h, func(operatorMessage) {}, nil, discardLogger(), initialSends)(testConvID, initialMessage)
+	operatorMessageHistory(h, nil, discardLogger(), initialSends)(testConvID, initialMessage)
 	v := appendFact(testConvID, protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: testConvID, TurnID: "turn", Text: "first"})
 	if _, err := cfg.ThreadCatchUp(t.Context(), protocol.ThreadCatchUpPayload{ConversationID: testConvIDB, Limit: 1}); err != nil {
 		t.Fatal(err)

@@ -12,7 +12,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
-	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -20,7 +19,7 @@ import (
 
 func TestLiveProducers_HistoryEntryID(t *testing.T) {
 	t.Parallel()
-	for _, producer := range []string{"interactive", "transition", "operator"} {
+	for _, producer := range []string{"interactive", "transition"} {
 		for _, scenario := range []string{"recipients", "no recipients", "absent store", "failed append", "no ring"} {
 			if scenario == "no ring" && producer != "operator" {
 				continue
@@ -82,18 +81,6 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 					nextID = &e.nextID
 					wantType = protocol.TypeSessionTransition
 					e.broadcast(ctx, sessions.SessionTransition{PreviousID: "sess-a", NewID: "sess-b", Reason: sessions.ReasonClear, OccurredAt: occurred})
-				case "operator":
-					ch := make(chan operatorMessage, 1)
-					e := newOperatorMessageEmitterV2(ch, logger)
-					e.nextID = 100
-					nextID = &e.nextID
-					newOperatorMessageHistory(store, operatorMessageNotify(ch, logger), nil, logger)(testConvID, msgqueue.QueuedMessage{ID: 42, MessageID: opMsgID, Text: text})
-					select {
-					case m := <-ch:
-						e.broadcast(ctx, bcast, ring, m)
-					default:
-						t.Fatal("history commit did not hand off the operator message")
-					}
 				}
 				wantPushes := 3
 				if scenario == "no recipients" {

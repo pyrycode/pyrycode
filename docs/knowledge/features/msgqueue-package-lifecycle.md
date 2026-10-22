@@ -37,10 +37,30 @@ confirmation. Retirement does not wait for an unrelated successor's write.
 
 Unconfirmed successful writes retain their original accepted identity and
 content as `queued` history for ordinary delivery or `written` for Send now,
-without a delivered fact, delivered operator-message publication or automatic
-replay. A historical `queued` state does not put possibly consumed bytes back in
+without a delivered fact, delivered receipt or automatic input replay.
+A historical `queued` state does not put possibly consumed bytes back in
 the FIFO. Failed writes retain the queue's retry behavior. See
 [accepted sends and restart loss](history-package-producers.md#accepted-sends-and-linked-outcomes-2972).
+
+Raw user-message fan-out and newly appended reconnect replay are retired for
+every app, including connections without `thread` (#3732). The safe
+`MessagePayload` source append, acceptance readiness, placement synchronization
+and thread wakeups remain. One canonical `user_message` retains its acceptance
+ID through queued/written/delivered state; delivery supplies its order and
+receiving provenance. Removing transport must not remove these recording seams.
+The source embeds the committed acceptance reference before any reader can see
+it, so a failed companion outcome append cannot split the accepted item into a
+second user row; see [delivery prefixes](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
+
+Acceptance, delivered and drop receipts still publish independently through
+the bounded receipt mailbox. Acceptance is enqueued before releasing readiness;
+delivery appends its source and linked outcome before enqueueing the delivered
+receipt. There is no raw user frame carrying that receipt. Failed storage mints
+no receipt, and asynchronous receipt arrival need not precede unrelated assistant
+output. Original durable IDs, timestamps, neutral payloads and eligible live/
+replay recipients remain until #3733. Producers never wait on peer delivery;
+cancellation stops and joins the receipt worker. See
+[receipt validation and publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 With `OnAccepted` configured (#2970), its callback must finish before either
 `OnDelivered` or `OnTerminal` begins for that message, including immediate

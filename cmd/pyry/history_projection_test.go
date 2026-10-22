@@ -140,7 +140,7 @@ func TestHistoryProjection_OtherProducerMetadata(t *testing.T) {
 				}
 				e.broadcast(ctx, sessions.SessionTransition{PreviousID: "old", NewID: "new", Reason: reason, OccurredAt: occurred})
 			case "operator":
-				newOperatorMessageHistory(store, nil, nil, discardLogger())(testConvID, msgqueue.QueuedMessage{Text: "operator"})
+				newOperatorMessageHistory(store, nil, discardLogger())(testConvID, msgqueue.QueuedMessage{Text: "operator"})
 			case "channel":
 				d := testDelivery(t, dir, store, nil)
 				err := d.deliver(channelDeliveryPost{ConversationID: conversations.ConversationID(testConvID), TurnID: "post", Text: "channel", TS: historyTS})

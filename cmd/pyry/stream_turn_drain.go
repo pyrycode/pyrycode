@@ -205,7 +205,6 @@ type streamTurnSink struct {
 	echo              atomic.Pointer[func(sessionID string, ev turnevent.UserEcho)]
 	placementIdle     atomic.Pointer[func(string)]
 	placement         *sendNowPlacement // bound before workers start
-	operatorPublisher atomic.Pointer[func(operatorMessage)]
 	placementCommands chan func()
 }
 
