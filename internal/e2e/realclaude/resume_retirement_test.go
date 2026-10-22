@@ -101,8 +101,16 @@ func TestResumePredecessorWaitsForRetirement(t *testing.T) {
 			t.Fatal("snapshot boundary did not observe predecessor")
 		}
 	}
+	advanceObservation := func() {
+		t.Helper()
+		select {
+		case advance <- struct{}{}:
+		case <-ctx.Done():
+			t.Fatal("snapshot observation handshake timed out")
+		}
+	}
 	checkObservation(nil)
-	advance <- struct{}{}
+	advanceObservation()
 	// A second observation proves the first live reading stayed pending.
 	checkObservation(nil)
 	if err := input.Close(); err != nil {
@@ -113,9 +121,9 @@ func TestResumePredecessorWaitsForRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advance <- struct{}{}
+	advanceObservation()
 	checkObservation(syscall.ESRCH)
-	advance <- struct{}{}
+	advanceObservation()
 	select {
 	case err := <-done:
 		if err != nil {
