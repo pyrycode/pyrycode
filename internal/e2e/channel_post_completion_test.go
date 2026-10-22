@@ -16,6 +16,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -80,19 +81,25 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, pair.Token)
-	seal, next := sealedConnDriver(t, phone, "phone", send, recv)
+	source := scenario.NewSourceObserver(t, home)
+	seal, next := sealedConnDriver(t, phone, "phone", send, recv, source)
 	// Route a real user message: replay uses the daemon's cursor, not a client
 	// conversation selection or the new channel's name.
 	seal(protocol.Envelope{ID: 28090, Type: protocol.TypeSendMessage, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: "route", Text: "hello"})})
 	var cursor uint64
-	for cursor == 0 {
-		env, ok := next(time.Now().Add(10 * time.Second))
+	deadline := time.Now().Add(10 * time.Second)
+	for !source.Ended(convID) || cursor == 0 {
+		env, ok := next(deadline)
 		if !ok {
 			t.Fatal("routed turn never completed")
 		}
-		if env.Type == protocol.TypeTurnEnd && env.EventID != nil {
-			cursor = *env.EventID
+		if env.EventID != nil {
+			cursor = max(cursor, *env.EventID)
 		}
+	}
+	terminal, ok := source.Terminal(convID)
+	if !ok || terminal.Session == nil || terminal.Session.SessionID != initial || source.Text(convID) == "" {
+		t.Fatal("routed turn lost producing-session content/completion")
 	}
 	// Observe the routed turn's connected-device suppression before dropping
 	// the phone, so its earlier trigger cannot masquerade as the post's wake.
