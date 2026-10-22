@@ -14,6 +14,28 @@ shadow quiescence readers enter: `installRuntimeHistory` assigns
 Folding consumes raw entries, including hidden facts and captured source
 provenance; it never attributes old entries through the active session cursor.
 
+Interactive `assistant_delta`, `tool_use`, `tool_result`, `tool_denied` and
+`turn_end` remain source vocabulary (#3734). `interactiveTurnEmitterV2.emit`
+attempts their history append once, even without clients, then returns before
+legacy projection, replay insertion and fan-out to every app, including peers
+without `thread`. Successful appends preserve existing payloads, timestamps,
+visibility and producing-session provenance. Nil/failed storage cannot restore
+raw content or substitute receipts; supported live state remains separate.
+Channel-post publication remains for #3737.
+
+`TestInteractiveContentRetired` drives interleaved main/child text, child tool
+use/result, denial and duplicate completion through the emitter and real Store.
+It applies actual live additions/patches/appends, rejects duplicate additions
+and broken base revisions, and compares final rows with explicit catch-up.
+One publication interval may contain several revisions of one item: counting
+frames as final rows would reject correct delivery. Ordered settled text and
+scoped parents survive reused message/tool IDs across conversations and producing
+sessions. Only genuine unsupported source content becomes a notice; normal
+completion need not add a visible end row. `TestInteractiveContentRetiredStorage`
+checks nil/failed history, absent clients and content-free failure logs alongside
+absent raw frames/replay. These deterministic proofs and tagged compilation do
+not establish live acceptance. See [source and canonical test observation](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#source-and-canonical-observation).
+
 Background discovery and per-conversation coordination inspect committed history
 versions. This covers conversations created after startup and activity after
 unload, including `channelDelivery.deliver`, which bypasses
@@ -67,8 +89,8 @@ unloaded reads open at most one certificate and no history segment, regardless
 of history size. This bound applies to `ThreadLastShownVersion`; the list
 handler's separate [legacy watermark scan](history-package-watermarks.md#unread-state-uses-a-separate-lazily-recovered-watermark-2954)
 can still read history. The no-relay composition
-continues folding without wire publication; legacy connections retain their
-existing stream and access gates.
+continues folding without wire publication; surviving legacy publication retains
+its existing access gates, without restoring the five retired interactive types.
 
 Reconnect skips event-ring replay/resync only for negotiated thread peers.
 Each open conversation requires explicit catch-up from its last completed
@@ -554,7 +576,8 @@ catch-up, without unsolicited live replay or a fresh recovery offer. The Core
 regression proves this publisher boundary; post-merge phone/transport acceptance
 belongs to [Mobile #2374](https://github.com/pyrycode/pyrycode-mobile/issues/2374).
 
-Nil or failed shadow storage leaves legacy traffic operational.
+Nil or failed shadow storage leaves supported live state and surviving legacy
+producers operational; it cannot restore retired interactive content.
 `TestThreadShadowLegacy` checks an authenticated Noise peer through
 the production session manager, comparing live frames, reconnect replay, history
 requests and negotiated capabilities with enabled, nil and failed storage.
@@ -625,70 +648,7 @@ and [capture/recovery requirements](e2e-realclaude.md#retained-shadow-history-ev
 
 ### Reusable fold regression corpus
 
-`testFoldCorpus` and `testFoldGoldenCheck` are same-package `internal/thread`
-test helpers for the [agent](https://github.com/pyrycode/pyrycode/issues/3351),
-[visibility](https://github.com/pyrycode/pyrycode/issues/3352) and
-[text](https://github.com/pyrycode/pyrycode/issues/3353) optimizations, and the
-[publication](https://github.com/pyrycode/pyrycode/issues/3328) and
-[rendering](https://github.com/pyrycode/pyrycode/issues/3333) work that consumes
-their evidence. `fold-scenarios-v1/100-entries` repeats fixed 100-entry scenarios;
-requesting a larger count preserves the smaller prefix and adds scenarios with
-distinct turn/call/task identities and bounded payloads. Each scenario has its
-own producer lifetime, with multiple calls/tasks inside its agent group. Sharing
-one lifetime across repetitions made cross-scenario group recomputation dominate
-the gate; separate lifetimes keep the corpus practical while retaining group
-joins and long-history visibility work.
-
-The scenarios retain genuine Agent/Task child work, late links and parent
-enrichment, nested closure/reopening, mapped/durable companions, queued-send
-delivery/suppression and escaped/Unicode deltas. Bash/local_bash remain ordinary
-tools and cannot parent children. `TestFoldCorpus` independently checks lifecycle
-boundaries, prefix stability and bounded payloads; digest equality supplements
-these assertions.
-
-`TestFoldBaselines` pins generated checkpoints at versions 6, 10, 11, 12, 14,
-15, 18, 21, 22, 23, 28, 33, 100, 1,000 and 30,000 in
-[`corpus_golden.json`](../../../internal/thread/testdata/corpus_golden.json).
-Early checkpoints surround child appearance, closure/reopening, links, endings
-and send delivery/suppression; the sparse long-history checkpoints avoid testing
-every split point as `testMainReplay` does for small fixtures. It also consumes
-the unchanged raw shadow history through checkpoints in
-[`shadow_golden.json`](../../../internal/thread/testdata/shadow_golden.json).
-`cmd/pyry.TestThreadRecordedBaselines` derives the three recordings through the
-same `testRecordedFrames` helper as the independent recorded replay tests and
-retains every emitted version. All checkpoints use fresh whole-prefix feeds,
-deterministic chunks cycling through 7/31/113 entries and single-entry feeds.
-These default-build offline gates require no credentials or recapture; preserve
-the separate provenance and raw/legacy semantic assertions above. See
-[baseline writing and digest conventions](thread-package-agents-and-background-work.md#agent-validation-and-testing).
-Canonical item hashing streams individually encoded rows in sorted field order.
-Only their Content requires generic JSON normalization, avoiding a second
-complete metadata object tree. `TestFoldItemsDigestCanonical` compares this
-encoding with the independent generic encoder for every Item field, nested
-content, nil and empty slices. Existing golden bytes and the separate exact
-Content-byte hash remain unchanged.
-
-`TestThreadRecordedBaselines` additionally proves checkpoint resume equivalence
-for all three committed histories: `parent_tool_use_v2.1.259.json`,
-`task_notification_v2.1.259.json` and `roster_after_finish_v2.1.280.json`.
-`testRecordedCheckpointResume` covers every emitted entry cut from zero through
-full, including hidden facts and companion emissions within frames, then compares
-immediately and after every suffix entry with uninterrupted reference folding.
-Both export parts cross JSON separately; import uses the same owner and a
-prefix-limited history source, makes no history lookups and receives only suffix
-feeds. Direct comparisons retain exact Content bytes, every Item field/revision,
-the complete internal metadata/recipe inventory and exported continuation state.
-Rendered equality alone misses lost ever-published membership; JSON-normalized
-digests can conceal Content byte differences. See the
-[comparison contract and negative controls](thread-package-main-thread-folding-validation-checkpoints.md#checkpoint-validation-and-resume-proof).
-The retained synthetic shell creation, launch-result and turn-end context is
-explicitly test-supplied. This offline gate uses the committed frames without
-credentials or recapture and adds no live-capture evidence. Existing recorded
-semantic assertions and golden expectations remain unchanged. The
-[persisted reader and durable transaction](thread-package-main-thread-folding-validation-checkpoints.md#durable-transaction-round-trip-and-fault-proof)
-have separate round-trip and interruption/retry proofs, supplemented by
-[worker cadence and joined certification](thread-package-cache-and-epochs.md#worker-checkpoint-cadence-and-retained-changes).
-Store startup restoration remains #3337; loading still fully replays history.
+[Generated, shadow and recorded corpus proofs](thread-package-reusable-fold-regression-corpus.md#reusable-fold-regression-corpus).
 
 ### Full-feed benchmark
 

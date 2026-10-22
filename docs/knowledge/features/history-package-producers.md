@@ -29,6 +29,20 @@ from a safe `msgqueue.QueuedMessage`, available before the write through
 not from an envelope in flight (see
 [delivery ordering](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965)).
 
+Interactive assistant/tool/completion facts still pass through `emit`'s single
+history-append attempt, even without connected clients (#3734). Successful
+appends retain payloads, timestamps, visibility and captured producing-session
+provenance. The five types `assistant_delta`, `tool_use`, `tool_result`,
+`tool_denied` and `turn_end` then return before legacy projection, replay
+insertion or fan-out for every app, including peers without `thread`; no
+substitute receipt is produced. Canonical folding and explicit catch-up consume
+these retained sources. Nil/failed storage cannot restore raw content delivery;
+supported live state continues independently, with content-free diagnostics.
+Coalescing, chunking and source-switch/boundary flush order remain recording
+contracts. Channel-post deltas/completion use their separate writer and retain
+publication pending #3737. See [interactive provenance](history-package-producers-interactive-provenance.md#interactive-provenance-2981)
+and [thread publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
+
 ### Producer topics
 
 | Document | Topics |

@@ -19,11 +19,19 @@ hidden facts; legacy receipt projections discard facts needed by the fold.
 ## Shadow lifecycle and evidence
 
 [Daemon publication, lifecycle and capture evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
-covers discovery, query/live ordering, retirement and recorded regression corpora.
+covers discovery, query/live ordering, retirement and recorded evidence.
+Interactive assistant/tool/completion source folding remains authoritative while
+its compatibility publication is retired for every app (#3734), including peers
+without `thread` and nil/failed history. Supported live state remains separate;
+channel-post publication awaits #3737. `TestInteractiveContentRetired` compares
+actual canonical live revisions with explicit catch-up, checking settled ordered
+text, tool/parent attribution and reused identities without raw frames/replay or
+substitute receipts. Its replay/storage controls and tagged compilation are
+deterministic evidence, not live acceptance.
 
 ### Reusable fold regression corpus
 
-[Generated, shadow and recorded corpus proofs](thread-package-shadow-lifecycle-and-evidence.md#reusable-fold-regression-corpus).
+[Generated, shadow and recorded corpus proofs](thread-package-reusable-fold-regression-corpus.md#reusable-fold-regression-corpus).
 
 ### Full-feed benchmark
 

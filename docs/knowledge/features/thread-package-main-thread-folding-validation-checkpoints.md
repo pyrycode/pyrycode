@@ -388,4 +388,4 @@ This default-build offline regression gate retains explicitly synthetic shell
 creation, launch-result and turn-end context, unchanged semantic assertions and
 committed goldens. Only the supplied frames are captured evidence; running this
 proof adds no live Claude capture or recapture evidence. See the
-[recorded corpus and evidence limits](thread-package-shadow-lifecycle-and-evidence.md#reusable-fold-regression-corpus).
+[recorded corpus and evidence limits](thread-package-reusable-fold-regression-corpus.md#reusable-fold-regression-corpus).

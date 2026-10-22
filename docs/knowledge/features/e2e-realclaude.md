@@ -57,6 +57,26 @@ for harness staging, isolated failure control, cleanup attribution and
 “A suggestion frame alone cannot prove its source”: independent wrapper/daemon
 readers, bounded stream results and retained live failures.
 
+### Reconnect receiver ownership
+
+`PollingReceive` owns one pending encrypted read across short source-poll
+deadlines. Canceling a short WebSocket read closes that connection; returning an
+empty observation must leave the read pending. `PollingReceiveWithStop` exposes
+an idempotent stop that closes and joins the old reader. Call `Next` and stop
+serially from the test goroutine.
+
+`sharedHarnessWire` must rebind receive ownership when `perConvHarness.phone`
+changes. A polling closure captures both its phone and receive cipher; replacing
+harness fields only updates a send closure that reads those fields afresh.
+Close/join the predecessor before binding the successor's phone/cipher. Retain
+the original `ObserveSource` wrapper, pre-command source cursor and monotonic
+send sequence across reconnect, so a modal answer preserves turn attribution
+and correlated replies use fresh connection ciphers. `TestSharedHarnessWireReconnect`
+leaves an old read pending and checks repeated replacement, source boundaries
+and request correlation. The modal-resolution arms exercise the repaired live
+consumer; compiling the tagged package alone would miss a closed predecessor
+reader. See [source and canonical observation](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#source-and-canonical-observation).
+
 ## Make target
 
 ```make
@@ -96,13 +116,14 @@ GitHub comment URL. Independent raw/legacy scenario, content and ownership check
 precede fresh Store/full replay comparisons at every checkpoint. Synthetic
 rejection controls exercise those readers without becoming retained records.
 
-Transport retirement must also update fresh-capture witnesses (#3732).
-Tagged compilation and replay of an older retained pair can stay green while
-`shadowWitness` still demands a raw user frame that a fresh daemon no longer
-publishes. Validate user content through raw acceptance/delivery joins and
-canonical checkpoint rows, retaining content mutation controls. The shared
-adapter still validates other producers' wire evidence; removing its unrelated
-checks would weaken the independent oracle. Receipt chronology requires
+Transport retirement must also update fresh-capture witnesses (#3732/#3734).
+Tagged compilation and replay of an older retained pair can stay green while a
+fresh witness still demands retired raw user, assistant, tool or completion
+frames. Validate user content through raw acceptance/delivery joins and
+interactive content through retained attributed sources plus canonical checkpoint
+rows, retaining content mutation controls. The shared adapter still validates
+surviving producers' wire evidence; removing its unrelated checks would weaken
+the independent oracle. Receipt chronology requires
 acceptance before outcome, not receipts before unrelated assistant traffic.
 
 Queue snapshot retirement removes only `queue_state` envelopes from the
