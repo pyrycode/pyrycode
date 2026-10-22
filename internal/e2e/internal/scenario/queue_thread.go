@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ type queuePlacementReader struct {
 	w          Wire
 	conv       string
 	items      map[uint64]protocol.ThreadItem
+	received   map[uint64]protocol.ThreadItem
 	pending    []protocol.ThreadItem
 	version    uint64
 	epoch      string
@@ -70,6 +72,9 @@ func QueuePlacementFrames(t *testing.T, w Wire, conv string) func(time.Time) (Qu
 
 func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bool) {
 	r.t.Helper()
+	if r.received == nil {
+		r.received = maps.Clone(r.items)
+	}
 	for {
 		if r.w.Source != nil {
 			if r.completed == nil {
@@ -213,7 +218,9 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 					r.t.Fatal("thread checkpoint changed epoch")
 				}
 				r.version = max(r.version, p.Version)
-				r.pending = append(r.pending, p.Items...)
+				for _, item := range p.Items {
+					r.receive(item)
+				}
 				if p.Final && env.InReplyTo != nil && *env.InReplyTo == r.request {
 					if p.FromVersion != nil && *p.FromVersion != r.requested {
 						r.t.Fatal("thread checkpoint changed requested version")
@@ -227,7 +234,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			decode(&p)
 			if p.ConversationID == r.conv {
 				r.version = max(r.version, p.Version)
-				r.pending = append(r.pending, p.Item)
+				r.receive(p.Item)
 			}
 		case protocol.TypeThreadItemChanged:
 			var p protocol.ThreadItemChangedPayload
@@ -236,12 +243,12 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				continue
 			}
 			r.version = max(r.version, p.Version)
-			item := r.items[p.ItemID]
+			item := r.received[p.ItemID]
 			if item.Rev >= p.Rev {
 				continue // a full catch-up may already include this revision
 			}
 			if item.Rev != p.BaseRev {
-				r.t.Fatal("thread patch revision gap")
+				r.t.Fatalf("thread patch revision gap: item=%d have=%d base=%d rev=%d", p.ItemID, item.Rev, p.BaseRev, p.Rev)
 			}
 			raw, err := json.Marshal(item)
 			if err != nil {
@@ -262,7 +269,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				r.t.Fatal(err)
 			}
 			item.Rev = p.Rev
-			r.pending = append(r.pending, item)
+			r.receive(item)
 		case protocol.TypeThreadTextAppend:
 			var p protocol.ThreadTextAppendPayload
 			decode(&p)
@@ -270,12 +277,12 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 				continue
 			}
 			r.version = max(r.version, p.Version)
-			item := r.items[p.ItemID]
+			item := r.received[p.ItemID]
 			if item.Rev >= p.Rev {
 				continue // a full catch-up may already include this revision
 			}
 			if item.Rev != p.BaseRev {
-				r.t.Fatal("thread append revision gap")
+				r.t.Fatalf("thread append revision gap: item=%d have=%d base=%d rev=%d", p.ItemID, item.Rev, p.BaseRev, p.Rev)
 			}
 			var content map[string]json.RawMessage
 			if err := json.Unmarshal(item.Content, &content); err != nil {
@@ -288,7 +295,7 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			content["text"], _ = json.Marshal(text + p.Text)
 			item.Content, _ = json.Marshal(content)
 			item.Rev = p.Rev
-			r.pending = append(r.pending, item)
+			r.receive(item)
 		default:
 			f := ClassifyQueuePlacementFrame(r.t, env, r.conv)
 			if env.Type == protocol.TypeAck && env.InReplyTo != nil {
@@ -322,4 +329,14 @@ func (r *queuePlacementReader) next(deadline time.Time) (QueuePlacementFrame, bo
 			return f, true
 		}
 	}
+}
+
+// receive advances canonical state immediately. Reporting placement may wait for
+// an earlier turn's certified completion without delaying patch application.
+func (r *queuePlacementReader) receive(item protocol.ThreadItem) {
+	if r.received[item.ID].Rev >= item.Rev {
+		return
+	}
+	r.received[item.ID] = item
+	r.pending = append(r.pending, item)
 }

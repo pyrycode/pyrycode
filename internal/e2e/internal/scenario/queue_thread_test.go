@@ -1,12 +1,17 @@
 package scenario
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/pyrycode/pyrycode/internal/history"
-	"github.com/pyrycode/pyrycode/internal/protocol"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/history"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 func queueThreadFrame(t *testing.T, conv, text string, id uint64, status string) protocol.Envelope {
@@ -171,4 +176,120 @@ func TestQueueCompletionNeedsFinalAndIdle(t *testing.T) {
 	frames = append(frames, running, currentIdle)
 	check(true)
 	check(false) // repeated source snapshots cannot complete the same turn twice
+}
+
+func TestQueueBufferedSuccessorRevisions(t *testing.T) {
+	stamp := time.Now().UTC()
+	frame := func(kind string, payload any) protocol.Envelope {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.Envelope{Type: kind, Payload: raw, TS: stamp}
+	}
+	var source []history.Entry
+	for i, turn := range []string{"first", "second"} {
+		raw, _ := json.Marshal(map[string]string{"conversation_id": "conv", "turn_id": turn, "stop_reason": "end_turn"})
+		source = append(source, history.Entry{ID: uint64(10 + i*10), Type: protocol.TypeTurnEnd, Payload: raw, Session: &history.SessionProvenance{Kind: "claude", SessionID: "producer"}})
+	}
+	user := protocol.ThreadItem{ID: 3, Rev: 11, Order: 11, Kind: "user_message", Status: "delivered", Shown: true, Content: json.RawMessage(`{"text":"queued","queued_msg_id":3}`)}
+	assistant := protocol.ThreadItem{ID: 13, Rev: 13, Order: 13, Kind: "assistant_message", Active: true, Shown: true, Content: json.RawMessage(`{"text":"two"}`)}
+	frames := []protocol.Envelope{
+		frame(protocol.TypeThreadItemAdded, protocol.ThreadItemAddedPayload{ConversationID: "conv", Epoch: "epoch", Version: 11, Item: user}),
+		frame(protocol.TypeThreadItemChanged, protocol.ThreadItemChangedPayload{ConversationID: "conv", Epoch: "epoch", Version: 12, ItemID: user.ID, BaseRev: 11, Rev: 12, Changes: map[string]json.RawMessage{"status": json.RawMessage(`"delivered"`)}}),
+		frame(protocol.TypeThreadItemAdded, protocol.ThreadItemAddedPayload{ConversationID: "conv", Epoch: "epoch", Version: 13, Item: assistant}),
+		frame(protocol.TypeThreadTextAppend, protocol.ThreadTextAppendPayload{ConversationID: "conv", Epoch: "epoch", Version: 14, ItemID: assistant.ID, BaseRev: 13, Rev: 14, Text: "!"}),
+		frame(protocol.TypeThreadItemChanged, protocol.ThreadItemChangedPayload{ConversationID: "conv", Epoch: "epoch", Version: 15, ItemID: assistant.ID, BaseRev: 14, Rev: 15, Changes: map[string]json.RawMessage{"active": json.RawMessage(`false`), "status": json.RawMessage(`"done"`)}}),
+	}
+	for range 2 {
+		for _, state := range []string{"responding", "idle"} {
+			env := frame(protocol.TypeTurnState, protocol.TurnStatePayload{ConversationID: "conv", State: state})
+			env.SessionID = json.RawMessage(`"producer"`)
+			frames = append(frames, env)
+		}
+	}
+	user.Rev = 12
+	assistant.Rev, assistant.Active, assistant.Status = 15, false, "done"
+	assistant.Content = json.RawMessage(`{"text":"two!"}`)
+	var requests int
+	r := &queuePlacementReader{t: t, conv: "conv", epoch: "epoch", version: 1, checkpoint: 1, items: map[uint64]protocol.ThreadItem{}, w: Wire{
+		Source: func(string) []history.Entry { return source },
+		Send: func(kind string, payload any) uint64 {
+			requests++
+			if kind != protocol.TypeThreadCatchUp || requests != 1 {
+				t.Fatal("unexpected completion query")
+			}
+			p := payload.(protocol.ThreadCatchUpPayload)
+			if p.Epoch != "epoch" || p.Version != 1 {
+				t.Fatal("lost canonical baseline")
+			}
+			// Full rows can repeat already received revisions while placement
+			// remains buffered behind the first source completion.
+			frames = append(frames, frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Epoch: "epoch", Version: 20, Items: []protocol.ThreadItem{user, assistant}}))
+			final := frame(protocol.TypeThreadItems, protocol.ThreadItemsPayload{ConversationID: "conv", Epoch: "epoch", Version: 20, FromVersion: &p.Version, Final: true})
+			id := uint64(99)
+			final.InReplyTo = &id
+			frames = append(frames, final)
+			return id
+		},
+		Next: func(time.Time) protocol.Envelope {
+			if len(frames) == 0 {
+				return protocol.Envelope{}
+			}
+			env := frames[0]
+			frames = frames[1:]
+			return env
+		},
+	}}
+	var got []string
+	for ends := 0; ends < 2; {
+		f, ok := r.next(time.Now().Add(time.Second))
+		if !ok {
+			t.Fatal("buffered successor did not complete")
+		}
+		switch f.Kind {
+		case "turn_end":
+			ends++
+			got = append(got, f.Kind)
+		case "delta", "user_message":
+			got = append(got, f.Kind+":"+f.Text)
+		}
+	}
+	if want := "[turn_end user_message:queued delta:two delta:! turn_end]"; fmt.Sprint(got) != want {
+		t.Fatalf("placement = %v, want %s", got, want)
+	}
+	for _, want := range []protocol.ThreadItem{user, assistant} {
+		got, _ := json.Marshal(r.items[want.ID])
+		raw, _ := json.Marshal(want)
+		if string(got) != string(raw) {
+			t.Fatalf("reported canonical item %d differs from final catch-up", want.ID)
+		}
+	}
+}
+
+func TestQueueRevisionGap(t *testing.T) {
+	if kind := os.Getenv("PYRY_QUEUE_GAP_CONTROL"); kind != "" {
+		var payload any = protocol.ThreadItemChangedPayload{ConversationID: "conv", ItemID: 1, BaseRev: 2, Rev: 3}
+		if kind == protocol.TypeThreadTextAppend {
+			payload = protocol.ThreadTextAppendPayload{ConversationID: "conv", ItemID: 1, BaseRev: 2, Rev: 3, Text: "missing base"}
+		}
+		raw, _ := json.Marshal(payload)
+		r := &queuePlacementReader{t: t, conv: "conv", items: map[uint64]protocol.ThreadItem{1: {ID: 1, Rev: 1}}, w: Wire{Next: func(time.Time) protocol.Envelope {
+			return protocol.Envelope{Type: kind, Payload: raw}
+		}}}
+		r.next(time.Now().Add(time.Second))
+		t.Fatal("missing base accepted")
+	}
+	for _, kind := range []string{protocol.TypeThreadItemChanged, protocol.TypeThreadTextAppend} {
+		t.Run(kind, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestQueueRevisionGap$", "-test.v")
+			cmd.Env = append(os.Environ(), "PYRY_QUEUE_GAP_CONTROL="+kind)
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil || err == nil || !strings.Contains(string(out), "revision gap: item=1 have=1 base=2 rev=3") {
+				t.Fatalf("gap rejection err=%v output=%s", err, out)
+			}
+		})
+	}
 }

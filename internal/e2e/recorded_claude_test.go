@@ -241,6 +241,21 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 	_, cmd, stdout, stderr, done := spawnWith(t, home, spawnOpts{claudeBin: wrapper, claudeArgs: append([]string{}, definition.ClaudeArgs...), extraEnv: extra, extraFlags: []string{"-pyry-relay=" + relayURL, "-pyry-workdir=" + workdir, "-pyry-verbose", "-pyry-socket=" + c.Socket}})
 	h := &Harness{SocketPath: c.Socket, HomeDir: home, PID: cmd.Process.Pid, Stdout: stdout, Stderr: stderr, cmd: cmd, doneCh: done}
 	t.Cleanup(func() { h.Stop(t) })
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		f, err := os.CreateTemp("", "pyry-recorded-failure-*.log")
+		if err != nil {
+			t.Log("could not retain private daemon failure log")
+			return
+		}
+		_, writeErr := f.WriteString(stderr.String())
+		closeErr := f.Close()
+		if writeErr == nil && closeErr == nil {
+			t.Logf("private daemon failure log: %s", f.Name())
+		}
+	})
 	if err = h.waitForReady(); err != nil {
 		t.Fatal("recorded daemon did not become ready")
 	}
@@ -346,7 +361,7 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 				return protocol.Envelope{}
 			}
 			if result.err != nil {
-				t.Fatal("test client connection ended before scenario completed")
+				t.Fatalf("test client connection ended before scenario completed: %v", result.err)
 			}
 			var inner protocol.InnerFrameV2
 			if json.Unmarshal(result.raw, &inner) != nil {
