@@ -251,12 +251,12 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// and the intercept sits below Route, so the id crossing into the reset is this
 	// registry key with its live binding.
 	w := newResetWindow()
-	w.watchSource(t, home, clearConvID)
+	w.watchSource(t, home, skipConvID)
 	lifecycleRecordingBeforeReset(t, home)
 	nativeObservation.Add("reset_send", nil, nil)
 	sealSendMessage(t, phone, initSend, clearReqID, skipConvID, "m-clear", "/clear")
 
-	// --- AC 2: the four frames, with `skipped` on the phase change -------------
+	// AC 2: three live reset edges and the retained rotation, with skipped handoff.
 	w.awaitReset(t, phone, initRecv, clearReqID, skippedResetWindowBudget)
 	nativeObservation.Add("reset_observed", nil, nil)
 
@@ -290,12 +290,8 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 		Handoff:        "",
 	})
 
-	// The transition arrives AFTER the `restarting` edge and is asserted against nothing
-	// else — see the header for why the falling edge is deliberately left unordered
-	// against it. edges[1] is the phase change, so two edges having preceded the
-	// transition is exactly that claim. The session ids are the sibling's assertion and
-	// are not repeated: what this case adds is that the rotation still completes when the
-	// wrap-up did not.
+	// The retained rotation must be recorded after both rising live reset edges.
+	// Their daemon timestamps prove this independently of source polling time.
 	tr := w.transitions[0]
 	if tr.edgesBefore < 2 {
 		t.Errorf("the retained session_transition was recorded after %d resetting edge(s), want it after at least "+

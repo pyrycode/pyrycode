@@ -146,8 +146,7 @@ type interactiveTurnEmitterV2 struct {
 
 	// hist records source facts before any publication. Session content reaches
 	// apps through the canonical thread only, even when storage is absent or fails.
-	// Constructor callers may
-	// leave it nil; appendConversationHistory owns that guard.
+	// Constructor callers may leave it nil; appendConversationHistory owns that guard.
 	hist *history.Store
 
 	// usageRec is the per-conversation context-reading memory (#2460): the daemon's

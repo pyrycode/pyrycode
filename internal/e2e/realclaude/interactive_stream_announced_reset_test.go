@@ -302,7 +302,7 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	lifecycleRecordingBeforeReset(t, home)
 	sealSendMessage(t, phone, initSend, clearReqID, clearConvID, "m-clear", "/clear")
 
-	// --- AC 1: the four frames of the daemon-run reset -------------------------
+	// AC 1: three live reset edges and the retained rotation record.
 	w.awaitReset(t, phone, initRecv, clearReqID, clearResetWindowBudget)
 
 	assertResetEdge(t, "the first rising edge", w.edges[0], protocol.ResettingPayload{
@@ -333,10 +333,8 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 		Handoff:        "",
 	})
 
-	// The transition arrives AFTER the `restarting` edge and is asserted against
-	// nothing else — see the header's ordering decision for why the falling edge is
-	// deliberately left unordered against it. edges[1] is the phase change, so two
-	// edges having preceded the transition is exactly that claim.
+	// The retained rotation must be recorded after both rising live reset edges.
+	// Their daemon timestamps prove this independently of source polling time.
 	tr := w.transitions[0]
 	if tr.edgesBefore < 2 {
 		t.Errorf("the retained session_transition was recorded after %d resetting edge(s), want it after at least "+
