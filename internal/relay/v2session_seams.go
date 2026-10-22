@@ -20,7 +20,7 @@ import (
 //
 // Connect-time reconcile seams (OutstandingModals,
 // RetainedModelLists, OutstandingQuestions, RetainedSlashCommandLists,
-// RetainedBackgroundTaskRosters, RunningTurnPhases, ReplySuggestions) share one
+// RunningTurnPhases, ReplySuggestions) share one
 // contract, the Mode B rule of docs/protocol-mobile.md § Reconnect / Backfill
 // semantics. handleNoiseInit's interactive-open tail calls each on the Run
 // goroutine and unicasts the payloads to the just-opened conn only. An
@@ -628,24 +628,6 @@ type V2SessionConfig struct {
 	// text, forwarded unsanitised (Description can carry newlines); the client
 	// owes render sanitisation.
 	RetainedSlashCommandLists func() []protocol.SlashCommandListPayload
-
-	// RetainedBackgroundTaskRosters returns one background_task_roster payload per
-	// session holding a roster, each with its conversation_id, for connect-time
-	// reconcile (see the type doc). A roster is a full snapshot, so re-sending it
-	// is idempotent. Without it a client sees an empty task panel until claude
-	// next changes the roster.
-	//
-	// An empty roster is a positive statement that nothing is running, so a
-	// producer MUST NOT filter it out as an empty aggregate, and the consumer
-	// sends it (BackgroundTaskRosterPayload.MarshalJSON writes "tasks":[]).
-	//
-	// Payloads arrive bounded at construction
-	// (BackgroundTaskRosterPayload.DroppedTasks, BackgroundTask.TruncatedFields,
-	// over streamsup's maxTaskRosterEntries and maxTaskRosterDescription). Every
-	// string in a row is claude-authored. Description is a literal command line
-	// for local_bash tasks: render it as inert text, and never execute it or feed
-	// it to an HTML sink, attribute or URL.
-	RetainedBackgroundTaskRosters func() []protocol.BackgroundTaskRosterPayload
 
 	// RunningTurnPhases returns the current phase of every running turn as
 	// turn_state payloads, each with its conversation_id, for connect-time

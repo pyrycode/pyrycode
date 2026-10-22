@@ -40,7 +40,7 @@ No new goroutines, locks or ownership changes. The existing stream drain seriali
 | Complete refreshed roster omits an active linked task | `TestAgentHistory_GoneRosters`: saved gone facts still distinguish incomplete/invalid rosters and repeated refreshes. |
 | Repeated closure, idle sleep/reactivation and reused source identifiers | `TestAgentSessionEndings_Runtime`, `TestAgentHistory_Isolation`: existing lifetime/ending isolation remains; focused selection includes the agent test families. |
 | Task/call IDs reused across conversations and producing sessions | `TestAgentContentRetired`: separate attributed canonical rows and lifetimes; no raw content or receipt frames. |
-| Fresh connection/reconnect after roster retention | Authenticated relay roster-retirement test: handshake completes and an ordered control barrier arrives without roster content; thread queries remain explicit. |
+| Fresh connection/reconnect after roster retention | `TestRelayV2_AgentContentRetiredReconnect`: handshake completes and an ordered control barrier arrives without roster content; explicit authenticated catch-up completes. |
 
 ## Error handling
 
@@ -80,3 +80,8 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-22
+
+## Revisions
+
+- 2026-10-22: `SourceObserver` must expose retained start/update/roster entries to the existing fake/live fixtures while rejecting their raw transport envelopes. `TestBackgroundTaskJoin_CaptureOrders` now reads the surviving hold directly after removal of publication-only resolution. The composer-stop fixture also consumes task completion as source evidence. The held-task stop proof negotiates thread, checks a canonical terminal item against its exact post-stop saved outcome/gone fact and retains the physical FIFO hold. These are fixture migrations required by the planned retirement.
+- 2026-10-22: Agent receipt assertions correlate banner history identities with agent source types. Other runtime producers still emit banners until #3736, so a blanket banner prohibition would test sibling scope. The original failing run remains recorded; a controlled old-publisher overlay verifies the refined agent-specific regression.

@@ -64,11 +64,8 @@ func bgTaskEvents() []struct {
 	}
 }
 
-// AC#1: each background-task event reaches an interactive mobile client as its
-// v2 frame (the capability gate holds), carrying every field of the event —
-// including both truncation reports, the per-field truncated_fields and the
-// roster's dropped_tasks — plus the conversation identity the bridge injects.
-func TestInteractiveTurnEmitterV2_BackgroundTasksFanOutToInteractiveOnly(t *testing.T) {
+// Task payloads remain durable source facts without raw app publication.
+func TestInteractiveTurnEmitterV2_BackgroundTaskSourcesOnly(t *testing.T) {
 	t.Parallel()
 	for _, tt := range bgTaskEvents() {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,23 +76,16 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksFanOutToInteractiveOnly(t *test
 				{ConnID: "a", Interactive: true},
 				{ConnID: "b", Interactive: false},
 			}}}
-			e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
-
+			e := testRecordedEmitter(t, cur, bcast, discardLogger())
 			e.Handle(context.Background(), tt.ev)
-
-			if got := len(bcast.pushes); got != 1 {
-				t.Fatalf("pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+			if len(bcast.pushes) != 0 {
+				t.Fatal("raw task publication survived")
 			}
-			p := bcast.pushes[0]
-			if p.connID != "a" {
-				t.Fatalf("pushed to conn %q; want interactive conn %q", p.connID, "a")
+			facts := testEmitterFacts(t, e)
+			if len(facts) != 1 || facts[0].env.Type != tt.wantTyp {
+				t.Fatal("missing task source")
 			}
-			if p.env.Type != tt.wantTyp {
-				t.Fatalf("envelope type: got %q, want %q", p.env.Type, tt.wantTyp)
-			}
-			if len(pushesFor(bcast.pushes, "b")) != 0 {
-				t.Fatalf("non-interactive conn b received the %s frame", tt.wantTyp)
-			}
+			p := facts[0]
 
 			switch ev := tt.ev.(type) {
 			case turnevent.BackgroundTaskStarted:
@@ -259,11 +249,7 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskRosterMidTurnDoesNotDisturbOpenT
 	}
 }
 
-// AC#3: a turn that backgrounds nothing gains no traffic. Paired with the
-// non-suppression assertions above (MapEvent forwards an empty roster, and
-// TestInteractiveTurnEmitterV2_BackgroundTaskRosterEmptyTasksOnTheWire proves it
-// reaches the wire), this says "absent because unproduced", not "absent because
-// filtered".
+// An ordinary turn retains live phase output without raw task frames.
 func TestInteractiveTurnEmitterV2_OrdinaryTurnEmitsNoBackgroundTaskFrames(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
@@ -295,24 +281,23 @@ func TestInteractiveTurnEmitterV2_OrdinaryTurnEmitsNoBackgroundTaskFrames(t *tes
 	}
 }
 
-// AC#3: an empty roster reaches the wire as "tasks": [] — asserted on the bytes
-// the mapping produced from an empty turnevent.BackgroundTaskRoster, never on a
-// payload the test built. This is the end-to-end form of the turnbridge
-// assertion and is the property most easily broken by a well-meaning make(...)
-// in the roster loop.
-func TestInteractiveTurnEmitterV2_BackgroundTaskRosterEmptyTasksOnTheWire(t *testing.T) {
+// Empty rosters remain complete source evidence for gone inference.
+func TestInteractiveTurnEmitterV2_BackgroundTaskRosterEmptySource(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+	e := testRecordedEmitter(t, cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), turnevent.BackgroundTaskRoster{})
 
-	if got := len(bcast.pushes); got != 1 {
+	if got := len(testEmitterFacts(t, e)); got != 1 {
 		t.Fatalf("empty roster pushed %d envelopes; want exactly 1 (it is a signal, not an absence)", got)
 	}
-	p := bcast.pushes[0]
+	if len(bcast.pushes) != 0 {
+		t.Fatal("empty roster reached app transport")
+	}
+	p := testEmitterFacts(t, e)[0]
 	if p.env.Type != protocol.TypeBackgroundTaskRoster {
 		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeBackgroundTaskRoster)
 	}
@@ -321,66 +306,6 @@ func TestInteractiveTurnEmitterV2_BackgroundTaskRosterEmptyTasksOnTheWire(t *tes
 	}
 	if bytes.Contains(p.env.Payload, []byte(`"tasks":null`)) {
 		t.Fatalf("empty roster reached the wire as null:\n%s", p.env.Payload)
-	}
-}
-
-// AC#4: no claude-derived text from the three background-task events reaches a
-// log, on the log-heaviest path (every push fails, firing the push_err DEBUG
-// branch for every envelope).
-func TestInteractiveTurnEmitterV2_BackgroundTasksNoLogLeak(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer // synchronous single-goroutine capture: bytes.Buffer is safe here
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	cur := &stubCursor{}
-	cur.set(testConvID)
-	bcast := &fakeInteractiveBcast{
-		snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}},
-		pushErr:   map[string]error{"a": relay.ErrConnNotFound},
-	}
-	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
-
-	// A distinct marker in EVERY claude-derived string of all three variants,
-	// including each roster row's three.
-	// This list is enumerated BY HAND, so widening one of the three variants does
-	// not widen the sweep — a new claude-derived field stays untested until its
-	// marker lands here. #2245's two are the case in point: Summary is unbounded
-	// model prose, the field on this family with the most to leak.
-	secrets := []string{
-		"SECRETTASKIDZZZ", "SECRETTOOLCALLZZZ", "SECRETDESCZZZ", "SECRETTASKTYPEZZZ",
-		"SECRETPATCHZZZ", "SECRETSTATUSZZZ", "SECRETSUMMARYZZZ",
-		"SECRETROWIDZZZ", "SECRETROWTYPEZZZ", "SECRETROWDESCZZZ",
-	}
-	for _, ev := range []turnevent.Event{
-		turnevent.BackgroundTaskStarted{
-			TaskID:      "SECRETTASKIDZZZ",
-			ToolCallID:  "SECRETTOOLCALLZZZ",
-			Description: "SECRETDESCZZZ",
-			TaskType:    "SECRETTASKTYPEZZZ",
-		},
-		// Two events of this variant, because its two producing subtypes fill
-		// disjoint fields: one event can never carry both a patch and a terminal
-		// state, so a single fixture would leave one half of the variant unswept.
-		turnevent.BackgroundTaskUpdated{TaskID: "SECRETTASKIDZZZ", Patch: "SECRETPATCHZZZ"},
-		turnevent.BackgroundTaskUpdated{
-			TaskID: "SECRETTASKIDZZZ", Status: "SECRETSTATUSZZZ", Summary: "SECRETSUMMARYZZZ",
-		},
-		turnevent.BackgroundTaskRoster{Tasks: []turnevent.BackgroundTask{
-			{TaskID: "SECRETROWIDZZZ", TaskType: "SECRETROWTYPEZZZ", Description: "SECRETROWDESCZZZ"},
-		}},
-	} {
-		e.Handle(context.Background(), ev)
-	}
-
-	logs := buf.String()
-	if logs == "" {
-		t.Fatal("expected DEBUG push-error logs; got none (test would not prove the no-leak property)")
-	}
-	for _, secret := range secrets {
-		if strings.Contains(logs, secret) {
-			t.Fatalf("claude-derived text %q leaked into logs:\n%s", secret, logs)
-		}
 	}
 }
 

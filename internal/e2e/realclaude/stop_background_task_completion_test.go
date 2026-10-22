@@ -20,7 +20,7 @@ import (
 // rig still holds the FIFO. A control acceptance alone cannot satisfy this test.
 func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 	runParallel(t)
-	h, convID := startStreamRunningTurnHarness(t)
+	h, convID := startStreamRunningTurnHarness(t, protocol.CapabilityThread)
 	fifo := filepath.Join(h.workdir, "stop-task.fifo")
 	arrived, release := tpcapHoldFIFO(t, fifo)
 	defer release()
@@ -61,36 +61,50 @@ func TestRealClaudeStopBackgroundTaskCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal("marshal stop")
 	}
+	snapshot := scenario.SourceSnapshot(t, h.home)
+	var stopMark uint64
+	for _, entry := range snapshot(convID) {
+		stopMark = max(stopMark, entry.ID)
+	}
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: 27961, Type: protocol.TypeStopBackgroundTask, TS: time.Now().UTC(), Payload: payload})
 	deadline = time.Now().Add(45 * time.Second)
-	for {
-		env, ok := reader.receive(t, time.Until(deadline))
-		if !ok {
-			t.Fatal("stop acceptance did not produce task completion while FIFO held")
+	request := uint64(27962)
+	pending := false
+	var items []protocol.ThreadItem
+	for time.Now().Before(deadline) {
+		if !pending {
+			sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{ID: request, Type: protocol.TypeThreadCatchUp, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.ThreadCatchUpPayload{ConversationID: convID, Limit: 100})})
+			pending, items = true, nil
 		}
-		switch env.Type {
-		case protocol.TypeError:
-			t.Fatal("task stop refused")
-		case protocol.TypeBackgroundTaskUpdated:
-			var p protocol.BackgroundTaskUpdatedPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal("decode terminal update")
+		env, _ := source.Next(poll, min(deadline, time.Now().Add(200*time.Millisecond)))
+		if env.Type == protocol.TypeError {
+			var p protocol.ErrorPayload
+			if json.Unmarshal(env.Payload, &p) != nil || p.Code != "thread.query_failed" || !p.Retryable {
+				t.Fatal("task stop or canonical query refused")
 			}
-			if p.ConversationID == convID && p.TaskID == taskID && p.Status == "stopped" {
-				t.Log("completion signal: background_task_updated status=stopped while FIFO held")
-				return
-			}
-		case protocol.TypeBackgroundTaskRoster:
-			var p protocol.BackgroundTaskRosterPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal("decode terminal roster")
-			}
-			if p.ConversationID == convID && !slices.ContainsFunc(p.Tasks, func(row protocol.BackgroundTask) bool { return row.TaskID == taskID }) {
-				t.Log("completion signal: background_task_roster omits held task while FIFO held")
-				return
-			}
+			pending = false
+			request++
+			continue
 		}
+		if env.Type != protocol.TypeThreadItems || env.InReplyTo == nil || *env.InReplyTo != request {
+			continue
+		}
+		var p protocol.ThreadItemsPayload
+		if json.Unmarshal(env.Payload, &p) != nil || p.ConversationID != convID {
+			t.Fatal("invalid canonical task query")
+		}
+		items = append(items, p.Items...)
+		if !p.Final {
+			continue
+		}
+		if stopTaskTerminalItem(items, snapshot(convID), convID, setup.uniqueToolID(), taskID, stopMark) {
+			t.Log("completion signal: canonical terminal item backed by saved task outcome while FIFO held")
+			return
+		}
+		pending = false
+		request++
 	}
+	t.Fatal("stop acceptance did not produce canonical task completion while FIFO held")
 }
 
 func stopTaskFIFOArrived(arrived <-chan struct{}) bool {

@@ -126,17 +126,17 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 	composerRequireReader(t, background, fifoLiveReaderPresent)
 	release()
 	deadline = time.Now().Add(perTurnReplyBudget)
-	for {
-		env := next(deadline)
-		if env.Type != protocol.TypeBackgroundTaskUpdated {
-			continue
+	completed := false
+	source.OnEntry = func(entry history.Entry) {
+		if entry.Type != protocol.TypeBackgroundTaskUpdated {
+			return
 		}
 		var p protocol.BackgroundTaskUpdatedPayload
-		if err := json.Unmarshal(env.Payload, &p); err != nil {
+		if err := json.Unmarshal(entry.Payload, &p); err != nil {
 			t.Fatal("decode background completion")
 		}
 		if p.ConversationID != convID || p.TaskID != setup.taskID() {
-			continue
+			return
 		}
 		status := p.Status
 		if status == "" && p.Patch != "" {
@@ -150,12 +150,15 @@ func TestRealClaudeComposerStopPreservesBackgroundTask(t *testing.T) {
 		}
 		switch status {
 		case "completed":
-			t.Log("cancelled foreground turn; held background task completed after rig release")
-			return
+			completed = true
 		case "failed", "stopped":
 			t.Fatalf("background task ended with %q after Composer Stop", status)
 		}
 	}
+	for !completed {
+		next(deadline)
+	}
+	t.Log("cancelled foreground turn; held background task completed after rig release")
 }
 
 // TestRealClaudeComposerStopClosedInputKillsHeldTask releases the foreground

@@ -91,14 +91,8 @@ func TestAgentSessionEndings_Runtime(t *testing.T) {
 					if p["lifetime_id"] != lifetime || p["cause"] != "idle_sleep" || entry.Session == nil || *entry.Session != source || entry.Shown == nil || !*entry.Shown || !entry.TS.Equal(historyTS) {
 						t.Fatalf("ending: %+v %s", entry, entry.Payload)
 					}
-					receipt, ok := legacyRuntimeReceipt(testConvID, entry.Type, entry.Payload, &entry.ID, entry.TS)
-					if !ok {
-						t.Fatal("missing receipt")
-					}
-					var banner protocol.BannerPayload
-					_ = json.Unmarshal(receipt, &banner)
-					if !reflect.DeepEqual(banner, protocol.BannerPayload{ConversationID: testConvID, Level: "info"}) {
-						t.Fatalf("visual receipt: %+v", banner)
+					if !validAgentHistoryFact(testConvID, entry.Type, entry.Payload) {
+						t.Fatal("invalid saved ending")
 					}
 				}
 			}
@@ -337,8 +331,7 @@ func TestAgentSessionEndings_DrainOrdering(t *testing.T) {
 	}
 }
 
-func TestAgentSessionEndings_ReceiptValidation(t *testing.T) {
-	id := uint64(9)
+func TestAgentSessionEndings_FactValidation(t *testing.T) {
 	at := historyTS
 	for _, tt := range []struct {
 		fact agentHistoryFact
@@ -352,11 +345,8 @@ func TestAgentSessionEndings_ReceiptValidation(t *testing.T) {
 	} {
 		tt.fact.ConversationID, tt.fact.Cause, tt.fact.OccurredAt = testConvID, "daemon_restart", at
 		raw, _ := json.Marshal(tt.fact)
-		if _, ok := legacyRuntimeReceipt(testConvID, historyAgentSessionEnded, raw, &id, at); ok != tt.want {
+		if ok := validAgentHistoryFact(testConvID, historyAgentSessionEnded, raw); ok != tt.want {
 			t.Fatalf("validation %s: %v", raw, ok)
-		}
-		if _, ok := legacyRuntimeReceipt(testConvID, historyAgentSessionEnded, raw, nil, at); ok {
-			t.Fatal("receipt without durable ID")
 		}
 	}
 }

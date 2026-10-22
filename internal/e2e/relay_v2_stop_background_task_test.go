@@ -16,6 +16,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -72,25 +73,26 @@ func TestRelayV2_StopBackgroundTaskCompletesOnlyAddressedTask(t *testing.T) {
 	}
 	// Both children have the same held id; B becomes the cursor, so stopping A proves named routing.
 	for i, conv := range []string{convA, convB} {
+		retained := false
+		source.OnEntry = func(entry history.Entry) {
+			if entry.Type != protocol.TypeBackgroundTaskRoster {
+				return
+			}
+			var p protocol.BackgroundTaskRosterPayload
+			if err := json.Unmarshal(entry.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			retained = p.ConversationID == conv && len(p.Tasks) == 1 && p.Tasks[0].TaskID == taskID
+		}
 		seal(protocol.Envelope{ID: uint64(27961 + i), Type: protocol.TypeSendMessage, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: conv, MessageID: conv, Text: "hold\n"})})
 		deadline = time.Now().Add(15 * time.Second)
-		for {
+		for !retained {
 			env, ok := next(deadline)
 			if !ok {
 				t.Fatal("held roster never arrived")
 			}
 			if env.Type == protocol.TypeError {
 				t.Fatal("turn refused")
-			}
-			if env.Type != protocol.TypeBackgroundTaskRoster {
-				continue
-			}
-			var p protocol.BackgroundTaskRosterPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			if p.ConversationID == conv && len(p.Tasks) == 1 && p.Tasks[0].TaskID == taskID {
-				break
 			}
 		}
 	}
@@ -117,8 +119,28 @@ func TestRelayV2_StopBackgroundTaskCompletesOnlyAddressedTask(t *testing.T) {
 		}
 		refusals++
 	}
-	stop(27964, taskID)
 	stopped, removed := false, false
+	source.OnEntry = func(entry history.Entry) {
+		var p struct {
+			ConversationID string                    `json:"conversation_id"`
+			TaskID         string                    `json:"task_id"`
+			Status         string                    `json:"status"`
+			Tasks          []protocol.BackgroundTask `json:"tasks"`
+		}
+		if err := json.Unmarshal(entry.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.ConversationID != convA {
+			return
+		}
+		if entry.Type == protocol.TypeBackgroundTaskUpdated && p.TaskID == taskID && p.Status == "stopped" {
+			stopped = true
+		}
+		if entry.Type == protocol.TypeBackgroundTaskRoster && len(p.Tasks) == 0 {
+			removed = true
+		}
+	}
+	stop(27964, taskID)
 	deadline = time.Now().Add(5 * time.Second)
 	for !stopped || !removed {
 		env, ok := next(deadline)
@@ -126,22 +148,6 @@ func TestRelayV2_StopBackgroundTaskCompletesOnlyAddressedTask(t *testing.T) {
 			t.Fatal("no task completion")
 		}
 		switch env.Type {
-		case protocol.TypeBackgroundTaskUpdated:
-			var p protocol.BackgroundTaskUpdatedPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			if p.ConversationID == convA && p.TaskID == taskID && p.Status == "stopped" {
-				stopped = true
-			}
-		case protocol.TypeBackgroundTaskRoster:
-			var p protocol.BackgroundTaskRosterPayload
-			if err := json.Unmarshal(env.Payload, &p); err != nil {
-				t.Fatal(err)
-			}
-			if p.ConversationID == convA && len(p.Tasks) == 0 {
-				removed = true
-			}
 		case protocol.TypeError:
 			t.Fatal("accepted stop returned error")
 		case protocol.TypeTurnEnd:

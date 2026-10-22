@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -274,82 +273,6 @@ func TestAgentHistory_Isolation(t *testing.T) {
 	}
 }
 
-func TestAgentHistory_LegacyCompatibility(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	store := history.New(dir)
-	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "phone", Interactive: true}, {ConnID: "other"}}}}
-	e := newInteractiveTurnEmitterV2(nil, bcast, discardLogger())
-	e.hist, e.runtimeFacts = store, true
-	ctx := context.Background()
-	source := history.SessionProvenance{Kind: "claude", SessionID: "source"}
-	e.emit(ctx, testConvID, protocol.TypeMessage, protocol.MessagePayload{ConversationID: testConvID, MessageID: "user", Role: "user", Text: "presented"})
-	e.HandleFor(ctx, testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "call"}, source)
-	e.HandleFor(ctx, testConvID, turnevent.ToolUpdate{ToolCallID: "call", Status: turnevent.ToolStatusCompleted}, source)
-	e.HandleFor(ctx, testConvID, turnevent.ToolCallDenied{ToolCallID: "call"}, source)
-	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"}, source)
-	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskUpdated{TaskID: "task", Status: "completed"}, source)
-	e.HandleFor(ctx, testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "gone-call"}, source)
-	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskStarted{TaskID: "gone-task", ToolCallID: "gone-call"}, source)
-	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskRoster{}, source)
-	if len(testGoneEntries(t, store, testConvID)) != 1 {
-		t.Fatal("gone fact missing from compatibility fixture")
-	}
-	// Hidden progress at the tail retains delivery and durable identity.
-	e.HandleFor(ctx, testConvID, turnevent.BackgroundTaskProgress{TaskID: "task"}, source)
-	raw := historyEntries(t, store, testConvID)
-	raw = slices.DeleteFunc(raw, func(e history.Entry) bool { return testRetiredInteractiveType(e.Type) })
-	events, _ := e.ring.After(testConvID, 0)
-	for _, reader := range []*history.Store{store, history.New(dir)} {
-		page, _ := testLegacyReceipts(t, reader)
-		page = slices.DeleteFunc(page, func(e history.Entry) bool { return testRetiredInteractiveType(e.Type) })
-		if len(page) != len(raw) || len(events) != len(raw) || len(bcast.pushes) != len(raw) {
-			t.Fatal("receipt hole or recipient gate changed")
-		}
-		for i, original := range raw {
-			var projected history.Entry
-			for _, entry := range page {
-				if entry.ID == original.ID {
-					projected = entry
-				}
-			}
-			event := events[i]
-			push := bcast.pushes[i]
-			if projected.ID == 0 || event.HistoryEntryID != original.ID || push.connID != "phone" || push.env.HistoryEntryID == nil || *push.env.HistoryEntryID != original.ID || !original.TS.Equal(projected.TS) || !event.TS.Equal(projected.TS) || !push.env.TS.Equal(projected.TS) || !bytes.Equal(event.Payload, projected.Payload) || !bytes.Equal(push.env.Payload, projected.Payload) {
-				t.Fatal("durable receipt identity changed")
-			}
-			if !legacyHistoryType(original.Type) {
-				if projected.Type != protocol.TypeBanner || bytes.Equal(projected.Payload, original.Payload) {
-					t.Fatal("raw fact leaked")
-				}
-				var banner protocol.BannerPayload
-				_ = json.Unmarshal(projected.Payload, &banner)
-				if banner.Level != "info" || banner.Text != "" || banner.Truncated || banner.StopsTurn {
-					t.Fatal("receipt conferred presentation/state")
-				}
-			}
-		}
-	}
-	// Only valid facts produce receipts.
-	var valid json.RawMessage
-	for _, entry := range raw {
-		if entry.Type == "background_task_observed" {
-			valid = slices.Clone(entry.Payload)
-		}
-	}
-	for _, payload := range []json.RawMessage{valid, json.RawMessage(`{}`), json.RawMessage(`{"conversation_id":"wrong"}`)} {
-		id := uint64(2)
-		_, ok := legacyRuntimeReceipt(testConvID, "background_task_observed", payload, &id, historyTS)
-		if ok != bytes.Equal(payload, valid) {
-			t.Fatal("receipt validation changed")
-		}
-	}
-	id := uint64(2)
-	if _, ok := legacyRuntimeReceipt(testConvID, "unrelated_unknown", valid, &id, historyTS); ok {
-		t.Fatal("unknown certified harmless")
-	}
-}
-
 func TestAgentHistory_StorageFailure(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"nil", "failed", "history-only"} {
@@ -376,6 +299,8 @@ func TestAgentHistory_StorageFailure(t *testing.T) {
 			e.HandleFor(context.Background(), testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "call-id-secret-sentinel"}, source)
 			e.HandleFor(context.Background(), testConvID, turnevent.BackgroundTaskStarted{TaskID: "task-id-secret-sentinel", ToolCallID: "call-id-secret-sentinel", Description: "description-secret-sentinel"}, source)
 			e.HandleFor(context.Background(), testConvID, turnevent.BackgroundTaskRoster{}, source)
+			e.HandleFor(context.Background(), testConvID, turnevent.ToolStart{Title: "Agent", ToolCallID: "ending-secret-sentinel"}, source)
+			e.closeAgentHistory(context.Background(), "idle_sleep", historyTS)
 			if mode == "history-only" {
 				if len(testGoneEntries(t, store, testConvID)) != 1 {
 					t.Fatal("relay-disabled gone missing")
@@ -384,13 +309,8 @@ func TestAgentHistory_StorageFailure(t *testing.T) {
 					t.Fatal("relay-disabled fact missing")
 				}
 			} else {
-				for _, push := range bcast.pushes {
-					if push.env.Type == protocol.TypeBanner || push.env.HistoryEntryID != nil {
-						t.Fatal("failed append produced receipt")
-					}
-				}
-				if len(bcast.pushes) != 3 || bcast.pushes[1].env.Type != protocol.TypeBackgroundTaskStarted || bcast.pushes[2].env.Type != protocol.TypeBackgroundTaskRoster {
-					t.Fatal("mapped report lost")
+				if len(bcast.pushes) != 1 || bcast.pushes[0].env.Type != protocol.TypeTurnState {
+					t.Fatal("storage failure restored raw task content or receipts")
 				}
 			}
 			if mode == "failed" && logs.Len() == 0 {
@@ -484,7 +404,7 @@ func TestAgentHistory_SealedReports(t *testing.T) {
 	}
 }
 
-func TestAgentHistory_ReceiptValidation(t *testing.T) {
+func TestAgentHistory_FactValidation(t *testing.T) {
 	t.Parallel()
 	store := history.New(t.TempDir())
 	e := newInteractiveTurnEmitterV2(nil, historyOnlyBroadcaster{}, discardLogger())
@@ -511,8 +431,8 @@ func TestAgentHistory_ReceiptValidation(t *testing.T) {
 			_ = json.Unmarshal(entry.Payload, &p)
 			delete(p, field)
 			raw, _ := json.Marshal(p)
-			if _, ok := legacyRuntimeReceipt(testConvID, entry.Type, raw, &entry.ID, entry.TS); ok {
-				t.Fatalf("missing %s in %s certified harmless", field, entry.Type)
+			if validAgentHistoryFact(testConvID, entry.Type, raw) {
+				t.Fatalf("missing %s in %s accepted", field, entry.Type)
 			}
 		}
 	}

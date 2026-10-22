@@ -25,13 +25,9 @@ import (
 // claude's system/task_started, task_updated, task_progress and task_notification lines
 // become background_task_started, background_task_updated (two producers: task_updated
 // fills patch, task_notification fills status and summary) and background_task_progress.
-// Every seam on that path — streamsup's emitSystemSubtype, turnbridge.MapEvent, cmd/pyry's
-// interactive v2 emitter — has its own unit coverage, and before #1533 nothing drove one
-// of these lines through a real daemon to a connected client. The realclaude drains
-// decrypt these frames and skip them, so make preship did not close the gap either. A
-// regression in the drain gate, the emitter or envelope handling, or a drift between the
-// turnevent and protocol shapes, would leave every unit test green while phones stopped
-// showing background tasks.
+// The daemon retains start/update payloads as source history and delivers progress
+// as live state. SourceObserver rejects raw task content on the app transport;
+// separate observations preserve parser/source and progress coverage.
 //
 // THE FEED IS fakeclaude's REPLAY RIDER (#2503), not a new rider: the first user turn's
 // canned reply is replaced by bgTaskFramesFragment, written byte for byte. The five system
@@ -200,6 +196,10 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 	deadline := time.Now().Add(30 * time.Second)
 	source.OnEntry = func(entry history.Entry) {
 		switch entry.Type {
+		case protocol.TypeBackgroundTaskStarted:
+			obs.started = append(obs.started, append(json.RawMessage(nil), entry.Payload...))
+		case protocol.TypeBackgroundTaskUpdated:
+			obs.updated = append(obs.updated, append(json.RawMessage(nil), entry.Payload...))
 		case protocol.TypeAssistantDelta:
 			var p protocol.AssistantDeltaPayload
 			if err := json.Unmarshal(entry.Payload, &p); err != nil {
@@ -223,10 +223,6 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
-		case protocol.TypeBackgroundTaskStarted:
-			obs.started = append(obs.started, append(json.RawMessage(nil), env.Payload...))
-		case protocol.TypeBackgroundTaskUpdated:
-			obs.updated = append(obs.updated, append(json.RawMessage(nil), env.Payload...))
 		case protocol.TypeBackgroundTaskProgress:
 			obs.progress = append(obs.progress, append(json.RawMessage(nil), env.Payload...))
 		case protocol.TypeUnrecognizedMessage:
@@ -237,12 +233,8 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 	return obs
 }
 
-// TestRelayV2_StreamBackgroundTaskFramesReachConnectedPhone is the hermetic end-to-end
-// proof that claude's per-task background-task lines reach a connected interactive v2
-// client as exactly the frames the protocol promises: one background_task_started, two
-// background_task_updated (one per producer), one background_task_progress (the second
-// progress line only), each carrying the fed values verbatim, the bound conversation id,
-// a null truncated_fields and no key its payload type does not declare.
+// TestRelayV2_StreamBackgroundTaskFramesReachConnectedPhone checks retained task
+// start/update source values and actual live progress from the same parsed turn.
 func TestRelayV2_StreamBackgroundTaskFramesReachConnectedPhone(t *testing.T) {
 	obs := driveBackgroundTaskFramesTurn(t)
 

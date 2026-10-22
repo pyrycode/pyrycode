@@ -887,20 +887,19 @@ func runSupervisor(args []string, deliveryFactory ...channelDeliveryFactory) err
 		// beside its MCP twin over the same registry and pool. The collapsing and
 		// mid-turn-deferral half is composed in startRelayV2, which holds the turn
 		// tracker and the daemon context.
-		contextUsageResolve:           contextUsageResolve(convReg, pool),
-		mcpActuatorFor:                boundMCPChildActuator(convReg, pool),
-		backgroundTaskStopper:         boundBackgroundTaskStopper(convReg, pool),
-		retainedModelLists:            retainedModelLists(convReg, pool, modelVocabulary),
-		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool, liveBindings),
-		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
-		approvals:                     approvals,
-		streamSink:                    streamSink,
-		suggestions:                   replySugg,
-		busy:                          turnBusy,
-		hist:                          conversationHistory,
-		shadow:                        shadow,
-		postDelivery:                  postDelivery,
-		approvalParked:                approvalParked,
+		contextUsageResolve:       contextUsageResolve(convReg, pool),
+		mcpActuatorFor:            boundMCPChildActuator(convReg, pool),
+		backgroundTaskStopper:     boundBackgroundTaskStopper(convReg, pool),
+		retainedModelLists:        retainedModelLists(convReg, pool, modelVocabulary),
+		retainedSlashCommandLists: retainedSlashCommandLists(convReg, pool, liveBindings),
+		approvals:                 approvals,
+		streamSink:                streamSink,
+		suggestions:               replySugg,
+		busy:                      turnBusy,
+		hist:                      conversationHistory,
+		shadow:                    shadow,
+		postDelivery:              postDelivery,
+		approvalParked:            approvalParked,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)

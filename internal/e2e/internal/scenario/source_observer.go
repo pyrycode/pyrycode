@@ -81,7 +81,8 @@ func (o *SourceObserver) Next(next Next, deadline time.Time) (protocol.Envelope,
 	}
 	env := next(pollDeadline(deadline))
 	switch env.Type {
-	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
+		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster:
 		o.t.Fatal("retired interactive content reached app transport: ", env.Type)
 	}
 	for conv, w := range o.watches {
@@ -109,7 +110,8 @@ func (o *SourceObserver) Next(next Next, deadline time.Time) (protocol.Envelope,
 				continue
 			}
 			switch e.Type {
-			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+			case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
+				protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster:
 				if e.Session == nil || e.Session.SessionID == "" {
 					o.t.Fatal("observed content lacks producing session")
 				}
