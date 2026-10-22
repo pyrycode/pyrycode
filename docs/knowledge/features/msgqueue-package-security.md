@@ -15,24 +15,24 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   composed prompt naming a stored attachment's on-host path while `text` stays
   the user's own words, which `docs/protocol-mobile.md` § Error codes forbids
   putting on the wire. `QueuedMessage` gains no `delivery` field, so
-  `Snapshot`/`SnapshotAll` — and so `queue_state`, on both the enqueue push and
-  the connect-time reconcile — are structurally incapable of projecting one; a
-  future consumer that wants the path on the wire has to widen the exported
+  `Snapshot`/`SnapshotAll` and lifecycle/delivery projections are structurally
+  incapable of projecting one; a future consumer that wants the path on the wire has to widen the exported
   type to get it, rather than merely forgetting a filter. `Enqueue` is
   `EnqueueDelivery(convID, "", text, text)`, so none of its ~108 existing call
   sites needed touching.
 - **`messageID` (#2092) is untrusted like `text`, but travels the opposite
   direction on purpose.** It is the client's own id for the `send_message` that
   produced this record, stored verbatim and projected by both `Snapshot` and
-  `SnapshotAll` so `queue_state` can carry it back out — deliberately echoed to
-  every paired device, as the key a client merges its own optimistic echo on.
+  `SnapshotAll`. Lifecycle/history facts also retain it for thread projection;
+  outbound queue snapshots are retired. A client correlates only its own sends,
+  since another device can choose the same `messageID`.
   Nothing in this package or its consumers reads it to route, authorize, match
   or dedupe; a colliding id across two devices is a client-local
   merge-attribution question (`docs/protocol-mobile.md` § Queue), not a daemon
   trust decision. This is the same shape #2038's `attachment_id` warned about: a
   doc comment that enumerated `Text` as *the* untrusted field went stale the
-  moment a second untrusted field landed beside it, so `QueuedMessage`'s and
-  `QueuedItem`'s comments now name both.
+  moment a second untrusted field landed beside it. `QueuedMessage` projections
+  must account for both.
 - **`attachmentIDs` (#2596) is untrusted like `messageID`, and the security
   distinction is provenance, not shape.** They arrive already past
   `resolveAttachments`' canonical-shape check (`internal/relay/handlers`),
@@ -94,8 +94,8 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
   [codebase/869.md](../codebase/869.md).
 - **`Snapshot` / `Remove` boundary crossings (#719) — convID trust is the
   consumer's job.** Both key by **caller-supplied `convID`**, and `Snapshot`
-  *returns* the opaque `text` and (#2092) `messageID` (both will flow out to a
-  phone via `queue_state`). Per-conversation maps give isolation-by-construction
+  *returns* the opaque `text` and (#2092) `messageID` as source-level values. Queue snapshot publication is retired;
+  lifecycle facts supply app-visible accepted-send content. Per-conversation maps give isolation-by-construction
   **once `convID` is trusted**; trusting it is #705's job (bind `convID` to the
   requesting phone's authorized conversation, exactly as `send_message` does).
   Cross-conversation **confidentiality** (`Snapshot` reading another conv's

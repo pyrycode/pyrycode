@@ -152,9 +152,16 @@ and retired bindings return false without mutation or observers. Existing
 
 ## Introspection, removal, and change notification (#719)
 
-An additive read/remove/notify layer the `queue_state` (#722) / `dequeue_message`
-(#723) consumers need. No goroutine, no new lock; `Enqueue`/`Run`/stable-id
-semantics untouched.
+The retained read/remove/notify layer supports source introspection and queue
+operations, including `dequeue_message`, send-now and reset backlog removal.
+`Snapshot`, `SnapshotAll` and optional `OnChange` are engine APIs, not app
+snapshot contracts. #3727 removed the daemon's change-time emitter, notification
+channel/goroutine, reconnect adapter and relay `OutstandingQueues` configuration;
+no app receives `queue_state`. Accepted-send lifecycle observers and
+`BindAcceptedItem` remain wired. Apps recover through
+[thread items](../../protocol-mobile.md#queue-v2), with explicit catch-up before
+live observation. Removing publication must not remove these operation and
+identity seams. The read/remove/notify layer adds no goroutine or lock.
 
 - **`Snapshot(convID)` — copy under the lock.** Takes `q.mu`, looks up the conv
   (`nil` ⇒ return `nil`, not an error), else projects each internal `queued` into
@@ -176,12 +183,10 @@ semantics untouched.
   including the in-flight head), keyed into a fresh `map[string][]QueuedMessage`.
   It **skips any conversation whose `items` is empty**: `shrinkLocked` leaves a
   drained-but-retained `convQueue` in `convs` with `items == nil`, so without this
-  filter a fully-drained conversation would still surface an entry. This filter
-  *is* the connect-time queue reconcile's AC3 enforcement point — see
-  [`v2-session-manager.md` § Connect-time queue reconcile](v2-session-manager.md#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues).
-  A pure read: mints no id, dequeues nothing. Built for, and so far only consumed
-  by, the `cmd/pyry` `outstandingQueues` adapter that feeds `internal/relay`'s
-  `OutstandingQueues` seam.
+  filter a fully-drained conversation would still surface an entry. This is
+  retained source-level introspection; the former `outstandingQueues` adapter
+  and connect-time reconcile are retired. A pure read: mints no id, dequeues
+  nothing and sends no app frame.
 - **`Remove(convID, id)` — a waiting head is droppable; the advance is what keeps
   that safe.** `Enqueue` only ever appends to the tail, so `Remove` is the
   **first** op that can touch index 0. It refuses index 0 **iff** `c.committing`
@@ -207,8 +212,8 @@ semantics untouched.
   `dequeue_message` does and for the identical reason — past that gate the
   message is already going into the outgoing child, so the reset's "drop the
   backlog" goal is already satisfied for that one id without `Remove` needing
-  to be made total. `Remove`'s own change-notify republishes the emptied
-  `queue_state`, so the reset needs no second publish of its own. See [Inbound
+  to be made total. Removal retains lifecycle/history observation; apps see
+  terminal accepted-item updates rather than an empty queue snapshot. See [Inbound
   new_session § The wrap-up
   turn](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477).
 
@@ -241,7 +246,7 @@ semantics untouched.
   (after `advanceLocked` drops a confirmed head — **not** on the empty-exit or
   delivery-error/retry paths), a successful `Remove` (no-ops fire nothing), and
   (#1000) `giveUp` — the abandoned head also leaves the backlog, so `notify`
-  fires there too, keeping the wired `queue_state` producer's view correct after
+  fires there too, allowing an optional source consumer to re-read after
   a give-up drop. Firing strictly after unlock is what makes a re-entrant
   `OnChange` (a consumer that calls back into `Snapshot`/`Remove`/`Enqueue`)
   re-acquire the lock cleanly and not deadlock against the goroutine that fired

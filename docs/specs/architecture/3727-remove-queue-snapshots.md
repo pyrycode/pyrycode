@@ -86,11 +86,13 @@ against the existing wire payloads; revisions below will record contract changes
 
 ## Documentation handoff
 
-Pending documentation stage:
+Completed by documentation stage on 2026-10-22; wording checked against the
+retained implementation and regression controls. `make docs-guard` passes on
+Linux. The completed scope is:
 
-- `docs/protocol-mobile.md`, **Queue (v2)**, application-message table, queue-snapshot examples and **Reconnect / Backfill semantics**: remove outbound/connect-time `queue_state`; explain queued identity/status and recovery through thread items. Retain dequeue/send-now command contracts including optional accepted-item binding. Update reset/queue wording promising an empty snapshot.
-- `docs/knowledge/features/msgqueue-package.md`: update introductory queue-publication wording.
-- `docs/knowledge/features/msgqueue-package-api.md`, **Introspection, removal, and change notification (#719)**: distinguish retained source/queue-operation APIs from retired app snapshots.
+- [x] `docs/protocol-mobile.md`, **Queue (v2)**, application-message table, queue-snapshot examples and **Reconnect / Backfill semantics**: remove outbound/connect-time `queue_state`; explain queued identity/status and recovery through thread items. Retain dequeue/send-now command contracts including optional accepted-item binding. Update reset/queue wording promising an empty snapshot.
+- [x] `docs/knowledge/features/msgqueue-package.md`: update introductory queue-publication wording.
+- [x] `docs/knowledge/features/msgqueue-package-api.md`, **Introspection, removal, and change notification (#719)**: distinguish retained source/queue-operation APIs from retired app snapshots.
 
 ## Security review
 

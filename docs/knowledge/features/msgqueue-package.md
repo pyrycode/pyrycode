@@ -21,12 +21,14 @@ runs `Queue.Run(ctx)` under the daemon lifecycle, and `send_message` now
 **enqueues-and-acks** instead of delivering synchronously (delivery seam =
 `newInboundDeliver(router.resolve)`, the reliable `WriteUserTurn` path — extended in
 [#1199](../codebase/1199.md) to `newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)`,
-see § Related). The
-`queue_state` / `dequeue_message` reporting/removal wire types (#720) + their
-handlers landed as #722/#723 (see § Related); the previously-deferred inbound
-bound/backpressure policy landed as [#869](../codebase/869.md) once that live
-wiring shipped. #719 added the engine-side primitives the #722/#723
-reporting/removal handlers map onto (`Snapshot`, `Remove`, `OnChange`).
+see § Related). Queue publication now comes from accepted-send lifecycle facts
+folded into [thread items](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
+Outbound `queue_state`, its change notifier and reconnect provider are retired
+for every app (#3727). The FIFO, `Snapshot`/`SnapshotAll`, `Remove`/`SendNow`,
+optional `OnChange`, lifecycle observers and accepted-item binding remain.
+Apps initialize each open conversation with explicit thread catch-up and then
+apply live item updates; handshake does not publish a queue baseline. See
+[Queue (v2)](../../protocol-mobile.md#queue-v2) for identity and command contracts.
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   — `send_message` is "queued by the daemon when claude is busy" (line 123); each

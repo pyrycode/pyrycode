@@ -121,13 +121,19 @@ These two live in their **own** cohesive const block, grouping the request/respo
 
 The four modal types share **one** const block with **one** rationale comment — the **mixed inbound+outbound** cluster precedent set by the `request_snapshot`/`screen_snapshot` pair. `TypeModalShown` / `TypeModalDismissed` are outbound binary → phone events; `TypeModalAnswer` / `TypeModalCancel` are inbound phone → binary **control** envelopes intercepted at `internal/relay/v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeRekeyRequest` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). All four carry real named payload structs in `messaging.go` (`ModalShownPayload` / `ModalAnswerPayload` / `ModalCancelPayload` / `ModalDismissedPayload` — see [Modal v2 wire payloads](#modal-v2-wire-payloads-701)). All four stay out of `inboundAppTypeSet` (four `{"modal_*-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producers are siblings #703 (control loop) / #706 (two-heads ownership) / #2605 (answer-side eligibility — any authenticated device, not the privileged per-device bit #702 gates for minting/MCP actuation); this slice is wire vocabulary only, `security-sensitive` for the **shape** review (no handler ships).
 
-**v2 queue vocabulary** (#720; spec `docs/protocol-mobile.md` § Queue):
+**v2 queue vocabulary** (#720/#2729; spec [Queue (v2)](../../protocol-mobile.md#queue-v2)):
 
 | Group | Constants |
 |-------|-----------|
-| Queue | `TypeQueueState`, `TypeDequeueMessage` |
+| Queue controls | `TypeDequeueMessage`, `TypeSendQueuedNow` |
 
-The two queue types share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal block. `TypeQueueState` is an outbound binary → phone queued-backlog snapshot; `TypeDequeueMessage` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeRequestSnapshot` precedent — **no `dispatch.Route` handler**). `TypeQueueState` carries the named `QueueStatePayload` / `QueuedItem` structs and `TypeDequeueMessage` the `DequeueMessagePayload` struct in `messaging.go` (see [Queue v2 wire payloads](#queue-v2-wire-payloads-720)). Both stay out of `inboundAppTypeSet` (two `{"queue_state-rejected"/"dequeue_message-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is #722 / the handler is #723; this slice is wire vocabulary only — and **unlike** the modal block it is **not** `security-sensitive` (`queued_msg_id` is a plain per-conversation counter, not a nonce, and dequeuing is ungated — ADR 025 § Security model).
+Both are inbound phone → binary controls intercepted by `dispatchAppFrame`
+before `dispatch.Route`, with `DequeueMessagePayload` and `SendQueuedNowPayload`
+in `messaging.go`. They stay out of `inboundAppTypeSet`; relay handlers own
+interactive gating and optional accepted-item binding. `TypeQueueState` and its
+outbound snapshot payloads are retired for every app (#3727); queue observation
+uses explicit thread catch-up and live item updates. See
+[queue payloads](protocol-package-types-queue-v2-wire-payloads.md).
 
 **v2 interrupt control** (#707; spec `docs/protocol-mobile.md` § Interrupt):
 

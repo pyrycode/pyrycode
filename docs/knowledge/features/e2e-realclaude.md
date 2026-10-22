@@ -96,6 +96,13 @@ GitHub comment URL. Independent raw/legacy scenario, content and ownership check
 precede fresh Store/full replay comparisons at every checkpoint. Synthetic
 rejection controls exercise those readers without becoming retained records.
 
+Queue snapshot retirement removes only `queue_state` envelopes from the
+retained `Legacy` expectation, preserving raw history, canonical items,
+attachments and capture provenance. Filter the retired envelopes without
+re-serializing other captured JSON: changing escaped bytes inside retained raw
+payloads breaks the independent replay comparison even when decoded values
+look equivalent. This filtering does not claim a new capture.
+
 Retained bytes and provenance describe the capture's original folding rules;
 rewriting expected rows to match a later fold would misrepresent that evidence.
 The pinned capture predates acceptance-owned queue handles: its delivered
