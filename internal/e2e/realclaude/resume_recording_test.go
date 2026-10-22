@@ -4,9 +4,11 @@ package realclaude
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -123,9 +125,9 @@ func lifecycleRecordingResumeSnapshot(t *testing.T, home string) {
 	if err != nil || job.Config.OwnerPID <= 1 {
 		t.Fatal("missing predecessor snapshot producer")
 	}
-	terminal := waitLifecycleReceipt(t, prefix+".receipt")
-	if terminal.OwnerPID != job.Config.OwnerPID || syscall.Kill(job.Config.OwnerPID, 0) != syscall.ESRCH {
-		t.Fatal("original eviction did not stop its owned predecessor")
+	terminal, err := waitLifecycleResumePredecessor(prefix+".receipt", job.Config.OwnerPID, time.Now().Add(15*time.Second), syscall.Kill)
+	if err != nil {
+		t.Fatal(err)
 	}
 	var delivery claudetape.LifecycleDelivery
 	if claudetape.ReadLifecycleControl(prefix+".user-000001", 16384, &delivery) != nil || delivery.Version != 1 || delivery.Kind != "user-input-forwarded" || delivery.OwnerPID != job.Config.OwnerPID || delivery.BrokerPID != terminal.BrokerPID || delivery.Sequence != 1 {
@@ -164,4 +166,21 @@ func lifecycleRecordingResumeSnapshot(t *testing.T, home string) {
 	if claudetape.PublishLifecycleControl(filepath.Join(home, "recording-snapshots", "bootstrap.stage"), stage) != nil {
 		t.Fatal("predecessor transcript causal stage repeated")
 	}
+}
+
+func waitLifecycleResumePredecessor(path string, owner int, deadline time.Time, observe func(int, syscall.Signal) error) (claudetape.LifecycleReceipt, error) {
+	for time.Now().Before(deadline) {
+		var r claudetape.LifecycleReceipt
+		if daemonRecordingRead(path, &r) == nil {
+			if !r.Success || r.Error != "" || r.Frames == 0 || r.OwnerPID != owner {
+				return r, fmt.Errorf("resume predecessor receipt failed or has foreign ownership")
+			}
+			if observe(owner, 0) != syscall.ESRCH {
+				return r, fmt.Errorf("original eviction did not stop its owned predecessor")
+			}
+			return r, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return claudetape.LifecycleReceipt{}, fmt.Errorf("resume predecessor boundary: %w", context.DeadlineExceeded)
 }
