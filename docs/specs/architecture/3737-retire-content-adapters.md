@@ -83,6 +83,8 @@ Pending for documentation stage:
 
 ## Revisions
 
+- 2026-10-22: `history_projection_test.go` → `TestHistoryProjection_InteractiveMetadata` has a recipient-count oracle separate from `assertLogMatchesRing`; exclude banners in both while retaining all four stored banner visibility cases. The second package run exposed the remaining recipient assertion after its replay assertion was repaired.
+
 - 2026-10-22: Final tagged-test inventory found residual raw channel assertions in `internal/e2e/channel_post_live_test.go` and `channel_post_completion_test.go`, and raw banner/receipt expectations in `internal/e2e/internal/scenario/hook.go` → `HookBanner`/`CheckHookBannerWindow` and its real-Claude offline fixtures. Migrate connected catch-up, reconnect absence, durable chunk/completion, actual wake and held-turn/successor ordering assertions together. Hook refusal is observed in saved sources while the no-read settle window, correlated ACK, subsequent live phase, canonical queued delivery and original source identity remain checked. Add focused `e2e` channel checks and offline tagged hook-window tests; live hook/prompt acceptance remains dispatcher-owned. These required helper migrations extend the initial file inventory within the existing grandchild scope.
 
 - 2026-10-22: `TestLocalPairingProviderWiredFromRelayConstructionToControl` in `relay_guard_test.go` also matched the discarded post callback's local variable name in `runSupervisor`. Update that expected tuple to `_`, keeping all exact pairing-provider/minter wiring assertions. The affected-package run exposed this residual mixed structural assertion; no pairing behavior changes.
