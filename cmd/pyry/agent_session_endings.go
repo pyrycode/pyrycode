@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"slices"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // endAgentWork closes task identities before remaining calls. A linked result
@@ -62,9 +60,6 @@ func (e *interactiveTurnEmitterV2) closeAgentHistory(ctx context.Context, cause 
 			e.logger.Warn("history: agent ending marshal failed", "event", "agent_history.marshal_err")
 			continue
 		}
-		id := appendConversationHistory(e.hist, e.logger, "agent_history.append_err", p.ConversationID, historyAgentSessionEnded, raw, at, e.source)
-		if receipt, ok := legacyRuntimeReceipt(p.ConversationID, historyAgentSessionEnded, raw, id, at); ok {
-			publishLegacyHistory(ctx, e.bcast, e.ring, e.logger, &e.nextID, p.ConversationID, protocol.TypeBanner, receipt, at, id)
-		}
+		appendConversationHistory(e.hist, e.logger, "agent_history.append_err", p.ConversationID, historyAgentSessionEnded, raw, at, e.source)
 	}
 }

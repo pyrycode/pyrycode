@@ -330,9 +330,6 @@ func TestV2Session_ThreadReplay(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 2)
 	rec := &v2Recorder{}
 	cfg := threadConfig(t, frames, rec, priv)
-	cfg.RetainedBackgroundTaskRosters = func() []protocol.BackgroundTaskRosterPayload {
-		return []protocol.BackgroundTaskRosterPayload{{ConversationID: gateClaudeConv}}
-	}
 	mgr, stop := startManager(t, cfg)
 	t.Cleanup(stop)
 	ring := eventring.New(eventring.MaxEventsPerConversation)

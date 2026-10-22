@@ -218,7 +218,8 @@ func TestInteractiveContentRetiredStorage(t *testing.T) {
 				}
 				e.hist = history.New(root)
 			}
-			for _, typ := range []string{protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd} {
+			for _, typ := range []string{protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
+				protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster} {
 				e.emit(t.Context(), testConvID, typ, map[string]string{"text": "PRIVATE_CONTENT"})
 			}
 			if len(b.pushes) != 0 {
@@ -227,7 +228,7 @@ func TestInteractiveContentRetiredStorage(t *testing.T) {
 			if events, _ := e.ring.After(testConvID, 0); len(events) != 0 {
 				t.Fatal("storage mode restored raw replay")
 			}
-			if mode == "no-clients" && len(historyEntries(t, e.hist, testConvID)) != 5 {
+			if mode == "no-clients" && len(historyEntries(t, e.hist, testConvID)) != 8 {
 				t.Fatal("missing source append without clients")
 			}
 			if strings.Contains(logs.String(), "PRIVATE_CONTENT") {

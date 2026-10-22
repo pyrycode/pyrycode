@@ -573,31 +573,8 @@ func (e *interactiveTurnEmitterV2) handleForSource(ctx context.Context, convID s
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.BackgroundTaskStarted, turnevent.BackgroundTaskUpdated, turnevent.BackgroundTaskRoster,
 		turnevent.BackgroundTaskProgress:
-		// claude's background-task lifecycle (#1394), taking the same shape as the
-		// status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
-		// transitionTo / endTurn; inTurn, turnID, currentState untouched). A
-		// background task OUTLIVES the turn that spawned it — that is the whole
-		// #1240 point — so it is not turn-scoped, and opening a turn on one would
-		// wedge the conversation exactly as opening one on an unrecognized message
-		// would: no turn end follows work that is orthogonal to the turn.
-		//
-		// Flush any pending delta first so buffered text keeps its wire position
-		// ahead of the frame. An empty roster is FORWARDED, not filtered — it says
-		// nothing is alive, which is the reassurance #1240's symptom needs. Like
-		// turn_state these flow through emit() and are NOT droppable deltas (the
-		// droppable set is assistant_delta only, #610), so a burst holds queue
-		// slots; the producer already caps roster entries, and these only fire on
-		// claude's own lifecycle lines.
-		//
-		// BackgroundTaskProgress (#2246) joins the case list rather than earning an arm
-		// of its own, because every sentence above already describes it: same subject,
-		// same non-turn-scoped posture, same flush-then-emit. What is NOT already true
-		// of it is the last clause — this variant does not fire only on claude's
-		// lifecycle lines, it fires repeatedly while a task runs. That is exactly why
-		// its producer carries a rate bound (streamsup.minTaskToolCallsPerEvent) where
-		// its three neighbours carry none, and, as with thinking progress, no second cap
-		// is imposed here: a filter in this file would silently diverge from the one
-		// that decided the event existed.
+		// Background reports outlive their main turn. Preserve source ordering and
+		// task progress without opening, closing or changing the main turn's phase.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ThinkingProgress:
@@ -1374,7 +1351,8 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	historyEntryID := appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
 		convID, typ, payloadJSON, ts, e.source)
 	switch typ {
-	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+	case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd,
+		protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster:
 		return
 	}
 	if !legacyHistoryType(typ) {

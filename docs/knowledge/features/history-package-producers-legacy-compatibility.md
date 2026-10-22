@@ -13,10 +13,11 @@ through canonical thread items and explicit catch-up. Shared adapters for other
 producers remain.
 A new history-only type's raw payload is excluded from every connection's legacy
 live fan-out and reconnect replay, whether its stored `Shown` is nil,
-false or true. Only the validated runtime/startup,
-[agent/task facts](history-package-producers-runtime-lifecycle.md#agenttask-attribution-and-reported-endings-3030)
-and [remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973)
-have a receipt projection. [Queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
+false or true. Validated runtime/startup and
+[remote prompt answers](history-package-producers.md#resolved-remote-prompt-answers-2973)
+retain receipt publication. Agent/task producers publish none (#3735), including
+mapped start/update/roster reports and neutral attribution/ending facts; shared
+validation/projection adapters remain pending #3737. [Queued-send facts](history-package-producers.md#accepted-sends-and-linked-outcomes-2972)
 have none (#3733), including when shown and durably identified. Apps observe
 queued sends through canonical thread items and explicit catch-up.
 Stored visibility feeds thread folding and the internal history APIs; it does
@@ -28,12 +29,19 @@ including normal turn ends, info banners and live status readings. This preserve
 old apps treat unknown history entries as read-mark barriers.
 
 `interactiveTurnEmitterV2.emit` appends once before checking this allowlist,
-including when no clients are connected. Unsupported facts return before ring
-publication unless `legacyRuntimeReceipt` validates their receipt projection.
+including when no clients are connected. Retired assistant/tool/completion and
+agent start/update/roster types return before projection, regardless of this
+allowlist. Other unsupported facts return before ring publication unless
+`legacyRuntimeReceipt` validates their receipt projection.
 Successful appends remain readable through raw `Store.Page` after reopening.
 Raw storage accepts arbitrary types; the transport vocabulary is closed independently.
 
-**Account known runtime, agent/task and prompt-answer IDs without certifying unseen content (#3026, #3030, #3031, #3032, #3222).**
+**Receipt adapter vocabulary and surviving producers (#3026, #3030, #3031, #3032, #3222).**
+The adapter's recognized agent types below do not authorize publication:
+`recordAgentFact` and `closeAgentHistory` append source facts only (#3735), and
+mapped start/update/roster values return from `emit` before projection. Agent
+visibility and durable identity cannot restore compatibility receipts.
+
 `legacyRuntimeReceipt` handles exactly `main_turn_opened`, `main_tool_interrupted`,
 `main_turn_interrupted`, `session_divider`, `agent_call_observed`,
 `agent_call_result`, `agent_call_denied`, `background_task_observed`,
@@ -82,9 +90,10 @@ unaccounted holes remain barriers. Receipt accounting alone never advances a
 read mark or grants foreground presentation.
 
 **Runtime writers bypass `emit`.** Changing only its allowlist would leave live
-and reconnect accounting incomplete. `recordRuntimeFact`, `recordAgentFact`,
-`closeAgentHistory` and `sessionTransitionEmitterV2.broadcast` append each raw
-fact once, then use `publishLegacyHistory` for the receipt. Runtime dividers use the replay ring
+and reconnect accounting incomplete. `recordRuntimeFact` and
+`sessionTransitionEmitterV2.broadcast` append each raw fact once, then use
+`publishLegacyHistory` for the receipt. `recordAgentFact` and `closeAgentHistory`
+append only; their receipt publication is retired (#3735). Runtime dividers use the replay ring
 installed on the runtime sink before workers start. History, direct recipients
 and replay share the original ID and timestamp, with the same receipt bytes;
 there is no second durable append or ID allocator. Existing interactive and

@@ -29,6 +29,18 @@ text, tool/parent attribution and reused identities without raw frames/replay or
 substitute receipts. Its replay/storage controls and tagged compilation are
 deterministic evidence, not live acceptance.
 
+Background-agent start/update/roster values and neutral attribution/ending facts
+also remain source evidence, without raw app frames, new replay copies, synthetic
+agent receipts or connect-time roster snapshots for any capability (#3735).
+`TestAgentContentRetired` compares canonical live revisions and explicit catch-up
+through late links, reported outcomes, saved gone/session endings and reused
+identities; task progress and bound-session stop controls remain supported.
+The counted Linux live gate passed `TestRealClaudeStopBackgroundTaskCompletion`
+and `TestRealClaudeComposerStopPreservesBackgroundTask` on `ad1cb1aec214`;
+[the linked evidence](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence)
+distinguishes that acceptance from offline helpers and parent #3718's remaining
+family acceptance. Stop acceptance alone cannot establish completion.
+
 ### Reusable fold regression corpus
 
 [Generated, shadow and recorded corpus proofs](thread-package-reusable-fold-regression-corpus.md#reusable-fold-regression-corpus).

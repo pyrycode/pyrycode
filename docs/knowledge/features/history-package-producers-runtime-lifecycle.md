@@ -121,6 +121,14 @@ Committed switches wait through transition publication, row publication and
 transport sealing before reset exclusion releases. Both relay configurations
 install this runtime path, including history-only operation.
 
+Agent source recording participates in this durable ordering without adding
+compatibility receipt publication (#3735): `recordAgentFact` flushes buffered
+predecessor text before its append, and `closeAgentHistory` appends saved endings
+before dividers/successor traffic. The canonical publisher consumes those facts;
+raw agent content and synthetic agent banners enter neither live delivery nor
+new reconnect replay. Supported progress/supplied-state ordering and sibling
+runtime/channel publication keep their existing coordination.
+
 ### Producer incarnation isolation
 
 Idle sleep and capacity eviction reactivate under the same routing ID.
@@ -143,8 +151,11 @@ retains chunk bounds and sequence progression. Other conversations stay untouche
 ### Legacy exclusion and write failures
 
 Runtime and agent/task types remain raw history facts; their payloads never enter
-legacy transports. Validated facts instead project to nonvisual info-banner
-receipts in history and, when recorded while running, live/replay (#3026).
+legacy transports. Agent identity/link/result/outcome/gone/session-ending
+producers publish no compatibility receipts (#3735). Their original mapped
+start/update/roster sources also stop after the history append, for every app,
+including without `thread`. Surviving runtime producers still use validated
+nonvisual info-banner receipts (#3026); shared adapters remain pending #3737.
 See [legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 Visibility never grants raw facts transport eligibility.
 Best-effort nil/failed storage does not change closure, sealing, eligible legacy
@@ -191,10 +202,10 @@ All startup facts share the captured startup occurrence time as `occurred_at`
 and entry timestamp. Their durable entry-ID order places tool closures before
 turn closure, then agent endings, then the divider, then new traffic.
 `closeStartupMainWork` and `closeStartupAgentWork` run before the restart divider,
-alongside `closeRuntimeSource` at runtime. Legacy history projects these facts as
-nonvisual receipts; startup does not backfill the in-memory replay ring or publish
-live frames. The restart divider intentionally has no predecessor/successor
-session IDs. Receipt validation
+alongside `closeRuntimeSource` at runtime. Startup does not backfill the in-memory
+replay ring or publish live frames. Agent endings remain source evidence without
+compatibility receipt publication; surviving runtime projection stays separate.
+The restart divider intentionally has no predecessor/successor session IDs. Receipt validation
 accepts its captured conversation and occurrence identity; requiring a predecessor
 would leave a restart read hole that running-turn tests cannot detect.
 
@@ -267,7 +278,7 @@ still appends its own divider after successful reads.
 `interactiveTurnEmitterV2.observeAgentHistory` runs on the captured-source drain
 when runtime facts are enabled and the producer is explicitly `claude`. Codex
 and unknown producers create no agent/task facts. The existing mapped tool,
-denial and background reports retain their payloads and routing; attribution
+denial and background reports retain their payloads and captured source; attribution
 adds only identities, links and supplied outcomes to the same raw history log.
 Inputs, descriptions, summaries and patches stay in their existing reports,
 outside `agentHistoryFact` and attribution memory.
@@ -346,10 +357,11 @@ supply no background ending. Only a later complete roster can establish
 
 Identity/link facts are explicitly hidden; results, denials, task outcomes and
 gone and ended-with-session facts are explicitly shown. Neither value grants
-foreground presentation or raw legacy transport eligibility. Successful validated
-facts use nonvisual receipts at their original durable IDs/timestamps, counted toward the legacy unread target
-independently of raw visibility under #3029. Receipt-only traffic does not confer
-sight or advance a read mark by itself. See
+foreground presentation or raw legacy transport eligibility. These producers
+publish no compatibility receipts (#3735); explicit visibility, durable IDs,
+timestamps and source attribution remain evidence for canonical folding and
+explicit catch-up. A stop-control acceptance supplies neither a reported outcome
+nor saved ending evidence. See
 [receipt validation and visibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
 [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
 and [the attribution contract](../../specs/architecture/3030-agent-task-history.md).
@@ -395,5 +407,9 @@ and its state remain owned by the single drain, including captured late rosters
 for sealed predecessors; other conversations, sources and lifetimes remain
 unaffected. Codex and unknown producers infer nothing. Session boundaries use
 [separate closure evidence](#unfinished-agenttask-session-endings-3032), not roster
-absence. No extra live refresh or second durable log supplies gone evidence. See
+absence. No extra live refresh or second durable log supplies gone evidence.
+Retiring raw roster frames, connect-time snapshots and agent receipts does not remove fresh
+source observations or saved gone/session-ending inference (#3735). Canonical
+thread items and explicit catch-up expose those outcomes; retained-roster control
+lookups and successful stop acceptance cannot establish them. See
 [the roster contract](../../specs/architecture/3031-agent-roster-gone.md).

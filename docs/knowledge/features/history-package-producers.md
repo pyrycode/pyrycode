@@ -43,6 +43,17 @@ contracts. Channel-post deltas/completion use their separate writer and retain
 publication pending #3737. See [interactive provenance](history-package-producers-interactive-provenance.md#interactive-provenance-2981)
 and [thread publication](thread-package-shadow-lifecycle-and-evidence.md#shadow-lifecycle-and-evidence).
 
+Background-task start/update/roster reports also retain their single append
+attempt, payloads, timestamps, visibility and captured source even without
+clients, then return before projection, replay or fan-out (#3735).
+`recordAgentFact` and `closeAgentHistory` retain neutral attribution, outcomes,
+gone and session-ending appends without publishing compatibility receipts.
+Canonical thread items and explicit catch-up consume both mapped and neutral
+sources. This retirement applies to every app and nil/failed storage; task
+progress and bound-session stop controls remain supported. The runner's retained
+roster/join state still serves controls, but connect-time roster publication and
+its exclusive provider/wiring are removed. Stop acceptance supplies no outcome.
+
 ### Producer topics
 
 | Document | Topics |
@@ -76,11 +87,12 @@ and [agent recovery](history-package-producers-runtime-lifecycle.md#recover-agen
 
 Gone and ended-with-session facts have explicit raw `shown: true`. Their raw
 payloads stay excluded from legacy live delivery and replay.
-After successful storage, #3026's
-validated nonvisual receipt retains the original durable ID and timestamp;
-\#3029 counts it toward the legacy unread target independently of raw visibility.
-That accounting confers no foreground presentation or read-mark advancement by
-itself. See [receipt validation](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
+No compatibility receipt is published for these agent facts (#3735). Their
+original durable IDs, timestamps, explicit visibility and source/lifetime facts
+remain fold inputs for canonical items and explicit catch-up. This changes no
+surviving runtime or prompt-answer producer contract; shared legacy validation
+adapters remain pending #3737. See
+[legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 
 ### Legacy transition provenance (#2982)
 

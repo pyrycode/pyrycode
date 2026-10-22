@@ -60,7 +60,7 @@ func testSourceCollector(t *testing.T, store func() *history.Store, live <-chan 
 		for _, entry := range entries[consumed : consumed+n] {
 			fact := protocol.Envelope{Type: entry.Type, TS: entry.TS, Payload: entry.Payload}
 			facts = append(facts, fact)
-			if testRetiredInteractiveType(entry.Type) {
+			if testRetiredInteractiveType(entry.Type) || testRetiredAgentType(entry.Type) {
 				continue
 			}
 			select {

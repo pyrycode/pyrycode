@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
-	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -114,10 +113,7 @@ func (e *interactiveTurnEmitterV2) recordAgentFact(ctx context.Context, typ stri
 		e.logger.Warn("history: agent fact marshal failed", "event", "agent_history.marshal_err")
 		return
 	}
-	id := appendConversationHistory(e.hist, e.logger, "agent_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
-	if receipt, ok := legacyRuntimeReceipt(p.ConversationID, typ, raw, id, p.OccurredAt); ok {
-		publishLegacyHistory(ctx, e.bcast, e.ring, e.logger, &e.nextID, p.ConversationID, protocol.TypeBanner, receipt, p.OccurredAt, id)
-	}
+	appendConversationHistory(e.hist, e.logger, "agent_history.append_err", p.ConversationID, typ, raw, p.OccurredAt, e.source)
 }
 
 // observeAgentHistory never changes main-turn or child routing state. A call

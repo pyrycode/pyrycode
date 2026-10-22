@@ -13,21 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
-
-type joinedRosterRunner struct {
-	stubRunner
-	hold *sessionBackgroundTaskHold
-}
-
-func (r joinedRosterRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bool) {
-	return r.hold.BackgroundTaskRoster()
-}
 
 func TestBackgroundTaskJoin_CaptureOrders(t *testing.T) {
 	t.Parallel()
@@ -54,12 +44,6 @@ func TestBackgroundTaskJoin_CaptureOrders(t *testing.T) {
 			}
 			var seen recordingSink
 			parser, held := newSessionParser(seen.sink, discardLogger())
-			pool, err := sessions.New(sessions.Config{Bootstrap: sessions.SessionConfig{ClaudeBin: os.Args[0]}, RegistryPath: filepath.Join(t.TempDir(), "sessions.json"), RunnerFactory: func(sessions.RunnerConfig) (sessions.Runner, error) { return joinedRosterRunner{hold: held.tasks}, nil }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			reg := &conversations.Registry{}
-			reg.Create(conversations.Conversation{ID: "conv", CurrentSessionID: string(pool.BootstrapID())})
 			count := 0
 			for _, frame := range frames {
 				if frame.Subtype != "task_started" && frame.Subtype != "background_tasks_changed" {
@@ -94,9 +78,9 @@ func TestBackgroundTaskJoin_CaptureOrders(t *testing.T) {
 			if start.ToolCallID != tc.id {
 				t.Fatalf("forwarded start = %#v", start)
 			}
-			got, ok := resolveBoundBackgroundTaskRoster(reg, pool, "conv")
+			got, ok := held.tasks.BackgroundTaskRoster()
 			if !ok || got.Tasks[0].ToolCallID != tc.id {
-				t.Fatalf("connect roster = %#v, ok=%v", got, ok)
+				t.Fatalf("retained control roster = %#v, ok=%v", got, ok)
 			}
 		})
 	}

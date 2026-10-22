@@ -335,13 +335,12 @@ func TestAgentHistory_GoneSealedLifetime(t *testing.T) {
 	}
 }
 
-func TestAgentHistory_GoneReceiptValidation(t *testing.T) {
+func TestAgentHistory_GoneFactValidation(t *testing.T) {
 	t.Parallel()
 	valid, err := json.Marshal(agentHistoryFact{ConversationID: testConvID, LifetimeID: testConvIDB, ToolCallID: "call", TaskID: "task", Status: "gone", OccurredAt: historyTS})
 	if err != nil {
 		t.Fatal(err)
 	}
-	id := uint64(2)
 	for _, tt := range []struct {
 		name, typ string
 		raw       json.RawMessage
@@ -352,8 +351,8 @@ func TestAgentHistory_GoneReceiptValidation(t *testing.T) {
 		{"unrelated", "unrelated_unknown", valid, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, ok := legacyRuntimeReceipt(testConvID, tt.typ, tt.raw, &id, historyTS); ok != tt.want {
-				t.Fatalf("receipt accepted=%t want=%t", ok, tt.want)
+			if ok := validAgentHistoryFact(testConvID, tt.typ, tt.raw); ok != tt.want {
+				t.Fatalf("fact accepted=%t want=%t", ok, tt.want)
 			}
 		})
 	}
@@ -365,20 +364,8 @@ func TestAgentHistory_GoneReceiptValidation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := legacyRuntimeReceipt(testConvID, "background_task_gone", raw, &id, historyTS); ok {
+		if validAgentHistoryFact(testConvID, "background_task_gone", raw) {
 			t.Fatalf("invalid gone status %q accepted", status)
-		}
-	}
-	for _, check := range []struct {
-		id *uint64
-		ts bool
-	}{{nil, true}, {new(uint64), true}, {&id, false}} {
-		ts := historyTS
-		if !check.ts {
-			ts = (agentHistoryFact{}).OccurredAt
-		}
-		if _, ok := legacyRuntimeReceipt(testConvID, "background_task_gone", valid, check.id, ts); ok {
-			t.Fatal("missing durable storage identity accepted")
 		}
 	}
 }

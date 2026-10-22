@@ -44,8 +44,8 @@ import (
 // conversation that has none of its own is allowed, and reading anything else off
 // it still is not. THE EXCEPTION IS VOCABULARY-ONLY: resolveBoundRunner,
 // resolveBoundSession, resolveBoundRunSettings, resolveBoundSlashCommandList,
-// resolveBoundBackgroundTaskRoster and the twins in cmd/pyry's main.go keep the
-// guard unchanged, and a future reader must not generalise from this one.
+// and the twins in cmd/pyry's main.go keep the guard unchanged, and a future
+// reader must not generalise from this one.
 // (resolveBoundSlashCommandList in particular looks like it should follow and
 // must not: its inventory is WORKSPACE-scoped — the same initialize reply's
 // commands array is 51 entries for this repository — so the bootstrap's copy

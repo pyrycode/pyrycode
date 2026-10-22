@@ -8,12 +8,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// This file holds the connect-time turn-phase reconcile (#2712) — the seventh
-// Mode B instance after reconcileModals (#877), reconcileQueues (#878),
-// reconcileModelLists (#1863), reconcileQuestions (#1979),
-// reconcileSlashCommandLists (#2006) and reconcileBackgroundTaskRosters (#2078).
-// Its own file for the reason the twins give for theirs: the test files are
-// one-per-reconcile.
+// Current turn phases are resent to newly authenticated interactive connections.
 
 // reconcileTurnPhases unicasts the current phase of every running turn to a
 // freshly interactive-open conn (#2712), so a client that left mid-turn shows
