@@ -112,3 +112,79 @@ child edits rather than repeating them. Carry forward the exact requirements:
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-22
+
+## Revisions
+
+- 2026-10-22: Completed the planned review below without implementation changes.
+  Resolved the open applicability question as source-equivalent historical support;
+  final parent gate-input identity and complete/live acceptance remain dispatcher-owned.
+  The live stage tally counts passing leaves; raw Go event counts also include
+  parents and skipped tests. Keep both conventions explicit rather than copying
+  the refinement comment's event-count description.
+
+## Evidence review — 2026-10-22
+
+Reviewed Linux/amd64, Go 1.26.9, at plan commit
+`45ffc602c13048b43313d50220ada95fd2947f68`, on integrated base
+`3c01097672fff84fe9f63caa5c715fb32ae617f6`. Native relations are untruncated:
+#3732/#3733 are merged leaves, neither a closed split placeholder nor an owner of
+unfinished descendants. All causal links remain; no labels or holds were cleared.
+
+### Merged completion and retained evidence
+
+| Owner | Reviewed candidate → merged revision | Authoritative evidence |
+| --- | --- | --- |
+| #3693 / PR #3696, stored attachment facts | `1f0929f1d3de5ac52da1571a630187537a791069` → `a19604f7a3e6f5674517869c9fa32726b0afedac` | Manual verifier PASS, PR comment `6320580153`; no central stage record exists. Retained gate manifest on build-hp-1: `/work/Projects/.pyrycode-recovery/manual-3693-20261021/verifier/result.json`. Later #3733 gates rerun the retained attachment assertions. |
+| #3725 / PR #3726, permanent delivery identity | `b5513cefbfa87de101e773cbcf5e3f0d151d7394` → `3d5379ec4b778c569c27b7639a2ae495b32cee0d` | Accepted verifier run `d3d84048d3598ef438b7f5ee75452b056cae100d13b81c629848cd85bcdd94b7`. |
+| #3727 / PR #3753, canonical probes and recovery repair | `aab3e2a4589ea21eaff506c0839f9da359d1c1f1` → `1293cdb5791a484bf512427e48bcacf936b55fbc` | Accepted verifier `5ea1a4f1cadc77262f74b571ef095b85e85e7b73622509a3500a41985a929288`; accepted live `22e370d77263057cde0ab1bb155f710e3ff6793333b94a820742278510f2fee8`. |
+| #3732 / PR #3826, raw user publication | `c9b74032eeaa28a8b8ee9be29811b84c64069e50` → `aee0e83fae0df78ef2d68691c833eb93a3006639` | Accepted verifier `686664537cbd5a67f0a91ccdaf142474df6817442fb5a71796f8544b464150a5`; accepted live `53dd6574921051551645d595db1394e54da59be4c6c7861fc08d3dcac0be4e8d`. |
+| #3733 / PR #3827, queued receipts | `8cc48a0ee6322e9b353940f89296e1dab8a500f8` → `3c01097672fff84fe9f63caa5c715fb32ae617f6` | Accepted verifier `7b4005882aa82e26a71e739d35c478cac9d4d14e3da10995211e2ba64f35c0fb`; accepted live `3394298641657845864f71d86f85e6c9d25fcea8c503088a45b723c23ceebf12`. |
+
+### Original obligation mapping
+
+| Original obligation / retained finding | Integrated evidence and assertion |
+| --- | --- |
+| No raw user delivery or newly appended replay, for every app; remove callbacks and exclusive positives, including skipped cases | #3732 removes raw callback, notifier and sink publisher. #3733 deletes `operator_message_v2.go` and its exclusive tests. Searches find retired symbol names only in the historical evidence manifest; the child diff adds no `t.Skip`. `TestQueuedCanonicalCompletedTurn` uses thread/nonthread/noninteractive recipients, checks no queued-source identity reaches pushes/replay, and requires unrelated assistant traffic as a positive control. |
+| No queued acceptance/delivery/drop/loss receipts or sole-purpose adapter/worker | #3733 removes mailbox, worker, relay field/start/join and receipt methods. `legacyRuntimeFact` excludes all queued types; `TestQueuedReceiptsRetired` produces and validates all five source types before rejecting projection. Shared adapters remain for other producers under #3718/#3737; `newInteractiveTurnEmitterV2` retains its API. |
+| Preserve `send_message`, queue operations, dequeue/Send now, accepted binding | Child production diffs remove publication only. `TestQueueBindingBeforeAcceptanceCompletes`, `TestBoundQueueActionsRestart`, `TestBoundQueueActionsDevices` pass in #3733's complete race output; #3727's canonical scenario controls retain command eligibility, foreign-conversation and stale-binding refusal. |
+| One identity, unordered queued/written, actual-delivery ordering; no duplicate on retries/callback/echo | `TestOperatorPublicationRetired`, `TestQueuedCanonicalSendNowDelayedConfirmation` prove ID/order/status and reopened agreement. #3733 placement selection passes `TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation`, `_IdenticalWritesInterleaveWithSendNow`, `_FailedWriteRetriesOnce`, and `TestSendNowWrittenRacesFinalPlacement`; source ordering remains on the stream drain. |
+| Durable accepted/written/delivered/drop/lost; hidden drop/give-up, visible undelivered loss | `TestQueuedSendHistoryLifecycle` covers all seven outcomes including retry/refusal/shutdown. `TestQueuedCanonicalStartup`, `TestQueuedSendHistoryStartup`, `TestQueuedSendHistoryLossRetryAndUnbound` cover loss visibility, repeated restart, reused queue ID and failed-loss retry; warm and reopened projections agree. |
+| Sender/device, safe text, attachment IDs/stored names, receiving provenance and isolation | `TestOperatorPublicationRetired`, `TestSuggestionEnqueuerIdentity`, `TestOperatorDeliveryProvenance_Placement`, `_WaitsAndRetry`, `_ReceivingSessionRotation`; #3693's `TestQueuedAttachmentFacts`, `TestQueuedAttachmentWire`, `TestQueuedAttachmentUnavailableAfterValidation`, `TestQueuedAttachmentRefusals`. #3733 retains `TestDeliveredAttachmentWire`. Stored names remain acceptance-time facts; composed host prompts are never the public text. |
+| Committed acceptance reference before readable delivery, including append failure; no fabricated identity/delivery | #3725 repair retained in `operatorMessageHistory`; `TestAcceptedDeliveryLiveRefusal/coalesced` and `/separated_segment`, all four `TestAcceptedDeliveryAppendFailures` arms, and `TestQueuedCanonicalStorageFailure` pass. Written-prefix replay/reopen remains covered by `/written_outcome` and #3725's `TestSendWrittenDeliveryPrefixes`. |
+| Readiness, `BindAcceptedItem`, `beforeDelivery`, wakeups, placement synchronization and private diagnostics | `accepted` still appends/binds before closing `ref.ready`; delivery still waits and embeds identity before append. `bindQueued` still dispatches placement, capacity remains 16, and history appends wake followers. `TestQueuedSendHistoryPlacement`, `TestQueueBindingBeforeAcceptanceCompletes`, `TestQueuedPlacementOwnership`, `TestQueuedPlacementUnreadPipe`, and `TestQueuedSendHistoryFailures` retain ordering, lifecycle and content/path-free failure proof. |
+| Mixed lifecycle/placement/history scenarios remain canonical, no disabled legacy suite | #3732 converts raw-user shadow/placement assertions; #3733 converts `CheckHookBannerWindow` and tagged fixtures while retaining refusal, liveness and ACK/text ordering. Its offline hook controls pass 34/34 events; this is replay/oracle evidence, not live acceptance. |
+| Historical stranded-backlog probe and recovery failure | #3727's accepted repair checks the complete canonical queued set across catch-up/additions/patches, including distinct-ID adverse controls and a cleared-item positive. `sessionErrorObservation.observe` validates scoped empty-object clears; `observePlacement` alone counts delivery. Accepted complete integration runs recovery, ordinary placement and Send now once each, passing; offline inner recovery passes parent and both retained/dropped arms (3/3 events). |
+| Documentation and protected holds | Exact reconciliation requirements remain pending under Documentation handoff above. Both child documentation commits are merged; no original operator/privacy/recording/approval release is claimed. No new live capture/artifact obligation was found. |
+
+### Counted proof and applicability
+
+- Fresh focused race check at `45ffc602`: 48 executed / 48 passed / 0 failed / 0 skipped Go test events (40 passing leaves). Exact command: `python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^(TestQueuedReceiptsRetired|TestOperatorPublicationRetired|TestQueuedCanonicalCompletedTurn|TestQueuedCanonicalStartup|TestQueuedCanonicalSendNowDelayedConfirmation|TestQueuedCanonicalStorageFailure|TestQueuedSendHistoryLifecycle|TestQueuedSendHistoryPlacement|TestQueuedSendHistoryStartup|TestQueuedSendHistoryFailures|TestQueuedSendHistoryLossRetryAndUnbound|TestAcceptedDeliveryLiveRefusal|TestAcceptedDeliveryAppendFailures|TestQueuedAttachmentFacts|TestQueuedAttachmentWire|TestQueuedAttachmentUnavailableAfterValidation|TestQueuedAttachmentRefusals)$' ./cmd/pyry`.
+- Fresh raw report `/tmp/builder-3728/focused-admitted.jsonl`, SHA-256 `fd9fe81e338f7556bc8b7bbfb1b7e42d9a3b2b6741c5479e12ec854c8333a851`; matching stderr is empty, SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. Initial sandbox-only admission failure (`focused.stderr`) executed zero tests; it remains a failed/unexecuted attempt, not a pass. Normal escalated admission then completed successfully.
+- #3732 and #3733 accepted complete Linux gates each report unit 30,778 run / 30,751 pass / 0 fail / 27 skip events; fake integration 2,152 / 2,150 / 0 / 2. Cite/docs guards, vet, 30 helper tests, staticcheck, substrate guard and build pass. Restoration dependency analysis passes; it did not select exhaustive proof. Tagged `e2e`/`e2e_realclaude` compilation and focused reports are retained separately in their verifier records and PRs.
+- Each child's accepted live tally is 2,255 executed/passed leaves, 0 failed, 27 skipped. Independently recounted #3733 raw log: 2,558 run / 2,531 pass / 0 fail / 27 skip events, including 276 passing parents. `TestRealClaude_OrdinaryQueuedPlacement` and `TestRealClaude_SendQueuedNowPlacement` each run/pass once with no skip. Original command: `go test -tags e2e_realclaude -timeout 30m -json ./internal/e2e/realclaude/...`; metadata pins candidate `8cc48a0e` on pyrybox, completed 2026-10-22 07:24 UTC. Skipped opt-in captures, API-key MCP tests, Codex prerequisites and alternate-path probes prove no acceptance for those cases.
+- Downloaded accepted verifier bundles for #3727/#3732/#3733 and #3733 live under `/tmp/builder-3728/{3727-verifier,3732-verifier,3733-verifier,3733-live}/<run-id>/`; every included file matches `SHA256SUMS`. #3733 bundle digests: verifier `fe8a455fd8a20cd4bde4a49d5badcff84472cd3bc81ee215994be378fa79d9a6`, live `91244f39f120f5ee42c8352ac06c63eada78afcb6c707796a64400bc6608cb74`.
+- Full #3733 source logs still exist on pyrybox and match retained pointer hashes: unit `/work/Projects/pyrycode-agents/logs/verifier-gate_#3733_5.log` → `52850e0e6fc7ff45db00590dee9a60dd81a080e548f43099c05387af11b08a8a`; integration `verifier-gate_#3733_9.log` → `a0fbac2ab3f0236ac0589c5f0a7ddb1f47d89333292280fcb83c110ac2cb7ad7`; live `/work/Projects/pyrycode-agents/logs/2026-10-22T07-14-34-693Z_real-claude-gate_#3733.log` → `c50be10edf282ff90a962303cbe5bd641782e568f0f040b1956c427bd9b7de99`. Bundle tails are not complete reports; these full logs supplied the recount.
+- Candidate-to-merge comparisons for each child change documentation only. No non-document file differs between `8cc48a0e` and the reviewed parent commit; #3733 is the applicable final integrated implementation, whereas #3732 alone still preserved receipts. Same-machine evidence is less than one day old and unmodified. The child verifier manifest retains `inputsHash` `4b3f11b74ecb36f47cdef917542ac9030e42d6f9cab00e628492980d27e07776`; this review does not establish identical final dispatcher/toolchain/settings inputs. Parent complete/live acceptance remains pending normal dispatcher validation or authorized reuse, never inferred from source equality alone.
+
+### Historical failures remain failures
+
+#3727 verifier run `728fcd26bc787ca6a9175da4a8644de6cf37f66da2ecff5620045e28096f53da`
+failed at `93f2fdd2430e0ebcab902dc615a23100277cd391`: the distinct stranded item
+was incorrectly accepted by the old probe (2 passing events on an invalid
+sequence), and recovery failed candidate 1/0/1/0 against base 1/1/0/0. Original
+integration was 2,150 run / 2,146 pass / 2 fail / 2 skip; candidate comparison
+71/69/2/0, base 71/71/0/0. The later accepted repair above resolves both findings;
+the earlier focused 88 passes and zero-live compilation never resolved them.
+
+#3725 verifier run `dad4555539332ab8e42898fb43a28586c01ac071c142a75d1f6e272723d05f22`
+failed written-prefix equivalence despite green ordinary gates. Its later
+accepted repair removes the intermediate written outcome before linking delivery.
+Its unrelated integration flake remains an original failure with an accepted
+same-tree named rerun, not a dependency or a newly green original log. #3732's
+historical red/compile/admission failures and #3733's red/conversion failures
+remain in their evidence records; this parent neither repeats nor relabels them.
+
+Builder review found no missing implementation obligation to reopen. This stage
+delivers the evidence map only: final configured gates, live applicability and
+documentation reconciliation remain with their existing owners. Retain
+`needs-real-claude` on #3728; do not claim whole-feature PASS from this handoff.
