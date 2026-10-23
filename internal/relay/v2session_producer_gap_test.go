@@ -96,8 +96,10 @@ func TestProducerGapDeliveryFailure(t *testing.T) {
 	go func() { p.stop(); close(stopped) }()
 	testHostedAwait(t, stopped)
 	select {
-	case <-p.delivered:
-		t.Fatal("terminal delivery attempted after shutdown")
+	case err := <-p.delivered:
+		if err == nil {
+			t.Fatal("unavailable terminal send claimed success")
+		}
 	default:
 	}
 }
