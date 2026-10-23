@@ -106,11 +106,18 @@ acceptance identity; the later fresh-daemon reopening separately proves durable
 names and bytes. New messages with an explicit acceptance reference use the
 [message-time join](thread-package-main-thread-folding-sources.md#accepted-sends-and-durable-outcomes).
 
-`dropRingOnConversationDelete` retains the registry's single removal observer
-for explicit deletion and sweep, including with the relay disabled. It preserves
-ring/reply-suggestion cleanup, tombstones the ID, joins shadow coordination and
-unloads the store worker. Registry membership checks and tombstones prevent late
-commits, callbacks or discovery from reopening removed conversations.
+`cleanupOnConversationDelete` composes the registry's single removal observer
+for explicit deletion and sweep, including with the relay disabled. It cancels
+pending inference, forgets suggestions, releases stream/live owners, tombstones
+the thread ID, cancels query demand, joins shadow coordination and unloads the
+store worker. No ring storage or `Drop` remains. Registry membership checks,
+tombstones and live-owner incarnation checks prevent late commits, callbacks or
+captures from reopening removed state or attaching to a recreated conversation;
+other conversations remain usable. `TestThreadShadowRemoval`,
+`TestReplyFallbackRegistryRemovalCancellation`, `TestDaemonLiveConversationRemoval`
+and `TestDaemonLiveNoRelayRemoval` exercise the surviving production wiring.
+See [the single-observer contract](conversations-registry-crud.md#setondeletefn-funcid-conversationid-1502).
+
 Publication operations follow both conversation cancellation and publisher
 retirement. Publisher stop withdraws readiness, seals admission, cancels and
 joins admitted operations before freeing the installation slot; freeing it

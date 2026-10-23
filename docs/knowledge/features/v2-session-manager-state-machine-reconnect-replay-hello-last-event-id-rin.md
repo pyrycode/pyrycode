@@ -44,20 +44,22 @@ head or send nonce; [reconnect wakes the ordinary drain](v2-session-manager-stat
 retain their pre-seal transport probe. Rekey, teardown, bounded queues and
 per-connection ordering retain their existing ownership and admission rules.
 
-`SetReplaySource` still stores the emitter's ring/cursor wiring, but neither is
-consulted by admission, forwarding or reconciliation. Ring ownership, storage,
-configuration and surviving deletion observers remain for #3739; this retirement
-does not claim they are removed. #3719 owns final integration acceptance.
+The daemon retains no event ring or ring-derived event IDs. `SetReplaySource`,
+its stored ring/cursor, emitter/sink ownership and ring-exclusive configuration
+are removed (#3739). Durable source history and `HistoryEntryID` remain separate
+from connection envelope IDs. Composed deletion observers still release thread,
+stream/live and suggestion/pending-inference owners in both relay postures;
+see [registry cleanup](conversations-registry-crud.md#setondeletefn-funcid-conversationid-1502).
+\#3719 owns final integration acceptance.
 
 ## Regression coverage
 
-`TestV2Session_LastEventIDIgnored` installs a real retained ring tail and a
-counted cursor callback, checks all obsolete cursor shapes with and without
-`thread`, then verifies ordered updates for the same and another conversation.
-A correlated barrier proves no replay/resync preceded ordinary replies, and
-reopening the same connection identity uses fresh Noise ciphers without reading
-the callback. Empty ring fixtures would miss the zero/stale replay regression;
-maximum uint64 separately exercises the formerly gap-classified input.
+`TestV2Session_LastEventIDIgnored` checks all obsolete cursor shapes with and
+without `thread`, then verifies ordered updates for the same and another
+conversation. A correlated barrier proves no replay/resync preceded ordinary
+replies, another connection remains isolated, and reopening the same connection
+identity uses fresh Noise ciphers. It requires no ring fixture or cursor callback;
+zero, stale and maximum-uint64 inputs still exercise ignored-cursor admission.
 
 `TestThreadRecoveryAfterReconnect` proves hello calls no content provider,
 explicit unusable-checkpoint recovery returns `thread_reset`, and newest-window

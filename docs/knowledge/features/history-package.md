@@ -63,14 +63,15 @@ is not the start of an entry line in that segment.
 That last check is the one that matters, and it is deliberately **not**
 computed. The segment is read and its entry-line start offsets are collected;
 the cursor's offset must equal one of them or be refused. This is
-`eventring`'s own #2022 lesson carried into a second package: a boundary
+the historical event-ring #2022 lesson carried into a second package: a boundary
 inferred from what an untrusted number *implies* (there, `afterID+1` assuming
 contiguous ids) is only as sound as the assumption behind the inference, and
 that assumption is exactly the thing an attacker controls. Validating against
 the real bytes on disk instead of computing from the claimed position is what
 makes `math.MaxUint64` simply "not a boundary" here, rather than a wraparound
 that reaches the wrong branch — see
-[eventring-package.md § `After`](eventring-package.md#after--the-three-way-replay-contract).
+[the historical #2022 analysis](../../specs/architecture/2022-global-event-ids.md). The
+[event ring is now removed](eventring-package.md); this cursor rule still applies.
 **Any future cursor-, offset- or id-shaped untrusted input in this codebase
 should default to this discipline, not to arithmetic guarded by a range
 check.**
@@ -209,10 +210,10 @@ internal/history/
 
 ## Related
 
-- [eventring-package.md](eventring-package.md) — the retained-triple shape
-  (`Type`/`Payload`/`TS` plus a minted id) and the leaf-mutex posture this
-  package copies; § "`After` — the three-way replay contract" is the #2022
-  lesson this package's cursor validation applies a second time.
+- [Event-ring retirement](eventring-package.md) — removed storage and the
+  surviving distinction between envelope metadata and durable source IDs.
+  [Historical #2022 analysis](../../specs/architecture/2022-global-event-ids.md) records the cursor-boundary
+  lesson applied here.
 - [attachments-package-directory-resolution-and-creation.md](attachments-package-directory-resolution-and-creation.md) —
   the root-as-argument style, the resolve-and-compare-for-equality containment
   check, and the 0o700/0o600 modes this package copies verbatim.

@@ -8,8 +8,7 @@ Eight production files (`log.go`, `segment.go`, `cursor.go`, `forward.go`,
 `sync.go`, `cache_dir.go`, `lookup.go`, `lookup_cache.go`), a leaf importing only
 `internal/conversations` (for `ValidID`/`ConversationID`)
 and stdlib —
-never the wire-payload types, never decoding a payload, the same posture
-[`eventring`](eventring-package.md) has. `New(instanceDir)` builds
+never the wire-payload types and never decoding a payload. `New(instanceDir)` builds
 `conversations/<id>/history/` beneath the given root exactly as
 [`attachments.EnsureDir`](attachments-package-directory-resolution-and-creation.md)
 does; the root is a constructor argument, never resolved inside the package.
@@ -128,7 +127,7 @@ legacy and unknown provenance stay absent.
 "up to `limit` entries", so an over-large ask from #2116 pages rather than
 fails and can never be broken by the ceiling. Entry ids are a
 **per-conversation** counter recovered from the newest segment's last entry on
-first touch, deliberately not `eventring`'s ring-wide shape: every cursor here
+first touch: every cursor here
 names its own conversation and is refused on any other, so there is no shared
 scalar for one conversation's cursor to mute a different one's stream, and no
 reason to pay for a global counter recovered by reading every conversation at

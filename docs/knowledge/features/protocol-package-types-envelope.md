@@ -12,7 +12,7 @@ type Envelope struct {
     Payload   json.RawMessage `json:"payload"`
     InReplyTo *uint64         `json:"in_reply_to,omitempty"`
 
-    // EventID — legacy in-memory event identity, unique daemon-wide.
+    // EventID — optional generic metadata; no daemon ring assigns it.
     EventID *uint64 `json:"event_id,omitempty"`
 
     // HistoryEntryID — durable per-conversation history entry id.
@@ -33,18 +33,19 @@ type Envelope struct {
 ## Replay cursors and durable read marks
 
 `Envelope.ID` is the connection counter used for request/reply correlation; it
-resets on reconnect. `Envelope.EventID` comes from `eventring.Ring.Append` and
-is unique daemon-wide, ascending but potentially sparse within a conversation
-(#2022). It survives phone reconnects and child respawns, but not daemon
-restarts. It is no longer a recovery cursor: `hello.last_event_id` is ignored,
-and no event-ring replay or raw `resync` is emitted (#3738). See
+resets on reconnect. `Envelope.EventID` remains optional generic metadata in
+envelope validation, sizing and relay projection contracts. The daemon no longer
+retains an event ring or assigns ring-derived IDs (#3739). It supplies no recovery
+cursor: `hello.last_event_id` is ignored, and no event-ring replay or raw `resync`
+is emitted (#3738). See
 [explicit reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
 
 `Envelope.HistoryEntryID` identifies `HistoryEntry.ID`, the durable
 per-conversation entry used by `MarkConversationReadPayload.UpTo`. Real entries
 start at 1 and survive daemon restarts. **These namespaces cannot be joined by
-numeric equality:** a ring id may belong to another conversation and resets
-with the daemon, while a history id belongs to one persisted log. Using either
+numeric equality:** connection IDs have connection scope and generic event
+metadata establishes no durable history position, while a history id belongs to
+one persisted log. Using either
 `ID` or `EventID` as a read-mark target can therefore mark the wrong position.
 See [history payloads](protocol-package-types-history-payloads.md) and
 the [read-mark contract](../../protocol-mobile.md#marking-a-conversation-read).
@@ -52,8 +53,9 @@ the [read-mark contract](../../protocol-mobile.md#marking-a-conversation-read).
 Supported legacy live-state delivery may attach the successful source append's
 `HistoryEntryID`, payload and timestamp. Retired content producers record durable
 fold inputs without raw publication or replay copies (#3718). Supplied thread
-live state carries neither history nor ring identity. Ring storage/wiring cleanup
-remains #3739; there is no replay consumer restoring these IDs to the wire.
+live state carries neither history nor event identity. `publishLiveState`
+assigns no `EventID`; successful source appends still supply `HistoryEntryID`,
+including when the logical event fans out to multiple recipients.
 
 Older daemons, absent or failed history storage, and non-history-backed frames
 omit the history key. Failed storage cannot restore retired content delivery.
@@ -65,7 +67,7 @@ Both optional ids use `*uint64` with `omitempty`: nil omits the key entirely,
 preserving legacy wire bytes. A non-nil pointer serializes its value, so the
 struct declaration alone does not enforce the real-entry minimum of 1.
 `TestEnvelope_HistoryEntryIDRoundTrip` checks raw key omission and preserves
-distinct connection, ring and history ids through encode/decode/re-encode,
+distinct connection, generic event and history ids through encode/decode/re-encode,
 including the maximum uint64. `TestEnvelope_EventIDOmitempty` pins the event-identity
 field's optional shape; `TestEnvelope_RoundTrip_Full` and
 `TestEnvelope_RoundTrip_Minimal` pin nil history pointers and byte-identical

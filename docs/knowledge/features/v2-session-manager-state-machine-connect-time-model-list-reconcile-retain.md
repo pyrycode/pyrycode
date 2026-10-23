@@ -61,7 +61,7 @@ Legacy live delivery is opportunistic: fan-in can drop inventory, and a later
 connection cannot rely on a live frame emitted before it attached. Bootstrap and
 rotated-child events now route to their own bound conversations (#2739), so the
 old foreground-cursor loss no longer applies. Connect-time reconciliation reads
-current vocabulary independently of that live delivery and event-ring replay.
+current vocabulary independently of live delivery; event-ring replay is retired.
 It opens no turn and sends snapshots without `event_id`.
 
 **`RetainedModelLists func(multiAgent bool) []protocol.ModelListPayload`** is an optional `V2SessionConfig` seam in the family (nil ⇒ no reconcile, byte-identical to pre-#1863). Production wires a non-nil closure as of #1867: `cmd/pyry/session_model_list.go`'s `retainedModelLists(convReg, pool)`, built at the composition root in `main.go` and assigned straight through the `relayWiring` struct (§ below). Same closure-not-concrete-import idiom as `OutstandingModals`: `internal/relay` imports neither `internal/turnevent` nor `internal/sessions` directly (`internal/sessions` reaches it only transitively, via `internal/control` — a `go list -deps` reading that looks contradictory and isn't), while `internal/protocol` is already a direct import, so the payload crosses with no new import and no cycle. **Enumerate-all, not conversation-keyed** — `V2Session` carries no conversation id, so there is no "this conn's conversation" to join on at connect time; the former queue reconcile's one-per-conversation shape was the precedent, and `RunConfigFor` (conversation-keyed) is the wrong shape here. The enumerator (`retainedModelLists`) walks `conversations.Registry.List()` unfiltered — including archived rows, since `Registry.SetArchived` writes one field without unbinding `CurrentSessionID` — and appends only the payloads `resolveBoundModelList` (#1857) answers `true` for; the comma-ok is its only filter, and the resolver decides refusal on its own. **As of #2124, that refusal surface is one arm, not several**: an unbound conversation, a binding the pool cannot resolve, a runner without the `ModelList` method and an empty hold all used to refuse here and now fall back to a daemon-wide copy instead (below); with usable vocabulary available, only a registry miss on the conversation id still refuses. **The bound is the producer's**: this path applies no cap of its own to either the number of payloads or any entry's text — it relies entirely on the construction-time bounds upstream (`DroppedModels` on the aggregate, `TruncatedFields` per entry, frozen by #1704/#1705), and the seam's doc comment says so explicitly. #2124 widens who reaches those bounds (every registry row once any vocabulary is retained, not just rows with a live, reporting session) without changing the bounds themselves.
@@ -97,15 +97,44 @@ retryable `model_list.unavailable` outcome instead.
 
 - **Guard:** `if !s.interactive || m.cfg.RetainedModelLists == nil { return }` — identical shape to the other reconciles. This is the one guard in the family with a sole-red mutant reachable by a *single-conn* test: dropping `!s.interactive` only reddens if a second, genuinely-interactive conn is opened after the non-interactive one under test — without that control conn, "zero frames" is indistinguishable from an empty seam and the mutant survives green. The other family members' non-interactive rows carry the same shape for the same reason.
 - **Snapshot once**, empty ⇒ nothing sent. This half of the guard has **no** sole-red mutant: with a zero-length slice the loop body never executes, so deleting the `len(retained) == 0` check is an equivalent mutant, not an untested branch. The "zero payloads" test row is pinning the *contract* (a real producer returning `nil` must not error), not a reachable code path — worth knowing before it reads as coverage that was skipped.
-- **Per payload:** marshal, then `m.Push(ctx, s.connID, protocol.Envelope{ID: 1, Type: TypeModelList, TS: ts, Payload: payload, EventID: nil})` — `ID: 1` non-load-bearing (the phone correlates on `conversation_id`); `EventID` left nil for the same double reason the twins have: it keeps the frame out of the #647/#777 turn-event replay ring, *and* it makes `forwardEnvelope`'s `last_event_id` dedup inert for this frame — the third loss point named above cannot re-drop what this path sends. A marshal failure logs only content-free discriminants (`event`, `conn_id`, `conversation_id` — **never** `err`, since `encoding/json` quotes input bytes and a `ModelOption` carries the exact fields #833 exists to keep out of logs) and continues to the next payload; a `Push` failure may log `err` (safe only because `Push`'s error is `ctx.Err()` or `ErrConnNotFound` and nothing else); `ctx.Err() != nil` returns early.
+- **Per payload:** marshal an envelope with a shared batch timestamp, `ID: 1`
+  (non-load-bearing; the phone correlates on `conversation_id`) and no
+  `EventID`. Queue through `pushSource` with `modelListProjected: true`, because
+  the provider has already selected and projected rows for this recipient.
+  The queue retains that provenance through draining; all ordinary delivery,
+  capability and size checks still apply. A marshal failure logs content-free
+  discriminants, never model text or the marshal error, then continues. Push
+  failures may log only the context/connection sentinel; canceled context stops
+  the batch.
+
+### Projection provenance
+
+Model projection must not depend on `EventID`. A canonical unsolicited model
+push is now ID-free, and `forwardEnvelopeSource` passes explicit eligibility to
+`mergedForConn`. Supplied readings use `ModelListUnprojected`; canonical readings
+can therefore be projected per recipient even when correlated. Ordinary
+correlated replies and provider-projected supplied readings preserve their bytes.
+Connect-time `RetainedModelLists` values are already projected yet uncorrelated,
+so correlation alone cannot distinguish them from canonical pushes:
+`queuedEnv.modelListProjected` carries that distinction under the existing queue
+lock. Clears remain `{}` and conversation/dropped-model fields survive projection.
+
+An artificial event ID in a fixture would keep the old merge gate green while
+real ID-free live pushes silently lost multi-agent rows.
+`TestV2Session_PushedModelList_MergedForMultiAgentConn` uses an ID-free push and
+checks basic/capable recipients, correlated replies and the unwired seam.
+`TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision` separately
+pins provider projection without a second merge; live-push coverage alone would
+miss duplicate rows on reconnect. See [supplied-state projection](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering).
 
 **No test can redden the defensive marshal branch, and none was written.** `ModelListPayload` is `string` + `[]ModelOption` + `int`, `ModelOption` is three strings / two `[]string` / one bool, and both custom `MarshalJSON`s delegate to `json.Marshal` over closed types — no value can fail to marshal. `reconcileModals` has no marshal test either, for the identical reason; the branch is defensive dead-in-practice code kept for the same reason the twins keep theirs, and the test file says so in its header rather than leaving the gap to read as an oversight.
 
-**Call site:** `handleNoiseInit`'s success tail reconciles retained model lists
-before the [#647 replay hook](#reconnect-replay-647--hellolast_event_id--ring-replay--resync).
+**Call site:** `handleNoiseInit`'s authenticated success tail reconciles retained
+model lists for legacy peers; thread peers use supplied reconciliation above.
+There is no event replay hook. See [explicit reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
 The former `reconcileQueues` call is removed (#3727). `staticcheck`'s default U1000 forbids shipping the seam + `reconcileModelLists` without this call site — an uncalled unexported method fails `make check`, which is why this and #1864's producer wiring could not be split further than they already were (from #1858, prerequisite-split once already).
 
-**Pure read, no turn opened.** `RetainedModelLists` mints nothing and retires nothing, so re-connecting re-sends the same snapshot idempotently. Nothing on this path touches turn state — the frame goes straight onto the push queue via `Push`, never through the interactive-turn lane, and `TypeModelList` is not a turn-boundary type by the same #1704/#1705 freeze the live-lane frame obeys.
+**Pure read, no turn opened.** `RetainedModelLists` mints nothing and retires nothing, so re-connecting re-sends the same snapshot idempotently. Nothing on this path touches turn state — the frame goes straight onto the push queue via `pushSource`, never through the interactive-turn lane, and `TypeModelList` is not a turn-boundary type by the same #1704/#1705 freeze the live-lane frame obeys.
 
 **Security review verdict: PASS** (`docs/specs/architecture/1863-model-list-connect-reconcile.md` § Security review has the full pass). Same two gates as the other two Mode B instances — authentication (post-handshake, post-token-validation only) and capability (`!s.interactive`) — plus the resource-bound discharge above. No new goroutine, no new lock; `s.interactive`/`s.connID` are read lock-free under the Run-goroutine single-owner invariant, the caller's guarantee, restated (not merely implied) in the function's own doc comment per the modal/queue precedent.
 
