@@ -522,3 +522,20 @@ rejection and dormant reset guards before the original authenticated live case.
 Author security review: this repair preserves source ownership by checking the
 revived identity before reservation. It adds no permission, authentication or
 privacy exception. Independent review of the changed candidate remains pending.
+
+### Activation-order correction
+
+Further source inspection corrects the earlier hypothesis: Pool.Revive only
+materialises. The producer starts later in wrap-up. The first control therefore
+placed activation too early, and recapture immediately after revival is not a
+production repair. Its limited red/green evidence and source are retained. The
+package run on that superseded patch was stopped through its own admission
+wrapper with exit 143; its partial log is not a complete package pass.
+
+The phase-accurate control reserves reset progress before the actual first
+producer registration, then advances to restarting. It separately requires
+replacement-producer and changed-session rejection. Repair the distinction
+between a cold placeholder and an existing producer, preserving pending control
+operations only for the first producer of the same session. Later producer or
+ownership changes must still advance generation and reject stale results.
+No production change is yet validated.
