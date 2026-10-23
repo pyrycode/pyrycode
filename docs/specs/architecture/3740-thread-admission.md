@@ -212,3 +212,14 @@ and publishers/processes retain their existing joined teardown. Linux focused
 race checks cover the reported regressions and helper controls; tagged compilation,
 vet and build remain builder-owned. Full acceptance and live execution remain
 pending with the dispatcher; all historical failures and continuity holds remain.
+
+The conservative execution-boundary check exposed a necessary timestamp repair:
+`main_turn_opened.occurred_at` currently records drain time, after a fast producer
+may already have captured idle. Carry the existing source turn's opening instant
+alongside its already captured identity in `liveStreamCapture`, and use it for
+the existing opening fact. This adds no wire fields or admission behavior. The
+controlled `TestDaemonLiveExecutionOpeningClock` queues two complete same-session
+turns before draining and checks each opening precedes its own captured idle.
+This is the source-proof prerequisite of finding 1, retained with its consumer.
+Security review: PASS; the timestamp is daemon-owned, captured under the existing
+live-state lock and immutable across queue/drain; no new goroutines or logs.
