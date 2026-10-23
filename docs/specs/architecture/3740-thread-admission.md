@@ -584,3 +584,31 @@ stronger linked supplied-delivery contract governs the thread fixtures. Reconcil
 that stale description in the existing documentation handoff. Record this narrow
 requirement correction on 3740. No product permission, crypto, stale-state exception,
 timeout increase or live acceptance waiver is introduced.
+
+## Manual author validation
+
+Source candidate c88688e2. All commands used ordinary Linux test admission.
+Evidence directory: /work/Projects/pyrycode-agents/logs/evidence/manual-3740-20261023.
+Counts below are named test events, excluding package outcomes.
+
+| Selection | Passed | Failed | Skipped | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| Reader handoff before repair | 0 | 3 | 0 | reader-handoff-red.json |
+| Complete scenario and fakephone packages | 355 | 0 | 0 | reader-handoff-green.json |
+| Reset source and completion controls | 9 | 0 | 0 | reset-window-controls.json |
+| Production live ownership/publication/control selection, 61 top-level tests | 147 | 0 | 0 | live-owner-controls.json |
+| Actual authenticated dormant reset, normal clear and skipped wrap-up | 3 | 0 | 0 | live-reset-current-state.json |
+
+Earlier repaired receipt, stdio permission isolation and question-refusal live
+selection passed 13 named events on 673750b3. Those fixture changes are unchanged
+in this source candidate. Its first-producer controls passed seven named events
+on a032af1a, now included in the 147-event current selection. Both original reset
+live cases failed on a032af1a; preserve live-reset-repair.json as failed evidence.
+The superseded command-package run exited 143 and supplies no complete-suite pass.
+No original failed capture is replaced by these focused results.
+
+Passed go vet ./..., tagged realclaude vet and go build ./cmd/pyry on c88688e2.
+Build output stays in the evidence directory. These are author results. Fresh
+independent review, full configured acceptance and the Documentation handoff remain
+pending. No merge, release or deployment is authorised. Documentation-only changes
+to this validation record do not alter the tested source tree.
