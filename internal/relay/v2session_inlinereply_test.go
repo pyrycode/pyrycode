@@ -9,12 +9,11 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/dispatch"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// inlineReplyRow is one of the ten inline reply seals on Run (#1526, #2530). Each row
+// inlineReplyRow covers an inline reply seal on Run. Each row
 // reaches exactly one site and waits for that site's own drop slug, so a row
 // fails only when its own site loses the guard.
 type inlineReplyRow struct {
@@ -22,15 +21,7 @@ type inlineReplyRow struct {
 	event string // the site's transport-down drop slug
 	caps  []string
 	cfg   func(*V2SessionConfig)
-	// setup runs on the started manager before the handshake.
-	setup func(*V2SessionManager)
-	// lastEventID, when set, is advertised in the hello (the resync row).
-	lastEventID *uint64
-	// downAtOpen flips the leg down right after the noise_resp is recorded, so a
-	// site that fires at the handshake tail (emitResync) runs with the leg down.
-	downAtOpen bool
-	// trigger is sealed and sent with the leg down; nil when the site fires at
-	// the handshake tail.
+	// trigger is sealed and sent with the leg down unless late controls the drop.
 	trigger *protocol.Envelope
 	// late, when set, makes the trigger go out with the leg UP: the site's reply
 	// arrives on Run later, from off-Run work (#2477). The row flips the leg with
@@ -48,7 +39,6 @@ type inlineReplyRow struct {
 func TestV2Session_InlineReply_TransportDown_BurnsNoNonce(t *testing.T) {
 	t.Parallel()
 
-	gapID := uint64(1000)
 	settingsTrigger := func(t *testing.T) *protocol.Envelope {
 		return &protocol.Envelope{
 			ID:      11,
@@ -74,17 +64,6 @@ func TestV2Session_InlineReply_TransportDown_BurnsNoNonce(t *testing.T) {
 			name:    "snapshot error",
 			event:   "v2.snapshot.err_dropped_transport_down",
 			trigger: snapshotTrigger, // nil KnownConversation ⇒ not-found error reply
-		}},
-		{inlineReplyRow: inlineReplyRow{
-			name:  "resync marker",
-			event: "v2.replay.resync_dropped_transport_down",
-			setup: func(mgr *V2SessionManager) {
-				ring := eventring.New(eventring.MaxEventsPerConversation)
-				appendRingEvents(ring, v2TestConvID, protocol.TypeAssistantDelta, 3)
-				mgr.SetReplaySource(ring, func() string { return v2TestConvID })
-			},
-			lastEventID: &gapID, // beyond the id space ⇒ gap ⇒ resync (#1494)
-			downAtOpen:  true,
 		}},
 		{inlineReplyRow: inlineReplyRow{
 			name:  "session_settings_updated",
@@ -193,16 +172,11 @@ func runInlineReplyDownRow(t *testing.T, row inlineReplyRow) {
 	// attempts counts every Outbound call, up OR down: gatedRecorder records
 	// nothing while down, so the recorder alone cannot tell "sealed nothing"
 	// from "handed something to Outbound" (the #1525 non-vacuity rule). Only Run
-	// calls Outbound, so the downAtOpen flip is ordered before the rest of the
-	// handshake's Run pass.
+	// calls Outbound.
 	var attempts atomic.Int64
 	outbound := func(env protocol.RoutingEnvelope) error {
-		n := attempts.Add(1)
-		err := gated.outbound(env)
-		if row.downAtOpen && n == 1 {
-			gated.up.Store(false)
-		}
-		return err
+		attempts.Add(1)
+		return gated.outbound(env)
 	}
 
 	logger, logBuf := bufferLogger()
@@ -220,11 +194,8 @@ func runInlineReplyDownRow(t *testing.T, row inlineReplyRow) {
 	if row.cfg != nil {
 		row.cfg(&cfg)
 	}
-	mgr, stop := startManager(t, cfg)
+	_, stop := startManager(t, cfg)
 	t.Cleanup(stop)
-	if row.setup != nil {
-		row.setup(mgr)
-	}
 
 	initSend, initRecv := inlineReplyHandshake(t, frames, gated.rec, row, respPub, initPriv)
 
@@ -281,9 +252,8 @@ func runInlineReplyDownRow(t *testing.T, row inlineReplyRow) {
 	}
 }
 
-// inlineReplyHandshake opens v2TestConnID with a hello built for row (caps, or a
-// last_event_id for the resync row) and returns the phone's CipherStates. It
-// mirrors driveToOpen, which cannot carry either hello variant.
+// inlineReplyHandshake opens v2TestConnID with the row's capabilities and
+// returns the phone's CipherStates. Unlike driveToOpen, it advertises capabilities.
 func inlineReplyHandshake(t *testing.T, frames chan protocol.RoutingEnvelope, rec *v2Recorder, row inlineReplyRow, respPub, initPriv []byte) (initSend, initRecv *noise.CipherState) {
 	t.Helper()
 	initiator, err := noise.NewInitiator(initPriv, respPub)
@@ -291,9 +261,6 @@ func inlineReplyHandshake(t *testing.T, frames chan protocol.RoutingEnvelope, re
 		t.Fatalf("NewInitiator: %v", err)
 	}
 	hello := buildHelloEarlyDataCaps(t, v2TestToken, row.caps)
-	if row.lastEventID != nil {
-		hello = buildHelloEarlyDataReplay(t, v2TestToken, row.lastEventID)
-	}
 	initMsg, err := initiator.WriteInit(hello)
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)

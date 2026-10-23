@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
@@ -482,7 +483,7 @@ func testThreadQueryRequestedScope(t *testing.T, page bool) {
 		return thread.QueryResult{}, nil
 	}, nil)
 	ring := eventring.New(eventring.MaxEventsPerConversation)
-	appendRingEvents(ring, catchUpConversation, protocol.TypeAssistantDelta, 1)
+	ring.Append(catchUpConversation, protocol.TypeAssistantDelta, json.RawMessage(`{}`), time.Now())
 	p.mgr.SetReplaySource(ring, func() string { return "22222222-2222-4222-8222-222222222222" })
 	for _, isThread := range []bool{true, false} {
 		q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: fmt.Sprint("reconnect-", isThread), pub: p.pub, events: p.events, ids: map[uint64]bool{1: true}}
@@ -516,11 +517,10 @@ func testThreadQueryRequestedScope(t *testing.T, page bool) {
 			q.seen = start + i + 1
 			break
 		}
-		if !isThread {
-			e, _ := q.next()
-			if e.Type != protocol.TypeResync {
-				t.Fatal("legacy lost resync")
-			}
+		q.request(38, protocol.TypeListConversations, `{}`)
+		e, _ := q.next()
+		if e.InReplyTo == nil || *e.InReplyTo != 38 {
+			t.Fatal("hello emitted unsolicited recovery")
 		}
 		if calls.Load() != 0 {
 			t.Fatal("handshake queried thread")

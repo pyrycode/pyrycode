@@ -24,21 +24,6 @@ import (
 // (not in relay_v2_handshake_test.go) alongside the other v2 two-phone helpers.
 func buildHelloEarlyInteractive(t *testing.T, token string) []byte {
 	t.Helper()
-	return buildHelloEarlyInteractiveResuming(t, token, nil)
-}
-
-// buildHelloEarlyInteractiveResuming is buildHelloEarlyInteractive with an
-// optional last_event_id, so a reconnecting phone can ask for the missed tail of
-// the daemon-resolved conversation. nil omits the field entirely (the fresh-connect
-// hello buildHelloEarlyInteractive delegates here for); a pointer to 0 is the
-// documented fresh-consumer input Ring.After answers with the WHOLE retained tail,
-// which is what lets a re-dialing witness read history it was disconnected for
-// without any event-id bookkeeping.
-//
-// A sibling rather than a widened signature: nine specs call the drive helper below
-// and none of them wants this parameter.
-func buildHelloEarlyInteractiveResuming(t *testing.T, token string, lastEventID *uint64) []byte {
-	t.Helper()
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
 		DeviceName:       "v2-e2e-phone",
@@ -46,7 +31,6 @@ func buildHelloEarlyInteractiveResuming(t *testing.T, token string, lastEventID 
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
 		Capabilities:     []string{protocol.CapabilityInteractive},
-		LastEventID:      lastEventID,
 	})
 	if err != nil {
 		t.Fatalf("marshal interactive hello payload: %v", err)
@@ -69,26 +53,11 @@ func buildHelloEarlyInteractiveResuming(t *testing.T, token string, lastEventID 
 // that this conn is on the structured-stream path (the grant phone A relies on).
 func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, caps ...string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
-	return driveHandshakeToOpenDaemonInteractiveResuming(t, phone, pubKey, token, nil, caps...)
-}
-
-// driveHandshakeToOpenDaemonInteractiveResuming is
-// driveHandshakeToOpenDaemonInteractive with an optional last_event_id on the
-// hello, for a phone re-dialing mid-session. It runs a FULL Noise_IK handshake and
-// returns a FRESH CipherState pair: v2 has no session resumption, so a caller
-// re-dialing must rebind to these and must never carry a prior conn's cipher
-// states — reusing them desyncs the AEAD nonce and surfaces as a decrypt failure
-// that reads like a daemon bug.
-//
-// A sibling rather than a widened signature: nine specs call the delegating helper
-// above and this ticket must not fan out into them.
-func driveHandshakeToOpenDaemonInteractiveResuming(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, lastEventID *uint64, caps ...string) (*noise.CipherState, *noise.CipherState) {
-	t.Helper()
 	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	early := buildHelloEarlyInteractiveResuming(t, token, lastEventID)
+	early := buildHelloEarlyInteractive(t, token)
 	if len(caps) > 0 {
 		var env protocol.Envelope
 		var hello protocol.HelloClientPayload

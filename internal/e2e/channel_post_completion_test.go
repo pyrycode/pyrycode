@@ -36,12 +36,12 @@ func assertHostPostEnd(t *testing.T, raw json.RawMessage, conv, turn string) {
 	}
 }
 
-func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
+func TestChannelPost_E2E_DisconnectedWakeAndHistory(t *testing.T) {
 	const convID = "28090000-0000-4000-8000-000000000002"
 	const initial = "28090000-0000-4000-8000-000000000001"
 	const pushToken = "test-fcm-2809"
 	const name = "scheduled"
-	// Escaping forces several bounded envelopes and exercises ordered replay.
+	// Escaping forces several bounded source records and exercises source order.
 	text := strings.Repeat("<雪", 5001)
 	home := shortHome(t)
 	fr := fakerelay.New(relayTestLogger())
@@ -82,18 +82,13 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, pair.Token)
 	source := scenario.NewSourceObserver(t, home)
 	seal, next := sealedConnDriver(t, phone, "phone", send, recv, source)
-	// Route a real user message: replay uses the daemon's cursor, not a client
-	// conversation selection or the new channel's name.
+	// Route a real user message and retain its producing-session source evidence.
 	seal(protocol.Envelope{ID: 28090, Type: protocol.TypeSendMessage, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.SendMessagePayload{ConversationID: convID, MessageID: "route", Text: "hello"})})
-	var cursor uint64
 	deadline := time.Now().Add(10 * time.Second)
-	for !source.Ended(convID) || cursor == 0 {
-		env, ok := next(deadline)
+	for !source.Ended(convID) {
+		_, ok := next(deadline)
 		if !ok {
 			t.Fatal("routed turn never completed")
-		}
-		if env.EventID != nil {
-			cursor = max(cursor, *env.EventID)
 		}
 	}
 	terminal, ok := source.Terminal(convID)
@@ -143,7 +138,7 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = phone2.Close() })
-	send2, recv2 := driveHandshakeToOpenDaemonInteractiveResuming(t, phone2, pub, pair.Token, &cursor)
+	send2, recv2 := driveHandshakeToOpenDaemonInteractive(t, phone2, pub, pair.Token)
 	seal2, next2 := sealedConnDriver(t, phone2, "returning phone", send2, recv2)
 	seal2(protocol.Envelope{ID: 3738, Type: protocol.TypeListConversations, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
 	for {
@@ -193,7 +188,7 @@ func TestChannelPost_E2E_DisconnectedWakeReplayAndHistory(t *testing.T) {
 	quiet, quietCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer quietCancel()
 	if _, ok := fr.NextPushWake(quiet); ok {
-		t.Fatal("replay woke a device again")
+		t.Fatal("reconnect woke a device again")
 	}
 }
 

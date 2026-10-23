@@ -130,9 +130,6 @@ func TestIsKnownAppType(t *testing.T) {
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
-		// the v2-only reconnect resync marker is binary → phone; an old phone
-		// must never receive it, so IsKnownAppType must reject it.
-		{"resync-rejected", TypeResync, false, ErrUnknownType},
 		// the v2-only session-boundary marker is binary → phone; an old phone
 		// must never receive it, so IsKnownAppType must reject it.
 		{"session_transition-rejected", TypeSessionTransition, false, ErrUnknownType},
@@ -328,7 +325,6 @@ var v2OnlyTypes = map[string]bool{
 	TypeResetting:         true,
 	TypeRequestSnapshot:   true,
 	TypeScreenSnapshot:    true,
-	TypeResync:            true,
 	TypeSessionTransition: true,
 	// v2 modal vocabulary.
 	TypeModalShown:     true,
@@ -484,8 +480,6 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeUnrecognizedMessage,
 		// v2 screen-snapshot types.
 		TypeRequestSnapshot, TypeScreenSnapshot,
-		// v2 reconnect resync marker.
-		TypeResync,
 		// v2 session-boundary marker.
 		TypeSessionTransition,
 		// v2 modal vocabulary.

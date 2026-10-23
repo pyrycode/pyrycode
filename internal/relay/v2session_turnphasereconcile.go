@@ -14,8 +14,7 @@ import (
 // freshly interactive-open conn (#2712), so a client that left mid-turn shows
 // thinking or responding straight away instead of idle until the turn ends. It is
 // structurally the roster twin with the payload type substituted; the
-// RunningTurnPhases seam doc states why the frame needs a reconcile at all and
-// why this one runs after replayMissed.
+// RunningTurnPhases seam doc states the snapshot ordering contract.
 //
 // Run-goroutine only (called from handleNoiseInit's success tail), so
 // s.interactive / s.connID are read lock-free under the package's single-owner
@@ -30,10 +29,8 @@ import (
 // forwardEnvelope, so withheldFromConn still withholds a Codex conversation's
 // phase from a conn without multi_agent, exactly as it withholds the live copy.
 //
-// EventID left nil is load-bearing: it keeps the frame out of the turn-event
-// replay ring and the durable history (this path appends to neither), and makes
-// forwardEnvelope's last_event_id dedup inert for it. A re-sent turn_state is
-// harmless — the client matches on conversation_id and replaces that
+// This snapshot appends neither ring events nor durable source history. A re-sent
+// turn_state is harmless: the client matches on conversation_id and replaces that
 // conversation's phase in place.
 //
 // SECURITY: the payload carries a server-minted conversation_id and a phase from

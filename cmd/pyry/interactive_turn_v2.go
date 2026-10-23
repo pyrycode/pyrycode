@@ -1061,10 +1061,8 @@ func (e *interactiveTurnEmitterV2) transitionTo(ctx context.Context, convID stri
 	if previous == state {
 		return
 	}
-	// Publish BEFORE emit: emit appends to the ring and then asks the relay's Run
-	// goroutine for its conns, so a connecting conn's reconcile, which runs on Run
-	// after replayMissed, either reads this phase or receives the live frame
-	// behind whatever it read (#2712).
+	// Publish before fan-out: a connecting conn's reconcile either reads this
+	// phase or receives the live frame behind whatever it read.
 	e.phases.publish(convID, state)
 	typ, payload := turnbridge.BuildTurnState(convID, state)
 	e.convTurnState = projected

@@ -324,7 +324,7 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 	}
 }
 
-func TestV2Session_ThreadReplay(t *testing.T) {
+func TestV2Session_ThreadContentWithheld(t *testing.T) {
 	t.Parallel()
 	priv, pub := genV2Keypair(t)
 	frames := make(chan protocol.RoutingEnvelope, 2)
@@ -350,10 +350,6 @@ func TestV2Session_ThreadReplay(t *testing.T) {
 	got := gateFramesUntil(t, rec, v2TestConnID, recv, "workspace_updated")
 	if len(got) != 1 || got[0].Type != "workspace_updated" {
 		t.Fatalf("replay: %#v", got)
-	}
-	stop()
-	if mgr.sessions[v2TestConnID].replayThrough != 0 || len(mgr.sessions[v2TestConnID].replayQueue) != 0 {
-		t.Fatal("thread connection entered legacy replay")
 	}
 }
 

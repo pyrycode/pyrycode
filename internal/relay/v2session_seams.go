@@ -631,21 +631,17 @@ type V2SessionConfig struct {
 
 	// RunningTurnPhases returns the current phase of every running turn as
 	// turn_state payloads, each with its conversation_id, for connect-time
-	// reconcile (see the type doc). turn_state otherwise travels only on the event
-	// stream, which a reconnect replays only after hello.last_event_id, and the
-	// emitter sends no repeated phase, so a long single-phase turn would show
-	// nothing.
+	// reconcile (see the type doc). The emitter sends no repeated phase, so a
+	// client connecting during a long single-phase turn needs this snapshot.
 	//
 	// The current phase is the thinking or responding the daemon last sent for a
 	// turn still open. An implementation MUST NOT derive a phase that was never
 	// sent and MUST NOT return an idle conversation: absence is the idle answer,
 	// which the client reads under the reset-on-reconnect rule.
 	//
-	// This reconcile runs after replayMissed, and the producer must record a
-	// transition before the emitter appends its event to the replay ring and asks
-	// ActiveConns for the fan-out. A turn ending while a conn opens then either
-	// reads as ended here, or its idle event lands above the conn's replayThrough
-	// and arrives live after the reconciled frame. Payloads carry only a
+	// The producer records a transition before asking ActiveConns for fan-out.
+	// A turn ending while a conn opens then either reads as ended here, or its
+	// idle event arrives live after the reconciled frame. Payloads carry only a
 	// daemon-minted conversation_id and a phase from turnbridge's closed
 	// vocabulary.
 	RunningTurnPhases func() []protocol.TurnStatePayload

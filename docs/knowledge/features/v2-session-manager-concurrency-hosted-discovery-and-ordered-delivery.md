@@ -153,6 +153,14 @@ under `pushMu`, or `RetireLiveState` or byte-ceiling retirement could leave a
 quarantined head eligible for delivery. `TestHostedPushAdmissionRetirement`
 forces both races and checks that declined output returns its reservation.
 
+Filtering after reservation must also return the unused slot without
+consuming a connection envelope ID or Noise nonce. `TestHostedPushReservation`
+uses a thread connection's replaced-content filter as the withholding oracle;
+the retired replay-watermark fixture would no longer exercise a supported
+filter. Removing that fixture outright would leave this capacity-release
+contract untested. `TestHostedPushCapacityPendingFence` separately pins the
+`livePending` fence between a clear and its fresh reading.
+
 The same boundary applies to `drainLiveOnce`: after `reserveHostedPush`, recheck
 `pushRetired` before consuming `livePending` or invoking `liveSnapshot`, and
 release the unused reservation on retirement. An entry-only check can pass

@@ -24,13 +24,13 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
-func testShadowPeerOpen(t *testing.T, w *switchWire, key []byte, last *uint64) []string {
+func testShadowPeerOpen(t *testing.T, w *switchWire, key []byte) []string {
 	t.Helper()
 	init, err := noise.NewInitiator(key, w.pub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: "phone-token", Capabilities: []string{protocol.CapabilityInteractive, "thread"}, LastEventID: last})
+	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: "phone-token", Capabilities: []string{protocol.CapabilityInteractive, "thread"}})
 	raw, _ := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: payload})
 	data, err := init.WriteInit(raw)
 	if err != nil {
@@ -80,7 +80,7 @@ func testShadowLegacyPayload(t *testing.T, typ string, raw []byte) string {
 
 func TestThreadShadowLegacy(t *testing.T) {
 	type surface struct {
-		live, replay, capabilities []string
+		live, capabilities []string
 	}
 	run := func(mode string) surface {
 		h := history.New(t.TempDir())
@@ -132,7 +132,7 @@ func TestThreadShadowLegacy(t *testing.T) {
 		done := make(chan struct{})
 		go func() { defer close(done); _ = mgr.Run(ctx) }()
 		defer func() { cancel(); <-done }()
-		result := surface{capabilities: testShadowPeerOpen(t, w, peer.Bytes(), nil)}
+		result := surface{capabilities: testShadowPeerOpen(t, w, peer.Bytes())}
 		source := history.SessionProvenance{Kind: "claude", SessionID: "saved-source"}
 		e.HandleFor(ctx, testConvID, turnevent.TextChunk{Text: "answer"}, source)
 		e.HandleFor(ctx, testConvID, turnevent.TurnEnd{}, source)
@@ -151,32 +151,18 @@ func TestThreadShadowLegacy(t *testing.T) {
 		if err := mgr.FlushPushes(ctx); err != nil {
 			t.Fatal(err)
 		}
-		replayCount := 0
-		var retainedLive []string
 		for len(w.out) > 0 {
 			_, env := w.read()
 			result.live = append(result.live, testShadowLegacyPayload(t, env.Type, env.Payload))
-			if env.EventID != nil {
-				replayCount++
-				retainedLive = append(retainedLive, result.live[len(result.live)-1])
-			}
 		}
-		if len(result.live) == 0 || replayCount == 0 {
+		if len(result.live) == 0 {
 			t.Fatal("connected peer received no legacy traffic")
 		}
 		w.frames <- protocol.RoutingEnvelope{ConnID: "phone", CloseCode: 1000}
 		testShadowWait(t, func() bool { return len(mgr.ActiveConns(ctx)) == 0 })
-		last := uint64(0)
-		testShadowPeerOpen(t, w, peer.Bytes(), &last)
-		for range replayCount {
-			_, env := w.read()
-			if env.EventID == nil {
-				t.Fatal("reconnect did not replay a legacy event")
-			}
-			result.replay = append(result.replay, testShadowLegacyPayload(t, env.Type, env.Payload))
-		}
-		if !reflect.DeepEqual(result.replay, retainedLive) {
-			t.Fatal("reconnect differed from retained legacy live frames")
+		testShadowPeerOpen(t, w, peer.Bytes())
+		if len(mgr.ActiveConns(ctx)) != 1 || len(w.out) != 0 {
+			t.Fatal("reconnect published implicit content recovery")
 		}
 		if mode == "enabled" {
 			v, _ := h.LatestEntryID(id)

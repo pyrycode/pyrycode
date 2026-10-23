@@ -138,9 +138,8 @@ func TestHostedPushReservation(t *testing.T) {
 	if !m.reserveHostedPush(s) {
 		t.Fatal("empty lane refused")
 	}
-	eventID := uint64(1)
-	s.replayThrough = eventID
-	if err := m.forwardEnvelope(t.Context(), s.connID, protocol.Envelope{Type: protocol.TypeModelList, EventID: &eventID}); err != nil {
+	s.thread = true
+	if err := m.forwardEnvelope(t.Context(), s.connID, protocol.Envelope{Type: protocol.TypeAssistantDelta}); err != nil {
 		t.Fatal(err)
 	}
 	m.releaseHostedPush(s)

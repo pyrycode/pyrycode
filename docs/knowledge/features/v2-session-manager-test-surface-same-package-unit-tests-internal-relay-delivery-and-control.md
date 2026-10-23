@@ -1,4 +1,4 @@
-# Push delivery, replay and inbound-control tests
+# Push delivery, reconnect recovery and inbound-control tests
 
 [Same-package test overview](v2-session-manager-test-surface-same-package-unit-tests-internal-relay.md) describes the shared harness.
 
@@ -35,9 +35,21 @@ Capability negotiation (#626) — `buildHelloEarlyDataCaps` / `driveToOpenCaps` 
 
 `OpenOnly` deliberately stays separate from `MixedInteractive` above rather than folding in: it is the only test in the tree exercising the `V2StateAwaitingInit` arm of the `handleActiveConns` `V2StateOpen` security gate (`MixedInteractive` injects a `HandshakeComplete` session but no `AwaitingInit` one). Confirmed, not just asserted — a mutant widening the filter to `V2StateOpen || V2StateAwaitingInit` and run against the whole package reddens `OpenOnly` alone. `CtxCancelled_ReturnsNil` is similarly the **sole** killer of the enqueue-arm `ctx.Done()` mutant in `ActiveConns` (`m.snapshot` is unbuffered, so that arm is the only thing stopping an indefinite block when `Run` isn't draining): deleting the arm hangs the whole package to timeout, and the same mutant with only this test skipped passes `ok`. Both were proved by `go test -overlay` mutation, not inferred from the retarget compiling. A test-helper collapsing `[]ActiveConn` into `[]string` was considered and rejected before the retarget — walking the seven call sites (five here plus `MixedInteractive` and `Push_ByteCeilingTearsDownSession`) showed only `OpenOnly` actually wanted a sorted `[]string`; the rest wanted `len`, a nil check, or a contains-by-`ConnID` predicate, so a shared helper would have relocated the deleted method rather than removed it.
 
-## Reconnect replay
+## Reconnect recovery
 
-Reconnect replay (#647) — `internal/relay/v2session_replay_test.go` (new): each drives a real Noise handshake whose hello carries `last_event_id` against a manager whose `SetReplaySource` was given a hand-populated `eventring.Ring` + a stub cursor, decrypts the forwarded frames, and asserts. `TestV2Session_Reconnect_ReplaysMissedTail` (3,4,5 ascending before any live frame), `…_CaughtUp_NoReplay` (`last_event_id` exactly at the newest id — the only caught-up position since #1494), `…_Gap_EmitsResync` (aged-out position → one `resync` with `conversation_id`), `…_BeyondNewest_EmitsResync` (#1494: `last_event_id` past the newest id, incl. `math.MaxUint64` → one `resync`, where it previously produced zero frames), `…_AbsentLastEventID_NoReplay`, `…_ScopedToCursorConversation` (cursor→B, ring holds A → zero A events, AC-5), `…_ReplayDisabled_NoReplay` (nil ring), `…_OtherConnsUnaffected`, `…_ForwardEnvelope_ReplayWatermarkGuard` (drops `EventID ≤ replayThrough`, forwards above, never drops `EventID == nil`). The #647 caught-up/out-of-range tests asserted only *no replay frames* and missed that the live stream was muted afterward; **#663 closes that gap** — `…_OutOfRangeLastEventID_LiveStreamDelivered` (incl. `math.MaxUint64`), `…_ClearRotation_LiveStreamDelivered`, and `…_SameConversation_DedupPreserved` push a live frame after the handshake and assert **delivery** (see [codebase/663.md](../codebase/663.md)). The first two now exercise the **gap** branch rather than the caught-up one (#1494): delivery comes from `replayThrough` being left untouched at `0`, not from the clamp, and each expects the `resync` ahead of its live frames. Only `…_SameConversation_DedupPreserved` (in-range `afterID=2` → replay branch) still runs the clamp end to end. Paced replay (#777) reworked the harness — `reconnectScenario` now polls `waitForEnvelopes(t, rec, wantEnvs)` for the final frame count instead of `waitConnOpen` + an open-instant snapshot (the tail drains over `Run` passes *after* the conn is enumerable), and the content-assertions above stayed green through the swap. Four new same-package tests pin the pacing (two direct-drive on an injected session via `offlineHandshake`/`newInjectManager`, two through the live `Run` select): `…_Paced_OnePerRunPass` (one `drainReplayOnce` pass forwards exactly ONE frame, advances `replayThrough` by one), `…_LiveGated_DrainOnceSkipsReplayingConn` (**AC #2**: `drainOnce` won't pop a replaying conn's buffered live events until its tail empties), `…_LargeReplay_DoesNotBlockOtherConn` (**AC #1**: conn B's `noise_resp` lands before conn A's final frame of a ~200-event replay — probability ≈ 2⁻²⁰⁰ of failing under a fair select), `…_LiveInterleave_OrderedAfterReplay` (**AC #2** end-to-end: a live push reaches the wire after every replay frame), and `…_PacedReplay_Race` (**AC #3**: `-race`-clean replay drained concurrently with off-`Run` `Push`es + a second conn's handshake; every `s.send.Encrypt` stays serialised on `Run`) (see [codebase/777.md](../codebase/777.md)).
+Event replay and its exclusive tests/helpers are retired (#3738).
+`v2session_recovery_test.go` uses authenticated fresh Noise handshakes instead.
+`TestV2Session_LastEventIDIgnored` checks obsolete cursor values with and without
+`thread`, a nonempty retained ring, a never-called cursor callback, a correlated
+barrier, later updates for two conversations and connection-identity reuse.
+`TestThreadRecoveryAfterReconnect` proves recovery requires explicit scoped
+catch-up/pages, with `thread_reset` followed by a newest window for an unusable
+checkpoint. See the [reconnect contract and fixture traps](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#regression-coverage).
+
+Retain the surrounding oracles when replacing obsolete fixtures: inline replies
+must consume no nonce while down; hosted filtering must return a reserved slot
+without spending an envelope ID or nonce; `livePending` must still fence clear
+and fresh state. Absence of replay is not evidence for any of those guarantees.
 
 ## Complete live-state workload
 
