@@ -19,6 +19,7 @@ type Envelope struct {
     HistoryEntryID *uint64 `json:"history_entry_id,omitempty"`
 
     // Live-state metadata, supplied only for thread-capable delivery.
+    ConversationID      json.RawMessage `json:"conversation_id,omitempty"`
     SessionID           json.RawMessage `json:"session_id,omitempty"`
     SessionStateCleared bool            `json:"session_state_cleared,omitempty"`
 
@@ -38,7 +39,7 @@ envelope validation, sizing and relay projection contracts. The daemon no longer
 retains an event ring or assigns ring-derived IDs (#3739). It supplies no recovery
 cursor: `hello.last_event_id` is ignored, and no event-ring replay or raw `resync`
 is emitted (#3738). See
-[explicit reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+[explicit reconnect recovery and integrated acceptance](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
 
 `Envelope.HistoryEntryID` identifies `HistoryEntry.ID`, the durable
 per-conversation entry used by `MarkConversationReadPayload.UpTo`. Real entries

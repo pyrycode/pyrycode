@@ -50,7 +50,8 @@ are removed (#3739). Durable source history and `HistoryEntryID` remain separate
 from connection envelope IDs. Composed deletion observers still release thread,
 stream/live and suggestion/pending-inference owners in both relay postures;
 see [registry cleanup](conversations-registry-crud.md#setondeletefn-funcid-conversationid-1502).
-\#3719 owns final integration acceptance.
+See [integrated acceptance](#integrated-acceptance) for the final review and
+remaining evidence boundaries.
 
 ## Regression coverage
 
@@ -66,3 +67,14 @@ explicit unusable-checkpoint recovery returns `thread_reset`, and newest-window
 and page requests return scoped items plus a successful final boundary. The
 requested-scope, host-isolation, pending-reading, hosted-capacity and nonce
 oracles remain independent checks; absence of replay alone proves none of them.
+
+## Integrated acceptance
+
+[The #3719 verifier accepted the integrated removal on Linux](https://github.com/pyrycode/pyrycode/pull/3841#issuecomment-6358552426),
+with current deterministic gates green on `630a921ad9a36e9c5d671a96bfba3d52035d192e`.
+The [requirement map and final dispositions](../../specs/architecture/3719-reconnect-retirement-acceptance.md#documentation-stage-disposition)
+retain exact revisions, child evidence applicability, counting conventions and
+historical failures. This supersedes ADR 042's transitional replay compatibility
+path; it does not make thread negotiation mandatory. No current live/release
+pass, skipped slow-check pass, deployment, migration or operator/approval hold
+release is implied. Mandatory-thread admission remains downstream work.

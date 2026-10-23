@@ -6,7 +6,7 @@
 
 | Document | Topics |
 | --- | --- |
-| [Source retirement](thread-package-shadow-lifecycle-and-evidence-retirement.md) | Retained source/publication boundaries, lifecycle regressions, counted Linux acceptance and source/live ordering. |
+| [Source retirement](thread-package-shadow-lifecycle-and-evidence-retirement.md) | Retained source/publication boundaries, lifecycle regressions, counted Linux acceptance, [integrated recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance) and source/live ordering. |
 | [Daemon publication](thread-package-shadow-lifecycle-and-evidence-publication.md) | Discovery, provider wiring, live/query ordering, continuity retirement and bounded coalescing. |
 | [Coordination and evidence](thread-package-shadow-lifecycle-and-evidence-coordination.md) | Idle unload, query demand, summary recovery, shutdown and retained capture evidence. |
 
