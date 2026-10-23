@@ -1012,3 +1012,40 @@ Preserve positive marker reply, negative cross-conversation marker, distinct
 spawn-file and stored prompt-content assertions. Include this actual caller in
 the targeted authenticated selection. No product behavior or shared observer
 changes are required; the scope remains test-only completion attribution.
+
+### Owned continuity source author validation
+
+Tested source 4d6ef47fdce2de917d9393ef5cdbe17ec8708fa1. The prospective
+plans f9725ea3 and a9a5de09 precede their respective test changes. Only the
+continuity and its system-prompt caller test files change. All existing nonce
+recall, prompted/bare isolation, recorded identity/child/order and spawn-file
+assertions remain. The product and approved shared completion helper are unchanged.
+
+Normal Linux race admission executes 55 named source/ownership/reconnect controls
+with zero failures or skips. This includes the deterministic delayed-history case:
+an actual constructed owned idle arrives before the current retained source, then
+the next observation appends current history. The drain returns the fresh reply
+after two reads and excludes the valid old pre-command reply. No sleep, deadline
+increase or manufactured runtime attribution is used.
+
+The complete tagged package with both provider credential variables absent passes
+2451 named events, with zero failures and 120 skips. Existing authentication and
+opt-in guards retain their skips. Exact per-name messages are saved separately in
+continuity-source-skip-reasons.json. These skips do not establish live coverage.
+Both affected actual authenticated cases then execute and pass, with zero skips:
+three-turn continuity and system-prompt reply isolation. Tagged realclaude vet
+also passes. Commands, source identity, OS, start/end times and exit codes are
+retained as continuity-source-*-final-command.json and their stdout/stderr siblings.
+
+The first source 57be87c8 failed to compile because two shared callers were missed.
+It executed zero tests. Its original continuity-source-controls build output stays
+failed. The full live ancestor 3f22ef72 remains failed with 2568 named passes, one
+continuity failure and 27 skips. Its candidate repeat fails and unchanged-base
+case passes. Original, repeat and base captures stay under live-failed-3f22ef72.
+No later targeted pass changes these historical outcomes.
+
+This is author validation. The independent PASS and accepted configured checks
+on 3f22ef72 remain historical evidence. Fresh independent review and full required
+configured/live acceptance are pending for this correction. Keep the PR draft and
+stop in Documentation after required review and checks. No merge, release or
+deployment is authorised.
