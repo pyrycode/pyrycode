@@ -89,11 +89,17 @@ func TestProducerGapDeliveryFailure(t *testing.T) {
 	if err := gapDeliveryResult(t, p.delivered); err == nil {
 		t.Fatal("unavailable active send claimed success")
 	}
-	observer.waitEvent("v2.hosted.close_failed", "")
-	if err := gapDeliveryResult(t, p.delivered); err == nil {
-		t.Fatal("unavailable terminal send claimed success")
-	}
 	waitQueueGone(t, p.mgr, v2TestConnID)
+	// Connection shutdown closes Frames and cancels Run's terminal context.
+	// Joining it fences all attempted output before checking suppression.
+	stopped := make(chan struct{})
+	go func() { p.stop(); close(stopped) }()
+	testHostedAwait(t, stopped)
+	select {
+	case <-p.delivered:
+		t.Fatal("terminal delivery attempted after shutdown")
+	default:
+	}
 }
 
 func gapDeliveryResult(t *testing.T, results <-chan error) error {
