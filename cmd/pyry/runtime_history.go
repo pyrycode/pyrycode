@@ -55,6 +55,14 @@ func runtimeDivider(t sessions.SessionTransition) (runtimeHistoryFact, bool) {
 	return p, true
 }
 
+func (e *interactiveTurnEmitterV2) recordTurnOpened(ctx context.Context, convID string) {
+	openedAt := time.Now().UTC()
+	if e.liveCapture != nil && !e.liveCapture.openedAt.IsZero() {
+		openedAt = e.liveCapture.openedAt
+	}
+	e.recordRuntimeFact(ctx, historyTurnOpened, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, OccurredAt: openedAt})
+}
+
 func (e *interactiveTurnEmitterV2) recordRuntimeFact(ctx context.Context, typ string, p runtimeHistoryFact) {
 	raw, err := json.Marshal(p)
 	if err != nil {

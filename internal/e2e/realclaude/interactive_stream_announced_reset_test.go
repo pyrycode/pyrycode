@@ -633,6 +633,9 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 				w.acked[*env.InReplyTo] = struct{}{}
 			}
 		case protocol.TypeResetting:
+			if env.SessionStateCleared {
+				continue
+			}
 			var p protocol.ResettingPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode resetting payload: %v", err)

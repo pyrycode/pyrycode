@@ -231,6 +231,9 @@ func driveRateLimitTurn(t *testing.T, riderStatus string) rateLimitObservation {
 				riderStatus, len(obs.rateLimited), obs.unrecognized, obs.sawEcho, obs.sawTurnEnd)
 			break
 		}
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))

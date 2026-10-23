@@ -54,14 +54,17 @@ func TestSourceTurnSupportedIdle(t *testing.T) {
 		{"before-history-end", "owner", start.Add(time.Second), false, true},
 		{"predecessor", "old", start.Add(time.Second), false, false},
 		{"previous-turn", "owner", start.Add(-time.Second), false, false},
+		{"queued-predecessor-after-acceptance", "owner", start.Add(500 * time.Millisecond), false, false},
 		{"clear", "owner", start.Add(time.Second), true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var turn sourceTurn
 			turn.feed(t, "conv", []history.Entry{{ID: 1, Type: "send_accepted", TS: start, Payload: json.RawMessage(`{"conversation_id":"conv"}`)}})
+			opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "turn", "occurred_at": start.Add(750 * time.Millisecond)})
+			turn.feed(t, "conv", []history.Entry{{ID: 2, Type: "main_turn_opened", TS: start.Add(2 * time.Second), Payload: opened, Session: &history.SessionProvenance{Kind: "claude", SessionID: "owner"}}})
 			for i, kind := range []string{protocol.TypeAssistantDelta, protocol.TypeTurnEnd} {
 				raw, _ := json.Marshal(map[string]string{"conversation_id": "conv", "turn_id": "turn", "text": "reply"})
-				turn.feed(t, "conv", []history.Entry{{ID: uint64(i + 2), Type: kind, TS: start.Add(time.Duration(i+2) * time.Second), Payload: raw, Session: &history.SessionProvenance{Kind: "claude", SessionID: "owner"}}})
+				turn.feed(t, "conv", []history.Entry{{ID: uint64(i + 3), Type: kind, TS: start.Add(time.Duration(i+2) * time.Second), Payload: raw, Session: &history.SessionProvenance{Kind: "claude", SessionID: "owner"}}})
 			}
 			tag, _ := json.Marshal(tc.session)
 			env := protocol.Envelope{Type: protocol.TypeTurnState, SessionID: tag, ConversationID: json.RawMessage(`"conv"`), TS: tc.idle, SessionStateCleared: tc.clear, Payload: json.RawMessage(`{"conversation_id":"conv","state":"idle"}`)}
@@ -69,6 +72,25 @@ func TestSourceTurnSupportedIdle(t *testing.T) {
 				t.Fatalf("idle=%t want=%t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSourceIdleBeforeHistoryAppend(t *testing.T) {
+	start := time.Now().UTC()
+	var turn sourceTurn
+	env := protocol.Envelope{Type: protocol.TypeTurnState, TS: start.Add(time.Second), SessionID: json.RawMessage(`"owner"`), Payload: json.RawMessage(`{"conversation_id":"conv","state":"idle"}`)}
+	if turn.idle(t, env, "conv") {
+		t.Fatal("idle without source completed a turn")
+	}
+	opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "turn", "occurred_at": start})
+	owner := &history.SessionProvenance{Kind: "claude", SessionID: "owner"}
+	turn.feed(t, "conv", []history.Entry{
+		{ID: 1, Type: "main_turn_opened", TS: start, Session: owner, Payload: opened},
+		{ID: 2, Type: protocol.TypeAssistantDelta, TS: start.Add(2 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"turn","text":"fresh"}`)},
+		{ID: 3, Type: protocol.TypeTurnEnd, TS: start.Add(3 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"turn"}`)},
+	})
+	if !turn.idle(t, protocol.Envelope{}, "conv") {
+		t.Fatal("actual terminal lost before source append")
 	}
 }
 

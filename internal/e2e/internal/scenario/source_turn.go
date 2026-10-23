@@ -94,7 +94,9 @@ type sourceTurn struct {
 	end       history.Entry
 	reason    string
 	started   time.Time
-	accepted  bool
+	opened    map[string]time.Time
+	queued    bool
+	liveIdle  *protocol.Envelope
 }
 
 func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
@@ -105,19 +107,27 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 		}
 		s.watermark = e.ID
 		var p struct {
-			ConversationID string `json:"conversation_id"`
-			TurnID         string `json:"turn_id"`
-			Parent         string `json:"parent_tool_use_id"`
-			Text           string `json:"text"`
-			Reason         string `json:"stop_reason"`
+			ConversationID string    `json:"conversation_id"`
+			TurnID         string    `json:"turn_id"`
+			Parent         string    `json:"parent_tool_use_id"`
+			Text           string    `json:"text"`
+			Reason         string    `json:"stop_reason"`
+			OccurredAt     time.Time `json:"occurred_at"`
 		}
 		if json.Unmarshal(e.Payload, &p) != nil {
 			t.Fatal("invalid source payload")
 		}
-		if p.ConversationID == conv && (e.Type == "send_accepted" || e.Type == protocol.TypeMessage) && s.turn == "" && !s.accepted {
-			s.started, s.accepted = e.TS, true
+		if p.ConversationID == conv && e.Type == "send_accepted" {
+			s.queued = true
 		}
 		if p.ConversationID != conv || p.Parent != "" || p.TurnID == "" {
+			continue
+		}
+		if e.Type == "main_turn_opened" && e.Session != nil && !p.OccurredAt.IsZero() {
+			if s.opened == nil {
+				s.opened = make(map[string]time.Time)
+			}
+			s.opened[e.Session.Kind+"\x00"+e.Session.SessionID+"\x00"+p.TurnID] = p.OccurredAt
 			continue
 		}
 		switch e.Type {
@@ -129,9 +139,14 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 			t.Fatal("source content lacks producing session")
 		}
 		if s.turn == "" && (e.Type == protocol.TypeAssistantDelta || e.Type == protocol.TypeTurnEnd) {
+			opened, executing := s.opened[e.Session.Kind+"\x00"+e.Session.SessionID+"\x00"+p.TurnID]
+			if s.queued && !executing {
+				continue
+			}
 			s.turn, s.session = p.TurnID, *e.Session
-			if !s.accepted {
-				s.started = e.TS
+			s.started = e.TS
+			if executing {
+				s.started = opened
 			}
 		}
 		if s.turn != p.TurnID || s.session != *e.Session {
@@ -171,7 +186,7 @@ func QuestionBoundary(t *testing.T, source SourceFacts, conv string) (SourceFact
 	mark := before.watermark
 	var anchors []history.Entry
 	for _, e := range entries {
-		if e.Type == "send_accepted" || e.Type == protocol.TypeMessage {
+		if e.Type == "main_turn_opened" {
 			var p struct {
 				ConversationID string `json:"conversation_id"`
 			}
@@ -179,7 +194,6 @@ func QuestionBoundary(t *testing.T, source SourceFacts, conv string) (SourceFact
 				continue
 			}
 			anchors = append(anchors, e)
-			break
 		}
 	}
 	return func(id string) []history.Entry {
@@ -217,25 +231,33 @@ func sourceFacts(t *testing.T, sources []SourceFacts, conv string) []history.Ent
 
 func (s *sourceTurn) idle(t *testing.T, env protocol.Envelope, conv string) bool {
 	t.Helper()
-	if env.Type != protocol.TypeTurnState || env.SessionStateCleared || !s.ended {
+	if env.Type == protocol.TypeTurnState {
+		var p protocol.TurnStatePayload
+		if json.Unmarshal(env.Payload, &p) != nil {
+			t.Fatal("invalid live turn state")
+		}
+		if p.ConversationID == conv {
+			if env.SessionStateCleared || p.State != "idle" {
+				s.liveIdle = nil
+			} else {
+				copy := env
+				s.liveIdle = &copy
+			}
+		}
+	}
+	// App delivery and source append run independently. Keep the actual received
+	// terminal until its producing source is available; never manufacture one.
+	if s.liveIdle == nil || !s.ended {
 		return false
 	}
-	var p protocol.TurnStatePayload
-	if json.Unmarshal(env.Payload, &p) != nil {
-		t.Fatal("invalid live turn state")
-	}
-	if p.ConversationID != conv || p.State != "idle" {
-		return false
-	}
+	env = *s.liveIdle
 	if len(env.SessionID) != 0 {
 		var session string
 		if json.Unmarshal(env.SessionID, &session) != nil || session != s.session.SessionID {
 			return false
 		}
-		// Source-bound live idle is captured before the history end append.
-		// Send acceptance precedes source processing even when a fast child completes
-		// before its first history delta. The accepted-send watermark and producing
-		// session exclude snapshots from a predecessor command or session.
+		// Execution belongs to the exact source turn, independently of when its
+		// history content is appended. Queue acceptance cannot establish this bound.
 		return !env.TS.Before(s.started)
 	}
 	return !env.TS.Before(s.end.TS)

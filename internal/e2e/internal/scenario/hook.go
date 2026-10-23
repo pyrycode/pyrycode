@@ -249,8 +249,18 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 	ack, firstRunning := -1, -1
 	var openingTurn, assistantTurn string
 	var refusalEntry, openingEntry history.Entry
+	var acceptedAt time.Time
 	for _, entry := range entries {
 		raw[entry.ID] = entry
+		if entry.Type == "send_accepted" {
+			var p struct {
+				ConversationID string `json:"conversation_id"`
+				MessageID      string `json:"message_id"`
+			}
+			if json.Unmarshal(entry.Payload, &p) == nil && p.ConversationID == convID && p.MessageID == "m-live" {
+				acceptedAt = entry.TS
+			}
+		}
 		if entry.Type == protocol.TypeBanner {
 			var p protocol.BannerPayload
 			if json.Unmarshal(entry.Payload, &p) == nil && hookBannerIsRefusal(p, convID) {
@@ -283,6 +293,9 @@ func CheckHookBannerWindow(convID string, liveReqID uint64, entries []history.En
 				ack = i
 			}
 		case protocol.TypeTurnState:
+			if env.SessionStateCleared || (!acceptedAt.IsZero() && env.TS.Before(acceptedAt)) {
+				continue
+			}
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				return fmt.Errorf("invalid lifecycle frame")
@@ -391,6 +404,7 @@ func HookBanner(t *testing.T, w Wire, c HookBannerConfig) {
 	}
 	c.CheckWitness(false)
 	time.Sleep(c.SettleBudget)
+	liveSentAt := time.Now().UTC()
 	liveID := w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: c.ConversationID, MessageID: "m-live", Text: c.LivePrompt})
 
 	ack := false
@@ -401,7 +415,7 @@ func HookBanner(t *testing.T, w Wire, c HookBannerConfig) {
 		if env.Type == protocol.TypeAck && env.InReplyTo != nil && *env.InReplyTo == liveID {
 			ack = true
 		}
-		if env.Type == protocol.TypeTurnState {
+		if env.Type == protocol.TypeTurnState && !env.SessionStateCleared && !env.TS.Before(liveSentAt) {
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid hook live phase")

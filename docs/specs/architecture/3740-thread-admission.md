@@ -223,3 +223,14 @@ turns before draining and checks each opening precedes its own captured idle.
 This is the source-proof prerequisite of finding 1, retained with its consumer.
 Security review: PASS; the timestamp is daemon-owned, captured under the existing
 live-state lock and immutable across queue/drain; no new goroutines or logs.
+
+Additional files read: `cmd/pyry/daemon_live_source.go` (`acceptEventLocked`),
+`cmd/pyry/interactive_turn_v2.go` (`startTurnIfNeeded`),
+`cmd/pyry/runtime_history.go` (`recordRuntimeFact`), and
+`internal/e2e/internal/scenario/source_turn.go` (`feed`, `idle`): execution
+identity and clock cross independently scheduled producer/drain delivery.
+Retain an actually received idle until its matching source append is visible;
+`TestSourceIdleBeforeHistoryAppend` covers this ordering. Heavy subagent history
+polling is bounded to the existing 20ms source-poll cadence, while every app frame
+still passes through the single ordered receiver. This avoids repeatedly scanning
+the growing transcript for each fragment and preserves all lane/cardinality checks.

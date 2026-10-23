@@ -210,6 +210,9 @@ func driveContextUsageTurn(t *testing.T) contextUsageObservation {
 	obs := contextUsageObservation{turnEndAt: -1}
 	record := func(env protocol.Envelope) {
 		obs.receivedOrdinal++
+		if env.SessionStateCleared {
+			return
+		}
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))

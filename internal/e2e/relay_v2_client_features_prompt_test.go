@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -72,7 +74,7 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 		early := mustJSON(t, protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.HelloClientPayload{
 			Role: "client", DeviceName: "Phone", ClientVersion: "1", ClientFeatures: report,
 			ProtocolVersions: []string{"v2"}, Token: paired.Token,
-			// Features must reach the prompt even without capability negotiation.
+			Capabilities: []string{protocol.CapabilityThread},
 		})})
 		init, err := initiator.WriteInit(early)
 		if err != nil {
@@ -92,14 +94,33 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 			t.Fatal(err)
 		}
 		var env protocol.Envelope
-		if err := json.Unmarshal(ack, &env); err != nil || env.Type != protocol.TypeHelloAck {
+		if err := json.Unmarshal(ack, &env); err != nil || env.Type != protocol.TypeHelloAck || env.InReplyTo == nil || *env.InReplyTo != 1 {
 			t.Fatal("missing authenticated hello ack")
 		}
+		var grant protocol.HelloAckPayload
+		if json.Unmarshal(env.Payload, &grant) != nil || !slices.Contains(grant.Capabilities, protocol.CapabilityThread) {
+			t.Fatal("thread not negotiated")
+		}
+		catchUpOpenConversations(t, phone, send, recv)
 		seal, next := noiseWire(t, phone, send, recv)
 		return phone, seal, next
 	}
 	phone, seal, next := connect(before)
 	conv := createConversationOverWire(t, seal, next, 2)
+	// A successful named query establishes the supported route before posting.
+	// Reconnects join the retained conversations in connect.
+	joinCreated := func() {
+		t.Helper()
+		// The closures share the phone's ordered receive cipher.
+		request := uint64(3740100)
+		wire := scenario.Wire{Send: func(kind string, payload any) uint64 {
+			request++
+			seal(protocol.Envelope{ID: request, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+			return request
+		}, Next: func(d time.Time) protocol.Envelope { env, _ := next(d); return env }}
+		scenario.JoinConversations(t, wire, phone.DeferEnvelopes)
+	}
+	joinCreated()
 	row := waitForConversation(t, home, conv)
 	post := func(id, text string) {
 		t.Helper()
@@ -176,12 +197,13 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 	if !strings.Contains(h.Stderr.String(), "v2.peer_close.teardown") {
 		t.Fatal("old authenticated connection not torn down")
 	}
-	_, seal, next = connect(after)
+	phone, seal, next = connect(after)
 	post(conv, "still active")
 	if initial != mustReadFile(t, path) {
 		t.Fatal("reconnect rewrote active prompt")
 	}
 	other := createConversationOverWire(t, seal, next, 3)
+	joinCreated()
 	post(other, "evict original through active cap")
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	waitForSessionState(t, regPath, row.CurrentSessionID, "evicted", 5*time.Second)

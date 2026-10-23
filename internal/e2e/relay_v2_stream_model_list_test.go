@@ -231,6 +231,9 @@ func driveModelListRespawn(t *testing.T) modelListObservation {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
 		case protocol.TypeModelList:
+			if env.SessionStateCleared {
+				continue
+			}
 			obs.preKillLists++
 
 		}
@@ -264,6 +267,9 @@ func driveModelListRespawn(t *testing.T) modelListObservation {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
 		case protocol.TypeModelList:
+			if env.SessionStateCleared {
+				continue
+			}
 			if err := json.Unmarshal(env.Payload, &obs.list); err != nil {
 				// A decode failure at this layer IS the defect, not a miss.
 				t.Fatalf("decode model_list payload: %v\nraw: %s", err, string(env.Payload))

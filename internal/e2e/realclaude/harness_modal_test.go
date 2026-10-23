@@ -280,7 +280,7 @@ func drainForControlEvent(t *testing.T, phone *fakephone.Client, cs *noise.Ciphe
 		if env.Type == protocol.TypeError {
 			t.Fatalf("unexpected error envelope while awaiting %s: %s", wantType, string(env.Payload))
 		}
-		if env.Type == wantType {
+		if env.Type == wantType && !env.SessionStateCleared {
 			return env
 		}
 		// ack / turn_state / assistant_delta / tool_use / turn_end / an earlier

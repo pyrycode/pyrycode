@@ -214,6 +214,9 @@ func driveSessionFactsTurn(t *testing.T, riderValue string) sessionFactsObservat
 				riderValue, len(obs.sessionFacts), obs.unrecognized, obs.sawEcho, obs.sawTurnEnd)
 			break
 		}
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))

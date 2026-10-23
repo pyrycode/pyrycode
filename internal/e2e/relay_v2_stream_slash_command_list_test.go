@@ -271,6 +271,9 @@ func driveSlashCommandListRespawn(t *testing.T) slashCommandListObservation {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
 		case protocol.TypeSlashCommandList:
+			if env.SessionStateCleared {
+				continue
+			}
 			// Counted, never decoded and never printed: the expected count is zero (the
 			// bootstrap child reports before any conversation is routed, so the
 			// no-cursor return takes it), but a non-zero reading here is a claim about
@@ -308,6 +311,9 @@ func driveSlashCommandListRespawn(t *testing.T) slashCommandListObservation {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
 		case protocol.TypeSlashCommandList:
+			if env.SessionStateCleared {
+				continue
+			}
 			if err := json.Unmarshal(env.Payload, &obs.list); err != nil {
 				// A decode failure at this layer IS the defect, not a miss. The raw
 				// bytes are deliberately NOT printed: they carry the whole inventory,

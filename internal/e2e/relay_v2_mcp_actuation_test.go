@@ -65,7 +65,7 @@ func drainMCPActTurn(t *testing.T, phone mcpQueryPhone, text string) (statuses i
 		if env.Type == protocol.TypeError {
 			t.Fatal("turn refused")
 		}
-		if env.Type == protocol.TypeMCPStatus {
+		if env.Type == protocol.TypeMCPStatus && !env.SessionStateCleared {
 			statuses++
 		}
 	}
