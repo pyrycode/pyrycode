@@ -25,6 +25,13 @@ func Receive(t *testing.T, phone Receiver, cs *noise.CipherState) Next {
 	t.Helper()
 	return func(deadline time.Time) protocol.Envelope {
 		t.Helper()
+		if saved, ok := phone.(interface {
+			TakeDeferred() (protocol.Envelope, bool)
+		}); ok {
+			if env, found := saved.TakeDeferred(); found {
+				return env
+			}
+		}
 		for time.Now().Before(deadline) {
 			raw, err := phone.ReceiveBytes(time.Until(deadline))
 			if errors.Is(err, fakephone.ErrReceiveTimeout) {
@@ -92,6 +99,13 @@ func PollingReceiveWithStop(t *testing.T, phone interface {
 	}
 	t.Cleanup(stop)
 	return func(deadline time.Time) protocol.Envelope {
+		if saved, ok := phone.(interface {
+			TakeDeferred() (protocol.Envelope, bool)
+		}); ok {
+			if env, found := saved.TakeDeferred(); found {
+				return env
+			}
+		}
 		for time.Now().Before(deadline) {
 			if pending == nil {
 				pending = make(chan result, 1)
@@ -157,6 +171,9 @@ func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 		}
 		env := next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, sources, convID))
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeModalShown:
 			if rejectModal {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"path/filepath"
 	"strings"
@@ -492,23 +491,16 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend,
 	return p.ID
 }
 
-// drainForReply reads sealed frames in arrival order until one decrypts to an
-// envelope of type want whose InReplyTo is reqID, and returns it. Every other
-// envelope type is ignored: an interactive conn may carry unsolicited structured
-// pushes, so a request's reply is not guaranteed to be the next frame on the
-// wire.
-//
-// Non-noise_msg inner frames are skipped WITHOUT decrypting (they do not advance
-// the receive nonce); every noise_msg is decrypted, in order, because the receive
-// CipherState is a lockstep counter — skipping one sealed frame desynchronises it
-// and every later open fails. Same discipline as
-// TestRelayV2_StreamSendMessageDrainsTurn's drain.
-//
-// On deadline it fails naming the envelope types it did see, so a wrong-reply
-// failure is distinguishable from a nothing-arrived one.
+// drainForReply selects the exact correlated reply while preserving interleaved
+// observations for the next scenario reader. Ciphertexts are decrypted once in
+// receive order; restored observations never advance the Noise nonce again.
+// A deadline reports the observed types to distinguish wrong output from silence.
 func drainForReply(t *testing.T, phone *fakephone.Client, recv *noise.CipherState, want string, reqID uint64, timeout time.Duration) protocol.Envelope {
 	t.Helper()
 	var seen []string
+	var saved []protocol.Envelope
+	defer func() { phone.DeferEnvelopes(saved) }()
+	next := scenario.Receive(t, phone, recv)
 	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
@@ -516,23 +508,13 @@ func drainForReply(t *testing.T, phone *fakephone.Client, recv *noise.CipherStat
 			t.Fatalf("no %s with in_reply_to=%d within %s; envelope types observed: %v",
 				want, reqID, timeout, seen)
 		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the t.Fatalf above
-			}
-			t.Fatalf("phone receive (awaiting %s id=%d): %v", want, reqID, err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (awaiting %s id=%d): %v", want, reqID, err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
+		env := next(deadline)
+		if env.Type == "" {
 			continue
 		}
-		env := decryptInnerEnvelope(t, inner, recv)
 		seen = append(seen, env.Type)
 		if env.Type != want {
+			saved = append(saved, env)
 			continue
 		}
 		if env.InReplyTo == nil || *env.InReplyTo != reqID {

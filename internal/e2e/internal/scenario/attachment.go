@@ -86,6 +86,9 @@ func AttachmentTurn(t *testing.T, next Next, convID string, budget time.Duration
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		env := next(pollDeadline(deadline))
+		if env.SessionStateCleared {
+			continue
+		}
 		turn.feed(t, convID, sourceFacts(t, sources, convID))
 		switch env.Type {
 		case protocol.TypeError, protocol.TypeModalShown:

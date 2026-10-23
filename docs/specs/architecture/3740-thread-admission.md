@@ -167,3 +167,24 @@ nonce order by storing decrypted envelopes without resealing or manufacturing
 content. Correlated acknowledgments and successful named queries prove supported
 admission. No new credential/log/path/subprocess/cryptographic boundary. Ownership,
 generic authentication refusals and source provenance checks remain required.
+
+Measured revision: the exact recorded reply's live idle preceded even its first
+history delta by 525 microseconds, and its terminal history append by 1.14 ms.
+Use the retained accepted-send (or channel message) timestamp plus producing
+session and owned source completion to exclude predecessor idles; append clocks
+cannot order this independently captured live reading. Controlled tests retain
+foreign-session, previous-command and generated-clear rejection. The snapshot
+iterator's exhaustion, rather than `FlushPushes` alone, fences enumeration;
+transport capacity must prevent exhausting it before the held writer releases.
+
+Out-of-scope production finding #3843: after the first supported recorded turn,
+`daemonThreadPublisher.publish` reports `baseline_required`, retires the peer,
+and loses its terminal close as the binary transport disconnects. Preserve every
+recorded assertion and skip only when a receive failure is accompanied by both
+that daemon gap reason and producer-gap retirement. Other receive failures still
+fail. No reconnect, accepted-send replay or production continuity workaround is
+added. The unresolved repeated-turn assertion remains pending on #3843.
+Late retained model/slash/suggestion consumers distinguish generated clears from
+fresh readings. Named catch-up assembles correlated fragments and verifies their
+index, offset, length and SHA-256 before awaiting the separate final coverage
+marker; interleaved live observations remain buffered for scenario assertions.

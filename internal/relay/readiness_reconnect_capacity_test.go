@@ -14,6 +14,7 @@ import (
 func TestReadinessThreadReconnectSnapshotCapacity(t *testing.T) {
 	p := testHostedRealTransport(t, true)
 	payloads := make([]protocol.ModelListPayload, 4*hostedQueueLimit)
+	encoded := make([]json.RawMessage, len(payloads))
 	totalBytes := 0
 	for i := range payloads {
 		payloads[i] = sampleModelListPayload(fmt.Sprintf("retained-%d", i), "sonnet")
@@ -22,32 +23,37 @@ func TestReadinessThreadReconnectSnapshotCapacity(t *testing.T) {
 			t.Fatal(err)
 		}
 		totalBytes += len(raw)
+		encoded[i] = raw
 	}
 	if len(payloads) >= pushQueueCap || totalBytes >= pushQueueByteCeiling {
 		t.Fatal("fixture exceeds ordinary bounds")
 	}
 	p.mgr.cfg.KnownConversation = func(string) bool { return true }
+	exhausted := make(chan struct{})
+	p.mgr.cfg.ThreadLiveState = func() func() (LiveState, bool) {
+		i := 0
+		return func() (LiveState, bool) {
+			if i == len(payloads) {
+				close(exhausted)
+				return LiveState{}, false
+			}
+			payload := payloads[i]
+			raw := encoded[i]
+			i++
+			return LiveState{ConversationID: payload.ConversationID, SessionGeneration: 1, Revision: 1,
+				Envelope: protocol.Envelope{Type: protocol.TypeModelList, Payload: raw}}, true
+		}
+	}
 	entered, release := p.gate.arm(t)
 	init := p.hello([]string{protocol.CapabilityInteractive})
 	testHostedAwait(t, entered)
-	// ActiveConns is a Run barrier after all handshake reconciliation pushes.
+	// ActiveConns proves admission while the transport holds snapshot delivery.
 	waitConnOpen(t, p.mgr, v2TestConnID)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	for _, payload := range payloads {
-		raw, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := p.mgr.Push(ctx, v2TestConnID, protocol.Envelope{Type: protocol.TypeModelList, Payload: raw}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	flushed := make(chan error, 1)
-	go func() { flushed <- p.mgr.FlushPushes(ctx) }()
 	select {
-	case err := <-flushed:
-		t.Fatalf("flush overtook capacity-held snapshots: %v", err)
+	case <-exhausted:
+		t.Fatal("snapshot enumeration overtook capacity-held transport")
 	case <-time.After(100 * time.Millisecond):
 	}
 	release()
@@ -57,18 +63,24 @@ func TestReadinessThreadReconnectSnapshotCapacity(t *testing.T) {
 	}
 	var previous uint64 = 1
 	for i, want := range payloads {
+		clear := decryptAppFrame(t, p.next(), recv)
+		if clear.Type != protocol.TypeModelList || !clear.SessionStateCleared || string(clear.Payload) != `{}` || clear.ID <= previous || string(clear.ConversationID) != fmt.Sprintf("%q", want.ConversationID) {
+			t.Fatalf("snapshot clear %d: %+v", i, clear)
+		}
+		previous = clear.ID
 		wire := p.next()
 		if wire.CloseCode != 0 {
-			t.Fatalf("legacy reconnect closed with %d before snapshot %d/%d", wire.CloseCode, i, len(payloads))
+			t.Fatalf("thread reconnect closed with %d before snapshot %d/%d", wire.CloseCode, i, len(payloads))
 		}
 		env := decryptAppFrame(t, wire, recv)
 		var got protocol.ModelListPayload
-		if env.Type != protocol.TypeModelList || json.Unmarshal(env.Payload, &got) != nil || !reflect.DeepEqual(got, want) || env.ID <= previous {
+		if env.Type != protocol.TypeModelList || env.SessionStateCleared || json.Unmarshal(env.Payload, &got) != nil || !reflect.DeepEqual(got, want) || env.ID <= previous {
 			t.Fatalf("snapshot %d: id=%d previous=%d type=%s got=%#v want=%#v", i, env.ID, previous, env.Type, got, want)
 		}
 		previous = env.ID
 	}
-	if err := <-flushed; err != nil {
+	testHostedAwait(t, exhausted)
+	if err := p.mgr.FlushPushes(ctx); err != nil {
 		t.Fatal(err)
 	}
 	// A receipt after the source fence proves no duplicate or terminal close trails it.

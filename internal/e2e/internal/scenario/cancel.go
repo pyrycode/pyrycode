@@ -36,6 +36,9 @@ func CancelPermission(t *testing.T, w Wire, convID string, shown protocol.ModalS
 			break
 		}
 		alarm(t, env)
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeModalShown, protocol.TypeQuestionShown:
 			t.Fatal("cancelled permission unexpectedly raised another prompt")

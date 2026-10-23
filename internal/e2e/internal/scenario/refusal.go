@@ -37,6 +37,9 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 		env := w.Next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
 		alarm(t, env)
+		if env.SessionStateCleared {
+			continue
+		}
 		if sawDismissal && env.Type != protocol.TypeApiRetry && env.Type != protocol.TypeAssistantDelta {
 			other[env.Type]++
 		}

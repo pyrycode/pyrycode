@@ -11,11 +11,10 @@
 //
 // # Surface
 //
-// One Client type, four methods (Dial, Send, Receive, Close) and two
-// sentinel errors (ErrReceiveTimeout, ErrClosed). The harness is
-// synchronous: each method blocks on its own I/O. No reconnect, no
-// ping pump, no hello/hello_ack handling — those are envelope-sequencing
-// concerns owned by the consumer test.
+// Client provides synchronous socket I/O and retains decrypted observations
+// consumed during setup. Consumers own reconnect, Noise negotiation and
+// application-envelope sequencing. ErrReceiveTimeout and ErrClosed distinguish
+// receive deadlines from explicit client shutdown.
 //
 // # Concurrency
 //
@@ -58,6 +57,28 @@ type Client struct {
 	closed          bool
 	lastCloseStatus websocket.StatusCode
 	lastCloseSet    bool
+	deferred        []protocol.Envelope
+}
+
+// DeferEnvelopes restores already decrypted observations ahead of unread wire
+// frames. Callers must retain their original order; no Noise nonce is replayed.
+func (c *Client) DeferEnvelopes(envs []protocol.Envelope) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deferred = append(append([]protocol.Envelope(nil), envs...), c.deferred...)
+}
+
+// TakeDeferred returns the oldest saved observation, if any.
+func (c *Client) TakeDeferred() (protocol.Envelope, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.deferred) == 0 {
+		return protocol.Envelope{}, false
+	}
+	e := c.deferred[0]
+	c.deferred[0] = protocol.Envelope{}
+	c.deferred = c.deferred[1:]
+	return e, true
 }
 
 // Dial opens /v1/client at baseURL with the three required headers set

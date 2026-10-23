@@ -99,7 +99,7 @@ func WaitQuestion(t *testing.T, next Next, convID string, budget time.Duration) 
 	for time.Now().Before(deadline) {
 		env := next(deadline)
 		alarm(t, env)
-		if env.Type != protocol.TypeQuestionShown {
+		if env.Type != protocol.TypeQuestionShown || env.SessionStateCleared {
 			continue
 		}
 		var batch protocol.QuestionShownPayload
@@ -190,6 +190,9 @@ func RequireChoice(t *testing.T, text string, choice Choice) {
 
 func alarm(t *testing.T, env protocol.Envelope) {
 	t.Helper()
+	if env.SessionStateCleared {
+		return
+	}
 	switch env.Type {
 	case protocol.TypeError:
 		t.Fatal("daemon returned an error during question scenario")

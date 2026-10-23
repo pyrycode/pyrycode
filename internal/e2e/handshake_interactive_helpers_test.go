@@ -15,10 +15,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// Interactive-capability handshake helpers, shared by the stream interactive
-// specs. They lived in relay_two_phone_structured_test.go until #1348 deleted
-// that spec with the rest of the terminal-path twins; nine surviving stream
-// specs call them, so they moved here rather than dying with their old home.
+// Interactive handshake helpers negotiate the supported thread route and join
+// current conversations before scenarios expect live content.
 
 // buildHelloEarlyInteractive mirrors buildHelloEarly (relay_v2_handshake_test.go)
 // but advertises the interactive capability so the daemon grants it. Defined here
@@ -103,7 +101,7 @@ func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client
 	if err := json.Unmarshal(earlyAck, &ackEnv); err != nil {
 		t.Fatalf("decode hello_ack envelope: %v", err)
 	}
-	if ackEnv.Type != protocol.TypeHelloAck {
+	if ackEnv.Type != protocol.TypeHelloAck || ackEnv.InReplyTo == nil || *ackEnv.InReplyTo != 1 {
 		t.Fatalf("early-data type = %q, want %q", ackEnv.Type, protocol.TypeHelloAck)
 	}
 	var ack protocol.HelloAckPayload
@@ -139,23 +137,5 @@ func catchUpOpenConversations(t *testing.T, phone *fakephone.Client, send, recv 
 		sendNoiseMsg(t, phone, sealed)
 		return request
 	}}
-	id := wire.Send(protocol.TypeListConversations, json.RawMessage(`{}`))
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		env := next(deadline)
-		if env.Type == "" || env.Type == protocol.TypeError {
-			t.Fatal("conversation list before catch-up failed")
-		}
-		if env.Type != protocol.TypeConversations || env.InReplyTo == nil || *env.InReplyTo != id {
-			continue
-		}
-		var rows protocol.ConversationsPayload
-		if err := json.Unmarshal(env.Payload, &rows); err != nil {
-			t.Fatal(err)
-		}
-		for _, row := range rows.Conversations {
-			_ = scenario.QueuePlacementFrames(t, wire, row.ID)
-		}
-		return
-	}
+	scenario.JoinConversations(t, wire, phone.DeferEnvelopes)
 }

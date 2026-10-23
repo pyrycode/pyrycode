@@ -316,11 +316,8 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 	sendB, recvB := driveHandshakeToOpenDaemonInteractive(t, phoneB, pubKey, payloadB.Token)
 	_, nextEnvB := sealedConnDriver(t, phoneB, "phone B", sendB, recvB)
 
-	// handleNoiseInit's success tail records s.interactive, creates the push queue and
-	// calls reconcileModelLists, which pushes one envelope per retained payload — and it
-	// sends noise_resp BEFORE those pushes, which is what makes B's decrypt order
-	// deterministic. driveHandshakeToOpenDaemonInteractive consumed exactly that
-	// noise_resp and nothing after it, so this loop starts on a nonce that is in sequence.
+	// The supported handshake joins named conversations and preserves interleaved
+	// snapshots. The reader drains those observations before decrypting new output.
 	// First arrival plus content is the honest shape: nothing terminates this window the
 	// way turn_end terminates a turn, so a total count would be a claim about timing
 	// rather than about behaviour.
@@ -336,6 +333,9 @@ func driveLateConnectModelList(t *testing.T) lateModelListObservation {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope on phone B: %s", string(env.Payload))
 		case protocol.TypeModelList:
+			if env.SessionStateCleared {
+				continue
+			}
 			if err := json.Unmarshal(env.Payload, &obs.list); err != nil {
 				// A decode failure at this layer IS the defect, not a miss.
 				t.Fatalf("decode model_list payload: %v\nraw: %s", err, string(env.Payload))

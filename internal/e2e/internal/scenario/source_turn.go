@@ -93,6 +93,8 @@ type sourceTurn struct {
 	ended     bool
 	end       history.Entry
 	reason    string
+	started   time.Time
+	accepted  bool
 }
 
 func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
@@ -112,6 +114,9 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 		if json.Unmarshal(e.Payload, &p) != nil {
 			t.Fatal("invalid source payload")
 		}
+		if p.ConversationID == conv && (e.Type == "send_accepted" || e.Type == protocol.TypeMessage) && s.turn == "" && !s.accepted {
+			s.started, s.accepted = e.TS, true
+		}
 		if p.ConversationID != conv || p.Parent != "" || p.TurnID == "" {
 			continue
 		}
@@ -125,6 +130,9 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 		}
 		if s.turn == "" && (e.Type == protocol.TypeAssistantDelta || e.Type == protocol.TypeTurnEnd) {
 			s.turn, s.session = p.TurnID, *e.Session
+			if !s.accepted {
+				s.started = e.TS
+			}
 		}
 		if s.turn != p.TurnID || s.session != *e.Session {
 			continue
@@ -161,11 +169,24 @@ func QuestionBoundary(t *testing.T, source SourceFacts, conv string) (SourceFact
 		}
 	}
 	mark := before.watermark
+	var anchors []history.Entry
+	for _, e := range entries {
+		if e.Type == "send_accepted" || e.Type == protocol.TypeMessage {
+			var p struct {
+				ConversationID string `json:"conversation_id"`
+			}
+			if json.Unmarshal(e.Payload, &p) != nil || p.ConversationID != conv {
+				continue
+			}
+			anchors = append(anchors, e)
+			break
+		}
+	}
 	return func(id string) []history.Entry {
 		if id != conv {
 			t.Fatal("question boundary crossed conversations")
 		}
-		var after []history.Entry
+		after := append([]history.Entry(nil), anchors...)
 		for _, e := range source(conv) {
 			if e.ID <= mark {
 				continue
@@ -196,14 +217,28 @@ func sourceFacts(t *testing.T, sources []SourceFacts, conv string) []history.Ent
 
 func (s *sourceTurn) idle(t *testing.T, env protocol.Envelope, conv string) bool {
 	t.Helper()
-	if env.Type != protocol.TypeTurnState || !s.ended {
+	if env.Type != protocol.TypeTurnState || env.SessionStateCleared || !s.ended {
 		return false
 	}
 	var p protocol.TurnStatePayload
 	if json.Unmarshal(env.Payload, &p) != nil {
 		t.Fatal("invalid live turn state")
 	}
-	return p.ConversationID == conv && p.State == "idle" && !env.TS.Before(s.end.TS)
+	if p.ConversationID != conv || p.State != "idle" {
+		return false
+	}
+	if len(env.SessionID) != 0 {
+		var session string
+		if json.Unmarshal(env.SessionID, &session) != nil || session != s.session.SessionID {
+			return false
+		}
+		// Source-bound live idle is captured before the history end append.
+		// Send acceptance precedes source processing even when a fast child completes
+		// before its first history delta. The accepted-send watermark and producing
+		// session exclude snapshots from a predecessor command or session.
+		return !env.TS.Before(s.started)
+	}
+	return !env.TS.Before(s.end.TS)
 }
 
 func pollDeadline(deadline time.Time) time.Time {

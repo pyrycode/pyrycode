@@ -17,7 +17,7 @@ func WaitPermission(t *testing.T, next Next, convID string, budget time.Duration
 	for time.Now().Before(deadline) {
 		env := next(deadline)
 		alarm(t, env)
-		if env.Type != protocol.TypeModalShown {
+		if env.Type != protocol.TypeModalShown || env.SessionStateCleared {
 			continue
 		}
 		var shown protocol.ModalShownPayload
@@ -66,6 +66,9 @@ func permissionTurn(t *testing.T, w Wire, convID string, pending map[string]bool
 		env := w.Next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
 		alarm(t, env)
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeQuestionShown:
 			t.Fatal("permission turn unexpectedly raised a question")

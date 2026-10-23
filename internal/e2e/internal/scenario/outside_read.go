@@ -42,6 +42,9 @@ func OutsideRead(t *testing.T, w Wire, convID string, deadline time.Time) (strin
 				convID, budget, turn.text.Len(), answered, tools)
 		}
 		env := w.Next(pollDeadline(deadline))
+		if env.SessionStateCleared {
+			continue
+		}
 		entries := sourceFacts(t, []SourceFacts{w.Source}, convID)
 		turn.feed(t, convID, entries)
 		sawDelta = strings.TrimSpace(turn.text.String()) != ""

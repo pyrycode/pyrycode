@@ -136,7 +136,7 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	if err := json.Unmarshal(earlyAck, &ackEnv); err != nil {
 		t.Fatalf("decode hello_ack envelope: %v", err)
 	}
-	if ackEnv.Type != protocol.TypeHelloAck {
+	if ackEnv.Type != protocol.TypeHelloAck || ackEnv.InReplyTo == nil || *ackEnv.InReplyTo != 1 {
 		t.Fatalf("early-data type = %q, want %q", ackEnv.Type, protocol.TypeHelloAck)
 	}
 	var ack protocol.HelloAckPayload
@@ -156,29 +156,26 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 
 func catchUpOpenConversations(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState) {
 	t.Helper()
-	const request = 3740000
-	sealEnvelope(t, phone, send, protocol.Envelope{ID: request, Type: protocol.TypeListConversations, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
-	env := drainForReply(t, phone, recv, protocol.TypeConversations, request, 30*time.Second)
-	var rows protocol.ConversationsPayload
-	if err := json.Unmarshal(env.Payload, &rows); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range rows.Conversations {
-		joinThreadConversation(t, phone, send, recv, row.ID)
-	}
+	scenario.JoinConversations(t, threadJoinWire(t, phone, send, recv), phone.DeferEnvelopes)
 }
 
 // joinThreadConversation completes the named catch-up before a scenario expects live content.
 func joinThreadConversation(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState, conv string) {
 	t.Helper()
-	_ = scenario.QueuePlacementFrames(t, scenario.Wire{
+	scenario.JoinConversations(t, threadJoinWire(t, phone, send, recv), phone.DeferEnvelopes, conv)
+}
+
+func threadJoinWire(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState) scenario.Wire {
+	t.Helper()
+	request := uint64(3740000)
+	return scenario.Wire{
 		Send: func(kind string, payload any) uint64 {
-			const request = 3740001
+			request++
 			sealEnvelope(t, phone, send, protocol.Envelope{ID: request, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
 			return request
 		},
 		Next: scenario.Receive(t, phone, recv),
-	}, conv)
+	}
 }
 
 func buildHelloEarly(t *testing.T, token string, caps []string) []byte {

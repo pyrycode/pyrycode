@@ -78,7 +78,7 @@ func PermissionContext(t *testing.T, w Wire, c PermissionContextConfig) {
 		deadline := time.Now().Add(c.SurfaceBudget)
 		for time.Now().Before(deadline) {
 			env := w.Next(deadline)
-			if env.Type == kind {
+			if env.Type == kind && !env.SessionStateCleared {
 				return env
 			}
 		}
