@@ -94,6 +94,29 @@ func TestSourceIdleBeforeHistoryAppend(t *testing.T) {
 	}
 }
 
+func TestSourceQueuedExecutionIdentity(t *testing.T) {
+	start := time.Now().UTC()
+	owner := &history.SessionProvenance{Kind: "claude", SessionID: "same-session"}
+	var turn sourceTurn
+	turn.feed(t, "conv", []history.Entry{
+		{ID: 1, Type: "send_accepted", TS: start, Payload: json.RawMessage(`{"conversation_id":"conv"}`)},
+		{ID: 2, Type: protocol.TypeAssistantDelta, TS: start.Add(time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"predecessor","text":"old"}`)},
+		{ID: 3, Type: protocol.TypeTurnEnd, TS: start.Add(time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"predecessor"}`)},
+	})
+	if turn.turn != "" || turn.ended || turn.text.Len() != 0 {
+		t.Fatal("queue acceptance selected the still-running predecessor")
+	}
+	opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "successor", "occurred_at": start.Add(2 * time.Second)})
+	turn.feed(t, "conv", []history.Entry{
+		{ID: 4, Type: "main_turn_opened", TS: start.Add(4 * time.Second), Session: owner, Payload: opened},
+		{ID: 5, Type: protocol.TypeAssistantDelta, TS: start.Add(4 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"successor","text":"fresh"}`)},
+		{ID: 6, Type: protocol.TypeTurnEnd, TS: start.Add(5 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"successor"}`)},
+	})
+	if turn.turn != "successor" || !turn.ended || turn.text.String() != "fresh" {
+		t.Fatal("source did not retain only successor execution")
+	}
+}
+
 func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 	const conv = "37340000-0000-4000-8000-000000000001"
 	const other = "37340000-0000-4000-8000-000000000002"
