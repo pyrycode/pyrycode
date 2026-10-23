@@ -305,3 +305,69 @@ other reading clears remain distinct and cannot certify completion themselves.
 This preserves both exact execution ownership and the independently captured
 terminal delivery requirement. The isolated clear-reset diagnostic rerun passed
 all three events, including its successor recall, without any new skip.
+
+## Builder validation — 2026-10-23 verifier rework
+
+Linux x86_64 source candidate `4b8c0a84bf28dea60f2ecc7526a0a8b3d0f36a65`.
+Counts are named Go test events, including parent/subtest events; skipped events
+are separate from executed events. Logs are retained under
+`/tmp/builder-3740-rework/`. All test commands use ordinary shared admission:
+`python3 scripts/test-admission.py -- go test -timeout=30m -race -json`.
+
+| Selection / command suffix | Executed | Passed | Failed | Skipped | Retained log |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `./internal/e2e/internal/scenario` | 282 | 282 | 0 | 0 | `scenario-terminal-final.json` |
+| `-tags e2e -run <connected selection below> ./internal/e2e` | 14 | 14 | 0 | 0 | `connected-terminal-final.json` |
+| `-tags e2e -run <recorded selection below> ./internal/e2e` | 13 | 13 | 0 | 0 | `recorded-terminal-final.json` |
+| `-tags e2e -count=5 -run '^(TestRelayV2_StreamThinkingProgressCrossingDeliversOneFrame\|TestRelayV2_StreamThinkingProgressBelowBoundIsSilent)$' ./internal/e2e` | 10 | 10 | 0 | 0 | `thinking-terminal-final.json` |
+| `-tags e2e -run '^(TestRecordedSubagentWorkerPolicy\|TestRecordedSubagentWorkerWait)$' ./internal/e2e` (unchanged worker source from `09cda2e3`) | 17 | 17 | 0 | 0 | `worker-controls.json` |
+| `./cmd/pyry` (retained `c7460bb8` package proof) | 16834 | 16834 | 0 | 4 | `cmd-package.json` |
+| Execution/history clock named selection | 9 | 9 | 0 | 0 | `clock.json` |
+| Relay admission/authentication/version/static-key/capacity named selection | 85 | 85 | 0 | 0 | `relay.json` |
+
+The four command-package skips retain their original reasons: opt-in real-Claude
+agent-run, two slow checks, and a case-insensitive-filesystem-only check.
+`git diff c7460bb8..4b8c0a84 -- cmd/pyry internal/relay` is empty; subsequent
+changes affect e2e consumers and the plan. The clock selection was
+`TestDaemonLiveExecutionOpeningClock`, `TestDaemonLiveLegacyDelayAndIdentity`,
+`TestDaemonLiveNeutralMainTurnIdentity`, `TestRuntimeHistoryExitSourceAndReplacement`
+and `TestRuntimeHistorySourceClosure`. The relay selection retained
+`TestReadinessThreadReconnectSnapshotCapacity`, `TestV2Session_ThreadAdmission`,
+`TestV2Session_ThreadAdmissionAuthPrecedence`,
+`TestV2Session_ThreadAdmissionVersionPrecedence`, `TestV2Session_ThreadNegotiation`,
+the minimum-version NoMinimumAcceptsAll/Enforced/RejectRecordsNothing/
+BadTokenStill4401/RejectLog cases, and the static-key DispatchedSnapshot/
+UnknownTokenBindsNothing/FirstConnectionBindsAndPersists/
+OtherInstallRefusedLikeUnknownToken/VersionRefusedBindsNothing/
+RaceAcceptsAtMostOne/RevokeAndRepairFreesTheDevice cases.
+
+Exact connected selector:
+`^(TestRecordedMCPSendFileWaitsForStartup|TestRelayV2_ClientFeaturesSpawnSnapshot|TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh|TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly|TestRelayV2_StreamBackgroundTaskFramesReachConnectedPhone|TestRelayV2_StreamContextUsageReachesConnectedPhone|TestRelayV2_StreamMCPStatusReachesConnectedPhone|TestRelayV2_StreamModelListReachesConnectedPhone|TestRelayV2_StreamRateLimitNonBenignReachesPhone|TestRelayV2_StreamRateLimitWarningBandReachesPhone|TestRelayV2_StreamSessionFactsReachesConnectedPhone|TestRelayV2_StreamSlashCommandListReachesConnectedPhone|TestRelayV2_StreamThinkingProgressCrossingDeliversOneFrame|TestRelayV2_StreamThinkingProgressBelowBoundIsSilent)$`.
+
+Exact recorded selector:
+`^TestRecordedClaude/hook-banner|TestRecordedClaude/question-answer-witness|TestRecordedClaude/bypass-witness-mcp-stored|TestRecordedClaude/bypass-witness-mcp-operator|TestRecordedClaude/bypass-witness-stdio-stored|TestRecordedClaude/bypass-witness-stdio-operator|TestRecordedClaude/fallback-suggestion|TestRecordedClaude/subagent-text|TestRecordedClaude/clear-wrapup-skipped|TestRecordedClaude/clear-reset|TestRecordedClaude/mcp-send-file$`.
+This executes eleven named leaves, their parent, and the matching first-turn
+startup test. The fallback replay completes without the continuity skip.
+
+Passed `go vet ./...`, `go vet -tags e2e ./internal/e2e`,
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/...`,
+`go vet -tags e2e_liverelay ./internal/e2e/liverelay/...`, and
+`go build -o /tmp/builder-3740-rework/pyry-terminal-final ./cmd/pyry`.
+Tagged compilation executes zero live scenarios and supplies no live proof.
+
+Historical failures remain failed: the original `9bed20c6` fake gate
+(2157 passed/26 failed/two skipped), its named comparison (59 passed/26 failed),
+the earlier `b862b6f8` comparison (seven passed/26 failed), and the timed-out
+`f1276c1f` acceptance. This rework retains the red queued-predecessor control,
+consumer reproductions, compilation/setup failures, first-main checkpoint
+failure, the 11-pass/two-fail recorded comparison, the 13-pass/one-fail connected
+comparison, the nine-pass/one-fail repeated thinking check, and the four-pass/
+two-fail other-reading-clear control. Final focused passes do not turn those
+captures into passes. Production continuity holds #3844/#3845 remain unresolved.
+The measured cold thread-only catch-up anomaly is recorded on existing #3741;
+the interactive fixture pass is not optional-capability proof.
+
+Pending dispatcher/verifier: normal approval and independent security review,
+full-module and complete configured acceptance, affected live-Claude scenarios
+and final gate build. Pending documentation remains as specified above. macOS
+is outside this Linux ticket's verification scope. No live artifacts are required.
