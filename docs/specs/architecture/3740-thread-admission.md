@@ -371,3 +371,52 @@ Pending dispatcher/verifier: normal approval and independent security review,
 full-module and complete configured acceptance, affected live-Claude scenarios
 and final gate build. Pending documentation remains as specified above. macOS
 is outside this Linux ticket's verification scope. No live artifacts are required.
+
+## Revisions — verifier rework of `28322de7`
+
+2026-10-23 (prospective): findings 1–3 concern the same supported-fixture
+completion invariant. Retain the recorded verification-floor/grandchild sizing
+exception. Expected repair is 450–700 written lines, zero exported types,
+seven consumer updates and no production admission changes.
+
+Additional files read: `source_turn.go` (`feed`, `idle`), `source_observer.go`
+(`Watch`, `Next`) and the seven consumers `CompletedTurn`, `AttachmentTurn`,
+`OutsideRead`, `permissionTurn`, `RefusedTurn`, `AnsweredTurn`, `NativeSuggestions`.
+Existing source, question and modal controls cover ownership and dismissal but
+omit delayed predecessor openings and consumer-level idle-before-history ordering.
+The e2e lifecycle and development-verification topics require independent actual
+delivery and owned completion; a private helper pass cannot prove its consumers.
+No concurrent feature branch overlaps these scenario files.
+
+Design: retain a command-time boundary from the watched command and its accepted
+source fact. An opening's producer `occurred_at` must meet that boundary before
+its content can select a turn. Preserve the captured opening clock and conservative
+no-opening behavior. Every consumer evaluates the lifecycle helper on every
+observation, including polls, running states and generated clears, before payload
+filtering. Reevaluate retained real idle when delayed source completion arrives;
+invalidate it on the watched turn-state clear/running state. Keep nonempty text,
+source ownership, dismissal attribution, retry caps and suggestion revisions.
+Declare `all` under the PR's `Live tests` heading, with pending-execution prose
+under a separate heading; existing live scenarios remain dispatcher-owned.
+
+| Rework event | Race-detector coverage |
+| --- | --- |
+| Predecessor opening/content/end append after successor watch/acceptance | `TestSourceDelayedPredecessorOpening`, `TestSourceObserverDelayedPredecessorOpening` |
+| Owned idle precedes text/end append, followed only by polling | `TestConsumerIdleBeforeHistory` (all seven consumers) |
+| Clear/running invalidates idle; unrelated clear preserves it | `TestConsumerIdleBeforeHistory` (all seven consumers) |
+
+Testing: first reproduce failures with the new controls, then run the affected
+scenario package and focused recorded consumer cases through ordinary Linux race
+admission. Retain prior failed evidence and continuity holds. Run vet, affected
+tagged compilation and build. Full acceptance/live execution and documentation
+remain pending with their existing owners; macOS remains outside scope.
+
+Security review: PASS (builder self-review, 2026-10-23). The command clock and
+opening identity jointly reject a predecessor even when history append is late.
+Only an actual ordered app reading can certify delivery; polls never fabricate
+one. Explicit clear/running invalidation cannot be bypassed by a consumer's
+payload filter. All state remains test-goroutine-owned, with bounded waits and
+no new goroutines, secrets, logs, file paths, subprocess contracts, crypto or
+network boundaries. Authentication/privacy precedence and production admission
+are unchanged. Existing dismissal, foreign-session and retry controls remain
+mandatory. Independent security review and live acceptance are still pending.
