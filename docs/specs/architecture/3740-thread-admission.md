@@ -766,3 +766,35 @@ only new author validation. The eight green ancestor configured commands do not
 supply current complete acceptance. Fresh independent review and complete normal
 configured/live gates remain mandatory. Keep the PR draft and stop in
 Documentation. No merge, release or deployment.
+
+## Manual reconnect-fixture correction after live acceptance
+
+The complete live gate on 7da07191 executed 2563 named events: 2562 passed and
+one reconnect fixture failed, with 27 skips. Its exact failing repeat remains red
+and its unchanged-base comparison passes. The effective manual hold is revision
+180 after all actual children and reservations settled. Preserve the complete
+failed run and its comparisons. The independent offline PASS remains historical
+approval of 7da07191, not this next fixture correction.
+
+Change only the tagged reconnect fixture's retained records. Supply valid
+producing-session metadata and an actual execution opening after its watched
+command. Keep valid pre-command source facts to prove their exclusion. Across
+all three connections require the same exact current opening/content IDs,
+current send and receive ciphers, monotonic request correlation and inherited
+pending-reader behavior. Do not alter the shared adapter, loosen ownership,
+remove an assertion or enlarge a deadline.
+
+Inspect the other direct retained-history fixtures together and run their cheap
+hermetic tagged ownership/completion controls with reconnect before another full
+provider run. Reuse the failed exact-candidate red evidence rather than repeating
+it unchanged. Record every executed result. Preserve all prior complete passes
+and failures honestly. Publish the small source-equivalent scope and request
+normal independent re-review and required admission. Full live acceptance remains
+required; no complete pass is inferred from the 2562 other passing events.
+
+Author security assessment: fixture records gain valid test-only provenance and
+an execution opening. Product authentication, permissions, transport, persistence
+and shared observation code remain untouched. The expected retained source facts
+stay explicit, and actual encrypted reconnect delivery remains required. No
+synthetic app envelope, new exported API, timeout exception or global state.
+Stop in Documentation after required review and acceptance. No merge or deploy.
