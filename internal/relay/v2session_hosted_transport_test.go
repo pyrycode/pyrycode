@@ -63,6 +63,7 @@ type testHostedTransport struct {
 	mgr        *V2SessionManager
 	conn       *Connection
 	socket     *websocket.Conn
+	server     *httptest.Server
 	socketDone chan struct{}
 	wires      chan protocol.RoutingEnvelope
 	gate       *testHostedPumpGate
@@ -104,6 +105,7 @@ func testHostedRealTransport(t *testing.T, enabled bool, options ...func(*V2Sess
 		}
 	}))
 	t.Cleanup(server.Close)
+	p.server = server
 	events := make(chan testHostedEvent, 2048)
 	p.gate = &testHostedPumpGate{testHostedLog: testHostedLog{events: events}}
 	logger := slog.New(p.gate)

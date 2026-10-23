@@ -82,26 +82,19 @@ func TestProducerGapDeliveryFailure(t *testing.T) {
 	}
 	observer := &testHostedPeer{t: t, conn: v2TestConnID, events: p.gate.events}
 	observer.waitEvent("v2.push.producer_gap.teardown", "")
-	if err := p.conn.Close(); err != nil {
+	if err := p.server.Listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+	p.conn.client.DropConn()
 	release()
 	if err := gapDeliveryResult(t, p.delivered); err == nil {
 		t.Fatal("unavailable active send claimed success")
 	}
-	waitQueueGone(t, p.mgr, v2TestConnID)
-	// Connection shutdown closes Frames and cancels Run's terminal context.
-	// Joining it fences all attempted output before checking suppression.
-	stopped := make(chan struct{})
-	go func() { p.stop(); close(stopped) }()
-	testHostedAwait(t, stopped)
-	select {
-	case err := <-p.delivered:
-		if err == nil {
-			t.Fatal("unavailable terminal send claimed success")
-		}
-	default:
+	observer.waitEvent("v2.hosted.close_failed", "")
+	if err := gapDeliveryResult(t, p.delivered); err == nil {
+		t.Fatal("unavailable terminal send claimed success")
 	}
+	waitQueueGone(t, p.mgr, v2TestConnID)
 }
 
 func gapDeliveryResult(t *testing.T, results <-chan error) error {
