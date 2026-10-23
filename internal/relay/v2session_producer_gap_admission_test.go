@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/pyrycode/pyrycode/internal/apps"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -101,7 +102,22 @@ func testGapPhoneSockets(t *testing.T, p *testHostedTransport) (*websocket.Conn,
 }
 
 func TestProducerGapCancellationAdmission(t *testing.T) {
+	testGapCancellationAdmission(t, "query")
+}
+
+func TestProducerGapCallbackAdmission(t *testing.T) {
+	for _, boundary := range []string{"after_retirement", "contended_admission"} {
+		t.Run(boundary, func(t *testing.T) { testGapCancellationAdmission(t, boundary) })
+	}
+}
+
+func testGapCancellationAdmission(t *testing.T, boundary string) {
+	t.Helper()
 	p := testHostedRealTransport(t, false)
+	generation := p.conn.client.Generation()
+	if generation == nil {
+		t.Fatal("binary transport has no generation")
+	}
 	phone, otherPhone := testGapPhoneSockets(t, p)
 	m, s, rec, recv := liveFixture(t, threadCaps, nil)
 	// Admit the unrelated peer on the same manager before retiring either lane.
@@ -145,9 +161,33 @@ func TestProducerGapCancellationAdmission(t *testing.T) {
 	m.hostedEnqueue(t.Context(), s, &hostedOutput{env: &env, callerCtx: queryCtx})
 	active := s.hosted.active
 	testHostedAwait(t, entered)
-	testGapRetireAtLock(t, m, s, "cancelThreadQuery", func() error {
-		return m.Push(t.Context(), s.connID, protocol.Envelope{Type: protocol.TypeThreadItemAdded, Payload: json.RawMessage(`{"conversation_id":"` + gateClaudeConv + `"}`)})
-	})
+	if boundary == "query" {
+		testGapRetireAtLock(t, m, s, "cancelThreadQuery", func() error {
+			return m.Push(t.Context(), s.connID, protocol.Envelope{Type: protocol.TypeThreadItemAdded, Payload: json.RawMessage(`{"conversation_id":"` + gateClaudeConv + `"}`)})
+		})
+	} else {
+		in := s.hosted.inbox
+		in.subscribed = true
+		change := apps.Change{ServerID: m.cfg.ServerID, AppID: "gap-app", Revision: 1}
+		for i := 1; i < hostedQueueLimit; i++ {
+			m.HostedAppsChanged(change)
+			change.Revision++
+		}
+		if in.used != hostedQueueLimit || len(in.pending) != hostedQueueLimit-1 || in.overflow {
+			t.Fatal("callbacks did not fill the inbox behind the selected write")
+		}
+		if boundary == "contended_admission" {
+			testGapRetireAtLock(t, m, s, "HostedAppsChanged", func() error { m.HostedAppsChanged(change); return nil })
+		} else {
+			if err := m.RetireLiveState(t.Context(), s.connID); err != nil {
+				t.Fatal(err)
+			}
+			m.HostedAppsChanged(change)
+		}
+		if in.overflow || in.ctx.Err() != nil || len(in.pending) != hostedQueueLimit-1 {
+			t.Errorf("retired callback altered inbox: overflow=%v err=%v pending=%d", in.overflow, in.ctx.Err(), len(in.pending))
+		}
+	}
 	if err := queryCtx.Err(); err != nil {
 		t.Errorf("quarantined push cancelled query: %v", err)
 	}
@@ -156,7 +196,8 @@ func TestProducerGapCancellationAdmission(t *testing.T) {
 	}
 	release()
 	if err := gapDeliveryResult(t, active.deliveryDone); err != nil {
-		t.Fatalf("selected transport send failed: %v", err)
+		testHostedAwait(t, p.socketDone)
+		t.Fatalf("selected transport send failed and original binary socket closed: %v", err)
 	}
 	m.handleHostedDone(t.Context(), hostedResult{s: s, output: active})
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
@@ -171,6 +212,13 @@ func TestProducerGapCancellationAdmission(t *testing.T) {
 	if _, _, err := phone.Read(ctx); websocket.CloseStatus(err) != StatusProducerGap {
 		t.Fatalf("phone close = %v, want 4414", err)
 	}
+	sealed, err := s.send.Encrypt([]byte("nonce probe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := recv.Decrypt(sealed); err != nil || string(plain) != "nonce probe" {
+		t.Fatalf("quarantined output spent Noise nonce: %q %v", plain, err)
+	}
 	// The unrelated authenticated Noise lane uses the same binary generation.
 	m.hostedEnqueue(t.Context(), ps, &hostedOutput{env: &env})
 	if err := gapDeliveryResult(t, ps.hosted.active.deliveryDone); err != nil {
@@ -184,10 +232,42 @@ func TestProducerGapCancellationAdmission(t *testing.T) {
 	if e := decryptAppFrame(t, protocol.RoutingEnvelope{Frame: raw}, peerRecv); e.Type != env.Type {
 		t.Fatal(e.Type)
 	}
+	if p.conn.client.Generation() != generation || generation.Context().Err() != nil {
+		t.Fatal("retirement changed the shared binary generation")
+	}
 	select {
 	case <-p.socketDone:
 		t.Fatal("retirement replaced the shared binary socket")
 	default:
+	}
+}
+
+func TestProducerGapCallbackFirstCause(t *testing.T) {
+	m, s, _, _ := liveFixture(t, threadCaps, nil)
+	if s.hosted == nil {
+		m.initHosted(t.Context(), s)
+	}
+	in := s.hosted.inbox
+	in.subscribed = true
+	for i := 0; i <= hostedQueueLimit; i++ {
+		m.HostedAppsChanged(apps.Change{ServerID: m.cfg.ServerID, AppID: "overflow-app", Revision: uint64(i + 1)})
+	}
+	if !in.overflow || in.ctx.Err() == nil {
+		t.Fatal("live callback overflow did not cancel its inbox")
+	}
+	if err := m.RetireLiveState(t.Context(), s.connID); err != nil {
+		t.Fatal(err)
+	}
+	wires := make(chan protocol.RoutingEnvelope, 1)
+	m.cfg.OutboundContext = func(_ context.Context, e protocol.RoutingEnvelope) error { wires <- e; return nil }
+	m.takeHostedChanges(t.Context(), s)
+	select {
+	case e := <-wires:
+		if e.CloseCode != uint16(StatusQueueOverflow) {
+			t.Fatalf("earlier callback overflow replaced by gap: %+v", e)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("terminal output missing")
 	}
 }
 
