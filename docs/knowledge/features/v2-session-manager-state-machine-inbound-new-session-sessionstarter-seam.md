@@ -558,7 +558,7 @@ it was.
   cursor-vs-named liveness-guard question this doc raised (answer: no guard,
   no asymmetry — `interrupt`'s actuation refuses without writing, unlike
   `RestartFresh`).
-- [e2e-harness.md § Build Helper](e2e-harness.md#build-helper) — the
+- [e2e-harness.md § Build Helper](e2e-harness-build-helper.md#build-helper) — the
   `-overlay` mutation-testing pitfalls this ticket's verification hit again,
   in a new shape: see that section's note on `go test` caching a daemon-spawning
   suite even with the source edited in place.
