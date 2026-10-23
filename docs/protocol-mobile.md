@@ -385,8 +385,8 @@ Envelope-level fields beyond the v1 set:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `event_id` | int | no (omitempty) | In-memory event id for the replay cursor (#649), **unique daemon-wide** (#2022). Present on ring-backed interactive live-state frames (binary → phone), including their reconnect replay; absent on session transitions and frames without ring recording. See [Interactive events](#interactive-events-v2-capability-gated). Distinct from `id` (the per-conn envelope counter that resets each reconnect). Strictly increasing in the daemon's emit order across **all** conversations, and therefore ascending **but not contiguous** within any one of them — a conversation's own ids have another conversation's in between, and the first id a conversation is ever assigned is normally well above 1. Stable across reconnects; the latest one a phone observes is a valid `last_event_id` to advertise on reconnect. Always ≥ 1 when present, so absence is unambiguous (omitted, not `null`/`0`). A single scalar cursor over this id space is now correct: **no future event in any conversation can carry an id at or below one already observed**. Ids do **not** survive a daemon restart (the ring is in-memory) — that boundary is the `resync` marker's job. |
-| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present on retained legacy live-state envelopes after a successful source append (#2861, #3737); reconnect replay of history-backed ring events carries that original append's id (#2909). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients recover saved content through explicit thread catch-up and require foreground presentation for a durable read-mark target. |
+| `event_id` | int | no (omitempty) | Legacy in-memory event identity on ring-backed live-state frames, unique daemon-wide and ascending within a conversation, but not contiguous. Absent on frames without ring recording. Distinct from per-connection `id` and durable `history_entry_id`; resets on daemon restart. Always ≥ 1 when present; absence omits the key. It is no longer a recovery cursor: `hello.last_event_id` is ignored and no ring replay or raw `resync` is emitted (#3738). Recover content through explicit thread queries. |
+| `history_entry_id` | uint64 | no (omitempty) | Durable per-conversation [history entry id](#a-history-entry) (`HistoryEntry.ID`), used by [`mark_conversation_read.up_to`](#marking-a-conversation-read). Present on retained legacy live-state envelopes after a successful source append (#2861, #3737). Distinct from connection `id` and daemon-wide ring `event_id`; real entries are ≥ 1 and survive daemon restarts. Older daemons, absent/failed storage and non-history-backed events omit the key entirely, never `null` or `0`; clients recover saved content through explicit thread catch-up and require foreground presentation for a durable read-mark target. |
 | `conversation_id` | nonempty string | required on delivered supplied thread live state; otherwise optional | **Thread-only supplied live-state routing (#3195/#3610).** Authoritative target for every delivered reading and generated/supplied clear, independently of session tags and request correlation. Absent source-envelope identity is stamped from `LiveState.ConversationID`; any supplied envelope/payload identity must be a nonempty string matching it. For a model catalog this is the requested target, even when the inventory came from elsewhere. Null, empty, non-string or conflicting identity rejects the reading before any clear or fresh delivery. |
 | `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means unresolved provenance; explicit `null` positively means no producing session; a nonempty string names the actual captured producer. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. A model catalog may name a bootstrap or predecessor producer; never substitute the target's session. This tag neither admits a session nor attributes every capability-merged row to that producer. Daemon provider installation (#3163) and production negotiation (#3164) are active. |
 | `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears only this family's readings in the envelope's target conversation before fresh readings for that target generation. For `model_list`, it invalidates catalog inventory independently of current-session admission. Generated and supplied clears omit `in_reply_to`. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
@@ -422,20 +422,20 @@ Ordering, access gates and connect reconciliation follow the
 using the same durable per-conversation namespace as `HistoryEntry.ID` and
 [`mark_conversation_read.up_to`](#marking-a-conversation-read). Real entries
 start at 1 and remain stable across daemon restarts. Connection `id` resets on
-reconnect, while daemon-wide ring `event_id` is an in-memory replay cursor;
+reconnect, while daemon-wide ring `event_id` is an in-memory event identity;
 neither can substitute for a durable history entry id in a read mark.
 For retained legacy live-state delivery, `interactiveTurnEmitterV2.emit`
 appends before `publishLiveState` carries the original ID, payload and timestamp
 through the shared ring and direct fan-out, including without recipients.
-Replay retains that identity without another append. Content producers now
+Reconnect emits no ring replay. Content producers now
 return after source recording: session transitions, operator messages, channel
 posts, standalone banners and runtime/prompt-answer facts publish no raw frames
 or substitute receipts (#3732–#3737). Supplied thread live state remains on its
-separate identity-free path above. Replay admission/pump and shared-ring
-retirement remain #3738/#3739.
+separate identity-free path above. Replay admission and delivery are retired
+(#3738); shared-ring storage and wiring cleanup remain #3739.
 
 **The field is absent on older daemons, with absent or failed history storage,
-and on non-history-backed frames, including their replay.** An absent store
+and on non-history-backed frames.** An absent store
 or failed append still permits supported legacy live-state delivery and ring
 recording; it never restores retired content publication.
 **When the field is absent, clients recover content through
@@ -1026,7 +1026,7 @@ tests alone MUST NOT be described as proof of production activation.
 
 1. **Load device-static keypair** from Android Keystore. If missing, abort and surface "pair record corrupted; re-pair from binary."
 2. **Connect** WSS to `/v1/client` with headers above.
-3. **Send `noise_init`** as the first frame, with the v1-shaped `hello` envelope as the early-data payload — the device token is what the payload must carry. A phone reconnecting mid-turn additionally includes `last_event_id` to be replayed the tail it missed (see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647)). The payload's `last_seen_ts` is **accepted and ignored**: nothing reads it, so sending it triggers no backfill and changes nothing.
+3. **Send `noise_init`** as the first frame, with the v1-shaped `hello` envelope as the early-data payload — the device token is what the payload must carry. Content recovery requires explicit thread catch-up for each open conversation (see [Reconnect / Backfill semantics](#reconnect--backfill-semantics)); `last_event_id` is ignored. The payload's `last_seen_ts` is **accepted and ignored**: nothing reads it, so sending it triggers no backfill and changes nothing.
 4. **Await `noise_resp`** within 10 seconds; on timeout close with `4421`.
 5. **Derive CipherStates**, switch to transport mode.
 6. **Send / receive `noise_msg`** frames as the user interacts.
@@ -1080,7 +1080,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 
 | Type | Direction | Carries handshake early-data? | Notes |
 |---|---|---|---|
-| `hello` | phone → binary | yes (in `noise_init`) | Includes the device-token; optional `last_event_id` for mid-turn reconnect replay (#647). Also accepts `last_seen_ts`, which **no daemon code reads** — it is decoded and dropped, drives no backfill, and a `hello` carrying it behaves identically to one omitting it (#2090). |
+| `hello` | phone → binary | yes (in `noise_init`) | Includes the device-token; obsolete `last_event_id` is ignored for every valid JSON value (#3738). Also accepts `last_seen_ts`, which **no daemon code reads** — it is decoded and dropped, drives no backfill, and a `hello` carrying it behaves identically to one omitting it (#2090). |
 | `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`; for an authorised peer, may include the daemon host's absolute `workspace_root` for resolving relative workspace paths. |
 | `send_message` | phone → binary | no | Operator sends are observed through canonical thread items and explicit catch-up; raw user-message pushes and queued acceptance, delivery, drop and loss receipts are retired for every app. See [Queue observation and delivery identity](#queue-observation-and-delivery-identity). Carries an **optional** `attachment_ids` — the uploaded attachments this message references, so the daemon names them instead of inferring the set from upload order or arrival timing (#2036). Each element is a lowercase UUIDv4 per [The `attachment_id` shape](#the-attachment_id-shape); **at most 32 per message**, counting elements rather than distinct ids. A message naming none **omits the key entirely** — `null` and `[]` are also accepted and a receiver cannot tell the three apart. **Consumed since #2038**: the daemon names each attachment's on-host path in `claude`'s prompt, refuses an over-bound list with `protocol.malformed`, and deduplicates a repeated id. See [Naming a message's attachments](#naming-a-messages-attachments). **Two fixed literals in `text` are exceptions to ordinary message delivery**: `/clear` (#2456) and `/reset` (#3607), independent of `slash_command_list`. After trimming, either must be the first whitespace-delimited token, matched case-sensitively with Unicode whitespace boundaries; trailing text after whitespace is discarded too. `/clear extra` and `/reset extra` reset; `/clearcache`, `/resetfoo`, `/RESET`, `/Reset` and `please /reset` remain ordinary messages. Payload decoding, the attachment-count bound and conversation routing still reject invalid requests before interception. For a valid, routable match, the daemon sends the ordinary `ack` **before** calling `StartNewSession` for that conversation, using the same wrap-up, handoff and rotation routine as a named `new_session` (see [`resetting`](#resetting)). Neither literal is enqueued or delivered to claude. Its `attachment_ids` are dropped without resolution, so they cannot produce `attachment.not_found`; the handler neither touches `LastUsedAt` nor auto-names the conversation. The reset is **not gated on the negotiated `interactive` capability** the way the `resetting` frames themselves are: a non-interactive client can use either literal but does not see those frames. An absent resetter or any reset error, including a refused workspace, still drops the message with only the ordinary `ack`; there is no `new_session.workspace_refused`-shaped reply on this path. Only a successful reset invalidates held reply suggestions; refusal preserves them (see [Clear and invalidation](#reply_suggestion)). A client that renders its own optimistic echo of either literal as a sent row will not find that row in history after a reload, since the daemon never delivers the message — the session delimiter appears with nothing above it. Accepted, not a bug. Also carries an **optional `client_sent_at`** (RFC 3339, #2704): when the client says Send was tapped, on the client's own clock. An absent or unparseable value is **dropped, not refused** — the message is enqueued and delivered exactly as if the key were missing. It is never used for ordering (the client's clock may be wrong) and never logged. See [A history entry](#a-history-entry) for where it, and the sender's device name and app version, land on the stored turn. |
 | `message` | binary → phone | no | Retired app content type; v2 assistant output uses authoritative thread updates and explicit catch-up (#3718). Queued sends are observed through canonical thread items and explicit catch-up; queued acceptance, delivery, drop and loss facts produce no legacy receipts (#3733). Raw user-message pushes and their reconnect replay publication are retired for every app (#3732), including connections without `thread`. Safe delivery source records remain internal history inputs; see [Queue observation and delivery identity](#queue-observation-and-delivery-identity). |
@@ -1142,7 +1142,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`session_facts`** | binary → phone | no | **New in v2** (interactive, capability-gated). What `claude`'s own **build** is and what permission **posture** `claude` says the child is running under, from the same `system/init` line [`model_announced`](#model_announced) is drawn from (#2253). It carries **no session identifier** — "session" names the child run these facts describe. Shape declared by #2253, emitted since #2254. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** Answers only `conversation.not_found` or `server.binary_offline` (#2540); the daemon renders no screen. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** Declared but never emitted (#2540) — `protocol.TypeScreenSnapshot` has no producer. See [Screen snapshot](#screen-snapshot-v2). |
-| **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`resync`** | retired | no | No longer emitted (#3738). Recover content through explicit per-conversation thread catch-up; an unusable checkpoint yields `thread_reset`, followed by a request for the newest window. |
 | **`session_transition`** | source history only | no | Retained transition and `session_divider` sources feed canonical session dividers; no raw frames, new replay copies or substitute transition-divider receipts for any app (#3736). See [source schema](#session_transition). |
 | **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. It also has a **connect-time snapshot** (#1863/#1867, widened by #2124 to cover every conversation the registry carries), so a client that missed the live frame is brought current on its next connect. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`mcp_status`** | binary → phone | no | **New in v2.** The conversation-scoped MCP status payload serves both automatic publication and a fresh [`mcp_status_request`](#asking-for-mcp-status-on-demand) reply. Automatic publication occurs once per eligible daemon-configured strict child, including an empty server list. It creates one event-ring entry and one frame per connected interactive client. A query reply goes only to its requester, carries no `event_id`, and never enters the event ring. Both paths exclude bypass children and their privately loaded MCP servers. See [`mcp_status`](#mcp_status). |
@@ -1208,7 +1208,8 @@ answer and channel-post content, including nil/failed history and peers without
 thread updates. Initial connection supplies current live state; content backfill
 requires explicit thread catch-up/pages. The
 [integrated acceptance record](knowledge/features/thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
-closes the content-publication slice without claiming downstream replay removal.
+closes the content-publication slice. Event replay admission and delivery are
+also retired (#3738); unused ring storage/wiring cleanup remains #3739.
 
 `thread_item_added`, `thread_item_changed` and `thread_text_append` have a
 per-connection relay delivery contract (#3081), including the bounded codec
@@ -1222,8 +1223,8 @@ supplied-state reconciliation and source-conversation routing are implemented
 [ADR 042](knowledge/decisions/042-daemon-built-thread.md) defines the migration.
 The [thread query vocabulary and bounded replies](#thread-query-messages)
 are production-installed on the real publisher store (#3236), with authenticated
-relay catch-up/page handling (#3253/#3235) and thread-only replay/resync bypass
-(#3253).
+relay catch-up/page handling (#3253/#3235). Event replay/resync is retired for
+every connection (#3738).
 
 Publication acquires a usable metadata-only `Store.Changes` boundary silently,
 then follows proven change ranges. Earlier items require explicit catch-up;
@@ -1271,7 +1272,7 @@ order and logical payload; the supplied envelope `session_id` must not grow
 after encoding, so later scalar stamps stay within the reserved byte budget.
 
 For thread connections, the relay suppresses these replaced **unsolicited**
-types across live forwarding, reconnect replay and existing connect reconciliation:
+types across live forwarding and existing connect reconciliation:
 `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `turn_end`,
 `session_transition`, `message`, `background_task_started`,
 `background_task_updated`, `background_task_roster`, `banner`
@@ -1281,9 +1282,8 @@ Transient live state remains deliverable, including `turn_state`, `tool_progress
 `background_task_progress`, `thinking_progress`, `api_retry` and `compacting`,
 subject to existing access gates. Ordinary correlated request/reply traffic
 retains its behavior; thread items still require the item gates above.
-A suppressed replay event advances the replay watermark and drains normally,
-allowing later permitted frames and buffered live traffic to follow. This
-filtering is complemented by the supplied
+Filtering occurs before encryption and consumes no send nonce. It is
+complemented by the supplied
 [current live-state reconciliation](#session-scoped-live-state-v2-supplied-delivery-contract)
 from #3082.
 
@@ -1292,7 +1292,7 @@ Connections without `thread` receive none of the three update kinds and no
 when supplied frames carry them. Explicit new-session clear frames are omitted
 entirely. Other legacy events, payloads and summary bytes retain their existing
 shape, including independent interactive and agent restrictions. Per-connection
-projection does not mutate shared push or replay payloads.
+projection does not mutate shared push payloads.
 
 All three payloads have these required common fields:
 
@@ -1679,8 +1679,8 @@ completed `rev`/`version`.
 
 The relay implements `thread_catch_up` (#3253) and `thread_page` (#3235)
 admission, serial delivery and query/live joining, using the ordered delivery
-outcomes and queued eligibility rechecks from #3252. Thread-only replay/resync
-bypass is production-active for negotiated thread peers (#3253). Production
+outcomes and queued eligibility rechecks from #3252. Event-ring replay and raw
+`resync` are retired for all peers (#3738). Production
 `ThreadCatchUp` and `ThreadPage` forward directly to `Store.CatchUp` and
 `Store.HistoryPage` on the real publisher store (#3236), preserving the request
 context, named conversation and complete captured result. Negotiation requires
@@ -3215,8 +3215,7 @@ Sent in the `noise_init` early-data payload. The `payload.token` field carries t
     "client_version": "pyrycode-mobile/0.1.0",
     "client_features": "Conversation list and interactive chat",
     "protocol_versions": ["v2"],
-    "last_seen_ts": "2026-05-08T08:14:02Z",
-    "last_event_id": 42
+    "last_seen_ts": "2026-05-08T08:14:02Z"
   }
 }
 ```
@@ -3256,30 +3255,22 @@ rotation carries the earlier admitted snapshot. Eviction/reactivation resolves
 current clients and refreshes the report. See
 [prompt composition and snapshots](knowledge/features/sessions-package-key-types-writesystemprompt-systemprompttext.md#composition-and-resolution).
 
-`last_seen_ts` (optional) appears in the block above because it is **still
-accepted vocabulary** — the daemon decodes it and a decoder that rejected it
-would be wrong. It is **inert**: no daemon code reads the decoded value, so it
-drives no backfill, no replay and no other behaviour, and a `hello` carrying it
-is answered exactly as one omitting it. The field is deliberately neither
-removed nor deprecated here (#2090); whether real history should exist at all,
-and what would source it, is #2091's decision. A client wanting the tail it
-missed sends `last_event_id` instead. The same key appears in the § Worked
-example wire trace below for the same reason — those are bytes genuinely on the
-wire, not a capability.
+`last_seen_ts` (optional) is accepted and decoded but ignored (#2090). It
+triggers no backfill or replay.
 
-`last_event_id` (optional, omitempty — absent, not `null`, when the phone has no
-position; key-absent keeps the v1 hello byte-identical) is the durable
-`event_id` (see [Interactive events](#interactive-events-v2-capability-gated)),
-unique daemon-wide since #2022, the phone last saw on the interactive stream —
-one scalar over one ordering, not a per-conversation cursor. The daemon still
-resolves the conversation to replay from its own current cursor, so an advertised
-id belonging to a conversation the daemon has since rotated away from is simply
-an id the resolved conversation never had, and classifies as a gap.
-On mid-turn reconnect the phone
-advertises it so the daemon can replay the missed tail from the event ring or
-emit a `resync` marker (#647). It is **untrusted input** — the daemon
-range/shape-validates it (`*uint64` decode) and bounds replay by the ring; the
-phone can never address a conversation other than the daemon's current one.
+`last_event_id` is an ignored unknown key (#3738), absent from
+`HelloClientPayload` serialization. An otherwise valid authenticated hello
+behaves identically with the key omitted or with zero, a stale integer, maximum
+uint64, a string, object, array or `null`. It selects no conversation, changes no
+admission or delivery gate, and causes neither event-ring replay nor a raw
+`resync`. Other hello decoding, token/static-key binding and client-version
+checks still apply.
+
+After reconnect, explicitly send `thread_catch_up` for each open conversation
+using its last completed epoch/version. Recover `thread_reset` by requesting a
+newest window with version zero, then request older pages from its certified
+continuation. Handshake initializes current prompts/live state, not thread
+items. See [Reconnect / Backfill semantics](#reconnect--backfill-semantics).
 
 Binary validates the token after decrypting the handshake message and before
 constructing the acknowledgement. If invalid, the binary still sends the
@@ -3390,7 +3381,7 @@ Defined capability strings:
 | `question` | The client understands the clarifying-question batch types — it can render a `question_shown` batch, answer it with `question_answer` / `question_refused`, and handle `question_dismissed`. **Detection only: this string grants no access.** The batch fan-out and the connect-time question reconcile gate on `interactive` alone, so a client advertising `question` by itself negotiates as non-interactive and receives none of them (#2020). |
 | `model_list` | The daemon can answer a model menu for **any** conversation, including one whose bound session has spawned no child yet — the `request_model_list` verb (#2125) plus the daemon-wide retained-vocabulary fallback it answers from (#2124). One string covers the pair because neither half is separately useful: the fallback with no verb gives a client no way to ask, and the verb with no fallback has nothing to answer for a childless conversation. **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `model_list` by itself negotiates as non-interactive, and a client advertising `interactive` without it is answered exactly as before (#2172). |
 | `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
-| `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, questions, modals), reconnect replay and the `resync` marker. A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
+| `multi_agent` | The client understands conversations run by more than one agent (#2643). **Not detection-only — this string changes what the daemon sends.** It grants no *interactive* access (every `interactive`-gated surface is unaffected, and a client can negotiate `multi_agent` alone without becoming interactive), but it gates two things on the `conversations` reply: every row carries `agent` (`"claude"` or `"codex"`, the bound session's agent), and a row whose agent is `"codex"` is included at all. A client that does not negotiate it gets today's list, byte-identical, with Codex-run conversations left out. See the `conversations` row below. As of #2644, it also gates every frame the daemon *pushes* about a Codex conversation: live turn events, conversation broadcasts (`conversation_updated`), the connect-time reconciles (model list, slash commands, questions, modals). A client that does not negotiate `multi_agent` receives none of them; frames about a Claude conversation, frames naming no conversation, and ordinary replies to the client's own requests are delivered exactly as before. Thread item updates and continuations remain subject to the independent item authorization gate even when correlated. `modal_dismissed` and `question_dismissed` name no conversation, so such a client can still receive one for a modal or question batch it never saw (the `*_shown` frame that introduced that batch id was itself withheld) — it names nothing the client can act on and should be ignored. As of #2651 it also changes the **content** of every `model_list` frame the daemon answers with — the connect-time reconcile and the `request_model_list` reply alike — whichever agent the named conversation itself runs: a capable client's `models` merges Claude's held entries with Codex's, each tagged `agent` and `family` (see [`model_list`](#model_list) below). A client that does not negotiate `multi_agent` still gets today's Claude-only list, byte-identical, with no `agent`/`family` keys on the wire. |
 | `stop_background_task` | The daemon supports stopping one named background task through the [`stop_background_task`](#stop-background-task-v2) verb (#2797). **Detection only: this string grants no access.** Clients advertise it and draw a per-task stop button only when `hello_ack.payload.capabilities` echoes it. Advertising it alone leaves the connection non-interactive; the verb requires `interactive` alone, and an interactive client can use it without advertising this detection string. |
 | `claude_usage` | The daemon answers [`request_claude_usage`](#claude-usage-allowance-reading) with its latest Claude usage allowance reading (#3575). **Detection only: this string grants no access and gates nothing** — `request_claude_usage` is answered through authenticated paired-client map dispatch whether or not a client advertised it, the same posture `request_claude_account` already has. A client advertises it only to know the daemon understands the verb before it asks. |
 | `thread_expansion` | **Production-installed (#3523/#3550).** Bounded body and direct-child reads; negotiated only with both providers, thread readiness and client `thread_expansion`, `thread` and `interactive`. See [Bounded expansion reads](#bounded-expansion-reads). |
@@ -3417,14 +3408,13 @@ a different store, publisher stop or cancellation withholds readiness. This
 attests providers, not completion of every conversation's replay: watermark lookup returns false
 for missing/not-loaded, rebuilding or unavailable observations and true for a
 registered usable zero. Retained-state snapshot/push/reply delivery remains
-source-bound (#3163/#3195). Bounded catch-up/pages and thread-only replay/resync
-replacement are production-installed. Handshake does not initialize thread
+source-bound (#3163/#3195). Bounded catch-up/pages are production-installed;
+event-ring replay and raw `resync` are retired for every connection (#3738). Handshake does not initialize thread
 items: each open conversation requires explicit catch-up, with completion only
 after all batches assemble and the separate successful final marker arrives.
 Nonusable views fail explicitly; an unfinished query racing live publication
-may fail and must be retried from the last completed checkpoint. Legacy peers
-retain replay/resync and raw history until
-[ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order).
+may fail and must be retried from the last completed checkpoint. Peers without `thread` receive no content recovery through an event cursor or
+raw history; supported prompt/current-state reconciliation remains available.
 The [envelope session metadata](#message-envelope) is omitted from non-thread
 delivery; existing payload session fields retain their meanings. Summary
 projection and replaced-content filtering follow the
@@ -3455,8 +3445,8 @@ queries, the real fold publisher and watermark lookup (#3164/#3236), enabling
 production `thread` negotiation.
 Connect/reconnect initializes the current transient readings below. Thread item
 backfill requires explicit queries for each open conversation. Bounded
-catch-up/page providers and thread-only replay/resync bypass are
-production-installed (#3236/#3253/#3235).
+catch-up/page providers are production-installed (#3236/#3253/#3235). Event-ring
+replay/resync is retired for every connection (#3738).
 
 **Supplied on-demand replies.** On a thread connection, an installed optional
 provider is selected once for `request_context_usage`, `mcp_status_request`,
@@ -3584,11 +3574,11 @@ ordinary live state does not use thread-item continuation encoding.
 
 These frames carry no replay or history identity, contribute no thread items or
 catch-up data, and never advance `last_shown_version` or read watermarks.
-Connections without `thread` retain their existing stream, snapshots and replay/resync, receive no
-envelope conversation/session metadata and receive no explicit clear frames;
-legacy payload and envelope bytes stay unchanged. Thread connections bypass
-event-ring replay/resync and request item catch-up explicitly through the
-installed bounded query providers (#3236/#3253/#3235).
+Connections without `thread` retain supported live frames and current-state
+snapshots, receive no envelope conversation/session metadata and receive no
+explicit clear frames. No connection receives event-ring replay or raw `resync`
+(#3738). Thread item recovery requires negotiated thread delivery and explicit
+queries through the installed bounded providers (#3236/#3253/#3235).
 
 ### Interactive events (v2, capability-gated)
 
@@ -3613,14 +3603,20 @@ gates. Required source fields remain explicit, including `seq: 0` and
 `is_error: false`. Host-post `turn_end` retains its separate four-field payload,
 omitting Claude result and metric fields.
 
-**Legacy replay cursor (`event_id`, #649).** Ring-backed frames in this stream carry an envelope-level `event_id` (the optional `Envelope` field above) — the daemon-resident id assigned to each structured event in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` identifies an envelope and can differ across recipients or replay, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
+**Legacy event identity (`event_id`).** Supported ring-backed live-state frames
+may still carry this connection-independent in-memory identity. It is distinct
+from envelope `id`, durable source IDs and thread epoch/version. Event-ring
+recovery is retired (#3738): clients must not use it as a reconnect checkpoint.
+`hello.last_event_id` is ignored, and the daemon sends no ring replay or raw
+`resync`. The remaining ring storage and setter wiring belong to #3739. See
+[explicit reconnect recovery](#reconnect-replay--resync-consumer-647).
 
 Host-post deltas and completion remain durable fold inputs (#2809, #3737).
 They create no raw live/reconnect publication or new ring events. Only a new
 successful durable completion triggers the existing asynchronous wake; failed
 completion remains pending, and cleanup-only reload/catch-up never notifies again.
-Shared replay admission, pump and event-ring infrastructure remain until
-\#3738/#3739; this ticket retires content publications, not those contracts.
+Replay admission and the pump are retired (#3738); remaining event-ring storage
+and wiring cleanup belong to #3739.
 
 #### `turn_state`
 
@@ -4443,7 +4439,7 @@ including envelope session tags and `{}` family clears before fresh state.
 
 Like every frame in this section it is **binary → phone only**, reaches only a
 phone whose `interactive` capability was echoed in `hello_ack`, and carries an
-envelope-level `event_id` for replay.
+envelope-level legacy `event_id`; it enables no reconnect recovery.
 
 `thinking_progress` (#1386) exists because it is claude's **only** mid-turn proof
 of life on the stream-json surface: during a long assistant turn nothing else
@@ -4530,7 +4526,7 @@ including envelope session tags and `{}` family clears before fresh state.
 
 Like every frame in this section it is **binary → phone only**, reaches only a
 phone whose `interactive` capability was echoed in `hello_ack`, and carries an
-envelope-level `event_id` for replay.
+envelope-level legacy `event_id`; it enables no reconnect recovery.
 
 **Emitted since #1410.** The shape was declared by #1405 so a client could be
 written against it; #1410 wired the producer — `internal/turnbridge`'s `MapEvent`
@@ -4675,7 +4671,7 @@ including envelope session tags and `{}` family clears before fresh state.
 
 Like every frame in this section it is **binary → phone only**, reaches only a
 phone whose `interactive` capability was echoed in `hello_ack`, and carries an
-envelope-level `event_id` for replay.
+envelope-level legacy `event_id`; it enables no reconnect recovery.
 
 **Emitted since #1638.** The shape was declared by #1616 so a client could be
 written against it; #1638 wired the producer — `internal/turnbridge`'s `MapEvent`
@@ -4760,7 +4756,7 @@ including envelope session tags and `{}` family clears before fresh state.
 
 Like every frame in this section it is **binary → phone only**, reaches only a
 phone whose `interactive` capability was echoed in `hello_ack`, and carries an
-envelope-level `event_id` for replay.
+envelope-level legacy `event_id`; it enables no reconnect recovery.
 
 **Emitted since #2254.** The shape was declared by #2253 so a client could be
 written against it before the daemon sent one; #2252 wired the emitting handler —
@@ -5010,7 +5006,7 @@ Each element of `models`:
 | `agent` | string (omitempty) | `"claude"` or `"codex"` — the agent this row's model belongs to. Present only for a client that negotiated `multi_agent` (#2651); absent, key omitted, for every other client. |
 | `family` | string (omitempty) | The model family: a Codex row's family name, or a Claude row's family alias with its bracket group preserved, even when `value` is pinned. Present only for a `multi_agent` client; omitted otherwise. |
 
-**A `multi_agent` client's `models` merges both agents' vocabulary, tagged; every other client's list is unchanged.** For a client that negotiated `multi_agent` (#2643), `models` carries Claude's held entries first, in claude's own order, followed by Codex's held entries in the vocabulary store's order — one row per family, at that family's newest resolved version — regardless of which agent the named conversation itself runs. Every row carries `agent` and `family`: a Claude row's `family` is its `value`'s family alias, preserving any bracket group (`claude-fable-5-1[1m]` has family `fable[1m]`); a Codex row's `agent` is `"codex"`, its `family` is the Codex family name, and its `display_name` equals that same family name, since Codex publishes no separate display string. `dropped_models` keeps its present meaning and counts only Claude's tail cut — the merge adds no combined cap of its own (#2651). When only one agent has anything held, that agent's rows are all a capable client gets; when neither does, no `model_list` frame is sent for that conversation, exactly as for any other client. A client that did not negotiate `multi_agent` gets exactly today's list — Claude's entries only, with `agent` and `family` absent from the wire rather than merely empty, so the frame stays byte-identical to what it has always been. This governs all three delivery paths in this section: the live-lane frame below, the connect-time reconcile, and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply. The live-lane frame is rewritten per connection at the moment it is sealed (#2652) rather than merged once and stored, so a `multi_agent` client's copy reflects whatever Codex vocabulary the daemon holds *at that instant* — not whatever it held when the child answered `initialize` — while every other connection, including one replayed later from the same event-ring entry, still receives the original Claude-only bytes untouched. Legacy connect-time reconciliation and on-demand replies already carry their projected rows and are not merged again. Supplied thread catalogs instead carry canonical inventory metadata internally and are projected separately for each recipient, including snapshots and replies without `event_id`; producer evidence is preserved through projection.
+**A `multi_agent` client's `models` merges both agents' vocabulary, tagged; every other client's list is unchanged.** For a client that negotiated `multi_agent` (#2643), `models` carries Claude's held entries first, in claude's own order, followed by Codex's held entries in the vocabulary store's order — one row per family, at that family's newest resolved version — regardless of which agent the named conversation itself runs. Every row carries `agent` and `family`: a Claude row's `family` is its `value`'s family alias, preserving any bracket group (`claude-fable-5-1[1m]` has family `fable[1m]`); a Codex row's `agent` is `"codex"`, its `family` is the Codex family name, and its `display_name` equals that same family name, since Codex publishes no separate display string. `dropped_models` keeps its present meaning and counts only Claude's tail cut — the merge adds no combined cap of its own (#2651). When only one agent has anything held, that agent's rows are all a capable client gets; when neither does, no `model_list` frame is sent for that conversation, exactly as for any other client. A client that did not negotiate `multi_agent` gets exactly today's list — Claude's entries only, with `agent` and `family` absent from the wire rather than merely empty, so the frame stays byte-identical to what it has always been. This governs all three delivery paths in this section: the live-lane frame below, the connect-time reconcile, and the [`request_model_list`](#asking-for-a-model-list-on-demand) reply. The live-lane frame is rewritten per connection at the moment it is sealed (#2652) rather than merged once and stored, so a `multi_agent` client's copy reflects whatever Codex vocabulary the daemon holds *at that instant* — not whatever it held when the child answered `initialize` — while every other connection, including another recipient of the same live event, still receives the original Claude-only bytes untouched. Legacy connect-time reconciliation and on-demand replies already carry their projected rows and are not merged again. Supplied thread catalogs instead carry canonical inventory metadata internally and are projected separately for each recipient, including snapshots and replies without `event_id`; producer evidence is preserved through projection.
 
 **`dropped_models` means what its name promises, and `len(models) + dropped_models` is the menu's true size.** The producer bounds the entry count at **ten** (#1812) and reports here how many entries it cut, so a client can render "10 of 40" rather than presenting a shortened menu as complete. The producer cuts only the overflow, so a non-zero `dropped_models` always arrives beside exactly ten entries; a shorter list is always a complete one. The count reaches the wire intact: the decode records the overflow where the cut happens, the mapping onto this frame carries the number **verbatim rather than recomputing it from `len(models)`** (#1848), and the producer passes it through (#1849). Two properties bound how a client may use it. The list is truncated **from the tail**, so the entries you receive are the first ten of the family-reduced list, in claude's own order; pinned rows removed by that reduction are not counted here. And ten is a **daemon-side producer cap, not a wire constant** — it may change without any change to this contract, so a client must never hardcode it, treat a list of exactly ten as a signal, or derive the cap from anything but the number in this field.
 
@@ -5025,7 +5021,12 @@ Each element of `models`:
 
 What reliably arrives is the case #1845 proves end to end: a child spawned **while a conversation is already routed and a client is connected** — a respawn after the child died, for instance.
 
-**A client that missed the frame is brought current on its next connect.** The three loss points above are recovered by a **connect-time snapshot**, and the two delivery paths differ on `event_id` in a way that is client-visible. The live-lane frame is appended to the per-conversation event ring before the per-conn fan-out, so it carries an `event_id`, and a **reconnecting** client whose `hello` advertises an earlier `last_event_id` is replayed it along with everything else it missed — Mode A, a cursor backfill. That path needs both a cursor from a previous connection and a frame that was actually emitted, so on its own it recovers nothing for a first attach and nothing for a menu that was never sent. The snapshot below deliberately carries **no** `event_id`: it never enters the ring, is never replayed, and never advances a client's cursor. A client still **must not block its model menu on the live frame** — render a usable UI without one and let the next connect fill it in — and if it needs one sooner than the next connect, it **asks** with [`request_model_list`](#asking-for-a-model-list-on-demand) below.
+**A client that missed the frame is brought current on its next connect.**
+Recovery uses the current-state snapshot below, not a replay cursor (#3738).
+A legacy live-lane frame may carry `event_id`; the connect-time snapshot carries
+none and adds no ring event or source-history entry. A client still must not
+block its model menu on a live frame. If it needs a menu sooner than the next
+connect, it asks with [`request_model_list`](#asking-for-a-model-list-on-demand).
 
 **Reconcile on (re)connect.** An authenticated connection negotiating both
 `thread` and `interactive` receives supplied catalog inventory for every
@@ -5051,9 +5052,9 @@ nor removal/recreation can be crossed by this refresh. See the
 An authenticated interactive connection without `thread` retains legacy
 `reconcileModelLists`: one snapshot per registry conversation with usable
 vocabulary, without supplied clear frames
-or top-level conversation/session metadata. Legacy live frames can also be
-recovered by event-ring replay; supplied thread reconciliation bypasses both that
-replay and the legacy connect providers. On either path, replace the menu by
+or top-level conversation/session metadata. No legacy live frame is recovered by
+event-ring replay (#3738). Supplied thread reconciliation uses source-bearing
+providers in place of the legacy connect providers. On either path, replace the menu by
 `conversation_id`, never by position or envelope `id`; registry iteration order
 is not a delivery contract.
 
@@ -5672,7 +5673,7 @@ writes what it reads back to the registry, so it cannot renew its own
 timestamp and can never stop being stale on its own.
 
 **The reply carries no `event_id`**, like every other on-demand reply on this
-wire: it never enters the [reconnect replay ring](#reconnect-replay--resync-consumer-647),
+wire: it never enters the legacy event ring,
 is never replayed, and advances no client cursor — only the automatic
 post-turn frame does that.
 
@@ -5705,7 +5706,12 @@ Each element of `commands`:
 
 **This frame is emitted.** The wire type was declared by **#1726**, the shape by **#1727**, the committed fixtures and this section by **#1718**, the mapping onto this wire shape by **#2001** with its frame-level byte bound by **#2002**, and the **producer** by **#2003**; **#2008** proves it reaches a connected client end to end. This is the same declare-then-emit sequencing `rate_limited` used (#1405 declared, #1410 emitted), `model_announced` used (#1616 declared, #1638 emitted) and `model_list` used (#1704 declared, #1848 mapped and #1849 emitted), and this frame has now completed it.
 
-**The delivery window is narrower than "emitted" suggests, and a client must build for the narrow one.** What the daemon performs on a schedule is an **ask, not a delivery**: it runs **one `initialize` exchange per claude child spawn** and emits whatever comes back on the **live interactive turn lane**, arriving on a `control_response` as above, to whatever interactive connections exist **at that instant**. Nothing bounds the rate on either side. **The two delivery paths differ on `event_id`, and the difference is client-visible.** A live-lane frame is appended to the per-conversation event ring before the per-conn fan-out, so it carries an `event_id`, and a **reconnecting** client whose `hello` advertises an earlier `last_event_id` is replayed it along with everything else it missed — Mode A, a cursor backfill. The connect-time snapshot below deliberately carries **no** `event_id`: it never enters the ring, is never replayed, and never advances a client's cursor.
+**The live delivery window begins when the child reports its inventory.**
+The daemon asks once through `initialize` per Claude child spawn and emits the
+result on the live interactive lane to eligible connections then present.
+A legacy live frame may carry `event_id`, but reconnect no longer replays it.
+The connect-time snapshot below supplies current inventory without an
+`event_id`, ring append or recovery cursor.
 
 Delivery on the live lane is **best-effort rather than guaranteed**, and **the losses are not limited to load** — three sit between that emit and a client:
 
@@ -5714,7 +5720,10 @@ Delivery on the live lane is **best-effort rather than guaranteed**, and **the l
 
 **Two situations that used to be loss points no longer are (#2739).** Every event is now attributed to the conversation its own session is bound to, never to whichever conversation holds the daemon's cursor. The **bootstrap child**, spawned at startup before any conversation is routed, is itself bound to the bootstrap conversation, so its inventory reaches that conversation's event ring and durable history immediately rather than being lost. And a **session rotation** delivers its fresh inventory to the rotated conversation, stamped with that conversation's id, instead of being dropped for no longer matching a fixed construction-time tag.
 
-**What is *not* a loss point, stated because the daemon's own comments count it as one:** the reconnect-replay dedup ([`hello.last_event_id`](#reconnect-replay--resync-consumer-647)) drops only an envelope a connection **already received in its replay**. The replay watermark is clamped to the newest event retained at handshake for the conversation that replay was taken from, and since #2022 `event_id` is unique daemon-wide, so **any** frame emitted afterwards carries a higher id — whatever conversation it belongs to — and the guard cannot cost a client a frame it had not already been given. **The conversation scope that qualified this claim is gone**, and it was not a formality: while ids were counted per conversation, each counter starting at 1, and the watermark was a single per-connection value, a `/clear` or a conversation switch after an in-range reconnect muted the new conversation's live stream up to the watermark for the life of that connection — a real defect, reported and fixed in #2022, not a caveat. And the guard is inert for the reconciled frame for a second reason, since that one carries no `event_id` at all.
+**Event IDs do not gate delivery.** The reconnect replay watermark and its
+live-event filter are removed (#3738). An ignored `last_event_id` cannot mute a
+later frame, including one from another conversation. Current menu recovery
+uses reconciliation, while capability and conversation restrictions still apply.
 
 **Reconcile on (re)connect.** On any (re)connection the daemon unicasts one `slash_command_list` for **every** conversation whose bound session currently holds an inventory (#2006 landed the reconcile, #2007 wired the daemon-side enumeration to it, over the per-conversation resolver #2005) — this is match-and-replace by stable id (see [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)), keyed on `conversation_id`: a re-sent `slash_command_list` for a known conversation **replaces** that menu in place rather than appending, and because the frame is snapshot-shaped full state rather than a delta, re-applying it on every connect is safe by construction. **#2009** proves a client that connects *after* the child reported receives the retained list, driving no turn and sending nothing. Correlate by `conversation_id` and **never by position** in the burst: the daemon walks its conversation registry in insertion order, that order is not a contract, and every envelope in the burst carries the same non-load-bearing envelope id.
 
@@ -5766,41 +5775,24 @@ A client replaces its held suggestion state keyed by **`conversation_id` and `se
 
 #### Reconnect replay & resync (consumer, #647)
 
-Background-agent lifecycle and roster values remain source history for canonical
-thread items and explicit catch-up (#3735). No app receives their raw content
-frames, agent receipt banners or connect-time roster snapshots, including apps
-without `thread`. Task progress and stop controls remain supported; stop
-acceptance alone does not establish completion. Nil/failed history cannot restore
-these publications.
+**Retired (#3738).** This anchor is retained for existing links. The daemon
+ignores `hello.last_event_id` for any valid JSON value, on connections with or
+without `thread`. It performs no event-ring replay, sends no raw `resync`, and
+keeps no replay tail, pump or watermark that can suppress subsequent live
+updates. Remaining ring storage and inert setter wiring belong to #3739.
 
-Thread peers bypass this legacy event-ring replay and `resync`; recover each
-open conversation through explicit canonical catch-up. The ring behavior below
-applies to supported fallback live state for peers without `thread`; no retired
-content family is restored. Replay infrastructure removal remains #3738/#3739.
+Recover each open conversation explicitly through
+[`thread_catch_up` and `thread_page`](#thread-query-messages), with its own
+completed epoch/version checkpoint. An unusable checkpoint returns
+`thread_reset`; request version zero to load the newest bounded window, then
+use its successful final marker's continuation for older pages. Neither hello,
+a conversation list nor a live item update certifies content backfill.
 
-The inbound half of the [replay cursor](#interactive-events-v2-capability-gated). On mid-turn reconnect a phone advertises the latest `event_id` it saw as `hello.last_event_id` (see [`hello`](#hello-v2-specific-note)). The daemon resolves the conversation to replay from its **own** current cursor — never from anything the phone sends — and queries the bounded per-conversation event ring (ADR 025 § Backpressure / replay):
-
-- **In-ring tail.** Events with `id > last_event_id` are replayed on that connection, in ascending order, **before** the live stream resumes. Each replay frame carries the same `event_id` it had originally (so the phone advances its cursor), and is AEAD-sealed under the freshly-handshaked session keys.
-- **Caught-up.** `last_event_id` exactly at the newest retained event → no replay; the live stream resumes normally.
-- **Aged out → `resync`.** `last_event_id` predates the oldest retained event (the position fell off the bounded window) → the daemon emits a single `resync` marker instead of a partial, gap-ful replay, so the phone is never left with a silent gap. The phone responds with a full reload of the named conversation.
-- **Beyond the id space → `resync`.** `last_event_id` *past* the newest id the **resolved conversation** was ever assigned names an id this daemon never issued to it → the same single `resync` marker (#1494). This is what a daemon restart looks like from the phone's side: the ring is purely in-memory, so the ring-wide counter restarts at 1 while the phone still holds a high cursor. It is also what a **rotation** looks like when the phone's cursor came from the conversation the daemon has since left — that id is above the new conversation's own high-water mark, so it lands here rather than silently deduping. Treating either as caught-up would produce exactly the silent gap the bullet above forbids — the phone dedups durably on `event_id` (see below), so it would drop every live event until the ids climbed back past its cursor. Since #2022 that "climb back" can only happen across a restart, never within one daemon lifetime: ids are unique daemon-wide and never reused.
-- **Absent.** A phone that sends no `last_event_id` receives no replay — just the normal live stream.
-
-A phone that advertises no `last_event_id`, and any v1 phone, are unaffected (key absent → byte-identical hello).
-
-`last_event_id` is **untrusted remote input**: it is range/shape-validated (`*uint64` decode rejects non-integers), the replay is bounded by what the ring retains (`MaxEventsPerConversation`), and it is scoped to the daemon-resolved conversation — a phone can never address another conversation's events. The phone SHOULD additionally de-duplicate replayed events by `event_id` (defence in depth; the two layers are independent).
-
-##### `resync`
-
-Direction **binary → phone** (outbound v2 control marker; not in `v1TypeSet` — an old phone never receives it).
-
-| Field | Type | Meaning |
-|---|---|---|
-| `conversation_id` | string | The conversation the phone must full-reload. The daemon's own resolved id; never attacker-derived. |
-
-The marker carries no `event_id` (it is not a structured event). On receipt the phone discards its `last_event_id` cursor for that conversation and performs a full reload (today via a fresh subscription).
-
-> **Implementation status (2026-06-17).** The reconnect-replay daemon code shipped via PR #651 (merged 2026-06-08) with a code-review **MUST FIX** outstanding — the *caught-up* path set the per-connection dedup watermark from the untrusted `last_event_id`, which could silently suppress the live stream after a `/clear`-rotated reconnect or a hostile-large `last_event_id`. That defect is **resolved**: #663 clamps the caught-up watermark to the conversation's newest retained id (`min(afterID, NewestID(convID))`), so the wire contract above is now the shipped daemon guarantee. Fix record: [`docs/knowledge/codebase/663.md`](knowledge/codebase/663.md); defect history: [`docs/knowledge/codebase/647.md`](knowledge/codebase/647.md#️-known-issue--unresolved-code-review-must-fix-do-not-merge-as-is). Superseded in part by #1494: an out-of-range / hostile `last_event_id` no longer reaches the caught-up branch at all — it classifies as a gap and earns a `resync` — so the clamp now covers only the window between the daemon's own newest-id read and its classification.
+Reconnect still reconciles outstanding answerable prompts and current live
+state. Background-agent lifecycle/roster and other retired content families
+remain durable source history for canonical thread items; they produce no raw
+frames, replay copies or replacement receipts. The durable source log and
+read-mark namespace are separate from in-memory event IDs.
 
 ### Screen snapshot (v2)
 
@@ -7328,8 +7320,9 @@ reading or generated clear. Neither falls back to a legacy provider or repeats
 the operation. Without `thread` or the relevant optional provider, the legacy
 reply path, bytes, enrichment and `SettingsUpdater` contract remain unchanged.
 Retained live-state provider installation (#3163) and production negotiation
-(#3164) are active. Production bounded catch-up/pages and thread-only
-replay/resync bypass are installed (#3236/#3253/#3235). Handshake initializes
+(#3164) are active. Production bounded catch-up/page
+queries are installed (#3236/#3253/#3235); event replay/resync is retired for
+all peers (#3738). Handshake initializes
 transient state without querying items.
 
 #### `set_session_settings`
@@ -7841,7 +7834,7 @@ resolved answers become canonical thread notices and explicit catch-up content.
 
 **Retained live-state identity remains separate from source content.**
 Supported legacy live-state envelopes may carry the successful append's
-`history_entry_id`, preserved through existing ring replay without another write.
+`history_entry_id`. Reconnect does not replay these frames (#3738).
 Supplied thread live state carries neither history nor replay identity. Content
 producers now record only; channel posts and session transitions add no raw
 frames. Queued acceptance still binds before placement, safe delivery sources
@@ -7853,7 +7846,7 @@ establishes sight.
 
 **The entry's `id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
 is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
-only to Mode A's replay. This one is on disk. They are different sequences that
+as legacy live-frame metadata, not as a reconnect cursor. This one is on disk. They are different sequences that
 both look like small integers, and a client must not join them.
 
 **`read_up_to` and `last_shown_version` use this durable ID space.**
@@ -7872,7 +7865,7 @@ never an entry count or connection `event_id`, shared by every paired device on
 this host and raised by [`mark_conversation_read`](#marking-a-conversation-read).
 
 **Raw storage accepts arbitrary type strings; legacy transports use a closed
-projection.** A legacy client MUST still tolerate a live/replay type it does not recognise
+projection.** A legacy client MUST still tolerate a live type it does not recognise
 rather than treating it as a protocol violation, but must not certify it
 as harmless read accounting — the same forward-compatibility rule this document
 applies to unknown fields does not grant presentation evidence.
@@ -7921,8 +7914,9 @@ the three — same omitted-key contract as `attachment_ids` above.
 
 Runtime and prompt-answer receipt publication is retired (#3737), alongside the
 other retired content families. This anchor remains for older references; it
-confers no receipt delivery contract. Shared replay infrastructure remains for
-\#3738/#3739, and parent #3718 owns final family acceptance.
+confers no receipt delivery contract. Replay admission and delivery are retired
+(#3738); shared-ring storage/wiring cleanup remains #3739. Parent #3718 owns
+content-family acceptance.
 
 Join retained source facts by conversation and durable ID. Connection `id`, ring
 `event_id`, canonical item identity/revision and durable read marks serve separate
@@ -8389,8 +8383,8 @@ see [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
 
 ## Reconnect / Backfill semantics
 
-**Connection mode:** the legacy two-mode replay/control-state behavior below
-remains for peers without `thread`. Raw `request_history` is retired for every
+**Connection mode:** no connection receives event-ring replay or raw `resync`
+(#3738). Peers without `thread` retain supported current-state reconciliation. Raw `request_history` is retired for every
 connection. A thread connection reconciles supplied current live state through the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
 including inactive retry/compaction and outstanding answerable prompts/questions.
@@ -8404,8 +8398,9 @@ captured target generation. No usable vocabulary means no fresh inventory, with
 successful handshake completion. See [`model_list`](#model_list) for coverage and
 source/retention rules.
 
-A thread connection skips legacy connect snapshots, all event-ring replay and
-`resync`, even when `hello.last_event_id` would produce a gap. Retained live-state providers, live
+A thread connection uses supplied live-state reconciliation in place of legacy
+connect snapshots. `hello.last_event_id` is ignored for every connection.
+Retained live-state providers, live
 item publication and bounded query providers are installed (#3163/#3164/#3236).
 Item backfill requires an explicit [`thread_catch_up`](#thread-query-messages)
 for each conversation the app opens;
@@ -8417,8 +8412,8 @@ arrives; terminal error/reset, cancellation, disconnect or incomplete fragments
 leave partial results uncertified. A reset requires a fresh zero-version window.
 The [query/live ordering](#querylive-ordering) contract either joins the capture
 before later updates or fails a racing query explicitly; retry from the last
-completed checkpoint. Production catch-up/pages and thread-only replay
-replacement are installed (#3236/#3253/#3235). Request older pages explicitly
+completed checkpoint. Production catch-up/pages are installed
+(#3236/#3253/#3235). Request older pages explicitly
 using the successful marker's numeric continuation when `older_exists` is true.
 Initial live-boundary acquisition and continuity repair broadcast no historical
 inventory to any client. A lost retained range, even under the same epoch, or
@@ -8437,25 +8432,16 @@ catch-up can still prove its interval. A fetched body or child page certifies
 only its bounded read; changed `rev` or epoch-scoped `subtree_version` makes
 cached detail stale and requires explicit refresh. Expansion does not advance
 the compact recovery checkpoint or subscribe descendants to live delivery.
-This per-connection replacement preserves simultaneous
-legacy peers; daemon-wide removal of replaced events, the replay buffer and
-resync belongs to
-[ADR 042 migration step 6](knowledge/decisions/042-daemon-built-thread.md#migration-order).
-Raw history pages are already retired (#3715). The durable log remains.
+Supported legacy prompt/current-state delivery remains available. Replaced
+content publication is retired (#3718), as are raw history queries (#3715) and
+event replay/resync (#3738). Remaining ring storage and wiring cleanup belong to
+#3739. The durable source log remains an input to canonical thread recovery.
 
-Every reconnect performs a fresh Noise_IK handshake (there is no session resumption in v2), and on every (re)connection the daemon brings the client back to **current truth**. For legacy connections, reconciliation runs in **two modes, keyed on the kind of data — not on how long the client was away**. The axis of difference is data type, not outage length: the interactive event stream keeps a cursor backfill; control state is always a cheap current-state snapshot.
-
-**Mode A — the interactive event stream → cursor backfill (replay of past events).** The mid-turn live stream reconnects by *replaying past events* from a cursor. **Mode A is exactly one mechanism, and it carries no history and no transcript content** (#2090):
-
-- `hello.last_event_id` drives the #647 mid-turn event-ring replay, with the `resync` marker as the snapshot-fallback when the advertised cursor has aged off the bounded per-conversation ring — see [Reconnect replay & resync (consumer, #647)](#reconnect-replay--resync-consumer-647). All replay frames ride inside `noise_msg`. Three properties bound what this recovers, and a client that plans around it must build for all three:
-  - **In-memory.** The event ring lives in the daemon process and **does not survive a daemon restart**. It does survive a supervised claude-child respawn and any number of phone reconnects, because the daemon stays up across both. Across a restart the phone's cursor names an id the daemon never issued, which classifies as a gap and answers with `resync`.
-  - **Bounded per conversation.** Each conversation retains at most `MaxEventsPerConversation` = **1024** events, and the bound is **not a plain FIFO age-out**: the oldest `assistant_delta` is evicted first (deltas are lossy and coalescable per ADR 025) and control-class events are retained in preference. A position that has fallen off the window answers with a single `resync` marker rather than a partial, gap-ful replay.
-  - **Daemon-resolved conversation only.** The daemon replays the conversation **its own** cursor names, never one the client names — `last_event_id` is a position, not an address, and a phone can never reach another conversation's events.
-
-**Mode A cannot recover content outside the ring or across a daemon restart.**
-Recover conversation content with [Thread query messages](#thread-query-messages),
-using explicit catch-up and older-page requests. There is no raw history or
-bulk-backfill endpoint to use after a `resync`.
+Every reconnect performs a fresh Noise_IK handshake; v2 has no session
+resumption. Content recovery and current-state reconciliation are independent.
+There is no cursor-backfill Mode A: `last_event_id` cannot request past events
+or identify a conversation. Clients need the thread capability and explicit
+per-conversation queries to recover content, including across daemon restart.
 
 **Mode B — legacy control state → current-state snapshot (the reconcile-on-connect rule).** For connections without `thread`, control state reconnects by *re-asserting current truth*, replaying no past events:
 
@@ -8465,15 +8451,19 @@ bulk-backfill endpoint to use after a `resync`.
   - an id the client has **already resolved** is a **no-op**;
   - control state the daemon does **not** re-assert after a fresh handshake is **gone** (reset-on-reconnect): each reconnect is a fresh Noise_IK handshake, so the client **resets** its control state and rebuilds it from whatever the daemon re-asserts — anything resolved while the client was disconnected simply does not reappear.
 
-The two modes are **complements, not alternatives**: on one and the same connect a client takes a cursor backfill for the interactive event stream and a current-state snapshot for control state. The mechanism is chosen by *what kind of data* it carries, never by *how long the client was away*. Mechanism internals live in #877 (modal reconcile), #1979 (question reconcile), #2006 (slash-command reconcile), #1863 (model-list reconcile) and #2712 (turn-phase reconcile); the answer-once security invariants are stated in [§ Modal](#modal-v2) and [§ Question](#question-v2), and are unchanged under re-delivery.
+Current-state reconciliation does not certify thread content recovery. It
+reasserts answerable prompts and current readings independently of explicit
+catch-up/pages, regardless of outage length. Answer-once security invariants in
+[Modal](#modal-v2) and [Question](#question-v2) are unchanged under re-delivery.
 
 The list above names the **five** remaining legacy connect-time frames.
 Background-task roster snapshots are retired for every app (#3735). Queue
 snapshots are retired for all capabilities (#3727). Recover queued acceptance
 and terminal state through explicit thread catch-up and live item updates as
 [Queue (v2)](#queue-v2) describes. The running turn's phase comes from the
-interactive emitter's open-turn state after mid-turn replay, so a turn ending
-during connection setup cannot leave the client holding an obsolete phase.
+interactive emitter's open-turn state, published before live fan-out so a later
+transition follows whatever phase the handshake observed. No replay watermark
+participates in this ordering.
 
 ## Error codes
 
@@ -8536,7 +8526,7 @@ WS close codes used at the transport layer:
 
 `4412` is sent when a `hello`'s app build is older than this host's minimum for that app (#2578). It echoes HTTP 412 (Precondition Failed) under the same 44xx←HTTP convention as the other v2-new codes above — the minimum app version is a precondition the `hello` failed. (426, Upgrade Required, would be the literal match, but 4426 is already `StatusHandshakeFailure`.) It follows the sealed `client.update_required` error in the same routing envelope, the same shape `4401` uses for a bad token, so the client reads the error — and the minimum version it carries — before the close. See [Compatibility](#compatibility).
 
-`4413` is sent by the binary (forwarded by the relay) when one session's server→phone push queue exceeds its retained-payload-byte ceiling and the daemon tears that session down rather than hold the bytes until the idle sweep. It echoes HTTP 413 (Content Too Large). Two things can reach the ceiling: a multi-minute relay outage during a live turn, where the daemon keeps producing never-droppable control events (`tool_result`, `tool_use`, `turn_state`, `turn_end`) that nothing can drain; and a single `request_debug_bundle` whose archive is large enough that its `debug_bundle_chunk` stream alone crosses the ceiling. It is strictly per-session — one conn hitting it never affects another. No `error` envelope accompanies it: the ceiling is typically reached precisely because the transport is down, so sealing one would burn a Noise send-nonce on a frame that cannot arrive and gap the phone's receive nonce. **A phone whose transport was down therefore never sees the `4413` close frame at all** — it learns on its next inbound frame, which lands on a session the daemon no longer has and is closed with `4410` above; this is the same property `4408` has, and it fires under the same conditions. Recovery is a fresh Noise handshake and transient-state reconciliation. Legacy connections replay missed turn events from `hello.last_event_id` and re-assert outstanding modal and queue state; thread connections bypass ring replay and require explicit catch-up for each open conversation from its last completed checkpoint. A debug bundle is not replayed — the operator re-requests it after reconnecting, and an archive large enough to trip the ceiling will trip it again.
+`4413` is sent by the binary (forwarded by the relay) when one session's server→phone push queue exceeds its retained-payload-byte ceiling and the daemon tears that session down rather than hold the bytes until the idle sweep. It echoes HTTP 413 (Content Too Large). Two things can reach the ceiling: a multi-minute relay outage during a live turn, where the daemon keeps producing never-droppable control events (`tool_result`, `tool_use`, `turn_state`, `turn_end`) that nothing can drain; and a single `request_debug_bundle` whose archive is large enough that its `debug_bundle_chunk` stream alone crosses the ceiling. It is strictly per-session — one conn hitting it never affects another. No `error` envelope accompanies it: the ceiling is typically reached precisely because the transport is down, so sealing one would burn a Noise send-nonce on a frame that cannot arrive and gap the phone's receive nonce. **A phone whose transport was down therefore never sees the `4413` close frame at all** — it learns on its next inbound frame, which lands on a session the daemon no longer has and is closed with `4410` above; this is the same property `4408` has, and it fires under the same conditions. Recovery is a fresh Noise handshake and transient-state reconciliation. Supported legacy prompts and current-state snapshots reconcile; no connection receives event-ring replay or raw `resync`, and `last_event_id` is ignored. Thread connections require explicit catch-up for each open conversation from its last completed epoch/version, loading the newest window after `thread_reset`. A debug bundle is not replayed — the operator re-requests it after reconnecting, and an archive large enough to trip the ceiling will trip it again.
 
 `4414` is sent by the binary (forwarded by the relay) when a producer handoff or
 continuity gap retires an open connection through `RetireLiveState`. This cause
@@ -8705,6 +8695,18 @@ A `case $?` block can distinguish the exit-1 (check failed) and exit-2 (gate fir
 The pyrycode release tooling does not yet have a feature-flag mechanism distinct from version bumping (#436), so this documented invocation is the load-bearing artefact until one lands; the CLI exit-code behaviour is already in `pyry` itself.
 
 ## Compatibility
+
+**Recovery retirement (#3738).** The transitional event-replay compatibility
+path in ADR 042 is superseded for every connection. `last_event_id` is no longer
+a declared hello field and is ignored as an unknown key, regardless of its valid
+JSON value; the daemon emits neither event-ring replay nor raw `resync`. Sending
+the key does not reject an otherwise accepted hello or suppress future updates.
+This does not make thread negotiation mandatory: supported legacy prompts and
+current-state snapshots still reconcile, but clients relying on an event cursor
+must use explicit per-open-conversation epoch/version catch-up, newest-window
+recovery after `thread_reset`, and older pages. Source history remains durable;
+in-memory `event_id` is not a content or read-mark checkpoint. Storage/wiring
+cleanup remains #3739; #3719 owns final integration acceptance.
 
 **Superseded premise — 2026-09-24 (#2576).** The Versioning and Capability negotiation sections above, and ADR 025's 2026-06-22 amendment and ADR 037, were written for a single operator who updates the app and the daemon together, with no old-app install base to protect. That premise held only as long as this tool was self-hosted. Once other people install the apps from app stores, app updates lag behind the operator's own hosted daemons: the relay and every hosted daemon update at once, app releases trickle out over app-store review and staged rollout, and one app can be connected — sequentially or through several accounts — to daemons running different versions. This section states the rule that now governs every wire change, and defines the rejection a daemon sends an app build it no longer supports.
 

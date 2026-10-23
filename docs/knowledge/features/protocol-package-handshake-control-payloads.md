@@ -19,7 +19,6 @@ type HelloClientPayload struct {
     LastSeenTS       *time.Time `json:"last_seen_ts,omitempty"` // decoded, no consumer (#2090)
     Token            string     `json:"token,omitempty"`        // #308; in-band device-pairing token under v2 (plaintext — MUST NOT be logged)
     Capabilities     []string   `json:"capabilities,omitempty"` // #607; phone's advertised feature set, e.g. [CapabilityInteractive]
-    LastEventID      *uint64    `json:"last_event_id,omitempty"` // #647; durable event_id the phone last saw, for mid-turn reconnect replay (untrusted — consumer range/ring-bounds it)
 }
 
 type HelloAckPayload struct {
@@ -42,10 +41,17 @@ type ErrorPayload struct {
 type AckPayload struct{}
 ```
 
+`last_event_id` is no longer a declared field (#3738). Normal JSON unknown-key
+handling ignores any valid value, including numeric extremes, string, object,
+array and null. It is never serialized by `HelloClientPayload`. Authenticated
+hello admission, capability checks and current-state reconciliation remain;
+content recovery uses explicit per-conversation thread epoch/version queries,
+not ring replay or raw `resync`. See [reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+
 Conventions:
 
 - **Two `Hello*Payload` structs, not a union.** The binary's hello and the phone's hello share only the envelope type name (`"hello"`) and dispatch site; field sets diverge. `role` is the discriminator. Modelling as a single struct with mostly-optional fields would lose type-level encoding of which fields belong with which role and force every consumer to validate role-field consistency by hand.
-- **Optional fields use `omitempty`; required fields are non-pointer.** A pointer preserves a meaningful zero value (`LastSeenTS`, `LastEventID`, `RetryAfterS`); a string or slice uses its empty value when empty and absent mean the same thing (`ClientFeatures`, `Token`, `Capabilities`, `WorkspaceRoot`). `time.Time` zero-value as sentinel for `LastSeenTS` was rejected — `time.Time{}` marshals as `"0001-01-01T00:00:00Z"`, which would pollute the wire.
+- **Optional fields use `omitempty`; required fields are non-pointer.** A pointer preserves a meaningful zero value (`LastSeenTS`, `RetryAfterS`); a string or slice uses its empty value when empty and absent mean the same thing (`ClientFeatures`, `Token`, `Capabilities`, `WorkspaceRoot`). `time.Time` zero-value as sentinel for `LastSeenTS` was rejected — `time.Time{}` marshals as `"0001-01-01T00:00:00Z"`, which would pollute the wire.
 - **`AckPayload` is `struct{}`.** `json.Marshal(AckPayload{})` emits `{}` byte-for-byte, matching the spec's `"payload": {}`.
 - **Field declaration order matches the spec example order.** The JSON encoder emits fields in struct-declaration order; that's what the round-trip byte-equivalence check verifies. Reordering breaks tests.
 - **No constructors, no methods, no validation.** Runtime enforcement of `Role` discriminators (a phone sending `role: "server"`, etc.) is the dispatcher's concern (#248–#250). The `Role` constant is documented in struct comments only.
@@ -105,15 +111,10 @@ Conventions:
   pins the wire omit/round-trip shape; relay handshake tests own authorization,
   encryption-only transport, no-creation and no-log proofs. See the
   [wire contract](../../protocol-mobile.md#hello_ack-v2-specific-note).
-- **`LastSeenTS *time.Time` is decoded and has no consumer.** It reads as a peer
-  of `LastEventID` below — same `*T` + `omitempty` shape, same struct — but
-  nothing in `internal/relay` or elsewhere reads the decoded value: a `hello`
-  carrying it behaves byte-for-byte like one omitting it. It is kept as
-  accepted wire vocabulary rather than removed (`docs/protocol-mobile.md` §
-  Reconnect / Backfill semantics once documented it as driving a v1 bulk-history
-  backfill; it never did — see that section's Changelog, #2090). A reconnecting
-  phone that wants the tail it missed sends `LastEventID` instead. Whether real
-  history should exist, and what would source it, is #2091's decision.
+- **`LastSeenTS *time.Time` is decoded and has no consumer.** A hello carrying
+  it behaves like one omitting it (#2090). It remains accepted wire vocabulary,
+  but triggers no backfill. Content recovery requires explicit thread queries;
+  `last_event_id` is ignored rather than providing an alternative cursor.
 - **`ErrorPayload.ConversationID` is additive + `omitempty` (#2443).**
   `new_session`'s bare form rotates the daemon's cursor conversation, so its
   workspace-refusal reply supplies the daemon-resolved subject that
@@ -130,7 +131,7 @@ Conventions:
   earlier wire shape. See the
   [stop contract](../../protocol-mobile.md#stop-background-task-v2).
 - **`ErrorPayload.MinClientVersion` is additive + `omitempty` (#2576), and carries `CodeClientUpdateRequired`'s minimum version alone — never any other error's.** `omitempty` keeps every existing error reply byte-identical. Same never-echo discipline as `ConversationID` above: it is the daemon's configured minimum for the requesting app, not a reflection of the client's own `client_version`. It is omitted on the same reject when the `hello`'s `client_version` could not be parsed at all, because the daemon then has no app name to look a minimum up by — see [protocol-package-constants-codes-go-error-codes-21.md](protocol-package-constants-codes-go-error-codes-21.md) and `docs/protocol-mobile.md` § Compatibility. The sender is `internal/relay`'s `handleNoiseInit`/`checkClientVersion` (#2578) — see [`v2-session-manager-state-machine-noise-init-happy-and-failure-path.md` § The client-version reject arm](v2-session-manager-state-machine-noise-init-happy-and-failure-path.md#the-client-version-reject-arm-2578).
-- **`LastEventID *uint64` is additive + `omitempty` (#647).** The phone's inbound reconnect-replay cursor: the durable `event_id` (the `Envelope.EventID` #649 surfaces outbound) it last saw, advertised on mid-turn reconnect so the daemon replays the missed tail from the `internal/eventring` ring or emits a `resync` marker. **Pointer + `omitempty` is load-bearing** — ring ids are always ≥ 1, so a non-nil pointer never encodes `0` and a nil pointer is omitted; a phone advertising none keeps the v1 hello byte-identical (key absent, not `null`). Same shape as `LastSeenTS`. This wire-type layer does **no enforcement** — `LastEventID` is **untrusted remote input**, and the consumer (`internal/relay`, #647, `security-sensitive`) range/shape-validates it and bounds replay by the ring. `TestHelloClientPayload_LastEventIDRoundTrip` pins the omit/round-trip shape. **Implementation caveat:** the #647 daemon consumer carries an unresolved code-review MUST FIX and is not yet merged — see [codebase/647.md](../codebase/647.md). The wire field itself is stable.
+
 
 Five fixture files under `testdata/` (one per type, each a complete `Envelope` with the payload inlined) drive five per-type `*_RoundTrip` tests in `handshake_test.go`. The tests reuse `readFixture` and `canonical` helpers from `envelope_test.go`. The byte-equivalence check (`canonical(out) == canonical(raw)`) is the load-bearing assertion; per-type field asserts exist to localise failure messages. The `hello_client.json` fixture's `last_seen_ts: "2026-05-08T08:14:02Z"` (no fractional seconds) pins the `time.RFC3339Nano` no-fractional round-trip behaviour.
 

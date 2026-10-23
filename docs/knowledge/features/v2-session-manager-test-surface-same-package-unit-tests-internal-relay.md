@@ -35,7 +35,7 @@ Reproducing a load-sensitive flake in this suite: a `GOMAXPROCS`/`-count` conten
 | Document | Coverage |
 | --- | --- |
 | [Handshake, rekey and peer-close tests](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-handshake-and-rekey.md) | Authentication, encrypted dispatch, rekey timers and peer-close ordering. |
-| [Push delivery, replay and inbound-control tests](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-delivery-and-control.md) | Push/backpressure, capabilities, reconnect replay, complete live-state deadlines and inbound controls. |
+| [Push delivery, reconnect recovery and inbound-control tests](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-delivery-and-control.md) | Push/backpressure, capabilities, explicit reconnect recovery, complete live-state deadlines and inbound controls. |
 | [Worker isolation and request-fixture tests](v2-session-manager-test-surface-same-package-unit-tests-internal-relay-workers-and-request-fixtures.md) | Handler isolation, asynchronous request waits, poisoned refusals and cleanup ordering. |
 
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)

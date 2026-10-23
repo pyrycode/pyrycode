@@ -12,9 +12,9 @@ Production `startRelayV2` installs `ThreadCatchUp`, `ThreadPage` and authoritati
 to `Store.CatchUp`/`Store.HistoryPage` on the real publisher store with the request
 context and named conversation. Readiness stays false without any provider or
 a running publisher on that same store, and becomes false before publisher
-teardown. Production negotiation, live publication, bounded queries and
-thread-only replay/resync bypass are installed. Readiness attests complete
-wiring, not that every conversation has completed replay. See
+teardown. Production negotiation, live publication and bounded queries are
+installed. Event replay/resync is retired for every connection (#3738). Readiness
+attests complete wiring, not that every conversation has completed recovery. See
 [daemon publication and lifecycle](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 With both expansion handlers and encoders compiled, `handleNoiseInit` supplies
@@ -210,6 +210,12 @@ not another relay query engine. `TestThreadPageResults` and
 `TestThreadPageLargeReply` checks assembly beyond `hostedQueueLimit` escaped,
 stamped envelopes without dropping supplied content or request correlation.
 
+Recovery fixtures must supply `Continuation == LowerOrder` as well as the
+complete window boundary. An inconsistent fixture makes `EncodeThreadReply`
+return a generic query error, masking the reconnect behavior under test.
+`TestThreadRecoveryAfterReconnect` retains this boundary while proving explicit
+reset/newest-window/page recovery and no implicit query from hello.
+
 The large-reply wait includes complete `EncodeThreadReply` work before first delivery;
 provider readiness alone cannot distinguish a stalled sender from expensive escaped
 JSON and race scheduling. `testHostedPeer.nextBefore` shares one 15-second absolute
@@ -320,8 +326,7 @@ including a supplied stored session binding. Rebuilding the row through that
 DTO would silently discard those fields and introduce absent zero/null fields.
 `agentTaggedForConn` and `threadSummary` therefore use `replaceObjectField` to
 edit only the projected fields, preserving unrelated encoded values and
-presence. Fresh payload bytes isolate each connection from shared pushes and
-replay; unchanged legacy replies retain their original bytes.
+presence. Fresh payload bytes isolate each connection from shared pushes; unchanged legacy replies retain their original bytes.
 
 `ThreadLastShownVersion` is the only authority for every `conversations` row
 and every pushed or replied `conversation_updated`. Usable zero emits numeric
@@ -335,8 +340,9 @@ strips the reading and envelope session metadata and omits clear frames entirely
 `TestV2Session_ThreadSummaries` checks distinct readings, zero/unavailable,
 legacy literal bytes and unrelated field presence, including the combination
 with agent tagging. `TestV2Session_ThreadDelivery` covers item denial even in
-handler replies, and `TestV2Session_ThreadReplay` checks thread replay bypass,
-an untouched replay watermark and permitted live traffic. Continuation
+handler replies. `TestV2Session_LastEventIDIgnored` checks that obsolete hello
+cursors produce no replay/resync and cannot suppress later updates for either
+the same or another conversation. Continuation
 payload/order and the envelope budget are pinned by
 `TestV2Session_ThreadContinuations`; projection must not
 grow the codec's supplied `SessionID`. See the
