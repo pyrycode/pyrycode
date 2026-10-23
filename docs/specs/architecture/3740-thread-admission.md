@@ -420,3 +420,53 @@ no new goroutines, secrets, logs, file paths, subprocess contracts, crypto or
 network boundaries. Authentication/privacy precedence and production admission
 are unchanged. Existing dismissal, foreign-session and retry controls remain
 mandatory. Independent security review and live acceptance are still pending.
+
+## Builder validation — command-bound consumer rework
+
+Linux x86_64 source candidate `46ff360420e7cb6b1f9ec2fbf2657a97dee11504`.
+Prospective plan/security commit `bae94a67` precedes implementation `46ff3604`.
+Logs are retained in `/tmp/builder-3740-ordering/`. Counts include named Go
+parents/subtests; executed excludes skipped events.
+
+| Selection | Executed | Passed | Failed | Skipped | Log |
+| --- | ---: | ---: | ---: | ---: | --- |
+| New ordering controls before repair (unchanged source plus regression tests) | 62 | 26 | 36 | 0 | `red.json` |
+| Affected shared scenario package after repair | 344 | 344 | 0 | 0 | `scenario.json` |
+| Recorded consumer selection after repair | 11 | 11 | 0 | 0 | `recorded.json` |
+
+All runs used `python3 scripts/test-admission.py -- go test -timeout=30m -race
+-count=1 -json`. The red selection was
+`-run '^(TestSourceDelayedPredecessorOpening|TestSourceObserverDelayedPredecessorOpening|TestConsumerIdleBeforeHistory)$' ./internal/e2e/internal/scenario`.
+The green package selection was `./internal/e2e/internal/scenario`, including
+all 62 new ordering controls and the existing ownership/dismissal controls.
+The recorded selection was
+`-tags e2e -run '^TestRecordedClaude/reply|TestRecordedClaude/attachment-read|TestRecordedClaude/default-outside-read|TestRecordedClaude/permission-allow|TestRecordedClaude/permission-deny|TestRecordedClaude/question-refuse|TestRecordedClaude/question-answer|TestRecordedClaude/native-suggestions$' ./internal/e2e`.
+It executed those eight leaves, matching `question-answer-witness`, their parent,
+and `TestRecordedClaudeFirstTurnWaitsForStartup`. Two earlier selector forms
+were refused before admission and executed zero tests; the refusal is retained
+in `recorded-selection-refused.stderr.log`. Admission waits were 705 seconds for
+the red run, 493 seconds for the package, and 409 seconds for the recorded run.
+
+Passed `go vet ./...`, `go vet -tags e2e ./internal/e2e`,
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/...`,
+`go vet -tags e2e_liverelay ./internal/e2e/liverelay/...`, and
+`go build -o /tmp/builder-3740-ordering/pyry ./cmd/pyry`.
+Tagged compilation executes zero live scenarios. `cmd/pyry` and `internal/relay`
+are unchanged from the reviewed candidate; retain their prior admission,
+authentication/version, static-key/race, clock and package evidence.
+
+PR #3842 now declares exactly `all` under `## Live tests`, with pending prose
+under `## Live execution status`; the required three numbered answers are at
+`/Users/juhanailmoniemi/.codex/publish/pyrycode/verdict-handoff/rework-answers-3740-28322de7f5b2.md`.
+Findings 1–3 are fixed in the pushed `46ff3604` candidate and its PR metadata.
+
+The pre-repair 36 failing events remain failed. Preserve all earlier failed
+captures and the last verifier's accepted-flaky-rerun disposition: unit gate
+30626 passed/27 skipped; original fake gate 2205 passed/four failed/two skipped;
+named rerun 71 passed/one skipped. Those accepted gates do not supersede the
+verifier's ten failing ordering probes. Production continuity holds #3844/#3845
+and the #3741 cold thread-only anomaly remain unresolved. Full configured
+acceptance, normal approval/independent security review, live-Claude execution
+(`all`, `needs-real-claude`) and the existing documentation handoff remain
+pending with their later-stage owners. No live artifacts are required. macOS
+remains outside this Linux ticket's verification scope.
