@@ -32,10 +32,12 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 			t.Fatalf("turn did not reach terminal idle; Agent/Task id=%q main=%v child=%v",
 				agentID, lanes[""], lanes[agentID])
 		}
-		threadFrame := live.Type == protocol.TypeThreadItems || live.Type == protocol.TypeThreadItemAdded || live.Type == protocol.TypeThreadItemChanged || live.Type == protocol.TypeThreadTextAppend || live.Type == protocol.TypeThreadCompactUpdate
-		if !threadFrame || !time.Now().Before(nextSourcePoll) {
+		// Observe the first source delta at its exact checkpoint. Afterwards, read
+		// the growing transcript on phase changes or bounded quiet polls; each
+		// thread fragment must not trigger another complete disk scan.
+		if !mainObserved || live.Type == protocol.TypeTurnState || (live.Type == "" && !time.Now().Before(nextSourcePoll)) {
 			entries = sourceFacts(t, []SourceFacts{w.Source}, convID)
-			nextSourcePoll = time.Now().Add(20 * time.Millisecond)
+			nextSourcePoll = time.Now().Add(100 * time.Millisecond)
 		}
 		turn.feed(t, convID, entries)
 		for _, env := range entries {
