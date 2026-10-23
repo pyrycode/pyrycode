@@ -732,3 +732,37 @@ checkpoint proof. A single-command consumer must still reject predecessor
 completion. The controlled crash targets the actual isolated fake child after
 permission delivery, never the daemon or another task. Replacement identity and
 late-answer refusal remain mandatory. No new exported API or global state.
+
+### Queue and permission author validation
+
+Source candidate 901e15f24f788120390a3131d75f08b85adab30e. All commands used
+normal Linux admission. Counts exclude package outcomes.
+
+| Selection | Passed | Failed | Skipped | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| Actual overlapping queue control before repair | 0 | 1 | 0 | queue-overlap-red-executed.json |
+| Complete shared scenario package after repair | 386 | 0 | 0 | queue-rework-scenario.json |
+| Both recorded queue cases and all fake-provider permission cases | 15 | 0 | 0 | queue-permission-rework-e2e.json |
+| Actual authenticated send-now and ordinary queue placement | 2 | 0 | 0 | queue-permission-live-queues.json |
+
+Passed shared scenario vet, tagged fake e2e vet and tagged liverelay vet. The
+15 named events include the two parent outcomes. The complete existing queue
+arrival/order and permission late-answer assertions execute. The new source
+control proves both overlapping queue terminals remain observable while the
+ordinary command observer rejects its predecessor. Real delivered idle and final
+correlated catch-up remain necessary. The initial new control had a compilation
+error using the append return type incorrectly; queue-overlap-red.json retains
+that failure and supplies no executed behavioural proof.
+
+The permission setup now ends the actual isolated owner only after receiving and
+validating its surface. It requires a distinct replacement and keeps synchronized
+stdin and old-answer rejection. No arbitrary sleep, enlarged deadline, fake
+surface or product permission exception is introduced. The shared source window
+is private to queue observation. No exported helper API or global state is added.
+
+The independent FAIL on 420bbc46 and all original, repeated and base comparison
+logs remain. Its prior two ownership findings are confirmed fixed, but this is
+only new author validation. The eight green ancestor configured commands do not
+supply current complete acceptance. Fresh independent review and complete normal
+configured/live gates remain mandatory. Keep the PR draft and stop in
+Documentation. No merge, release or deployment.
