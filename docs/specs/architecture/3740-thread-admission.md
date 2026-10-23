@@ -690,3 +690,45 @@ and permission continuation, skipped-note preservation and session isolation.
 These are manual author results, not an independent PASS. Fresh independent
 source/security review and complete configured/live acceptance remain pending.
 Keep the PR draft and stop at Documentation. No merge, release or deployment.
+
+## Manual rework of independent review 420bbc46
+
+The actual final independent FAIL identifies overlapping queue observation and a
+late-answer permission fixture that never reaches its surface. The manual hold
+is effective at revision 164. No ticket reservation or actual child remains.
+Reuse the completed candidate failures and passing unchanged-base comparison.
+The prior strict command boundary and active reset ownership repairs remain.
+
+Give the multi-turn queue reader one private, fixed source window established
+before its first command. Subsequent queued sends must still refresh the ordinary
+single-command observer's boundary, but must not hide the queue reader's actual
+predecessor terminal. Share the existing commandSource filter and keep initial
+history exclusion, actual session/turn identity, delivered running-to-idle state,
+final correlated catch-up and complete placement assertions. Add a real-history
+regression that queues during an open turn, proving both the queue's two terminal
+observations and the ordinary observer's rejection of that predecessor.
+
+The child-exit fixture currently exits immediately after writing its permission
+request. Supplied state may overtake the surface before the phone receives it,
+so this does not establish the parked permission required by a late-answer proof.
+Use the existing actual child status and kill helpers to end the origin only
+after actual permission-surface delivery and validation. Retain the origin's
+correlated dismissal, verify a different replacement child and its synchronized
+stdin, and prove the old answer is not delivered to it. No timeout increase,
+synthetic surface, production permission change or removed assertion is planned.
+Confirm this causal correction by running the affected fixture and permission
+siblings under ordinary admission.
+
+Run the overlapping control red before its repair. Then run the complete shared
+scenario package, both recorded queue scenarios, the affected fake permission
+family and relevant live queue consumers. Preserve all failed logs and meaningful
+negative controls. Publish separate author validation, keep the PR draft and
+obtain fresh independent review plus complete configured/live acceptance before
+Documentation. No merge, release or deployment is authorised.
+
+Author security assessment: only test observation and fixture sequencing change.
+The queue reader still needs genuine history, delivered lifecycle and final
+checkpoint proof. A single-command consumer must still reject predecessor
+completion. The controlled crash targets the actual isolated fake child after
+permission delivery, never the daemon or another task. Replacement identity and
+late-answer refusal remain mandatory. No new exported API or global state.
