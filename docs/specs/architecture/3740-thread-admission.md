@@ -234,3 +234,10 @@ Retain an actually received idle until its matching source append is visible;
 polling is bounded to the existing 20ms source-poll cadence, while every app frame
 still passes through the single ordered receiver. This avoids repeatedly scanning
 the growing transcript for each fragment and preserves all lane/cardinality checks.
+
+| Rework event | Race-detector coverage |
+| --- | --- |
+| Same-session predecessor finishes after successor acceptance | `TestSourceObserverQueuedPredecessorIdle`, `TestSourceQueuedExecutionIdentity` |
+| Received idle precedes history append, then repeats, clears or resumes | `TestSourceIdleBeforeHistoryAppend`, `TestSourceTurnSupportedIdle` |
+| Two complete same-session turns wait behind the history drain | `TestDaemonLiveExecutionOpeningClock` |
+| Bootstrap snapshot followed by fresh MCP request/turn observations | `TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh`, `TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly`, `TestRelayV2_StreamMCPStatusReachesConnectedPhone` |

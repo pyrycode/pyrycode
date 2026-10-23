@@ -77,20 +77,35 @@ func TestSourceTurnSupportedIdle(t *testing.T) {
 
 func TestSourceIdleBeforeHistoryAppend(t *testing.T) {
 	start := time.Now().UTC()
-	var turn sourceTurn
 	env := protocol.Envelope{Type: protocol.TypeTurnState, TS: start.Add(time.Second), SessionID: json.RawMessage(`"owner"`), Payload: json.RawMessage(`{"conversation_id":"conv","state":"idle"}`)}
-	if turn.idle(t, env, "conv") {
-		t.Fatal("idle without source completed a turn")
-	}
 	opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "turn", "occurred_at": start})
 	owner := &history.SessionProvenance{Kind: "claude", SessionID: "owner"}
-	turn.feed(t, "conv", []history.Entry{
+	entries := []history.Entry{
 		{ID: 1, Type: "main_turn_opened", TS: start, Session: owner, Payload: opened},
 		{ID: 2, Type: protocol.TypeAssistantDelta, TS: start.Add(2 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"turn","text":"fresh"}`)},
 		{ID: 3, Type: protocol.TypeTurnEnd, TS: start.Add(3 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"turn"}`)},
-	})
-	if !turn.idle(t, protocol.Envelope{}, "conv") {
-		t.Fatal("actual terminal lost before source append")
+	}
+	for _, tc := range []struct {
+		name  string
+		after protocol.Envelope
+		want  bool
+	}{
+		{"retained", protocol.Envelope{}, true},
+		{"cleared", protocol.Envelope{Type: protocol.TypeTurnState, SessionStateCleared: true, ConversationID: json.RawMessage(`"conv"`)}, false},
+		{"foreign-clear", protocol.Envelope{Type: protocol.TypeTurnState, SessionStateCleared: true, ConversationID: json.RawMessage(`"other"`)}, true},
+		{"running", protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"conversation_id":"conv","state":"responding"}`)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var turn sourceTurn
+			if turn.idle(t, env, "conv") {
+				t.Fatal("idle without source completed a turn")
+			}
+			turn.idle(t, tc.after, "conv")
+			turn.feed(t, "conv", entries)
+			if got := turn.idle(t, protocol.Envelope{}, "conv"); got != tc.want {
+				t.Fatalf("received terminal retained=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
