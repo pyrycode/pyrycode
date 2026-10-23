@@ -32,7 +32,8 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 			t.Fatalf("turn did not reach terminal idle; Agent/Task id=%q main=%v child=%v",
 				agentID, lanes[""], lanes[agentID])
 		}
-		if !time.Now().Before(nextSourcePoll) {
+		threadFrame := live.Type == protocol.TypeThreadItems || live.Type == protocol.TypeThreadItemAdded || live.Type == protocol.TypeThreadItemChanged || live.Type == protocol.TypeThreadTextAppend || live.Type == protocol.TypeThreadCompactUpdate
+		if !threadFrame || !time.Now().Before(nextSourcePoll) {
 			entries = sourceFacts(t, []SourceFacts{w.Source}, convID)
 			nextSourcePoll = time.Now().Add(20 * time.Millisecond)
 		}
