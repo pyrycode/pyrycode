@@ -63,6 +63,7 @@ func TestResetWindowCurrentStateCompletion(t *testing.T) {
 			w.transitions = []windowTransition{transition}
 			w.edges = []protocol.ResettingPayload{{ConversationID: "conv", Active: true, Phase: protocol.ResetPhaseWrappingUp, Handoff: protocol.ResetHandoffPending}}
 			w.edgeTimes = []time.Time{now.Add(-time.Second)}
+			w.edgeFrames = []protocol.Envelope{{Type: protocol.TypeResetting, TS: now.Add(-time.Second), ConversationID: json.RawMessage(`"conv"`), SessionID: json.RawMessage(`"old"`)}}
 			w.clears = []protocol.Envelope{clear}
 			want := false
 			switch name {

@@ -487,6 +487,7 @@ type resetWindow struct {
 	sourceConv  string
 	sourceMark  uint64
 	edgeTimes   []time.Time
+	edgeFrames  []protocol.Envelope
 	edges       []protocol.ResettingPayload
 	clears      []protocol.Envelope
 	transitions []windowTransition
@@ -596,6 +597,7 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			}
 			w.edges = append(w.edges, p)
 			w.edgeTimes = append(w.edgeTimes, env.TS)
+			w.edgeFrames = append(w.edgeFrames, env)
 		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 			t.Fatal("retired raw content reached the reset window")
 		}
@@ -654,11 +656,18 @@ func (w *resetWindow) assertClear(t *testing.T, conv string) {
 // a phase before delivery. Handoff content is independently proved by the caller.
 func (w *resetWindow) assertProgress(t *testing.T, conv, handoff string) {
 	t.Helper()
-	if len(w.edges) == 0 || len(w.transitions) != 1 {
+	if len(w.edges) == 0 || len(w.transitions) != 1 || len(w.edgeFrames) != len(w.edges) {
 		t.Fatal("reset lacks observed progress or a unique rotation")
 	}
 	restarting := false
 	for i, edge := range w.edges {
+		var conversation, session string
+		frame := w.edgeFrames[i]
+		predecessor := w.transitions[0].payload.PreviousSessionID
+		if json.Unmarshal(frame.ConversationID, &conversation) != nil || conversation != conv ||
+			json.Unmarshal(frame.SessionID, &session) != nil || session == "" || predecessor == "" || session != predecessor {
+			t.Fatal("active reset progress lacks predecessor ownership")
+		}
 		if edge.ConversationID != conv || !edge.Active || w.edgeTimes[i].After(w.transitions[0].payload.OccurredAt) {
 			t.Fatalf("reset progress has wrong ownership or ordering: %+v", edge)
 		}
