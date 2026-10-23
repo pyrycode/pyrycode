@@ -107,19 +107,28 @@ func PollingReceiveWithStop(t *testing.T, phone interface {
 			}
 		}
 		for time.Now().Before(deadline) {
-			if pending == nil {
-				pending = make(chan result, 1)
-				ch := pending
-				go func() { raw, err := phone.ReceiveBytes(30 * time.Minute); ch <- result{raw, err} }()
-			}
-			timer := time.NewTimer(time.Until(deadline))
 			var r result
-			select {
-			case r = <-pending:
-				pending = nil
-				timer.Stop()
-			case <-timer.C:
-				return protocol.Envelope{}
+			if owner, ok := phone.(interface {
+				PollBytes(time.Duration) ([]byte, error)
+			}); ok {
+				r.raw, r.err = owner.PollBytes(time.Until(deadline))
+				if errors.Is(r.err, fakephone.ErrReceiveTimeout) {
+					return protocol.Envelope{}
+				}
+			} else {
+				if pending == nil {
+					pending = make(chan result, 1)
+					ch := pending
+					go func() { raw, err := phone.ReceiveBytes(30 * time.Minute); ch <- result{raw, err} }()
+				}
+				timer := time.NewTimer(time.Until(deadline))
+				select {
+				case r = <-pending:
+					pending = nil
+					timer.Stop()
+				case <-timer.C:
+					return protocol.Envelope{}
+				}
 			}
 			if r.err != nil {
 				t.Fatal("phone receive: ", r.err)

@@ -53,11 +53,19 @@ var (
 type Client struct {
 	conn *websocket.Conn
 
+	readMu  sync.Mutex
+	pending chan readResult
+
 	mu              sync.Mutex
 	closed          bool
 	lastCloseStatus websocket.StatusCode
 	lastCloseSet    bool
 	deferred        []protocol.Envelope
+}
+
+type readResult struct {
+	data []byte
+	err  error
 }
 
 // DeferEnvelopes restores already decrypted observations ahead of unread wire
@@ -132,7 +140,8 @@ func (c *Client) SendBytes(data []byte) error {
 
 // Receive reads one WS text frame and unmarshals it into a
 // protocol.Envelope. On deadline expiry returns ErrReceiveTimeout;
-// note that coder/websocket closes the underlying connection when the
+// unless inheriting an outstanding PollBytes read. Otherwise coder/websocket
+// closes the underlying connection when the
 // Read context is canceled, so a timed-out Client cannot be reused.
 // After Close, returns ErrClosed.
 func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
@@ -152,6 +161,50 @@ func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
 // wire shape inside RoutingEnvelope.Frame is an InnerFrameV2 rather than
 // a protocol.Envelope.
 func (c *Client) ReceiveBytes(timeout time.Duration) ([]byte, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.pending != nil {
+		return c.pollLocked(timeout)
+	}
+	return c.readBytes(timeout)
+}
+
+// PollBytes retains one read across short observation deadlines and successive
+// consumers. The timeout bounds this observation, without canceling the socket.
+// Close joins the read before returning. Call readers serially.
+func (c *Client) PollBytes(timeout time.Duration) ([]byte, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	return c.pollLocked(timeout)
+}
+
+func (c *Client) pollLocked(timeout time.Duration) ([]byte, error) {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil, ErrClosed
+	}
+	if c.pending == nil {
+		c.pending = make(chan readResult, 1)
+		ch := c.pending
+		go func() {
+			data, err := c.readBytes(30 * time.Minute)
+			ch <- readResult{data, err}
+		}()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-c.pending:
+		c.pending = nil
+		return r.data, r.err
+	case <-timer.C:
+		return nil, ErrReceiveTimeout
+	}
+}
+
+func (c *Client) readBytes(timeout time.Duration) ([]byte, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -210,5 +263,11 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 
 	_ = c.conn.Close(websocket.StatusNormalClosure, "phone closing")
+	c.readMu.Lock()
+	if c.pending != nil {
+		<-c.pending
+		c.pending = nil
+	}
+	c.readMu.Unlock()
 	return nil
 }

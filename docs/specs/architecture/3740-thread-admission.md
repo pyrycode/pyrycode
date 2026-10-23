@@ -560,3 +560,27 @@ frame. No secrets or payloads are logged. Shutdown closes the socket before join
 The actual two-frame regression requires ordered decryption through both consumer
 kinds, so a missing or duplicated frame cannot satisfy it. Independent review of
 the final candidate is pending.
+
+### Reset observation contract correction
+
+The supplied session-live-state contract suppresses overtaken singleton revisions,
+rejects earlier generations and initializes each new generation with a family clear.
+The current publisher checks that contract before delivery. The old reset fixture
+instead demands exactly two active observations and one clear, then indexes its
+second phase after a combined count that duplicate clears can satisfy. The live
+dormant case panicked with only one active observation.
+
+Replace the exact transient count with actual current-state proof: observe active
+reset progress, retain exactly one correctly owned rotation, and receive a reset
+family clear naming its successor at or after rotation. Validate every observed
+active phase and its handoff token, including ordering against the retained
+rotation. Do not manufacture a missing restarting observation. Initial or old-owner
+clears cannot establish completion. Keep fresh-note/successor-prompt proof, actual
+successor recall, skipped-wrapup note preservation, source ownership and retired
+wire-content alarms. Duplicate rotations remain a failure.
+
+The protocol reset section still describes the former synchronous producer. Its
+stronger linked supplied-delivery contract governs the thread fixtures. Reconcile
+that stale description in the existing documentation handoff. Record this narrow
+requirement correction on 3740. No product permission, crypto, stale-state exception,
+timeout increase or live acceptance waiver is introduced.
