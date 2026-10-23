@@ -894,3 +894,40 @@ the normal repeat. That original failed capture stays failed. No new full unit,
 integration or live acceptance is inferred from this targeted author validation.
 Fresh independent review and required normal configured/live acceptance remain
 pending. Keep the PR draft and stop in Documentation. No merge or deployment.
+
+## Manual completion-control fixture correction after live fb216ba8
+
+The completed full tagged run on fb216ba8 has 2548 named passes, 15 failed named
+events and 27 skips. The failures are 13 leaves and two parent outcomes across
+QuestionAnswerModelTurnControls and CompletedTurnDrainControls. The same-tree
+repeat has 23 passes and the same 15 failures; unchanged base passes all 38.
+The strict shared completion helper is already independently approved. These
+synthetic encrypted terminals omit the fixture source owner, so the positive
+paths cannot settle and model-negatives fail at an earlier completion check.
+No reservation or actual ticket child remains. The effective manual hold is
+Development revision 219. Retain all original, repeat and base captures.
+
+Only the two fixture families should change. Their synthetic idle constructors
+must explicitly declare the same fixture owner as their synthetic source facts.
+Do not add metadata inside runtime observation or weaken the shared helper.
+Retain encrypted delivery, frame draining, foreign-conversation rejection, model
+validation, diagnostics, read order and every existing failure expectation. Add
+omitted, foreign and null terminal-session negatives so these same fixtures prove
+that the strict rule remains required. No timeout increase is planned.
+
+Reuse the completed red repeat and passing base instead of duplicating them.
+Run both affected families through ordinary admission. Then execute the entire
+tagged package with provider credentials deliberately absent, relying on its
+existing authentication guard to skip provider-dependent cases. This broad cheap
+sweep must retain exact executed/passed/failed/skipped names and commands. It is
+provider-free validation, not complete live acceptance. Do not acquire credentials
+or turn skips into passes. Normal authenticated full acceptance remains required
+later, after independent re-review. Preserve the valid unchanged helper review
+and offline results through normal admission, with all failed history retained.
+
+Author security assessment: only synthetic encrypted fixture envelopes gain their
+explicit declared owner. New negatives reject lost or foreign attribution. Actual
+wire/source adapters and all product authentication, persistence, permissions and
+transport remain unchanged. No new API or global state. Publish author evidence
+separately from independent review. Keep the PR draft and stop in Documentation.
+No merge, release or deployment is authorised.
