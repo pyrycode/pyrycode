@@ -37,6 +37,11 @@ type queuePlacementReader struct {
 
 func newQueuePlacementReader(t *testing.T, w Wire, conv string) *queuePlacementReader {
 	t.Helper()
+	// One queue observation spans its running predecessor and queued successors.
+	// Keep that execution window while ordinary sends establish their own window.
+	if w.sourceWindow != nil {
+		w.Source = w.sourceWindow(conv)
+	}
 	request := w.Send(protocol.TypeThreadCatchUp, protocol.ThreadCatchUpPayload{ConversationID: conv, Limit: 100})
 	r := &queuePlacementReader{t: t, w: w, conv: conv, items: map[uint64]protocol.ThreadItem{}}
 	deadline := time.Now().Add(30 * time.Second)

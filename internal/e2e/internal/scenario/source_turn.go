@@ -122,6 +122,7 @@ func commandSource(t *testing.T, snapshot SourceFacts, conv string) SourceFacts 
 func ObserveSource(t *testing.T, home string, w Wire) Wire {
 	t.Helper()
 	snapshot := SourceSnapshot(t, home)
+	w.sourceWindow = func(conv string) SourceFacts { return commandSource(t, snapshot, conv) }
 	windows := map[string]SourceFacts{}
 	send := w.Send
 	w.Send = func(kind string, payload any) uint64 {
@@ -130,7 +131,7 @@ func ObserveSource(t *testing.T, home string, w Wire) Wire {
 			if !ok {
 				t.Fatal("source observer requires a typed send_message")
 			}
-			windows[p.ConversationID] = commandSource(t, snapshot, p.ConversationID)
+			windows[p.ConversationID] = w.sourceWindow(p.ConversationID)
 		}
 		return send(kind, payload)
 	}

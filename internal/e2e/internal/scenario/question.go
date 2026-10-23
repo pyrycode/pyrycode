@@ -15,6 +15,8 @@ type Wire struct {
 	Send   func(string, any) uint64
 	Next   Next
 	Source SourceFacts
+
+	sourceWindow func(string) SourceFacts
 }
 
 type Choice struct {
