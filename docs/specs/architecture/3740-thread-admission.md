@@ -241,3 +241,21 @@ the growing transcript for each fragment and preserves all lane/cardinality chec
 | Received idle precedes history append, then repeats, clears or resumes | `TestSourceIdleBeforeHistoryAppend`, `TestSourceTurnSupportedIdle` |
 | Two complete same-session turns wait behind the history drain | `TestDaemonLiveExecutionOpeningClock` |
 | Bootstrap snapshot followed by fresh MCP request/turn observations | `TestRelayV2_MCPActuationGatedAuditedAndAnsweredFresh`, `TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly`, `TestRelayV2_StreamMCPStatusReachesConnectedPhone` |
+
+Measured follow-up: the selected connected run passed ten of fourteen tests.
+Send-file's post-modal `SourceSince` lost the parked execution anchor, so use
+the existing continuation boundary with the current source snapshot. A cold
+new conversation has no usable history until its first owned post; finish named
+catch-up after that source completion and before any live-content expectation.
+MCP queries/actuations update public retained readings as well as returning one
+correlated reply; validate uncorrelated readings separately while retaining exact
+requester-only reply counts and payload/provenance checks. Reset retirement is
+two active readings plus an explicit clear, not a third resetting payload:
+retain the clear envelope separately, assert its conversation/new session and
+ordering, and preserve the combined cardinality and retained rotation assertions.
+Diagnose subagent's extra invocation by recording whether it exists at the
+scenario-sealed boundary before joined daemon shutdown; do not suppress it.
+The same fixture contract and grandchild/verification floor apply; the expanded
+repair is approximately 700–900 written lines with zero exported APIs.
+Security review: PASS. No admission change, invented content or relaxed reply
+correlation; clear metadata and public reading provenance remain mandatory.
