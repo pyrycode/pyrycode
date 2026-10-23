@@ -380,8 +380,11 @@ and the original modal, tool-reference and stored-attachment assertions.
 `TestRecordedMCPSendFileWaitsForStartup` delays initialize to expose this ordering
 without changing capture or live Claude behavior.
 
-Response delivery, action acknowledgement, player exhaustion and teardown are
-separate observations. Kill/rotation/eviction completion requires authorized
+Response delivery, action acknowledgement, player exhaustion, terminal receipts
+and predecessor disappearance are separate observations. For idle resume,
+receipt publication may precede daemon reaping; see the
+[resume boundary](e2e-realclaude-interactive-stream-resume-after-eviction-tes.md#resume-snapshot-boundary).
+Kill/rotation/eviction completion requires authorized
 owned termination, both provider output EOFs, complete strict input with no
 partial frames, terminal checks and receipts, and the outer artifact audit.
 Both EOFs can precede a final query, so an incomplete replay waits within the
