@@ -259,3 +259,20 @@ The same fixture contract and grandchild/verification floor apply; the expanded
 repair is approximately 700–900 written lines with zero exported APIs.
 Security review: PASS. No admission change, invented content or relaxed reply
 correlation; clear metadata and public reading provenance remain mandatory.
+
+The subagent diagnostic establishes that its extra child is the daemon's normal
+reply-suggestion fallback before scenario sealing, not a second foreground
+provider or a shutdown-only launch. Account for one ancillary worker explicitly:
+recognize only the complete fixed fallback argv, require the foreground claim,
+read bounded safe exchange JSON, record its own PID/parent and input size/hash,
+then decline it with empty output and exit 1 without executing a provider. After
+joined shutdown, require the matching daemon-owned completed Wait/exit diagnostic.
+Unknown argv, duplicate ancillary workers and extra foreground launches retain
+the existing duplicate failure. This extends offline fixture accounting, not live
+provider evidence; no native response or application frame is synthesized.
+`TestRecordedSubagentWorkerPolicy` covers exact/altered argv, invalid input,
+duplicate receipts, ownership and completed-Wait checks. The same verification
+floor/grandchild sizing exception retains this necessary process-accounting seam.
+Security review: PASS; closed argv and bounded safe input, private receipt under
+the existing fixture home, actual process parent plus production Wait, zero
+provider execution, and no new goroutines or admission/credential changes.
