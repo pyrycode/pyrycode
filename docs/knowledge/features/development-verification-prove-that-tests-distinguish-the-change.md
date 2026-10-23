@@ -246,7 +246,7 @@ is closed. Retain the original inode and replace its name with a symlink back to
 it: identity checks alone would accept that link, so require open itself to fail
 with `ELOOP`. Run potentially blocking replacements in deadline-bounded child
 processes that are killed and waited on, with parent-owned temporary files.
-See the [private artifact contract](e2e-harness.md#recorded-lifecycle-timing-and-settlement).
+See the [private artifact contract](e2e-harness-recorded-lifecycle-timing-and-settlement.md#recorded-lifecycle-timing-and-settlement).
 
 No-follow filesystem tests need a canonical fixture root before deriving paths
 and exact-root references. `t.TempDir()` can inherit a symlinked `TMPDIR`; then an
@@ -298,5 +298,33 @@ the stream drain proves only that drain's progress, not the queue goroutine's.
 See [history producers](history-package-producers.md#producers-2114-2115) and
 `TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation`; its foreign-conversation
 barrier alone leaves this late-callback assertion under-synchronized (#2820).
+
+## Broker diagnostic failure cleanup
+
+A passing original-root replay cannot prove resources survive assertion-failure
+cleanup. `TestRecordedLifecycleDiagnosticCleanup` re-execs the test binary and
+uses real Unix seven-pipe transfer with `recordedLifecycleDiagnostic`, the same
+helper as `runRecordedLifecycleSuite`. An intentionally failing inner subtest
+triggers actual LIFO cleanup. Channel barriers hold the launch callback across
+cleanup, including beyond both bounded `Join` waits, and prove the diagnostic
+remains writable before release. A separate running-child case observes readiness
+through a transferred descriptor before cancellation; retain the source pipes
+until outer probe cleanup so closing them cannot substitute for killing the child.
+
+Require the original failure marker and failed helper verdict, and reject extra
+lifetime failures and race reports. After handler completion, verify retained
+content, a closed descriptor, exactly one owner close and child reaping. Cover
+success, start failure, launch rejection, cancellation before start and
+cancellation after start. Sleeps
+or a separate cleanup model cannot establish this ordering. See the
+[handler ownership contract](e2e-harness-recorded-lifecycle-timing-and-settlement.md).
+
+The [retained evidence](../../../internal/e2e/testdata/3835-broker-diagnostics/results.json)
+separates the four old-order lifetime failures from the five repaired cleanup
+passes and the passing isolated session-resume replay under the race detector.
+That replay does not erase the historical #3737 verifier failure preserved by
+[#3833](https://github.com/pyrycode/pyrycode/issues/3833), or establish the
+predecessor-retirement repair tracked by
+[#3834](https://github.com/pyrycode/pyrycode/issues/3834).
 
 [Development verification overview](development-verification.md).

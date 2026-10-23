@@ -131,16 +131,16 @@ func TestFallbackWorkerNativeProcessBoundary(t *testing.T) {
 			sourceSHA := strings.Repeat("c", 64)
 			var brokerCmd *exec.Cmd
 			var brokerProof bytes.Buffer
-			server, err := NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), []string{path}, func(path string, peer int) (*exec.Cmd, error) {
+			server, err := NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), []string{path}, func(path string, peer int) (*exec.Cmd, io.Closer, error) {
 				var job FallbackWorkerJob
 				if ReadLifecycleControl(path, 16384, &job) != nil || ValidateFallbackWorkerLaunch(job, path, peer, os.Getpid(), base, sourceSHA) != nil {
-					return nil, os.ErrInvalid
+					return nil, nil, os.ErrInvalid
 				}
 				cmd := exec.Command(exe, "-test.run=^TestFallbackWorkerOSHelper$", "--", "broker", path, mode)
 				cmd.Env = append(os.Environ(), "PYRY_FINITE_WORKER_KIND="+kind)
 				cmd.Stdout = &brokerProof
 				brokerCmd = cmd
-				return cmd, nil
+				return cmd, nil, nil
 			})
 			if err != nil {
 				t.Fatal(err)
