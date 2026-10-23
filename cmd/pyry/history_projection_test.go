@@ -31,9 +31,8 @@ func TestHistoryProjection_UnknownEmitIsDurableOnly(t *testing.T) {
 			if len(entries) != 1 || entries[0].Type != "synthetic_thread_fact" || string(entries[0].Payload) != `{"detail":"private"}` {
 				t.Fatalf("raw durable facts = %#v", entries)
 			}
-			events, _ := e.ring.After(testConvID, 0)
-			if len(events) != 0 || len(bcast.pushes) != 0 || bcast.callIdx != 0 {
-				t.Fatalf("fact entered legacy stream/replay: %d events, %d pushes", len(events), len(bcast.pushes))
+			if len(bcast.pushes) != 0 || bcast.callIdx != 0 {
+				t.Fatalf("fact entered live stream: %d pushes", len(bcast.pushes))
 			}
 
 		})
@@ -89,8 +88,7 @@ func TestHistoryProjection_InteractiveMetadata(t *testing.T) {
 			if len(entries) != 2 || entries[0].Shown != nil || entries[1].Shown == nil || *entries[1].Shown != tt.shown || entries[1].Session != nil {
 				t.Fatalf("stored visibility = %#v", entries)
 			}
-			evs, _ := e.ring.After(testConvID, 0)
-			assertLogMatchesRing(t, entries[1:], evs)
+			assertLogMatchesLive(t, entries[1:], bcast.pushes)
 			wantPushes := 2
 			if testRetiredInteractiveType(tt.typ) || testRetiredAgentType(tt.typ) || testRetiredSessionContentType(tt.typ) || tt.typ == protocol.TypeBanner {
 				wantPushes = 0

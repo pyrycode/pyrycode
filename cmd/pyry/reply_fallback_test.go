@@ -23,7 +23,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/debugbundle"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -667,10 +666,7 @@ func TestReplyFallbackRegistryRemovalCancellation(t *testing.T) {
 				now := time.Now()
 				reg.Create(conversations.Conversation{ID: testConvID, LastUsedAt: now.Add(-365 * 24 * time.Hour)})
 				reg.Create(conversations.Conversation{ID: suggestConvB, LastUsedAt: now})
-				ring := eventring.New(2)
-				ring.Append(testConvID, "turn_state", nil, now)
-				ring.Append(suggestConvB, "turn_state", nil, now)
-				dropRingOnConversationDelete(reg, ring, s)
+				cleanupOnConversationDelete(reg, s)
 				suggestedTurn(e, s, suggestConvB)
 				s.suggest(suggestConvB, "Keep this")
 				ready, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -720,9 +716,6 @@ func TestReplyFallbackRegistryRemovalCancellation(t *testing.T) {
 				close(release)
 				released = true
 				s.workers.Wait()
-				if ring.NewestID(testConvID) != 0 || ring.NewestID(suggestConvB) == 0 {
-					t.Fatal("removal did not preserve replay isolation")
-				}
 				s.mu.Lock()
 				_, retained := s.convs[testConvID]
 				kept := s.convs[suggestConvB].text

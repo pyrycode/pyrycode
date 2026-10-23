@@ -85,8 +85,8 @@ func TestResidualContentRetired(t *testing.T) {
 		if len(live) != before {
 			t.Fatal("duplicate canonical publication")
 		}
-		events, _ := e.ring.After(conv, 0)
-		if len(bcast.pushes) != 0 || len(events) != 0 {
+
+		if len(bcast.pushes) != 0 {
 			t.Fatal("retired content published or retained for replay")
 		}
 	}
@@ -116,8 +116,8 @@ func TestResidualContentRetiredStorage(t *testing.T) {
 			for _, typ := range []string{historyTurnOpened, historyToolInterrupted, historyTurnInterrupted} {
 				e.recordRuntimeFact(t.Context(), typ, runtimeHistoryFact{ConversationID: testConvID, TurnID: "turn", ToolCallID: "tool", Cause: "child_exit", OccurredAt: historyTS})
 			}
-			events, _ := e.ring.After(testConvID, 0)
-			if len(events) != 0 || len(bcast.pushes) != 0 {
+
+			if len(bcast.pushes) != 0 {
 				t.Fatal("storage mode restored raw publication")
 			}
 			if mode == "no-clients" {

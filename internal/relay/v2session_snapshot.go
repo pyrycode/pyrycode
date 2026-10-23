@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -96,12 +95,4 @@ func (m *V2SessionManager) dropInlineReplyIfDown(s *V2Session, event string) boo
 		"conn_id", s.connID,
 		"reason", "transport_down")
 	return true
-}
-
-// SetReplaySource retains wiring inputs without affecting admission or delivery.
-func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv func() string) {
-	m.pushMu.Lock()
-	defer m.pushMu.Unlock()
-	m.replayRing = ring
-	m.replayCursor = currentConv
 }

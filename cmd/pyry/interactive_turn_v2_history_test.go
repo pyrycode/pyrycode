@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
@@ -35,9 +34,8 @@ func historyEntries(t *testing.T, store *history.Store, convID string) []history
 	return out
 }
 
-// assertLogMatchesRing compares eligible source facts with their replay payloads
-// and timestamps. Retired interactive content remains only in the source log.
-func assertLogMatchesRing(t *testing.T, entries []history.Entry, evs []eventring.Event) {
+// assertLogMatchesLive compares supported source facts with actual live delivery.
+func assertLogMatchesLive(t *testing.T, entries []history.Entry, pushes []recordedPush) {
 	t.Helper()
 	if len(entries) == 0 {
 		t.Fatal("fixture recorded no source facts")
@@ -45,27 +43,33 @@ func assertLogMatchesRing(t *testing.T, entries []history.Entry, evs []eventring
 	entries = slices.DeleteFunc(slices.Clone(entries), func(e history.Entry) bool {
 		return testRetiredInteractiveType(e.Type) || testRetiredAgentType(e.Type) || testRetiredSessionContentType(e.Type) || e.Type == protocol.TypeBanner
 	})
-	if len(entries) != len(evs) {
-		t.Fatalf("log holds %d entries, ring holds %d events", len(entries), len(evs))
+	recipients := map[string]bool{}
+	for _, p := range pushes {
+		recipients[p.connID] = true
 	}
-	for i := range evs {
-		if entries[i].Type != evs[i].Type {
-			t.Fatalf("entry %d type = %q, ring = %q", i, entries[i].Type, evs[i].Type)
+	if len(entries) > 0 && len(recipients) == 0 {
+		t.Fatal("supported source facts were not delivered")
+	}
+	for conn := range recipients {
+		delivered := pushesFor(pushes, conn)
+		if len(entries) != len(delivered) {
+			t.Fatalf("source facts=%d live=%d for %s", len(entries), len(delivered), conn)
 		}
-		if !bytes.Equal(entries[i].Payload, evs[i].Payload) {
-			t.Fatalf("entry %d payload differs from the ring's:\n log %s\nring %s", i, entries[i].Payload, evs[i].Payload)
-		}
-		if !entries[i].TS.Equal(evs[i].TS) {
-			t.Fatalf("entry %d ts = %s, ring = %s", i, entries[i].TS, evs[i].TS)
+		for i, p := range delivered {
+			env := p.env
+			if entries[i].Type != env.Type || !bytes.Equal(entries[i].Payload, env.Payload) || !entries[i].TS.Equal(env.TS) {
+				t.Fatalf("source/live payload, timestamp or order differs at %d for %s", i, conn)
+			}
+			if env.EventID != nil || env.HistoryEntryID == nil || *env.HistoryEntryID != entries[i].ID {
+				t.Fatalf("source/live identity differs at %d for %s", i, conn)
+			}
 		}
 	}
 }
 
 // historyFixtureEvents is the scripted turn every test below drives: it exercises
 // the state machine's transitions plus a content envelope and a turn end, so the
-// comparison covers more than one wire type. Well inside
-// eventring.MaxEventsPerConversation, which is what makes the ring a complete
-// reference rather than a truncated one.
+// comparison covers more than one wire type.
 func historyFixtureEvents() []turnevent.Event {
 	return []turnevent.Event{
 		turnevent.ThoughtChunk{Text: "reasoning"},
@@ -75,8 +79,8 @@ func historyFixtureEvents() []turnevent.Event {
 	}
 }
 
-// Source content and live state are recorded once; only eligible state replays.
-func TestInteractiveTurnEmitterV2_HistoryMatchesRing(t *testing.T) {
+// Source content and live state are recorded once; only supported state is delivered.
+func TestInteractiveTurnEmitterV2_HistoryMatchesLive(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
 	cur.set(testConvID)
@@ -89,22 +93,12 @@ func TestInteractiveTurnEmitterV2_HistoryMatchesRing(t *testing.T) {
 		e.Handle(context.Background(), ev)
 	}
 
-	evs, gap := e.ring.After(testConvID, 0)
-	if gap {
-		t.Fatal("ring reports a gap for a conversation well inside its bound")
-	}
-	assertLogMatchesRing(t, historyEntries(t, store, testConvID), evs)
-
-	// Surviving live-state events retain their delivery count.
-	if got, want := len(bcast.pushes), len(evs); got != want {
-		t.Fatalf("pushed %d envelopes, ring recorded %d", got, want)
-	}
+	assertLogMatchesLive(t, historyEntries(t, store, testConvID), bcast.pushes)
 }
 
 // AC-2: the append happens once per logical event, BEFORE the per-conn fan-out,
 // so a conversation with no interactive connection open still accumulates
-// history. Zero conns is the proof: the ring already behaves this way and the
-// log must too.
+// history. Zero conns proves the append is independent of fanout.
 func TestInteractiveTurnEmitterV2_HistoryWithNoConnsOpen(t *testing.T) {
 	t.Parallel()
 	cur := &stubCursor{}
@@ -121,8 +115,9 @@ func TestInteractiveTurnEmitterV2_HistoryWithNoConnsOpen(t *testing.T) {
 	if len(bcast.pushes) != 0 {
 		t.Fatalf("pushed %d envelopes with no conns open; want 0", len(bcast.pushes))
 	}
-	evs, _ := e.ring.After(testConvID, 0)
-	assertLogMatchesRing(t, historyEntries(t, store, testConvID), evs)
+	if got := len(historyEntries(t, store, testConvID)); got != 6 {
+		t.Fatalf("source facts=%d, want 6 without recipients", got)
+	}
 }
 
 // Failed history preserves supported live state without restoring raw content.
@@ -149,11 +144,6 @@ func TestInteractiveTurnEmitterV2_HistoryFailureDoesNotSuppressEmit(t *testing.T
 	}
 	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
 		t.Fatalf("envelope type order:\n got %v\nwant %v", got, wantTypes)
-	}
-	// The ring append stands.
-	evs, _ := e.ring.After(badConv, 0)
-	if len(evs) != len(wantTypes) {
-		t.Fatalf("ring holds %d events, want %d", len(evs), len(wantTypes))
 	}
 	// The log refuses the id, and says so without echoing content.
 	if _, err := store.Page(conversations.ConversationID(badConv), "", 16); !errors.Is(err, history.ErrInvalidID) {

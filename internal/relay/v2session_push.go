@@ -288,7 +288,8 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	if stale && !supplied {
 		return nil
 	}
-	env = m.mergedForConn(s, env, supplied && reading.ModelListUnprojected)
+	unprojected := !supplied && env.InReplyTo == nil || supplied && reading.ModelListUnprojected
+	env = m.mergedForConn(s, env, unprojected)
 	env = m.agentTaggedForConn(s, env)
 	env = m.threadProjected(s, env)
 	envJSON, err := json.Marshal(env)
@@ -325,12 +326,12 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 }
 
 // mergedForConn projects canonical model rows for a multi_agent recipient.
-// Legacy events are canonical when EventID is present; supplied readings mark
-// their projection explicitly. Legacy replies already carry their projection.
+// Unsolicited pushes are canonical; supplied readings mark their projection
+// explicitly. Correlated replies already carry their projection.
 // Clears stay empty. Shared payload bytes are never mutated, and conversation
 // and dropped-model fields are preserved. Runs only on the Run goroutine.
 func (m *V2SessionManager) mergedForConn(s *V2Session, env protocol.Envelope, unprojected bool) protocol.Envelope {
-	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.SessionStateCleared || (env.EventID == nil && !unprojected) {
+	if !s.multiAgent || m.cfg.MergedModelOptions == nil || env.Type != protocol.TypeModelList || env.SessionStateCleared || !unprojected {
 		return env
 	}
 	var p protocol.ModelListPayload

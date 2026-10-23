@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -121,16 +120,7 @@ func TestInteractiveTurnEmitterV2_BackgroundChildAcrossMainEnd(t *testing.T) {
 			if got := pushTypes(bcast.pushes[count:]); !slices.Equal(got, []string{protocol.TypeToolProgress}) {
 				t.Errorf("later child order = %v", got)
 			}
-			events, gap := e.ring.After(testConvID, 0)
-			if gap || len(events) != len(bcast.pushes) {
-				t.Fatal("live/ring frame counts differ or ring has gap")
-			}
-			assertLogMatchesRing(t, historyEntries(t, e.hist, testConvID), events)
-			for i, ev := range events {
-				if ev.Type != bcast.pushes[i].env.Type || !bytes.Equal(ev.Payload, bcast.pushes[i].env.Payload) {
-					t.Errorf("live/ring payload or order differs at %d", i)
-				}
-			}
+			assertLogMatchesLive(t, historyEntries(t, e.hist, testConvID), bcast.pushes)
 		})
 	}
 }

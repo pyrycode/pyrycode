@@ -12,7 +12,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/devices"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -564,10 +563,6 @@ type V2SessionManager struct {
 	// switchAgentDone returns worker outcomes to the sole reply/crypto owner.
 	// Producers escape via requester teardown or Run cancellation. Never closed.
 	switchAgentDone chan switchAgentResult
-
-	// Retained only for SetReplaySource wiring; never used for delivery.
-	replayRing   *eventring.Ring
-	replayCursor func() string
 }
 
 // NewV2SessionManager validates cfg and returns a ready manager. Panics

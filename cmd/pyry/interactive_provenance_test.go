@@ -272,19 +272,24 @@ func TestInteractiveProvenanceCompatibility(t *testing.T) {
 			e.hist = tc.store
 			e.HandleFor(ctx, tc.conv, turnevent.TextChunk{Text: "visible"}, source)
 			e.HandleFor(ctx, tc.conv, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
-			events, _ := e.ring.After(tc.conv, 0)
-			if len(events) == 0 || len(b.pushes) != len(events) {
-				t.Fatal("storage affected live/replay delivery")
+			if len(b.pushes) != 2 {
+				t.Fatal("storage affected supported live delivery")
 			}
-			for i, event := range events {
-				env := b.pushes[i].env
-				if b.pushes[i].connID != "yes" || string(env.Payload) != string(event.Payload) || !env.TS.Equal(event.TS) {
-					t.Fatal("legacy recipient/payload changed")
+			for _, p := range b.pushes {
+				env := p.env
+				if p.connID != "yes" || env.EventID != nil {
+					t.Fatal("recipient or identity changed")
 				}
-				if tc.name == "stored" && (env.HistoryEntryID == nil || event.HistoryEntryID == 0 || *env.HistoryEntryID != event.HistoryEntryID) {
-					t.Fatal("durable identity lost")
-				}
-				if tc.name != "stored" && (env.HistoryEntryID != nil || event.HistoryEntryID != 0) {
+				if tc.name == "stored" {
+					entries := historyEntries(t, tc.store, tc.conv)
+					if env.HistoryEntryID == nil {
+						t.Fatal("durable identity lost")
+					}
+					entry := entries[*env.HistoryEntryID-1]
+					if string(env.Payload) != string(entry.Payload) || !env.TS.Equal(entry.TS) || entry.Session == nil || *entry.Session != source {
+						t.Fatal("live/source provenance differs")
+					}
+				} else if env.HistoryEntryID != nil {
 					t.Fatal("failed append invented identity")
 				}
 			}
@@ -328,8 +333,11 @@ func TestInteractiveProvenanceDelayedDrain(t *testing.T) {
 			join()
 			entries := historyEntries(t, e.hist, testConvID)
 			assertProvenanceText(t, entries, map[string]history.SessionProvenance{"old": {Kind: kind, SessionID: "old"}, "new": {Kind: kind, SessionID: "new"}})
-			replayed, _ := e.ring.After(testConvID, 0)
-			assertLogMatchesRing(t, entries, replayed)
+			var delivered []recordedPush
+			for len(b.pushed) > 0 {
+				delivered = append(delivered, recordedPush{connID: "interactive", env: <-b.pushed})
+			}
+			assertLogMatchesLive(t, entries, delivered)
 			if len(historyEntries(t, e.hist, testConvIDB)) != 0 {
 				t.Fatal("active cursor received producer history")
 			}

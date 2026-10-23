@@ -112,3 +112,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-23
+
+## Revisions
+
+- 2026-10-23: `mergedForConn` used `EventID` to distinguish canonical model pushes from projected replies. The retained multi-agent regression fails when its ring ID is removed. `forwardEnvelopeSource` now passes projection eligibility explicitly: unsolicited ordinary pushes and explicitly unprojected supplied readings are canonical; correlated replies and provider-projected readings keep their bytes. Preserve generic envelope metadata, thread live-state validation and all capability/size gates. Mixed source tests compare actual per-recipient envelopes with durable records; zero-recipient tests assert source append counts directly.

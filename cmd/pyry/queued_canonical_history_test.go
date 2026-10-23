@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -22,7 +21,6 @@ func TestQueuedCanonicalCompletedTurn(t *testing.T) {
 	store := history.New(dir)
 	h := testSendHistory(store)
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "phone", Interactive: true}, {ConnID: "peer", Interactive: true, Thread: true}, {ConnID: "noninteractive"}}}}
-	ring := eventring.New(64)
 	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }, OnAccepted: h.accepted, OnDelivered: operatorMessageHistory(store, nil, discardLogger(), h), OnTerminal: h.terminal, SendNow: func(context.Context, string, uint64, []byte) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +31,7 @@ func TestQueuedCanonicalCompletedTurn(t *testing.T) {
 		t.Fatal("send now refused")
 	}
 	e := newInteractiveTurnEmitterV2(nil, bcast, discardLogger())
-	e.hist, e.ring = store, ring
+	e.hist = store
 	e.HandleFor(context.Background(), testConvID, turnevent.TextChunk{Text: "pong"}, history.SessionProvenance{})
 	e.HandleFor(context.Background(), testConvID, turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, history.SessionProvenance{})
 	users := testCanonicalUsers(t, store, testConvID)
@@ -47,14 +45,8 @@ func TestQueuedCanonicalCompletedTurn(t *testing.T) {
 			queuedIDs[entry.ID] = true
 		}
 	}
-	events, _ := ring.After(testConvID, 0)
-	if len(events) == 0 || len(bcast.pushes) == 0 {
+	if len(bcast.pushes) == 0 {
 		t.Fatal("assistant traffic control absent")
-	}
-	for _, event := range events {
-		if queuedIDs[event.HistoryEntryID] {
-			t.Fatal("queued source reached newly appended replay")
-		}
 	}
 	for _, push := range bcast.pushes {
 		if push.env.HistoryEntryID != nil && queuedIDs[*push.env.HistoryEntryID] {

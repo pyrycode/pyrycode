@@ -192,8 +192,7 @@ func TestInteractiveTurnEmitterV2_AttributedDeltaRetainsHistoryOnly(t *testing.T
 	_, bcast, e := newParentLaneEmitter(t, testConvID)
 	e.Handle(t.Context(), turnevent.TextChunk{MessageID: "child", ParentToolCallID: parentLaneA, Text: "retained child"})
 	e.flushAll(t.Context())
-	events, gap := e.ring.After(testConvID, 0)
-	if gap || len(events) != 0 || len(bcast.pushes) != 0 {
+	if len(bcast.pushes) != 0 {
 		t.Fatal("attributed text reached raw delivery")
 	}
 	deltas := assistantDeltas(t, testEmitterFacts(t, e))

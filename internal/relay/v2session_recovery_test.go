@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/thread"
@@ -85,12 +84,6 @@ func TestV2Session_LastEventIDIgnored(t *testing.T) {
 				p := testCatchUpPeer(t, nil, func(c *V2SessionConfig) {
 					c.KnownConversation = func(id string) bool { return id == catchUpConversation || id == "other" }
 				})
-				ring := eventring.New(4)
-				for range 4 {
-					ring.Append(catchUpConversation, protocol.TypeTurnState, json.RawMessage(`{"conversation_id":"ring-secret"}`), time.Now())
-				}
-				var cursorCalls atomic.Int32
-				p.mgr.SetReplaySource(ring, func() string { cursorCalls.Add(1); return catchUpConversation })
 				caps := []string{protocol.CapabilityInteractive, protocol.CapabilityHostedAppsV1}
 				if isThread {
 					caps = append(caps, protocol.CapabilityThread)
@@ -98,8 +91,8 @@ func TestV2Session_LastEventIDIgnored(t *testing.T) {
 				q := testRecoveryOpen(t, p, caps, last)
 				q.request(10, protocol.TypeAppCancel, `{"request_id":999}`)
 				e, _ := q.next()
-				if e.Type != protocol.TypeAppCancelled || e.InReplyTo == nil || *e.InReplyTo != 10 || cursorCalls.Load() != 0 {
-					t.Fatal("obsolete cursor changed handshake delivery", e.Type, cursorCalls.Load())
+				if e.Type != protocol.TypeAppCancelled || e.InReplyTo == nil || *e.InReplyTo != 10 {
+					t.Fatal("obsolete cursor changed handshake delivery", e.Type)
 				}
 				for i, conv := range []string{catchUpConversation, "other"} {
 					payload := json.RawMessage(fmt.Sprintf(`{"conversation_id":%q,"version":%d}`, conv, i+1))
@@ -130,7 +123,7 @@ func TestV2Session_LastEventIDIgnored(t *testing.T) {
 				q = testRecoveryOpen(t, p, caps, last)
 				q.request(13, protocol.TypeAppCancel, `{"request_id":999}`)
 				e, _ = q.next()
-				if e.Type != protocol.TypeAppCancelled || cursorCalls.Load() != 0 {
+				if e.Type != protocol.TypeAppCancelled {
 					t.Fatal("reused connection identity retained replay state")
 				}
 			})

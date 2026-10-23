@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -133,9 +132,7 @@ func TestThreadShadowRemoval(t *testing.T) {
 		return nil
 	})
 	s.store = store
-	ring := eventring.New(10)
-	ring.Append(string(a), "test", nil, time.Time{})
-	dropRingOnConversationDelete(reg, ring, nil, s)
+	cleanupOnConversationDelete(reg, nil, s)
 	s.start()
 	<-entered
 	deleted := make(chan bool, 1)
@@ -150,9 +147,6 @@ func TestThreadShadowRemoval(t *testing.T) {
 		t.Fatal("removed conversation reloaded")
 	}
 	testShadowEqual(t, h, store, b, 1)
-	if ring.NewestID(string(a)) != 0 {
-		t.Fatal("removal lost ring cleanup")
-	}
 	tail.Store(true)
 	testShadowAppend(t, h, b)
 	awaitSwitchPublication(t, tailEntered) // the actual tail chunk is in flight

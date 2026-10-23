@@ -255,19 +255,7 @@ func testChildCompletionPipeline(t *testing.T, recorded *backgroundCompletionRec
 	if replies != 1 {
 		t.Fatalf("reply count=%d", replies)
 	}
-	events, gap := e.ring.After(testConvID, 0)
-	if gap {
-		t.Fatal("catch-up gap")
-	}
-	assertLogMatchesRing(t, entries, events)
-	if len(events) != len(bcast.pushes) {
-		t.Fatal("live/catch-up differ")
-	}
-	for i, ev := range events {
-		if !reflect.DeepEqual(ev.Payload, bcast.pushes[i].env.Payload) {
-			t.Fatal("live/catch-up payload differs")
-		}
-	}
+	assertLogMatchesLive(t, entries, bcast.pushes)
 	replay := thread.New(testConvID)
 	if err := replay.Feed(entries); err != nil {
 		t.Fatal(err)
