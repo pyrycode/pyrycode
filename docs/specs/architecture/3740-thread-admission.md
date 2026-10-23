@@ -823,3 +823,37 @@ comparison passes. All those captures and metadata remain under live-failed-7da0
 The offline independent PASS is still for 7da07191. This tagged-only fixture
 correction needs independent re-review and required normal acceptance. No original
 outcome is changed, no gate is waived and no full current live pass is claimed.
+
+## Manual terminal-ownership repair after independent FAIL 3743f4ba
+
+The settled normal verifier confirmed the source finding with its admitted race
+probe. An omitted terminal session passes the timestamp-only fallback even when
+source content has an explicit owner. Its owned, foreign, null and empty controls
+remain retained. The exact-head independent FAIL and original complete integration
+failure plus the passing named repeat remain separate historical outcomes.
+Manual hold revision 196 and no reservation or ticket child precede this repair.
+
+Require the actual retained idle envelope to carry a valid, nonempty session ID
+matching the selected source producer. Remove the unowned timestamp fallback.
+Keep the existing execution-opening bound, idle-before-history retention, clear
+and running invalidation, command boundary and encrypted delivery. No production
+protocol or admission change is planned. No timeout increase or synthetic facts
+will be added to runtime observation.
+
+Add omitted, null, empty and malformed terminal controls to the existing owned
+and foreign tests, and exercise omitted ownership across the existing completion
+consumers. Positive synthetic fixtures must supply their declared source owner;
+retain every predecessor, generation, queue and read-count assertion. Inspect
+related fixture helpers together, then run the complete shared scenario package,
+the independent exact probe against the repair, grouped tagged history controls
+and meaningful recorded/live consumers through ordinary Linux admission. Tagged
+compilation alone is not execution proof. Complete acceptance stays with normal
+review and dispatcher admission. Preserve valid prior checks and all failures.
+
+Author security assessment: this strengthens test proof by requiring independently
+observed matching terminal identity. It does not project source facts into actual
+app envelopes or change product authentication, persistence, permissions or
+transport. The terminal must still follow actual execution and retained source
+end. No exported API or global state is added. Publish author evidence separately
+from the real independent FAIL, obtain fresh independent review, keep the PR draft
+and stop in Documentation. No merge, release or deployment is authorised.
