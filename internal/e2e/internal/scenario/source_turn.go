@@ -117,7 +117,7 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 		if json.Unmarshal(e.Payload, &p) != nil {
 			t.Fatal("invalid source payload")
 		}
-		if p.ConversationID == conv && e.Type == "send_accepted" {
+		if p.ConversationID == conv && (e.Type == "send_accepted" || e.Type == protocol.TypeMessage) {
 			s.queued = true
 		}
 		if p.ConversationID != conv || p.Parent != "" || p.TurnID == "" {
