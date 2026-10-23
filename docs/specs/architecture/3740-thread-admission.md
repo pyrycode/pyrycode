@@ -470,3 +470,33 @@ acceptance, normal approval/independent security review, live-Claude execution
 (`all`, `needs-real-claude`) and the existing documentation handoff remain
 pending with their later-stage owners. No live artifacts are required. macOS
 remains outside this Linux ticket's verification scope.
+
+## Manual completion plan, 2026-10-23
+
+The exact-ticket manual hold is effective at central revision 110. No ticket
+worker or child remains. Continue the existing feature/3740 branch from
+de881516094259b71cc3c113d8329ce33966b0c5. The independent source/security PASS
+for that candidate remains historical evidence, not review of these changes.
+
+The complete live run failed five leaves. Its repeat still failed the receipt
+positive control, stdio always-allow continuation, question refusal and dormant
+restart reset. All four pass the retained unchanged-base comparison. The
+original clear-reset failure passed the candidate repeat; its producer-gap/4414
+evidence remains failed and is not reassigned from the close code alone.
+
+Repair the confirmed fixture gaps together: timestamp the valid receipt frames,
+consume preserved decrypted setup observations and distinguish generated question
+clears from fresh batches, and retain the permission continuation's exact existing
+turn opening rather than using a new-send boundary. Preserve negative controls,
+remote refusal attribution, fresh-session permission isolation and actual terminal
+delivery. Diagnose dormant reset from received frames and source observations; do
+not enlarge its timeout, synthesize frames or replace the live proof with history.
+Run focused controls and the affected live selections through normal admission.
+Retain candidate/base failures and require independent review of every changed
+candidate before the remaining acceptance and Documentation handoff.
+
+Security assessment: author review only. These repairs change test observations,
+not product authentication, admission, permissions, cryptography or persistence.
+Only actually received lifecycle frames may prove completion. Exact conversation,
+session, turn, answer attribution and fresh-session isolation remain mandatory.
+Independent review and execution are pending. No release or deployment is included.
