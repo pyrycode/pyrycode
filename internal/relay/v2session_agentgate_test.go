@@ -2,10 +2,10 @@ package relay
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -65,10 +65,12 @@ func openGateConn(t *testing.T, frames chan protocol.RoutingEnvelope, rec *v2Rec
 		ProtocolVersions: []string{"v2"},
 		Token:            v2TestToken,
 		Capabilities:     caps,
-		LastEventID:      lastEventID,
 	})
 	if err != nil {
 		t.Fatalf("marshal hello payload: %v", err)
+	}
+	if lastEventID != nil {
+		payload = replaceObjectField(payload, "last_event_id", json.RawMessage(fmt.Sprint(*lastEventID)))
 	}
 	hello, err := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: payload})
 	if err != nil {
@@ -212,57 +214,6 @@ func TestV2Session_CodexFrames_ReachOnlyMultiAgentConns(t *testing.T) {
 	})
 }
 
-// TestV2Session_CodexReplay_WithheldFromOldConn pins the replay path: a
-// reconnecting old conn is replayed none of a Codex conversation's ring events,
-// and its replay still completes (the live sentinel, held until the replay
-// drains, arrives), while a capable conn is replayed them.
-func TestV2Session_CodexReplay_WithheldFromOldConn(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		caps []string
-		want []string
-	}{
-		{"capable", gateCapableCaps, []string{"turn_state/conv-codex", "turn_state/conv-codex", "workspace_updated/"}},
-		{"old", gateOldCaps, []string{"workspace_updated/"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			respPriv, respPub := genV2Keypair(t)
-			initPriv, _ := genV2Keypair(t)
-			const connID = "c-gate-replay"
-
-			ring := eventring.New(eventring.MaxEventsPerConversation)
-			for range 3 {
-				ring.Append(gateCodexConv, protocol.TypeTurnState, json.RawMessage(`{"conversation_id":"conv-codex"}`), time.Now().UTC())
-			}
-
-			frames := make(chan protocol.RoutingEnvelope, 1)
-			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
-				Frames:            frames,
-				Outbound:          rec.outbound,
-				StaticPriv:        respPriv,
-				Devices:           v2PairedRegistry(t, v2TestToken),
-				ServerID:          v2TestServerID,
-				Logger:            silentLogger(),
-				CodexConversation: gateCodexSeam,
-			})
-			t.Cleanup(stop)
-			mgr.SetReplaySource(ring, func() string { return gateCodexConv })
-
-			last := uint64(1)
-			recv := openGateConn(t, frames, rec, connID, respPub, initPriv, tc.caps, &last)
-			sentinel := protocol.Envelope{ID: 9, Type: protocol.TypeWorkspaceUpdated, TS: time.Now().UTC(), Payload: json.RawMessage(`{"path":"/w","label":"w"}`)}
-			if err := mgr.Push(t.Context(), connID, sentinel); err != nil {
-				t.Fatalf("Push sentinel: %v", err)
-			}
-			gateEqual(t, connID, gateFramesUntil(t, rec, connID, recv, protocol.TypeWorkspaceUpdated), tc.want)
-		})
-	}
-}
-
 // gatePushedModelList is a pushed model_list as turnbridge encodes a Claude
 // child's initialize reply: untagged Claude entries, a conversation, a cut count.
 func gatePushedModelList(t *testing.T) json.RawMessage {
@@ -385,59 +336,5 @@ func TestV2Session_PushedModelList_MergedForMultiAgentConn(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestV2Session_ReplayedModelList_MergedForMultiAgentConn pins the replay path: a
-// ring model_list replayed to a reconnecting capable conn arrives merged, and the
-// same ring entry replayed to an old conn afterwards arrives byte-identical, so
-// the capable conn's copy never wrote through the stored one. The replay dedup
-// still applies: the event at the advertised last_event_id is not replayed.
-func TestV2Session_ReplayedModelList_MergedForMultiAgentConn(t *testing.T) {
-	t.Parallel()
-	respPriv, respPub := genV2Keypair(t)
-	initPrivA, initPrivB := v2TestInstallPriv, v2TestInstallPriv
-	const capable, old = "c-merge-replay-capable", "c-merge-replay-old"
-
-	pushed := gatePushedModelList(t)
-	ring := eventring.New(eventring.MaxEventsPerConversation)
-	for range 2 {
-		ring.Append(gateClaudeConv, protocol.TypeModelList, pushed, time.Now().UTC())
-	}
-
-	frames := make(chan protocol.RoutingEnvelope, 1)
-	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:             frames,
-		Outbound:           rec.outbound,
-		StaticPriv:         respPriv,
-		Devices:            v2PairedRegistry(t, v2TestToken),
-		ServerID:           v2TestServerID,
-		Logger:             silentLogger(),
-		MergedModelOptions: gateMergeSeam,
-	})
-	t.Cleanup(stop)
-	mgr.SetReplaySource(ring, func() string { return gateClaudeConv })
-
-	sentinel := protocol.Envelope{ID: 9, Type: protocol.TypeWorkspaceUpdated, TS: time.Now().UTC(), Payload: json.RawMessage(`{"path":"/w","label":"w"}`)}
-	last := uint64(1)
-	want := []string{"model_list/" + gateClaudeConv, "workspace_updated/"}
-
-	recvA := openGateConn(t, frames, rec, capable, respPub, initPrivA, gateCapableCaps, &last)
-	if err := mgr.Push(t.Context(), capable, sentinel); err != nil {
-		t.Fatalf("Push sentinel: %v", err)
-	}
-	gotA := gateFramesUntil(t, rec, capable, recvA, protocol.TypeWorkspaceUpdated)
-	gateEqual(t, capable, gotA, want)
-	assertMergedModelList(t, gotA[0], pushed)
-
-	recvB := openGateConn(t, frames, rec, old, respPub, initPrivB, gateOldCaps, &last)
-	if err := mgr.Push(t.Context(), old, sentinel); err != nil {
-		t.Fatalf("Push sentinel: %v", err)
-	}
-	gotB := gateFramesUntil(t, rec, old, recvB, protocol.TypeWorkspaceUpdated)
-	gateEqual(t, old, gotB, want)
-	if string(gotB[0].Payload) != string(pushed) {
-		t.Errorf("old conn's replayed model_list = %s, want the stored bytes %s", gotB[0].Payload, pushed)
 	}
 }

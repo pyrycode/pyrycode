@@ -202,7 +202,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 	m.pushMu.Unlock()
 	for _, connID := range candidates {
 		s := m.sessions[connID]
-		if s != nil && (len(s.replayQueue) > 0 || s.livePending != nil) {
+		if s != nil && s.livePending != nil {
 			continue
 		}
 		m.pushMu.Lock()
@@ -276,31 +276,8 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	if s.hosted != nil {
 		s.hosted.pushDeferred = false
 	}
-	// A frame about a Codex conversation, for a conn without multi_agent (#2644).
-	// Nil, not an error: drainReplayOnce abandons a conn's replay tail on an error
-	// and must instead advance past a withheld event to the ones behind it. Before
-	// the seal, so a withheld frame spends no send-nonce.
+	// Withheld output consumes neither a sender ID nor a Noise nonce.
 	if m.withheldFromConn(s, env) || (!supplied && m.threadWithheld(s, env)) {
-		return nil
-	}
-	// Reconnect-replay dedup (#647): drop a live structured envelope this conn
-	// already received via replay. Envelopes with EventID == nil (snapshot,
-	// error, rekey, resync) are never structured events and are never dropped;
-	// conns that never advertised last_event_id keep replayThrough == 0 and
-	// live ids are always >= 1, so the guard is inert for them.
-	//
-	// replayThrough is a single per-conn scalar carrying no conversation tag,
-	// and this is deliberately NOT compensated for here. It is sound because
-	// eventring assigns ids from one ring-wide counter (#2022): every event
-	// appended after the watermark was taken carries a higher id, whatever
-	// conversation it belongs to, so the guard can only ever drop something this
-	// conn was actually given. Before that the id spaces overlapped, and a
-	// watermark clamped for the conversation a conn's replay came from muted
-	// every lower-id event of any conversation the daemon later rotated to.
-	// Making this comparison conversation-aware instead would mean plumbing the
-	// conversation from the emitter through Push to here, for a failure the id
-	// space already removes.
-	if env.EventID != nil && *env.EventID <= s.replayThrough {
 		return nil
 	}
 	// Per-conversation revision ordering for reply_suggestion (#2830): a stale

@@ -417,7 +417,6 @@ var excludedTypes = map[string]string{
 	"TypeBanner":              "push",
 	"TypeUnrecognizedMessage": "push",
 	"TypeScreenSnapshot":      "push",
-	"TypeResync":              "push",
 	"TypeSessionTransition":   "push",
 	"TypeModalShown":          "push",
 	"TypeModalDismissed":      "push",

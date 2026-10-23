@@ -14,8 +14,7 @@ import (
 // freshly interactive-open conn (#2712), so a client that left mid-turn shows
 // thinking or responding straight away instead of idle until the turn ends. It is
 // structurally the roster twin with the payload type substituted; the
-// RunningTurnPhases seam doc states why the frame needs a reconcile at all and
-// why this one runs after replayMissed.
+// RunningTurnPhases seam doc states the snapshot ordering contract.
 //
 // Run-goroutine only (called from handleNoiseInit's success tail), so
 // s.interactive / s.connID are read lock-free under the package's single-owner

@@ -238,7 +238,7 @@ func (m *V2SessionManager) signalLiveDrain() {
 	m.pushMu.Lock()
 	queued := false
 	for id, q := range m.queues {
-		if s := m.sessions[id]; !q.overflowed && len(q.items) > 0 && s != nil && len(s.replayQueue) == 0 && s.livePending == nil && (!held[id] || q.items[0].barrier != nil) {
+		if s := m.sessions[id]; !q.overflowed && len(q.items) > 0 && s != nil && s.livePending == nil && (!held[id] || q.items[0].barrier != nil) {
 			queued = true
 			break
 		}

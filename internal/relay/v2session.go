@@ -363,37 +363,13 @@ type V2Session struct {
 	// discipline does not apply).
 	lastActivityAt time.Time
 
-	// replayThrough is the highest durable event id already delivered to this
-	// conn by the mid-turn-reconnect replay (#647). Run-owned: written in
-	// replayMissed (the #663 clamp) and drainReplayOnce (the per-event trailing
-	// advance), read in forwardEnvelope, all on the single Run goroutine — same
-	// single-writer regime as state/interactive, so no lock or atomic.
-	// forwardEnvelope drops a live structured envelope whose EventID
-	// <= replayThrough, so the transient replay/live overlap never
-	// double-delivers an event (the deterministic dedup proven in spec
-	// § Concurrency model). Zero for any conn that never advertised
-	// last_event_id, and live ids are always >= 1, so the guard is inert for
-	// them.
-	replayThrough uint64
-
 	// replySuggestionRevisions is the highest reply_suggestion revision already
-	// delivered to this conn, per conversation_id (#2830). Run-owned, the
-	// replayThrough regime: read and written only in forwardEnvelope. nil until the
+	// delivered to this conn, per conversation_id (#2830). Run-owned:
+	// read and written only in forwardEnvelope. nil until the
 	// first delivery, and a fresh V2Session per handshake, so a reconnect is never
 	// held back by revisions an earlier conn saw. Bounded by the conversations this
 	// conn received a suggestion for, and freed with the session.
 	replySuggestionRevisions map[string]uint64
-
-	// replayQueue is the not-yet-forwarded tail of a mid-turn-reconnect replay
-	// (#777), populated by replayMissed and drained one event per Run pass by
-	// drainReplayOnce so a large replay can no longer monopolise the Run loop.
-	// Run-owned: written and read only on the dispatch goroutine (replayMissed,
-	// drainReplayOnce, drainOnce's gate, closeWith) — no lock or atomic, same
-	// regime as state/replayThrough. nil/empty ⇒ no replay in flight. Bounded by
-	// ring retention (≤ MaxEventsPerConversation), never the push cap: the
-	// events come straight from ring.After's materialised copy, so there is no
-	// drop/gap risk a second cap would reintroduce (spec § Open questions).
-	replayQueue []eventring.Event
 
 	// appFrames is the per-conn FIFO queue of decrypted application-frame
 	// plaintexts handed off to this session's worker goroutine
@@ -421,7 +397,7 @@ type V2Session struct {
 	// as the enqueue, so the two halves overlap and no second request can slip
 	// between them.
 	//
-	// Run-owned single-writer, exactly like state/replayThrough — no lock, no
+	// Run-owned single-writer, exactly like state — no lock, no
 	// atomic, and pushMu is NOT involved, so pushMu's "taken alone, never held
 	// across an Encrypt, m.send, or any channel op" invariant is untouched by
 	// construction rather than by discipline. The off-Run assembleBundle goroutine
@@ -526,16 +502,6 @@ type V2SessionManager struct {
 	// next pass — a self-perpetuating pump with no lost wakeups.
 	drainCh chan struct{}
 
-	// replayCh signals "some session has a pending reconnect-replay tail" to
-	// Run's replay-drain arm (#777). Mirrors drainCh exactly: capacity 1 with
-	// non-blocking sends (from replayMissed and from drainReplayOnce's
-	// re-signal) collapses concurrent wakes into at most one pending, so a
-	// self-perpetuating pump forwards one replay frame per Run pass with no lost
-	// wakeup. Carries no data — the queued events live on each V2Session
-	// (replayQueue); this channel references no session and spawns no goroutine,
-	// so concurrent multi-conn replays are covered by the single cap-1 channel.
-	replayCh chan struct{}
-
 	// snapshot funnels (*V2SessionManager).ActiveConns calls onto Run's dispatch
 	// goroutine so the read of m.sessions runs under the single-owner-goroutine
 	// invariant, serialised against every map write (lazy-create, delete, state
@@ -548,7 +514,7 @@ type V2SessionManager struct {
 	// appReply funnels one handler reply from a per-conn worker goroutine
 	// (routeAppFrame) back to Run for sealing (#965), so s.send.Encrypt stays
 	// on the single-owner Run goroutine while the handler itself runs off-Run.
-	// Mirrors the drainCh/replayCh house style of "off-Run producers, Run
+	// Mirrors the drainCh house style of "off-Run producers, Run
 	// consumes-and-seals", but carries data (appReplyMsg) rather than a bare
 	// wake — the reply's addressed session travels with it. Unbuffered:
 	// backpressure onto the worker is correct (a worker whose replies Run
@@ -599,15 +565,7 @@ type V2SessionManager struct {
 	// Producers escape via requester teardown or Run cancellation. Never closed.
 	switchAgentDone chan switchAgentResult
 
-	// replayRing + replayCursor are the mid-turn-reconnect replay source
-	// (#647), published once after the interactive emitter (which owns the
-	// ring) is built — see SetReplaySource for why this is a late-bound setter
-	// and not a V2SessionConfig field. Guarded by the pushMu leaf lock: the
-	// publish writes them off the Run goroutine during wiring, and replayMissed
-	// reads them on the Run goroutine at reconnect (much later, after a full
-	// network handshake). nil ring or cursor ⇒ replay disabled (no setter
-	// called, or the structured stream is off) — a phone advertising
-	// last_event_id then simply gets the live stream, no replay, no resync.
+	// Retained only for SetReplaySource wiring; never used for delivery.
 	replayRing   *eventring.Ring
 	replayCursor func() string
 }
@@ -664,7 +622,6 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		manualRekey:        make(chan manualRekeyReq),
 		queues:             make(map[string]*pushQueue),
 		drainCh:            make(chan struct{}, 1),
-		replayCh:           make(chan struct{}, 1),
 		snapshot:           make(chan snapshotReq),
 		appReply:           make(chan appReplyMsg),
 		pushOverflow:       make(chan string, wakeBufferSize),
@@ -758,19 +715,11 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			// drainOnce here — so the existing drain arm owns the single pop path
 			// and its FIFO self-re-signal. A nil m.cfg.Reconnect makes this a
 			// nil-channel read, permanently not-ready, so the select behaves
-			// exactly as pre-#875. Re-signal replayCh too, so a replay tail
-			// held by drainReplayOnce's transport-down hold resumes (#1490);
-			// drainOnce keeps that conn's live events gated behind it.
+			// exactly as pre-#875.
 			select {
 			case m.drainCh <- struct{}{}:
 			default:
 			}
-			select {
-			case m.replayCh <- struct{}{}:
-			default:
-			}
-		case <-m.replayCh:
-			m.drainReplayOnce(runCtx)
 		case req := <-m.snapshot:
 			req.reply <- m.handleConnSnapshot(req)
 		case rep := <-m.appReply:
@@ -1247,7 +1196,7 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 }
 
 // teardown transitions s to V2StateClosed and releases everything the session
-// holds — timers, app-frame worker, uploads, replay tail — then deletes it and
+// holds — timers, app-frame worker, uploads — then deletes it and
 // its push queue from the manager. It publishes nothing; closeWith adds the
 // close envelope. Returns false, doing nothing, when s is already closed.
 func (m *V2SessionManager) teardown(s *V2Session) bool {
@@ -1299,18 +1248,14 @@ func (m *V2SessionManager) teardown(s *V2Session) bool {
 	if m.cfg.AttachmentIntake != nil {
 		m.cfg.AttachmentIntake.ReleaseConn(s.connID)
 	}
-	// Drop any in-flight reconnect-replay tail (#777). The session is deleted
-	// from m.sessions just below, so drainReplayOnce's scan can no longer find
-	// it; niling matches the timer-cleanup pattern and releases the slice for GC.
-	s.replayQueue = nil
 	s.liveSnapshot = nil
 	s.livePending = nil
 	s.liveWatermarks = nil
 	delete(m.sessions, s.connID)
 	// Symmetric with the create in handleNoiseInit: drop the per-session push
 	// buffer. Any buffered-but-undrained envelopes are discarded — the conn is
-	// terminal (#611 reconnect replay, not this ticket, reconciles a returning
-	// phone). closeWith's close envelope is sent synchronously after this,
+	// terminal. Returning clients explicitly query their open conversation threads.
+	// closeWith's close envelope is sent synchronously after this,
 	// bypassing the buffer (it is terminal, not part of the ordered push stream).
 	m.pushMu.Lock()
 	if q := m.queues[s.connID]; q != nil {

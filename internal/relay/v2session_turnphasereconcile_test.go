@@ -13,8 +13,8 @@ import (
 // --- #2712 connect-time turn-phase reconcile (the seventh Mode B instance) ---
 //
 // The marshal arm and the non-ctx push arm are unreachable by fixture for the
-// reasons v2session_rosterreconcile_test.go's header gives; the ordering against
-// replayMissed is argued in the plan and pinned on the producer side by
+// reasons v2session_rosterreconcile_test.go's header gives. Snapshot ordering is
+// pinned on the producer side by
 // TestTurnPhaseSnapshot_PublishedBeforeFanOut in cmd/pyry.
 
 // reconciledTurnStates decrypts every noise_msg addressed to connID and returns

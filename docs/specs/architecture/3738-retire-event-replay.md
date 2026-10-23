@@ -115,3 +115,7 @@ Pending for the documentation stage:
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-23
+
+## Revisions
+
+- 2026-10-23: Preserve the published-before-fan-out contract in `RunningTurnPhases` and `interactiveTurnEmitterV2` comments after removing their references to the retired replay watermark. Keep the source-history observer in modal/channel-post integration tests; reconnect now uses an ordinary fresh Noise handshake. The recovery regression supplies a complete window boundary, including continuation equal to its lower order, as required by `EncodeThreadReply`.

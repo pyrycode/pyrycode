@@ -560,16 +560,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		return
 	}
 
-	// Connect-time modal reconcile (#877): re-send the still-outstanding
-	// modal_shown set to this conn so a phone that connected/reconnected after a
-	// permission prompt was raised is brought to current modal truth, rather than
-	// letting the prompt silently ride the deny-on-timeout window unseen. No-op
-	// for a non-interactive conn or an unwired seam. Ordering relative to
-	// replayMissed is immaterial: the reconcile's modal_shown lands in m.queues
-	// (held behind any reconnect-replay tail by #777, then drains), while
-	// replayMissed enqueues into the separate replayQueue. Placed first to
-	// document intent — surface the time-sensitive prompt ahead of replayed
-	// history.
+	// Surface outstanding prompts before retained menus and current turn state.
 	m.reconcileModals(ctx, s)
 
 	// Connect-time question reconcile (#1979): re-send the still-outstanding
@@ -590,7 +581,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// menu without sending a message first. The live turn lane never reaches such a
 	// client (and on the bootstrap session reaches none), for the three loss points
 	// reconcileModelLists names. No-op for a non-interactive conn or an unwired
-	// seam. Ordering relative to the other two and to replayMissed is immaterial
+	// seam. Ordering relative to the other two is immaterial
 	// (distinct payload types); placed third to keep the time-sensitive permission
 	// prompt first, the same reason the queue reconcile is already second.
 	m.reconcileModelLists(ctx, s)
@@ -608,30 +599,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// least time-sensitive of the five, so it goes last.
 	m.reconcileSlashCommandLists(ctx, s)
 
-	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
-	// off, replay the conversation's missed tail (or emit a resync marker) on
-	// this conn before Run returns to its select to service the live stream
-	// (AC-2's "before the live stream resumes"). The hook is at the very tail
-	// of the success path — noise_resp is sent (the phone's recv CipherState
-	// exists), s.state is V2StateOpen (forwardEnvelope's gate passes), and the
-	// push queue exists — so replay frames seal under the fresh session keys as
-	// the first AEAD-transport frames. last_event_id is untrusted remote input:
-	// replayMissed range/ring-bounds it and scopes it to the daemon-resolved
-	// conversation (never one the phone names).
-	if helloPayload.LastEventID != nil {
-		m.replayMissed(ctx, s, *helloPayload.LastEventID)
-	}
-
-	// Connect-time turn-phase reconcile (#2712): re-assert the current phase of a
-	// running turn to this conn — the seventh Mode B instance. Unlike the six above
-	// it is placed AFTER replayMissed, and the position is load-bearing: replayMissed
-	// sets s.replayThrough from the ring, so reading the phase afterwards means a turn
-	// whose idle was appended before that watermark already reads as ended here,
-	// while an idle appended after it is above the watermark and reaches this conn
-	// live, behind the reconciled frame. Read before replayMissed, an idle could land
-	// in the replay tail, which drains first, have its live copy deduped, and leave
-	// the reconciled running phase as the last word. No-op for a non-interactive conn
-	// or an unwired seam.
+	// Reassert current phase independently of conversation content recovery.
 	m.reconcileTurnPhases(ctx, s)
 
 	// Connect-time reply-suggestion reconcile (#2830), the eighth Mode B instance.

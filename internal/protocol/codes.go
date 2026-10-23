@@ -587,18 +587,6 @@ const (
 	TypeScreenSnapshot  = "screen_snapshot"  // binary → phone, outbound v2 event (plain text only)
 )
 
-// TypeResync tells a reconnecting phone to reload a conversation in full: its
-// hello.last_event_id has aged out of the bounded per-conversation event ring, so
-// the daemon sends this instead of a partial replay (ADR 025 § Backpressure /
-// replay; docs/protocol-mobile.md § resync). Its payload is an inline
-// conversation_id with no named struct.
-//
-// MUST NOT be added to inboundAppTypeSet: an old phone never receives it.
-// v2OnlyTypes in compat_test.go, push in relay_guard_test.go.
-const (
-	TypeResync = "resync" // binary → phone, outbound v2 mid-turn-reconnect resync marker
-)
-
 // TypeSessionTransition marks a session boundary: a conversation's session rotated
 // (a /clear, an idle eviction, a workspace change), so the phone can draw the
 // boundary rather than infer it (docs/protocol-mobile.md § session_transition).

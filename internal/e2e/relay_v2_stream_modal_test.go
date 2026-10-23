@@ -633,32 +633,15 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					"source=" + tc.wantSource,
 				}, 20*time.Second)
 
-				// Step 3: re-dial a FRESH interactive conn asking for the whole
-				// retained tail (last_event_id 0 — the fresh-consumer input the ring
-				// answers with everything it still holds, so no event-id bookkeeping is
-				// needed). A witness is needed at all because a conn that cannot answer
-				// also cannot observe: interactive is the daemon's only v2 capability,
-				// and the turn stream and the modal fan-out both skip conns without it,
-				// so there is no "observer that cannot answer" conn shape to lean on.
-				//
-				// Gating this on step 2 is what structurally excludes the re-extension
-				// hazard the ticket flags: a phone returning BEFORE the window boundary
-				// would be an answerer again and re-extend, but this one returns to an
-				// approval that is already resolved.
+				// Reconnect after the denial; the source observer retains the verdict.
 				redialCtx, redialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer redialCancel()
 				phone, err = fakephone.Dial(redialCtx, fr.URL(), serverID, payload.Token, "phone-a")
 				if err != nil {
 					t.Fatalf("phone re-dial: %v", err)
 				}
-				// FRESH CipherStates, rebound into nextEnv's closure. v2 has no session
-				// resumption, so this is a new Noise_IK handshake: carrying the first
-				// conn's cipher states across would desync the AEAD nonce and surface
-				// as a decrypt failure that reads like a daemon bug. The send half is
-				// unused — this conn only witnesses the replay.
-				var fromStart uint64
-				_, replayRecv := driveHandshakeToOpenDaemonInteractiveResuming(t, phone, pubKey, payload.Token, &fromStart)
-				recvCS = replayRecv
+				// Each connection requires fresh Noise cipher states.
+				_, recvCS = driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
 				poll = scenario.PollingReceive(t, phone, recvCS)
 			} else {
 				// The extension arm's delay is the stimulus, not a synchronisation
@@ -693,14 +676,8 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			//   2. modal_dismissed{wantOutcome, wantSource} — the corroborating vocabulary.
 			// The deadline is generous over the 2s daemon window so the timeout case proves
 			// the deny arrives promptly, not that the test outlasted a hang.
-			// modal_dismissed is a bridge broadcast, not a ring event, so in the
-			// loseAnswerer arm it went out while nobody was connected and is genuinely
-			// unobservable on the replay conn. Its vocabulary is not lost — step 2
-			// above gated on retire's audit line, which carries the same
-			// denied_timeout/timeout pair — so that arm starts already satisfied. The
-			// needle is what step 3's re-dial exists for: only it separates a genuine
-			// daemon deny from a masked client-side approve-error, which would have
-			// written a byte-identical audit record.
+			// With no answerer, the audit line proves dismissal and source history
+			// distinguishes a daemon denial from a masked client-side error.
 			reader.phase = "verdict-drain"
 			sawNeedle := false
 			sawDismissal := tc.loseAnswerer
@@ -727,14 +704,6 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					t.Fatalf("unexpected error envelope during drain: %s", string(env.Payload))
 				}
 				switch env.Type {
-				case protocol.TypeResync:
-					// Only reachable on the loseAnswerer arm's replay conn: the ring
-					// evicted this conversation's tail before the witness re-dialed, so
-					// the verdict needle and the tool_use join are both unobservable.
-					// Asserted so a future retention change fails legibly here instead
-					// of as a confusing "never observed the verdict" timeout below.
-					t.Fatalf("replay returned a resync marker (payload=%s): the conversation's retained tail was evicted "+
-						"before the witness reconnected, so this case can no longer observe the verdict it proves", string(env.Payload))
 				case protocol.TypeQuestionDismissed:
 					if !tc.question {
 						continue
