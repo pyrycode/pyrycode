@@ -13,6 +13,16 @@
 - `docs/knowledge/features/v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md`: grants remain value-specific, rekey retains them, rejected ack grants no session authority.
 - `docs/knowledge/features/e2e-harness.md`, `e2e-realclaude.md`, `development-verification.md`: consume encrypted frames in order, catch up named conversations, compilation is not live proof.
 - `docs/knowledge/decisions/042-daemon-built-thread.md`: thread is the supported conversation-content route; final compatibility wording belongs to the parent.
+- `cmd/pyry/agent_switch_frames_test.go` → `switchWire`: exact advertisements, correlated Noise response and admitted-session snapshots.
+- `cmd/pyry/daemon_live_relay_test.go` → `testDaemonRelayWire`, `TestDaemonLiveRelayRetiredSnapshot`: live-provider installation, publication and deliberately held admission.
+- `cmd/pyry/agent_switch_publication_test.go` → `TestRelayAgentSwitchDelayedPublication`: publication exclusion and attribution across consecutive switches.
+- `cmd/pyry/session_model_selection_test.go` → `TestPublishedModelSelection_SettingsRoundTrip`: preserved model selection/projection on supported sessions.
+- `cmd/pyry/daemon_model_catalog_test.go`, `daemon_model_catalog_reconnect_test.go` → catalog request/reconnect tests: value-specific projection, generated clears and refusal behavior.
+- `cmd/pyry/daemon_thread_compact_test.go`, `daemon_thread_compact_read_test.go`, `daemon_relay_wire_test.go` → compact negotiation and held-handshake tests: stopped readiness and response-before-admission boundaries.
+- `cmd/pyry/daemon_thread_queries_test.go`, `daemon_thread_relay_test.go` → query/join and publication fixtures: named catch-up, checkpoint integrity and content isolation.
+- `cmd/pyry/daemon_thread_list_test.go`, `unread_visibility_test.go`, `daemon_thread_offscreen_test.go` → shown-authority tests: supported-peer watermarks and joined retirement/recovery.
+- `cmd/pyry/prompt_answer_relay_test.go`, `thread_shadow_legacy_test.go` → prompt responsiveness and unavailable-route tests: live dismissals and durable producer behavior under refusal.
+- `docs/knowledge/features/development-verification-test-execution-and-artifact-survival.md`: Noise completion is distinct from admission; retain failed evidence and completed query boundaries.
 
 ## Context
 
@@ -118,3 +128,13 @@ precedence. Existing cryptography, bounded transport, token storage, subprocess
 and publisher cancellation contracts remain unchanged. Manager snapshot waits
 use bounded contexts; new test publishers retain joined shutdown paths. No new
 exports, dependencies, paths, logs or credentials are introduced.
+
+The shared-package check also exposed three intentional response-before-admission
+fixtures. `TestCompactReadWaitsForOpenSession`,
+`TestDaemonRelayWireAdmissionBeforePush` and `TestDaemonLiveRelayRetiredSnapshot`
+now use the exact low-level hello while their response callback is held, then
+prove actual thread admission after releasing it. Supported opening keeps its
+strong admission check. Reset state is delivered through the production live
+publisher, whose current-state coalescing can omit superseded intermediate
+edges; the switch fixture still checks the inactive state before delayed
+publication, exclusion, successive agent attribution and durable delimiters.

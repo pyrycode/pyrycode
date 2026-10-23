@@ -14,13 +14,28 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
+	"github.com/pyrycode/pyrycode/internal/thread"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
+
+// testDaemonThreadBackend installs the production query/readiness contract and
+// starts its publisher before any supported hello reaches the manager.
+func testDaemonThreadBackend(t *testing.T, cfg *relay.V2SessionConfig, b *daemonLiveBindings) func(context.Context, *relay.V2SessionManager) func() {
+	t.Helper()
+	h := history.New(t.TempDir())
+	s := newThreadShadow(h, b.reg, thread.NewStore(h), discardLogger())
+	installDaemonThreadRelay(cfg, s)
+	return func(ctx context.Context, mgr *relay.V2SessionManager) func() {
+		stop := startDaemonThreadPublisher(ctx, s, mgr)
+		return func() { stop(); s.shutdown() }
+	}
+}
 
 func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring, usage *contextUsageResolver, setup func(*relay.V2SessionConfig), publisher ...func(context.Context, *relay.V2SessionManager) func()) (*switchWire, *relay.V2SessionManager) {
 	t.Helper()
@@ -39,9 +54,7 @@ func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring
 	if cfg.ThreadReady != nil {
 		t.Fatal("production thread readiness enabled")
 	}
-	// Readiness remains deliberately test-only until folded-item publication lands.
-	cfg.ThreadReady = func() bool { return true }
-	cfg.ThreadLastShownVersion = func(string) (uint64, bool) { return 0, true }
+	startThread := testDaemonThreadBackend(t, &cfg, b)
 	if setup != nil {
 		setup(&cfg)
 	}
@@ -50,6 +63,8 @@ func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
+	wire.manager = mgr
+	stopThread := startThread(ctx, mgr)
 	done := make(chan struct{})
 	var stop func()
 	if len(publisher) > 0 {
@@ -58,7 +73,7 @@ func testDaemonRelayWire(t *testing.T, b *daemonLiveBindings, wiring relayWiring
 		stop = startDaemonLivePublisher(ctx, b.sink.live, mgr.ActiveConns, mgr.PushLiveState, func(ctx context.Context, id string) { _ = mgr.RetireLiveState(ctx, id) }, discardLogger())
 	}
 	go func() { defer close(done); _ = mgr.Run(ctx) }()
-	t.Cleanup(func() { cancel(); stop(); <-done })
+	t.Cleanup(func() { cancel(); stop(); stopThread(); <-done })
 	return wire, mgr
 }
 
@@ -115,7 +130,7 @@ func TestDaemonLiveRelayPublication(t *testing.T) {
 	if !seen[protocol.TypeApiRetry] || !seen[protocol.TypeCompacting] {
 		t.Fatal("inactive readings missing")
 	}
-	w.open("legacy", false)
+	w.rejectCapabilities("legacy", []string{protocol.CapabilityInteractive}, protocol.CodeClientUpdateRequired, 4412)
 	// Fill the legacy fan-in so admission can no longer enter its queue.
 	for i := 0; i < cap(b.sink.ch)+1; i++ {
 		send(turnevent.Stall{})
@@ -134,20 +149,23 @@ func TestDaemonLiveRelayPublication(t *testing.T) {
 	if err := mgr.FlushPushes(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	// The legacy recipient gets only its existing Push bytes, never duplicate live publication.
-	want := protocol.Envelope{ID: 99, Type: protocol.TypeStall, TS: time.Unix(1, 0).UTC(), Payload: json.RawMessage(`{"conversation_id":"conv"}`)}
-	if err := mgr.Push(t.Context(), "legacy", want); err != nil {
+	// A supported control marker drains publication; rejected peers receive nothing.
+	want := protocol.Envelope{ID: 99, Type: protocol.TypeError, TS: time.Unix(1, 0).UTC(), Payload: json.RawMessage(`{}`)}
+	if err := mgr.Push(t.Context(), "phone", want); err != nil {
 		t.Fatal(err)
 	}
 	for {
 		id, e := w.read()
-		if id != "legacy" {
+		if id != "phone" {
+			t.Fatalf("publication reached rejected peer %s", id)
+		}
+		if e.ID != want.ID {
 			continue
 		}
 		raw, _ := json.Marshal(e)
 		expected, _ := json.Marshal(want)
 		if !bytes.Equal(raw, expected) {
-			t.Fatalf("legacy bytes changed: %s", raw)
+			t.Fatalf("control bytes changed: %s", raw)
 		}
 		break
 	}
@@ -389,7 +407,7 @@ func TestDaemonLiveRelayRetiredSnapshot(t *testing.T) {
 			}
 		}
 	})
-	w.open("phone", false, protocol.CapabilityThread)
+	w.helloCapabilities("phone", []string{protocol.CapabilityInteractive, protocol.CapabilityThread})
 	wait(responseSent, "response publication before admission")
 	barrier := protocol.Envelope{ID: 130, Type: protocol.TypeError, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}
 	// Response receipt alone cannot establish push-queue registration.

@@ -16,7 +16,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
-	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -24,39 +23,10 @@ import (
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
-func testShadowPeerOpen(t *testing.T, w *switchWire, key []byte) []string {
+func testShadowPeerRefused(t *testing.T, w *switchWire, key []byte) {
 	t.Helper()
-	init, err := noise.NewInitiator(key, w.pub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: "phone-token", Capabilities: []string{protocol.CapabilityInteractive, "thread"}})
-	raw, _ := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: payload})
-	data, err := init.WriteInit(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.frames <- w.wrap("phone", protocol.TypeNoiseInit, data)
-	response := w.await()
-	if response.ConnID != "phone" || response.CloseCode != 0 {
-		t.Fatal("shadow peer handshake rejected")
-	}
-	ack, send, recv, err := init.ReadResp(w.data(response))
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.phones["phone"] = switchPhone{send, recv}
-	var env protocol.Envelope
-	var hello protocol.HelloAckPayload
-	if json.Unmarshal(ack, &env) != nil || env.Type != protocol.TypeHelloAck || json.Unmarshal(env.Payload, &hello) != nil {
-		t.Fatal("invalid hello ack")
-	}
-	for _, cap := range hello.Capabilities {
-		if strings.Contains(cap, "thread") {
-			t.Fatal("shadow advertised thread capability")
-		}
-	}
-	return hello.Capabilities
+	w.privateKeys = map[string][]byte{"phone": key}
+	w.rejectCapabilities("phone", []string{protocol.CapabilityInteractive, protocol.CapabilityThread}, protocol.CodeProtocolUnsupported, 4421)
 }
 
 func testShadowLegacyPayload(t *testing.T, typ string, raw []byte) string {
@@ -79,9 +49,7 @@ func testShadowLegacyPayload(t *testing.T, typ string, raw []byte) string {
 }
 
 func TestThreadShadowLegacy(t *testing.T) {
-	type surface struct {
-		live, capabilities []string
-	}
+	type surface struct{ live []string }
 	run := func(mode string) surface {
 		h := history.New(t.TempDir())
 		reg, _ := conversations.Load("")
@@ -126,13 +94,15 @@ func TestThreadShadowLegacy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		w.manager = mgr
 		e := newInteractiveTurnEmitterV2(&activeConversation{}, mgr, discardLogger())
 		e.hist, e.runtimeFacts = h, true
 
 		done := make(chan struct{})
 		go func() { defer close(done); _ = mgr.Run(ctx) }()
 		defer func() { cancel(); <-done }()
-		result := surface{capabilities: testShadowPeerOpen(t, w, peer.Bytes())}
+		testShadowPeerRefused(t, w, peer.Bytes())
+		result := surface{}
 		source := history.SessionProvenance{Kind: "claude", SessionID: "saved-source"}
 		e.HandleFor(ctx, testConvID, turnevent.TextChunk{Text: "answer"}, source)
 		e.HandleFor(ctx, testConvID, turnevent.TurnEnd{}, source)
@@ -155,14 +125,27 @@ func TestThreadShadowLegacy(t *testing.T) {
 			_, env := w.read()
 			result.live = append(result.live, testShadowLegacyPayload(t, env.Type, env.Payload))
 		}
+		if len(result.live) != 0 {
+			t.Fatal("rejected peer received content")
+		}
+		// Admission refusal must not change durable producer behavior.
+		page, err := h.Page(id, "", 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range page.Entries {
+			if legacyHistoryType(entry.Type) {
+				result.live = append(result.live, testShadowLegacyPayload(t, entry.Type, entry.Payload))
+			}
+		}
 		if len(result.live) == 0 {
-			t.Fatal("connected peer received no legacy traffic")
+			t.Fatal("producer history fixture is empty")
 		}
 		w.frames <- protocol.RoutingEnvelope{ConnID: "phone", CloseCode: 1000}
 		testShadowWait(t, func() bool { return len(mgr.ActiveConns(ctx)) == 0 })
-		testShadowPeerOpen(t, w, peer.Bytes())
-		if len(mgr.ActiveConns(ctx)) != 1 || len(w.out) != 0 {
-			t.Fatal("reconnect published implicit content recovery")
+		testShadowPeerRefused(t, w, peer.Bytes())
+		if len(mgr.ActiveConns(ctx)) != 0 || len(w.out) != 0 {
+			t.Fatal("unavailable reconnect admitted a session or published content")
 		}
 		if mode == "enabled" {
 			v, _ := h.LatestEntryID(id)
@@ -176,7 +159,7 @@ func TestThreadShadowLegacy(t *testing.T) {
 	for _, mode := range []string{"enabled", "failed"} {
 		t.Run(mode, func(t *testing.T) {
 			if got := run(mode); !reflect.DeepEqual(baseline, got) {
-				t.Fatalf("legacy client surface changed: baseline=%v shadow=%v", baseline, got)
+				t.Fatalf("durable producer surface changed: baseline=%v shadow=%v", baseline, got)
 			}
 		})
 	}

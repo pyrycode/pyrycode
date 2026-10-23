@@ -252,34 +252,32 @@ func TestDaemonLiveRelayCatalogLegacy(t *testing.T) {
 				if available {
 					saved.claude, saved.haveClaude = sentinelModelList("legacy"), true
 				}
-				w, _ := testDaemonRelayWire(t, b, relayWiring{}, nil, func(cfg *relay.V2SessionConfig) {
+				w, _ := testDaemonRelayWire(t, b, relayWiring{modelListReading: daemonModelListReadingFor(b.reg, pool, saved, b)}, nil, func(cfg *relay.V2SessionConfig) {
 					cfg.ModelListFor = modelListFor(b.reg, pool, saved, b)
+					cfg.MergedModelOptions = pushedModelOptions(saved)
 				})
 				w.open("phone", multi)
 				for _, conv := range []string{"conv", "missing"} {
 					testCatalogWireRequest(t, w, 401, conv)
-					e, raw := testCatalogWireRead(t, w)
-					if e.InReplyTo == nil || *e.InReplyTo != 401 || len(e.ConversationID) != 0 || len(e.SessionID) != 0 || e.SessionStateCleared || e.EventID != nil {
-						t.Fatalf("legacy envelope changed: %s", raw)
-					}
 					if available && conv == "conv" {
 						want, _ := mapModelList(saved.claude, conv)
 						if multi {
 							want.Models = claudeModelOptions(want.Models)
 						}
-						wantRaw, _ := json.Marshal(want)
-						if e.Type != protocol.TypeModelList || !bytes.Equal(e.Payload, wantRaw) {
-							t.Fatalf("legacy payload changed: %s", raw)
-						}
-					} else {
-						code := "model_list.unavailable"
-						if conv == "missing" {
-							code = "conversation.not_found"
-						}
-						var refusal protocol.ErrorPayload
-						if err := json.Unmarshal(e.Payload, &refusal); err != nil || e.Type != protocol.TypeError || refusal.Code != code || refusal.Retryable != (conv == "conv") {
-							t.Fatalf("legacy refusal changed: %s (%v)", raw, err)
-						}
+						testCatalogWireReply(t, w, 401, conv, "", want, true)
+						continue
+					}
+					e, raw := testCatalogWireRead(t, w)
+					if e.InReplyTo == nil || *e.InReplyTo != 401 || len(e.ConversationID) != 0 || len(e.SessionID) != 0 || e.SessionStateCleared || e.EventID != nil {
+						t.Fatalf("refusal envelope changed: %s", raw)
+					}
+					code := "model_list.unavailable"
+					if conv == "missing" {
+						code = "conversation.not_found"
+					}
+					var refusal protocol.ErrorPayload
+					if err := json.Unmarshal(e.Payload, &refusal); err != nil || e.Type != protocol.TypeError || refusal.Code != code || refusal.Retryable != (conv == "conv") {
+						t.Fatalf("catalog refusal changed: %s (%v)", raw, err)
 					}
 				}
 			})

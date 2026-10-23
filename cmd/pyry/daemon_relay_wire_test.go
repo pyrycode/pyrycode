@@ -25,7 +25,7 @@ func testDaemonRelayAdmission(ctx context.Context, mgr *relay.V2SessionManager, 
 		return err
 	}
 	for _, conn := range conns {
-		if conn.ConnID == id {
+		if conn.ConnID == id && conn.Thread {
 			return nil
 		}
 	}
@@ -60,7 +60,7 @@ func TestDaemonRelayWireAdmissionBeforePush(t *testing.T) {
 		}
 	})
 	defer release() // Release Run before the fixture joins it, including on failure.
-	w.open("again", false)
+	w.helloCapabilities("again", []string{protocol.CapabilityInteractive, protocol.CapabilityThread})
 	select {
 	case <-published:
 	case <-time.After(3 * time.Second):

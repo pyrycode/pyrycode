@@ -35,7 +35,7 @@ func TestCompactReadWaitsForOpenSession(t *testing.T) {
 			}
 		})
 		t.Cleanup(unblock)
-		w.open("phone", false, protocol.CapabilityThread)
+		w.helloCapabilities("phone", []string{protocol.CapabilityInteractive, protocol.CapabilityThread})
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -51,5 +51,8 @@ func TestCompactReadWaitsForOpenSession(t *testing.T) {
 		}
 		unblock()
 		<-done
+		if err := testDaemonRelayAdmission(t.Context(), mgr, "phone"); err != nil {
+			t.Fatal(err)
+		}
 	})
 }

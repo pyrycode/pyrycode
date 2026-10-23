@@ -171,7 +171,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 	t.Log("phase: handshake phone")
 	w.open("phone", false, protocol.CapabilityThread)
 	t.Log("phase: handshake legacy")
-	w.open("legacy", false)
+	w.rejectCapabilities("legacy", []string{protocol.CapabilityInteractive}, protocol.CodeClientUpdateRequired, 4412)
 	t.Log("phase: handshake again")
 	w.open("again", true, protocol.CapabilityThread)
 	var cfg relay.V2SessionConfig
@@ -397,30 +397,32 @@ func TestDaemonThreadPublication(t *testing.T) {
 			seen[peer] = true
 		}
 	}
-	// Withheld families still reach the simultaneous legacy recipient unchanged.
+	// Replaced content families stay withheld from every admitted recipient.
 	families := []string{protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeMessage, protocol.TypeBackgroundTaskStarted, protocol.TypeBackgroundTaskUpdated, protocol.TypeBackgroundTaskRoster, protocol.TypeBanner, protocol.TypeCompactionBoundary, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeUnrecognizedMessage}
 	for _, typ := range families {
 		e := protocol.Envelope{ID: 80, Type: typ, TS: time.Unix(1, 0).UTC(), Payload: json.RawMessage(`{"conversation_id":"` + testConvID + `"}`)}
-		for _, peer := range []string{"phone", "legacy", "again"} {
+		for _, peer := range []string{"phone", "again"} {
 			if err := mgr.Push(t.Context(), peer, e); err != nil {
 				t.Fatal(err)
 			}
-		}
-		peer, got := w.read()
-		if peer != "legacy" || !reflect.DeepEqual(got, e) {
-			t.Fatalf("legacy stream changed: %s %s", peer, got.Type)
 		}
 	}
 	if err := mgr.FlushPushes(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	barrier := protocol.Envelope{Type: protocol.TypeError, Payload: json.RawMessage(`{}`)}
-	if err := mgr.Push(t.Context(), "phone", barrier); err != nil {
-		t.Fatal(err)
+	for _, peer := range []string{"phone", "again"} {
+		if err := mgr.Push(t.Context(), peer, barrier); err != nil {
+			t.Fatal(err)
+		}
 	}
-	peer, e := w.read()
-	if peer != "phone" || e.Type != protocol.TypeError {
-		t.Fatal("withheld content escaped behind legacy delivery")
+	seenBarriers := map[string]bool{}
+	for len(seenBarriers) < 2 {
+		peer, e := w.read()
+		if (peer != "phone" && peer != "again") || e.Type != protocol.TypeError || seenBarriers[peer] {
+			t.Fatal("withheld content escaped supported delivery")
+		}
+		seenBarriers[peer] = true
 	}
 	b.reg.Delete(testConvID)
 	p := protocol.ThreadItemAddedPayload{ConversationID: testConvID, Epoch: "epoch", Item: protocol.ThreadItem{ID: 9, Rev: 9, Kind: "notice", Content: json.RawMessage(`{}`)}}
@@ -431,7 +433,7 @@ func TestDaemonThreadPublication(t *testing.T) {
 	if err := mgr.Push(t.Context(), "phone", barrier); err != nil {
 		t.Fatal(err)
 	}
-	_, e = w.read()
+	_, e := w.read()
 	if e.Type != protocol.TypeError {
 		t.Fatal("removed member received thread item")
 	}

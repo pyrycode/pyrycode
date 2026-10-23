@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/identity"
@@ -45,11 +46,12 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 		h, err := pool.HarnessFor(sessions.SessionID(id))
 		return h, err == nil
 	}
-	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
+	cfg := relay.V2SessionConfig{
 		Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil },
 		StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()), Logger: discardLogger(),
 		CodexConversation: codexConversation(reg, agent), ConversationAgent: conversationAgent(reg, agent),
-		Reconnect: reconnect, Connected: func() bool {
+		KnownConversation: func(id string) bool { _, ok := reg.Get(conversations.ConversationID(id)); return ok },
+		Reconnect:         reconnect, Connected: func() bool {
 			if down.Load() {
 				select {
 				case held <- struct{}{}:
@@ -59,11 +61,20 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 			}
 			return true
 		},
-	})
+	}
+	bindings := testControlBindings(t, switchConvID, dormantWriteTargetID)
+	bindings.reg = reg
+	installDaemonLiveRelay(&cfg, relayWiring{streamSink: bindings.sink}, nil)
+	startThread := testDaemonThreadBackend(t, &cfg, bindings)
+	mgr, err := relay.NewV2SessionManager(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sw.resetting.attach(mgr)
+	sw.resetting.live = bindings
+	w.manager = mgr
+	stopThread := startThread(ctx, mgr)
+	stopLive := startDaemonLivePublisher(ctx, bindings.sink.live, mgr.ActiveConns, mgr.PushLiveState, func(ctx context.Context, id string) { _ = mgr.RetireLiveState(ctx, id) }, discardLogger())
 	entered, release := make(chan struct{}), make(chan struct{})
 	store := history.New(t.TempDir())
 	announced := make(chan struct{}, 2)
@@ -85,7 +96,7 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	})
 	done := make(chan struct{})
 	go func() { defer close(done); _ = mgr.Run(ctx) }()
-	t.Cleanup(func() { cancel(); <-done; stop() })
+	t.Cleanup(func() { cancel(); stopLive(); stopThread(); <-done; stop() })
 	runPoolReady(t, pool)
 	w.open("observer", true)
 	adapter := relayAgentSwitcher{switcher: sw}
@@ -111,10 +122,20 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 		}
 	}
 	checkExcluded()
-	for i := 0; i < 3; i++ {
+	for {
 		_, e := w.read()
 		if e.Type != protocol.TypeResetting {
 			t.Fatalf("early outcome: %+v", e)
+		}
+		if e.SessionStateCleared {
+			continue
+		}
+		var status protocol.ResettingPayload
+		if json.Unmarshal(e.Payload, &status) != nil || status.ConversationID != switchConvID {
+			t.Fatalf("resetting ownership lost: %+v", e)
+		}
+		if !status.Active {
+			break
 		}
 	}
 	// Delay sealing separately from the transition consumer. Enqueue completion
@@ -145,23 +166,29 @@ func TestRelayAgentSwitchDelayedPublication(t *testing.T) {
 	if got := adapter.SwitchAgent(ctx, protocol.SwitchAgentPayload{ConversationID: switchConvID, Agent: "claude", Model: "opus"}); got.State != relay.AgentSwitchCommitted {
 		t.Fatalf("return outcome=%+v", got)
 	}
-	for i, typ := range []string{protocol.TypeConversationUpdated, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeResetting, protocol.TypeConversationUpdated} {
+	for outcomes := 0; outcomes < 2; {
 		_, e := w.read()
-		if e.Type != typ {
-			t.Fatalf("frame %d=%s, want %s", i, e.Type, typ)
+		if e.Type == protocol.TypeResetting {
+			if string(e.ConversationID) != `"`+switchConvID+`"` {
+				t.Fatalf("resetting lost conversation metadata: %+v", e)
+			}
+			continue
 		}
-		if typ == protocol.TypeConversationUpdated {
+		if e.Type == protocol.TypeConversationUpdated {
 			var p protocol.ConversationUpdatedPayload
 			if err := json.Unmarshal(e.Payload, &p); err != nil {
 				t.Fatal(err)
 			}
 			want := "codex"
-			if i == 4 {
+			if outcomes == 1 {
 				want = "claude"
 			}
 			if p.Agent != want {
-				t.Fatalf("frame %d agent=%s, want %s", i, p.Agent, want)
+				t.Fatalf("outcome %d agent=%s, want %s", outcomes, p.Agent, want)
 			}
+			outcomes++
+		} else {
+			t.Fatalf("unexpected switch publication: %+v", e)
 		}
 	}
 	page, err := store.Page(switchConvID, "", 100)

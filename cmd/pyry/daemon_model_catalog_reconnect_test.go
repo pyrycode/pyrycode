@@ -476,7 +476,8 @@ func TestDaemonLiveRelayCatalogReconnectGates(t *testing.T) {
 				caps = []string{protocol.CapabilityThread}
 			}
 			if mode == "legacy" {
-				caps = []string{protocol.CapabilityInteractive}
+				w.rejectCapabilities("phone", []string{protocol.CapabilityInteractive}, protocol.CodeClientUpdateRequired, 4412)
+				return
 			}
 			w.openCapabilities("phone", caps)
 			// A marker after snapshot exhaustion proves completion even with no inventory.
@@ -492,23 +493,9 @@ func TestDaemonLiveRelayCatalogReconnectGates(t *testing.T) {
 			if mode == "access" || mode == "no_vocabulary" {
 				testAwaitInventory(t, finished)
 			}
-			// FlushPushes handles legacy reconcile; ThreadLiveState has its own finite drain.
+			// ThreadLiveState has its own finite snapshot drain.
 			if err := mgr.FlushPushes(ctx); err != nil {
 				t.Fatal(err)
-			}
-			if mode == "legacy" {
-				want, _ := mapModelList(saved.claude, "conv")
-				for {
-					e, raw := testCatalogWireRead(t, w)
-					if e.Type != protocol.TypeModelList {
-						continue
-					}
-					wantRaw, _ := json.Marshal(want)
-					if len(e.ConversationID) != 0 || len(e.SessionID) != 0 || e.SessionStateCleared || e.InReplyTo != nil || !bytes.Equal(e.Payload, wantRaw) {
-						t.Fatalf("legacy reconcile changed: %s", raw)
-					}
-					break
-				}
 			}
 			marker := protocol.Envelope{ID: 902, Type: protocol.TypeError, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}
 			if err := mgr.Push(ctx, "phone", marker); err != nil {
