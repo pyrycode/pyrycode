@@ -55,9 +55,7 @@ func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol
 }
 
 func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env protocol.Envelope, live *LiveState, ready, modelListProjected bool) error {
-	if !m.pushRetired(connID) {
-		m.cancelThreadQuery(connID, env)
-	}
+	m.cancelThreadQuery(connID, env)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
