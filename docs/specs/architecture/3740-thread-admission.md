@@ -188,3 +188,27 @@ Late retained model/slash/suggestion consumers distinguish generated clears from
 fresh readings. Named catch-up assembles correlated fragments and verifies their
 index, offset, length and SHA-256 before awaiting the separate final coverage
 marker; interleaved live observations remain buffered for scenario assertions.
+
+2026-10-23 verifier rework (`9bed20c6`, findings 1–3): keep this repair within the
+supported-fixture migration and its existing grandchild/verification-floor
+exception. Completion must use the producing session and `main_turn_opened`
+identity/`occurred_at`, falling back conservatively to the first source content
+timestamp when no execution fact exists. Queue acceptance is not execution.
+Controlled tests place a same-session predecessor idle after successor acceptance
+but before successor execution, with no successor terminal delivery. Preserve
+the before-history-append idle case. Positive client-feature peers advertise and
+verify thread, correlate their ack and finish named catch-up. Remaining connected
+and recorded consumers explicitly consume generated clears without counting or
+decoding them as fresh readings; retain payload, ownership, cardinality and
+lifecycle assertions. Diagnose hook ordering, subagent extra launch, fallback
+retirement and thinking-progress separately. Expected repair remains 400–700
+written lines, zero exports and no production admission changes.
+
+Security review: PASS. These changes retain authentication/privacy precedence,
+one ordered Noise reader, explicit clear visibility and real source ownership.
+Execution facts must match both turn ID and producing session; no timing allowance
+may make a predecessor idle prove successor completion. New waits remain bounded
+and publishers/processes retain their existing joined teardown. Linux focused
+race checks cover the reported regressions and helper controls; tagged compilation,
+vet and build remain builder-owned. Full acceptance and live execution remain
+pending with the dispatcher; all historical failures and continuity holds remain.
