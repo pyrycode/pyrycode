@@ -1000,3 +1000,15 @@ relax ownership, extend deadlines or bypass authentication/thread admission. The
 independent recorded reader and recall-content proof remain. No exported API or
 global state is added. Keep the PR draft and stop at Documentation after required
 review/checks. No merge, release or deployment is authorised.
+
+### Shared caller migration after compile feedback
+
+The first admitted control selection on 57be87c8 did not compile and executed zero
+tests. Its JSON build failure is retained as continuity-source-controls.json.
+The changed drain also has two system-prompt test callers. Read all call sites
+before correcting these callers. Both prompted and bare conversation sends need
+a fresh pre-command source window and the same persistent connection reader.
+Preserve positive marker reply, negative cross-conversation marker, distinct
+spawn-file and stored prompt-content assertions. Include this actual caller in
+the targeted authenticated selection. No product behavior or shared observer
+changes are required; the scope remains test-only completion attribution.
