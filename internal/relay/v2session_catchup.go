@@ -310,10 +310,10 @@ func (m *V2SessionManager) sendThreadReply(s *V2Session, q *threadQuery, env pro
 	}
 }
 
-// cancelThreadQuery fences live admission against final selection without holding
-// pushMu. The original bounded push queue still owns all live buffering. A live
-// update cancels only a query of its own projection; threadQueryGate withholds it
-// from a load of the other projection instead.
+// cancelThreadQuery admits cancellation under hostedMu then pushMu, so a
+// quarantined update cannot cancel an already-selected query delivery. A live
+// update cancels only a query of its own projection; threadQueryGate withholds
+// it from a load of the other projection instead.
 func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelope) {
 	compact := env.Type == protocol.TypeThreadCompactUpdate
 	if !compact && (!threadItemUpdate(env.Type) || env.InReplyTo != nil) {
@@ -322,6 +322,11 @@ func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelop
 	conversation := pushedConversationID(env)
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
+	m.pushMu.Lock()
+	defer m.pushMu.Unlock()
+	if q := m.queues[connID]; q != nil && q.overflowed {
+		return
+	}
 	in := m.hostedInboxes[connID]
 	if in == nil || in.query == nil || in.query.conversation != conversation {
 		return
@@ -341,6 +346,11 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 	env := *o.env
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
+	m.pushMu.Lock()
+	defer m.pushMu.Unlock()
+	if q := m.queues[s.connID]; q != nil && q.overflowed {
+		return ErrConnNotFound
+	}
 	in := s.hosted.inbox
 	if env.Type == protocol.TypeThreadCompactUpdate {
 		return in.compactLiveGate(env)

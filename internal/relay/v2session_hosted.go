@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"sort"
 	"time"
 
@@ -226,6 +227,11 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	if s.state != V2StateOpen {
 		return
 	}
+	if m.pushRetired(s.connID) {
+		o.finish(ErrConnNotFound)
+		m.handlePushOverflow(ctx, s.connID)
+		return
+	}
 	m.takeHostedChanges(ctx, s)
 	m.hostedMu.Lock()
 	in := h.inbox
@@ -245,7 +251,7 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	}
 	m.hostedMu.Unlock()
 	if full {
-		m.closeWith(ctx, s, StatusQueueOverflow, nil)
+		m.closeHostedOverflow(ctx, s)
 		return
 	}
 	h.queue = append(h.queue, o)
@@ -255,6 +261,10 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	h := s.hosted
 	if s.state != V2StateOpen {
+		return
+	}
+	if m.pushRetired(s.connID) {
+		m.handlePushOverflow(ctx, s.connID)
 		return
 	}
 	m.takeHostedChanges(ctx, s)
@@ -280,6 +290,10 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		}
 		if rejection == nil {
 			rejection = m.threadQueryGate(s, o)
+		}
+		if errors.Is(rejection, ErrConnNotFound) {
+			m.handlePushOverflow(ctx, s.connID)
+			return
 		}
 		if rejection == nil {
 			break
@@ -307,10 +321,19 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		m.closeWith(ctx, s, StatusSessionGone, nil)
 		return
 	}
+	// Commit the one selected writer against retirement after all hosted-lock
+	// work. The latch can then quarantine everything except this active write.
+	m.pushMu.Lock()
+	if q := m.queues[s.connID]; q != nil && q.overflowed {
+		m.pushMu.Unlock()
+		m.handlePushOverflow(ctx, s.connID)
+		return
+	}
 	o := h.queue[0]
 	h.queue[0] = nil
 	h.queue = h.queue[1:]
 	h.active = o
+	m.pushMu.Unlock()
 	wire := protocol.RoutingEnvelope{ConnID: s.connID}
 	if o.wire != nil {
 		wire = *o.wire
@@ -433,6 +456,10 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 		h.active = nil
 		res.output.finish(threadDeliveryError(res.err))
 		m.releaseHostedOutput(s, res.output)
+		if m.pushRetired(s.connID) {
+			m.handlePushOverflow(ctx, s.connID)
+			return
+		}
 		if res.err != nil {
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return
