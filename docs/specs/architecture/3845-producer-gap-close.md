@@ -73,3 +73,10 @@ Resolve the precise held-write failure in the regression before implementing; re
 - Errors/logs: unavailable terminal delivery remains logged as failure, never proof of phone receipt.
 - Concurrency: completion and timeout both re-enter first-cause handling; replacement terminal contexts remain fenced by `hostedCloseContext`.
 - Threat model: untrusted relay still carries only encrypted content; this change neither extends device privileges nor trusts client checkpoint/source assertions. No new security finding is deferred.
+
+## Revisions
+
+- 2026-10-23: The held-pump baseline at production revision `c4eba68b` failed `TestProducerGapOrderedClose` with no wire output. This resolves the delivery-boundary question: cancellation of the selected hosted send retires the shared socket before the close. Keep transport cancellation intact and wait only for the selected bounded send.
+- The recovery fixture uses the existing fake-Claude executable with production history and thread Store providers. Two authenticated phone sends append source-owned user facts once; fake-Claude output records completion independently of phone teardown. Reset removes only disposable index certificates after unloading, retaining source history and receiving session. These choices resolve the fixture question.
+- `hostedEnqueue` also rejects output after the latch, before capacity handling can replace the terminal cause. `TestProducerGapHostedNonceQuarantine` decrypts a post-teardown nonce probe. `TestProducerGapDeliveryFailure` proves unavailable active and terminal sends return failures. The optional configuration argument in `testHostedRealTransport` is an additive local helper edit overlapping #3740's migration; no migrated helper API is required.
+- Final sizing remains below 800 written lines, zero exported types/signature consumers, three criteria and fewer than ten reject branches. Full configured acceptance and the documentation handoff remain pending for their owning stages.

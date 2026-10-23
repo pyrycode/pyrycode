@@ -72,7 +72,7 @@ type testHostedTransport struct {
 	stop       func()
 }
 
-func testHostedRealTransport(t *testing.T, enabled bool) *testHostedTransport {
+func testHostedRealTransport(t *testing.T, enabled bool, options ...func(*V2SessionConfig)) *testHostedTransport {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	p := &testHostedTransport{socketDone: make(chan struct{}), t: t, wires: make(chan protocol.RoutingEnvelope, 128), entered: make(chan struct{}, 128), delivered: make(chan error, 128)}
@@ -137,6 +137,9 @@ func testHostedRealTransport(t *testing.T, enabled bool) *testHostedTransport {
 		cfg.HostedAppsDiscovery = &testAppDiscovery{}
 		cfg.HostedAppsReady = func() bool { return true }
 		cfg.HostedAppsSend = cfg.OutboundContext
+	}
+	for _, option := range options {
+		option(&cfg)
 	}
 	p.mgr, p.stop = startManager(t, cfg)
 	t.Cleanup(p.stop)

@@ -226,6 +226,11 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 	if s.state != V2StateOpen {
 		return
 	}
+	if m.pushRetired(s.connID) {
+		o.finish(ErrConnNotFound)
+		m.handlePushOverflow(ctx, s.connID)
+		return
+	}
 	m.takeHostedChanges(ctx, s)
 	m.hostedMu.Lock()
 	in := h.inbox
@@ -255,6 +260,10 @@ func (m *V2SessionManager) hostedEnqueue(ctx context.Context, s *V2Session, o *h
 func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 	h := s.hosted
 	if s.state != V2StateOpen {
+		return
+	}
+	if m.pushRetired(s.connID) {
+		m.handlePushOverflow(ctx, s.connID)
 		return
 	}
 	m.takeHostedChanges(ctx, s)
@@ -433,6 +442,10 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 		h.active = nil
 		res.output.finish(threadDeliveryError(res.err))
 		m.releaseHostedOutput(s, res.output)
+		if m.pushRetired(s.connID) {
+			m.handlePushOverflow(ctx, s.connID)
+			return
+		}
 		if res.err != nil {
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return

@@ -677,7 +677,11 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 				if s.hosted != nil && !m.hostedAuthorized(s) {
 					m.closeWith(runCtx, s, StatusUnauthorized, nil)
 				} else if s.hosted != nil && s.hosted.deliveryCtx != nil && s.hosted.deliveryCtx.Err() != nil {
-					m.closeWith(runCtx, s, StatusSessionGone, nil)
+					if m.pushRetired(s.connID) {
+						m.handlePushOverflow(runCtx, s.connID)
+					} else {
+						m.closeWith(runCtx, s, StatusSessionGone, nil)
+					}
 				}
 			}
 		case w := <-m.wake:
