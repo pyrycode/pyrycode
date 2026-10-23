@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -253,5 +254,22 @@ func TestQuestionAnswerHistoryProof(t *testing.T) {
 				t.Fatalf("validation=%v for %s", err, change)
 			}
 		})
+	}
+}
+
+func TestLiveQuestionReaderRetainsCatchUpOrder(t *testing.T) {
+	t.Parallel()
+	phone := &fakephone.Client{}
+	cleared := protocol.Envelope{Type: protocol.TypeQuestionShown, SessionStateCleared: true,
+		ConversationID: json.RawMessage(`"conv"`), Payload: json.RawMessage(`{}`)}
+	fresh := protocol.Envelope{Type: protocol.TypeQuestionShown, Payload: mustJSON(t, testQuestionProofBatch())}
+	phone.DeferEnvelopes([]protocol.Envelope{cleared, fresh})
+	h := &perConvHarness{phone: phone}
+	got := awaitQuestionControl(t, h, protocol.TypeQuestionShown, time.Second, nil)
+	if string(got.Payload) != string(fresh.Payload) || got.SessionStateCleared {
+		t.Fatal("cleared setup state replaced the fresh question")
+	}
+	if _, ok := phone.TakeDeferred(); ok {
+		t.Fatal("question reader did not consume the saved observations in order")
 	}
 }

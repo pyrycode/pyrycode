@@ -7,16 +7,13 @@ package realclaude
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -175,39 +172,14 @@ func (p *questionAnswerTurn) complete() bool {
 // do not advance the receive nonce and are skipped without decryption.
 func receiveQuestionEnvelope(t *testing.T, phone scenario.Receiver, cs *noise.CipherState, deadline time.Time) (protocol.Envelope, bool) {
 	t.Helper()
-	for time.Until(deadline) > 0 {
-		raw, err := phone.ReceiveBytes(time.Until(deadline))
-		if errors.Is(err, fakephone.ErrReceiveTimeout) {
-			return protocol.Envelope{}, false
-		}
-		if err != nil {
-			t.Fatalf("question receive: %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatal(err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatal(err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("question decrypt: %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatal(err)
-		}
-		if err := checkQuestionEnvelopeAlarm(env); err != nil {
-			t.Fatal(err)
-		}
-		return env, true
+	env := scenario.Receive(t, phone, cs)(deadline)
+	if env.Type == "" {
+		return protocol.Envelope{}, false
 	}
-	return protocol.Envelope{}, false
+	if err := checkQuestionEnvelopeAlarm(env); err != nil {
+		t.Fatal(err)
+	}
+	return env, true
 }
 
 func checkQuestionEnvelopeAlarm(env protocol.Envelope) error {
@@ -238,6 +210,9 @@ func awaitQuestionControl(t *testing.T, h *perConvHarness, want string, timeout 
 		env, ok := receiveQuestionEnvelope(t, h.phone, h.initRecv, deadline)
 		if !ok {
 			t.Fatalf("no %s within %s", want, timeout)
+		}
+		if env.SessionStateCleared {
+			continue
 		}
 		if err := checkQuestionControl(env, parked); err != nil {
 			t.Fatal(err)

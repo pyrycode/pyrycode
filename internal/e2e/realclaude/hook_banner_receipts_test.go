@@ -90,9 +90,9 @@ func testHookBannerWindow(t *testing.T) ([]protocol.Envelope, []history.Entry) {
 	}
 	reqID := uint64(9)
 	frames := []protocol.Envelope{
-		{Type: protocol.TypeAck, InReplyTo: &reqID},
-		{Type: protocol.TypeTurnState, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "responding"})},
-		{Type: protocol.TypeTurnState, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "idle"})},
+		{Type: protocol.TypeAck, TS: at, InReplyTo: &reqID},
+		{Type: protocol.TypeTurnState, TS: at, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "responding"})},
+		{Type: protocol.TypeTurnState, TS: at, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "idle"})},
 	}
 	return frames, entries
 }
