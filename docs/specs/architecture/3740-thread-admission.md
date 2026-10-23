@@ -959,3 +959,44 @@ The independent PASS and completed offline checks on fb216ba8 remain historical
 source/gate evidence. This small tagged fixture correction requires fresh
 independent re-review and normal complete acceptance. Keep the PR draft and stop
 in Documentation. No merge, release or deployment is authorised.
+
+## Manual continuity drain correction after live 3f22ef72
+
+The full authenticated run has one failing repeated-turn case: idle has no
+recorded completion. Its candidate repeat fails and unchanged base passes. All
+other executed cases, including both last repaired fixture families, pass. Keep
+the full failed run, comparison and independent PASS separately. The effective
+manual hold is Development revision 237, after worker and child settlement.
+
+The custom drain treats delivered running then idle as proof that retained source
+already contains the completed reply. Source append and app delivery are separate
+observations. The proposed test-only correction uses the existing strict shared
+completion observer with a fresh SourceSince boundary before each send. Keep one
+PollingReceive closure across all three turns so pending reads and cipher order
+remain owned. Wait for the actual session/execution-owned source completion and
+received terminal together. Keep the separate recorded-text read and compare it
+to the owned completion result. Retain all three prompts, filler turn, held child,
+per-run nonce recall and every existing source identity/child/order assertion.
+
+Add a deterministic provider-free delayed-history control: receive an owned idle
+before its source content/end is retained, append the actual owned facts on a
+subsequent poll, and require the current reply instead of a pre-command completed
+turn. No sleep or deadline increase should substitute for this order. Reuse the
+actual failing candidate and passing base captures rather than rerunning that red.
+Run the relevant source controls, broad credential-free tagged package and actual
+authenticated three-turn continuity under ordinary Linux admission. Keep skips
+separate from provider execution. Normal independent review and complete required
+acceptance remain mandatory after the concrete validated repair.
+
+The existing #3844 publication-gap hold concerns baseline_required and 4414/EOF
+in the recorded ordinary two-turn case. No such gap establishes this immediate
+history-read failure. Keep that causal prerequisite and hold unchanged; do not
+split or waive this necessary migration into it. Product source and the approved
+shared helper remain unchanged.
+
+Author security assessment: the test will use existing actual source and delivery
+proof with explicit pre-command attribution. It must not synthesize app events,
+relax ownership, extend deadlines or bypass authentication/thread admission. The
+independent recorded reader and recall-content proof remain. No exported API or
+global state is added. Keep the PR draft and stop at Documentation after required
+review/checks. No merge, release or deployment is authorised.
