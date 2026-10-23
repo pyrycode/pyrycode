@@ -39,6 +39,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 )
 
 // The two conversations and the two sessions they are bound to. The session ids
@@ -100,9 +102,11 @@ func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
 		return nil
 	})
 
+	next := scenario.PollingReceive(t, h.phone, h.initRecv)
+	promptedSource := scenario.SourceSince(t, h.home, livePromptedConvID)
 	// Arm 1 — the conversation whose stored prompt asks for the marker.
 	sealSendMessage(t, h.phone, h.initSend, 2, livePromptedConvID, "m-prompted", livePromptTurnQuery)
-	prompted := drainForCompletedSourceText(t, h.phone, h.initRecv, h.home, livePromptedConvID, perTurnReplyBudget)
+	prompted := drainForCompletedSourceText(t, next, promptedSource, h.home, livePromptedConvID, perTurnReplyBudget)
 	if !strings.Contains(prompted, marker) {
 		t.Errorf("AC #5: the reply for the conversation whose stored system prompt asks for %q does not "+
 			"carry it — the stored prompt did not reach the spawn.\nreply: %s", marker, prompted)
@@ -112,8 +116,9 @@ func TestInteractiveConversationSystemPrompt_ReachesTheReply(t *testing.T) {
 	// carrying the marker would mean one conversation's prompt reached another
 	// conversation's session; its reply NOT carrying it is what makes arm 1
 	// evidence about the prompt rather than about claude's habits.
+	bareSource := scenario.SourceSince(t, h.home, liveBareConvID)
 	sealSendMessage(t, h.phone, h.initSend, 3, liveBareConvID, "m-bare", livePromptTurnQuery)
-	bare := drainForCompletedSourceText(t, h.phone, h.initRecv, h.home, liveBareConvID, perTurnReplyBudget)
+	bare := drainForCompletedSourceText(t, next, bareSource, h.home, liveBareConvID, perTurnReplyBudget)
 	if strings.Contains(bare, marker) {
 		t.Errorf("AC #5: the reply for the conversation with NO stored system prompt carries %q — "+
 			"a per-session prompt file is being shared across sessions.\nreply: %s", marker, bare)
