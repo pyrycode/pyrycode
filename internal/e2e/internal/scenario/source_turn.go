@@ -329,16 +329,13 @@ func (s *sourceTurn) idle(t *testing.T, env protocol.Envelope, conv string) bool
 		return false
 	}
 	env = *s.liveIdle
-	if len(env.SessionID) != 0 {
-		var session string
-		if json.Unmarshal(env.SessionID, &session) != nil || session != s.session.SessionID {
-			return false
-		}
-		// Execution belongs to the exact source turn, independently of when its
-		// history content is appended. Queue acceptance cannot establish this bound.
-		return !env.TS.Before(s.started)
+	var session string
+	if json.Unmarshal(env.SessionID, &session) != nil || session == "" || session != s.session.SessionID {
+		return false
 	}
-	return !env.TS.Before(s.end.TS)
+	// Execution belongs to the exact source turn, independently of when its
+	// history content is appended. Queue acceptance cannot establish this bound.
+	return !env.TS.Before(s.started)
 }
 
 func pollDeadline(deadline time.Time) time.Time {

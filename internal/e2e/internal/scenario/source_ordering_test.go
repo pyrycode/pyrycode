@@ -108,7 +108,7 @@ func TestSourceObserverDelayedPredecessorOpening(t *testing.T) {
 
 func TestConsumerIdleBeforeHistory(t *testing.T) {
 	for _, consumer := range []string{"reply", "attachment", "outside-read", "permission", "refusal", "answer", "suggestion"} {
-		orderings := []string{"poll", "clear", "running", "foreign-clear", "other-reading-clear", "foreign-idle", "old-idle"}
+		orderings := []string{"poll", "clear", "running", "foreign-clear", "other-reading-clear", "foreign-idle", "old-idle", "omitted-idle"}
 		if consumer == "permission" || consumer == "refusal" || consumer == "answer" {
 			orderings = append(orderings, "dismissal-after-clear", "dismissal-after-running")
 		}
@@ -121,7 +121,7 @@ func TestConsumerIdleBeforeHistory(t *testing.T) {
 				clearing := false
 				lateDismissal := ordering == "dismissal-after-clear" || ordering == "dismissal-after-running"
 				wantReads := 5
-				if ordering == "clear" || ordering == "running" || ordering == "foreign-idle" || ordering == "old-idle" || lateDismissal {
+				if ordering == "clear" || ordering == "running" || ordering == "foreign-idle" || ordering == "old-idle" || ordering == "omitted-idle" || lateDismissal {
 					wantReads = 6
 				}
 				frame := func(kind string, value any) protocol.Envelope {
@@ -179,6 +179,10 @@ func TestConsumerIdleBeforeHistory(t *testing.T) {
 						}
 						if ordering == "old-idle" {
 							idle.TS = start.Add(-time.Second)
+						}
+						if ordering == "omitted-idle" {
+							idle.SessionID = nil
+							idle.TS = start.Add(5 * time.Second)
 						}
 						return idle
 					case 3:

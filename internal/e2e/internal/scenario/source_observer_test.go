@@ -27,7 +27,7 @@ func TestSourceObserverTerminalOrdering(t *testing.T) {
 	o.OnEntry = func(e history.Entry) { kinds = append(kinds, e.Type) }
 	for i, ts := range []time.Time{now.Add(-time.Second), now} {
 		next := func(time.Time) protocol.Envelope {
-			return protocol.Envelope{Type: protocol.TypeTurnState, TS: ts, Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "idle"})}
+			return protocol.Envelope{Type: protocol.TypeTurnState, TS: ts, SessionID: raw("new"), Payload: raw(protocol.TurnStatePayload{ConversationID: "conv", State: "idle"})}
 		}
 		o.Next(next, time.Now().Add(time.Second))
 		if len(kinds) != i+1 {

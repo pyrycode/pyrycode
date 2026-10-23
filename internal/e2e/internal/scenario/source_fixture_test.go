@@ -67,8 +67,13 @@ func testSourceWire(t *testing.T, w Wire, completeIdle ...bool) Wire {
 			if err != nil {
 				t.Fatal(err)
 			}
-			return protocol.Envelope{Type: protocol.TypeTurnState, Payload: raw}
+			return protocol.Envelope{Type: protocol.TypeTurnState, SessionID: json.RawMessage(`"fixture"`), Payload: raw}
 		case protocol.TypeTurnState:
+			// Neutral fixtures declare the same owner as their retained facts.
+			// Preserve explicit foreign or invalid ownership for negative controls.
+			if len(env.SessionID) == 0 {
+				env.SessionID = json.RawMessage(`"fixture"`)
+			}
 			var p protocol.TurnStatePayload
 			if json.Unmarshal(env.Payload, &p) != nil {
 				t.Fatal("invalid live fixture")
