@@ -72,11 +72,38 @@ func TestAgentContentRetired(t *testing.T) {
 		for _, session := range []string{"source-a", "source-b", "source-c"} {
 			source := history.SessionProvenance{Kind: "claude", SessionID: session}
 			handle := func(ev turnevent.Event) { e.HandleFor(ctx, conv, ev, source) }
+			mainStart := len(b.pushes)
 			for _, ev := range []turnevent.Event{
 				turnevent.TextChunk{MessageID: "main", Text: "main"},
 				turnevent.ToolStart{ToolCallID: "call", Title: "Agent"},
 				turnevent.ToolUpdate{ToolCallID: "call", Status: turnevent.ToolStatusCompleted, Content: turnevent.TextContent{Text: "launch"}},
 				turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+			} {
+				handle(ev)
+			}
+			for _, conn := range []string{"legacy", "thread"} {
+				phases := pushesOfType(pushesFor(b.pushes[mainStart:], conn), protocol.TypeTurnState)
+				running, idle := false, false
+				for _, push := range phases {
+					var phase protocol.TurnStatePayload
+					if err := json.Unmarshal(push.env.Payload, &phase); err != nil {
+						t.Fatal(err)
+					}
+					if phase.ConversationID != conv {
+						t.Fatal("main phase crossed conversation")
+					}
+					if phase.State == "idle" {
+						idle = running
+					} else {
+						running = true
+					}
+				}
+				if !running || !idle {
+					t.Fatalf("%s: main running/idle envelopes missing", conn)
+				}
+			}
+			childStart := len(b.pushes)
+			for _, ev := range []turnevent.Event{
 				turnevent.BackgroundTaskStarted{TaskID: "task", ToolCallID: "call"},
 				turnevent.BackgroundTaskRoster{DroppedTasks: 1},
 				turnevent.TextChunk{MessageID: "child", ParentToolCallID: "call", Text: "child", TextComplete: true},
@@ -103,6 +130,9 @@ func TestAgentContentRetired(t *testing.T) {
 				handle(turnevent.BackgroundTaskRoster{})
 			} else {
 				e.closeAgentHistory(ctx, "idle_sleep", historyTS)
+			}
+			if len(pushesOfType(b.pushes[childStart:], protocol.TypeTurnState)) != 0 {
+				t.Fatal("child/task/roster traffic emitted a main turn-state envelope")
 			}
 			items = publish()
 			agents, texts := 0, 0

@@ -79,7 +79,9 @@ on `9ebba3462074` records 28121/28121 race-unit, 1963/1963 fake integration and
 2268/2268 configured live leaf tests, zero failed, with 27/2/27 skipped
 respectively; historical failed results remain failed. It also distinguishes
 the 163/163 focused parent/subtest events from leaf counts and tagged compilation
-from live acceptance. They cover #3736, not parent #3718's final family acceptance.
+from live acceptance. They cover #3736;
+[final integrated Linux acceptance](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
+adds current combined gates and the corrected live-reader proof for #3718.
 
 Standalone banners and runtime/startup facts now retain source recording only
 (#3737). `emit` returns after its banner append attempt; `recordRuntimeFact`
@@ -105,9 +107,9 @@ are removed. `historyVisibilityMetadata`/`historyEntryShown`, source payloads,
 constructor seams and ordered `daemonLiveState`/`daemonThreadPublisher` delivery
 remain. The interactive ring/counter still serve supported live state; replay
 admission/pump retirement belongs to #3738 and shared ring/`SetReplaySource`
-removal to #3739. Neither this cleanup nor its
-[counted evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737)
-completes #3718's final family acceptance.
+removal to #3739. The
+[integrated acceptance record](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
+supplements child evidence without changing those downstream boundaries.
 
 ### Producer topics
 
@@ -322,8 +324,9 @@ types stay off legacy live publication and newly appended reconnect replay,
 including their receipt projection and connections without `thread` (#3733).
 Queued sends are observed through canonical thread items and explicit catch-up;
 queued acceptance, delivery, drop and loss facts produce no legacy receipts.
-`legacyRuntimeFact` excludes them, and `legacyRuntimeReceipt` rejects them even
-when valid, durably identified and explicitly shown. Source validation remains:
+The exclusive `legacyRuntimeFact`/`legacyRuntimeReceipt` adapters are removed
+(#3737); explicit visibility and a durable ID never grant publication eligibility.
+Source validation remains:
 acceptance requires `accepted_at`; outcomes require `occurred_at`,
 `accepted_entry_id` and the exact reason in the table, with `delivery_entry_id`
 also required for delivery. `send_written` requires reason `written` and no
@@ -512,7 +515,10 @@ failed history. Both retain their winning verdicts and one dismissal each;
 healthy storage retains original history without receipt delivery. These race
 regressions are deterministic proofs, separate from counted real-Claude
 acceptance. See the
-[retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737).
+[retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737)
+and [integrated acceptance](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718).
+The final configured Linux live gate retained modal allow/deny and question
+answer/refusal coverage; it does not turn skipped API/MCP probes into evidence.
 
 The raw pager remains retired. Source metadata and shown-thread authority keep
 their contracts; receipt arrival is no longer an accounting or presentation path.

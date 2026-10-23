@@ -154,13 +154,14 @@ Runtime and agent/task types remain raw history facts; their payloads never ente
 legacy transports. Agent identity/link/result/outcome/gone/session-ending
 producers publish no compatibility receipts (#3735). Their original mapped
 start/update/roster sources also stop after the history append, for every app,
-including without `thread`. Surviving runtime producers still use validated
-nonvisual info-banner receipts (#3026); shared adapters remain pending #3737.
+including without `thread`. Runtime/startup producers also retain source
+recording without info-banner receipts; their exclusive adapters are removed
+(#3737). Canonical items and explicit catch-up consume the saved facts.
 See [legacy eligibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965).
 Visibility never grants raw facts transport eligibility.
-Best-effort nil/failed storage does not change closure, sealing, eligible legacy
-publication, payload meanings or recipient gates. Append failures use the existing
-content-free discriminants, never payloads or filesystem error text. Daemon-start
+Best-effort nil/failed storage does not change closure, sealing, payload meanings
+or supported live-state recipient gates, and never restores content publication.
+Append failures use the existing content-free discriminants, never payloads or filesystem error text. Daemon-start
 reconciliation uses the [startup closure point](#startup-reconciliation-3014).
 See [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
 and [drain source lifecycle](streamsup-package-draining-turnevents-into-the-interactive-emitter.md).
@@ -204,10 +205,11 @@ turn closure, then agent endings, then the divider, then new traffic.
 `closeStartupMainWork` and `closeStartupAgentWork` run before the restart divider,
 alongside `closeRuntimeSource` at runtime. Startup does not backfill the in-memory
 replay ring or publish live frames. Agent endings remain source evidence without
-compatibility receipt publication; surviving runtime projection stays separate.
-The restart divider intentionally has no predecessor/successor session IDs. Receipt validation
-accepts its captured conversation and occurrence identity; requiring a predecessor
-would leave a restart read hole that running-turn tests cannot detect.
+compatibility receipt publication; runtime/startup receipts are also retired
+(#3737). The restart divider intentionally has no predecessor/successor session
+IDs. Its captured conversation and occurrence identity remain fold inputs;
+requiring a predecessor would lose restart evidence that running-turn tests
+cannot detect.
 
 **Recover identity without inventing provenance.** Tagged turns match recorded
 source and turn ID. Untagged turns match recorded turn/tool IDs within legacy
@@ -362,7 +364,7 @@ publish no compatibility receipts (#3735); explicit visibility, durable IDs,
 timestamps and source attribution remain evidence for canonical folding and
 explicit catch-up. A stop-control acceptance supplies neither a reported outcome
 nor saved ending evidence. See
-[receipt validation and visibility](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
+[source visibility and retired publication](history-package-producers-legacy-compatibility.md#legacy-eligibility-and-explicit-visibility-2965),
 [ADR 042](../decisions/042-daemon-built-thread.md#sessions-agents-messages-read-marks)
 and [the attribution contract](../../specs/architecture/3030-agent-task-history.md).
 

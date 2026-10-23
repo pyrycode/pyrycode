@@ -215,11 +215,21 @@ func completedSourceText(t *testing.T, home, convID string) string {
 		t.Fatal("completed reply source exceeds the fixture window")
 	}
 	var ending protocol.TurnEndPayload
+	var endingSource *history.SessionProvenance
+	var endingID uint64
 	for _, entry := range page.Entries {
 		if entry.Type == protocol.TypeTurnEnd {
-			if err := json.Unmarshal(entry.Payload, &ending); err != nil {
+			var completion struct {
+				protocol.TurnEndPayload
+				Parent string `json:"parent_tool_use_id"`
+			}
+			if err := json.Unmarshal(entry.Payload, &completion); err != nil {
 				t.Fatal(err)
 			}
+			if completion.Parent != "" {
+				continue
+			}
+			ending, endingSource, endingID = completion.TurnEndPayload, entry.Session, entry.ID
 			break
 		}
 	}
@@ -229,7 +239,14 @@ func completedSourceText(t *testing.T, home, convID string) string {
 	var text strings.Builder
 	for i := len(page.Entries) - 1; i >= 0; i-- {
 		entry := page.Entries[i]
-		if entry.Type != protocol.TypeAssistantDelta {
+		if entry.Type != protocol.TypeAssistantDelta || entry.ID >= endingID {
+			continue
+		}
+		sameSource := entry.Session == nil && endingSource == nil
+		if entry.Session != nil && endingSource != nil {
+			sameSource = *entry.Session == *endingSource
+		}
+		if !sameSource {
 			continue
 		}
 		var delta protocol.AssistantDeltaPayload
@@ -271,5 +288,48 @@ func TestCompletedSourceText(t *testing.T) {
 	}
 	if got := completedSourceText(t, home, string(conv)); got != "onetwo" {
 		t.Fatalf("completed source text = %q", got)
+	}
+}
+
+func TestCompletedSourceTextIdentity(t *testing.T) {
+	for _, scenario := range []string{"session reuse", "agent kind reuse", "later child completion", "text after completion"} {
+		t.Run(scenario, func(t *testing.T) {
+			const conv = conversations.ConversationID(streamMultiTurnConvID)
+			home := t.TempDir()
+			h := history.New(filepath.Join(home, ".pyry", "test"))
+			main := history.SessionProvenance{Kind: "claude", SessionID: "producing-session"}
+			appendFact := func(typ string, payload any, source *history.SessionProvenance) {
+				t.Helper()
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := h.AppendWithMetadata(conv, typ, raw, time.Now(), history.Metadata{Session: source}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			foreign := main
+			foreign.SessionID = "previous-session"
+			if scenario == "agent kind reuse" {
+				foreign = main
+				foreign.Kind = "codex"
+			}
+			appendFact(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "reused", Text: "foreign"}, &foreign)
+			appendFact(protocol.TypeTurnEnd, protocol.TurnEndPayload{TurnID: "reused"}, &foreign)
+			appendFact(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "reused", Text: "one"}, &main)
+			appendFact(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "reused", ParentToolUseID: "child", Text: "child"}, &main)
+			appendFact(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "reused", Text: "two"}, &main)
+			appendFact(protocol.TypeTurnEnd, protocol.TurnEndPayload{TurnID: "reused"}, &main)
+			if scenario == "later child completion" {
+				appendFact(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "child-turn", ParentToolUseID: "child", Text: "later child"}, &main)
+				appendFact(protocol.TypeTurnEnd, map[string]string{"turn_id": "child-turn", "parent_tool_use_id": "child"}, &main)
+			}
+			if scenario == "text after completion" {
+				appendFact(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{TurnID: "reused", Text: "unfinished"}, &main)
+			}
+			if got := completedSourceText(t, home, string(conv)); got != "onetwo" {
+				t.Fatalf("completed source text = %q, want onetwo", got)
+			}
+		})
 	}
 }
