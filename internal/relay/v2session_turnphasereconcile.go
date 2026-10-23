@@ -29,10 +29,8 @@ import (
 // forwardEnvelope, so withheldFromConn still withholds a Codex conversation's
 // phase from a conn without multi_agent, exactly as it withholds the live copy.
 //
-// EventID left nil is load-bearing: it keeps the frame out of the turn-event
-// replay ring and the durable history (this path appends to neither), and makes
-// forwardEnvelope's last_event_id dedup inert for it. A re-sent turn_state is
-// harmless — the client matches on conversation_id and replaces that
+// This snapshot appends neither ring events nor durable source history. A re-sent
+// turn_state is harmless: the client matches on conversation_id and replaces that
 // conversation's phase in place.
 //
 // SECURITY: the payload carries a server-minted conversation_id and a phase from
