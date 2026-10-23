@@ -85,7 +85,7 @@ func TestV2Session_LastEventIDIgnored(t *testing.T) {
 				p := testCatchUpPeer(t, nil, func(c *V2SessionConfig) {
 					c.KnownConversation = func(id string) bool { return id == catchUpConversation || id == "other" }
 				})
-				ring := eventring.New(2)
+				ring := eventring.New(4)
 				for range 4 {
 					ring.Append(catchUpConversation, protocol.TypeTurnState, json.RawMessage(`{"conversation_id":"ring-secret"}`), time.Now())
 				}

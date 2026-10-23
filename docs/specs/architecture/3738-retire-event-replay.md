@@ -119,3 +119,4 @@ Pending for the documentation stage:
 ## Revisions
 
 - 2026-10-23: Preserve the published-before-fan-out contract in `RunningTurnPhases` and `interactiveTurnEmitterV2` comments after removing their references to the retired replay watermark. Keep the source-history observer in modal/channel-post integration tests; reconnect now uses an ordinary fresh Noise handshake. The recovery regression supplies a complete window boundary, including continuation equal to its lower order, as required by `EncodeThreadReply`.
+- 2026-10-23: Keep all four seeded ring events in the unknown-cursor matrix so zero and stale cursors would produce real replay tails under the retired path; maximum uint64 would produce a gap. Retained lifecycle checks are `TestV2Session_Push_FlushesOnReconnectSignal`, `TestV2Session_Push_ReconnectWhileDownDoesNotSeal`, `TestV2Session_RekeyInitiator_Emit_ReArmViaResponder` and `TestHostedPushCapacityTeardown`.
