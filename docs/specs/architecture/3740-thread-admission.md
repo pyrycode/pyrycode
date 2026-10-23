@@ -289,3 +289,9 @@ Ancillary process ownership/exit controls are covered separately by
 `TestRecordedSubagentWorkerPolicy`. Subagent source polling after its first-main
 checkpoint now uses 100ms between rescans, with immediate scans on real turn-state
 readings; the 281-event helper race run preserves the exact first-main boundary.
+
+The final recorded run passed the clear-reset payload/rotation assertions, then
+its successor recall lost the phone with 4414. Before classifying this as the
+existing #3844/#3845 continuity failure, retain closed-set daemon gap/retirement
+diagnostics on that root's failure; the original assertions and failed replay
+remain intact. A receive code alone is insufficient evidence of the known hold.

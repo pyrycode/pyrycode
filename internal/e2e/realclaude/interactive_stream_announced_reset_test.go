@@ -232,6 +232,14 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	seedBoundConversation(t, home, clearConvID, clearSessUUID, workdir)
 
 	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, relayURL)
+	t.Cleanup(func() {
+		if t.Failed() {
+			log := d.stderr.String()
+			t.Logf("thread continuity diagnostic: baseline_required=%t producer_gap_retired=%t",
+				strings.Contains(log, "event=daemon.thread.gap reason=baseline_required"),
+				strings.Contains(log, "event=v2.push.producer_gap.teardown"))
+		}
+	})
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
