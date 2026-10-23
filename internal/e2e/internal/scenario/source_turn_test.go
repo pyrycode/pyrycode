@@ -93,6 +93,7 @@ func TestSourceIdleBeforeHistoryAppend(t *testing.T) {
 		{"retained", protocol.Envelope{}, true},
 		{"cleared", protocol.Envelope{Type: protocol.TypeTurnState, SessionStateCleared: true, ConversationID: json.RawMessage(`"conv"`)}, false},
 		{"foreign-clear", protocol.Envelope{Type: protocol.TypeTurnState, SessionStateCleared: true, ConversationID: json.RawMessage(`"other"`)}, true},
+		{"other-reading-clear", protocol.Envelope{Type: protocol.TypeThinkingProgress, SessionStateCleared: true, ConversationID: json.RawMessage(`"conv"`)}, true},
 		{"running", protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"conversation_id":"conv","state":"responding"}`)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

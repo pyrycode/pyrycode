@@ -233,7 +233,7 @@ func (s *sourceTurn) idle(t *testing.T, env protocol.Envelope, conv string) bool
 	t.Helper()
 	if env.SessionStateCleared {
 		var id string
-		if json.Unmarshal(env.ConversationID, &id) == nil && id == conv {
+		if env.Type == protocol.TypeTurnState && json.Unmarshal(env.ConversationID, &id) == nil && id == conv {
 			s.liveIdle = nil
 		}
 		return false

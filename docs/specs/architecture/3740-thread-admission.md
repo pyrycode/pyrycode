@@ -295,3 +295,13 @@ its successor recall lost the phone with 4414. Before classifying this as the
 existing #3844/#3845 continuity failure, retain closed-set daemon gap/retirement
 diagnostics on that root's failure; the original assertions and failed replay
 remain intact. A receive code alone is insufficient evidence of the known hold.
+
+Repeated thinking checks exposed a second ordering defect: a generated clear for
+an unrelated reading discarded an already received terminal idle before the
+history append became visible. The controlled `other-reading-clear` case in
+`TestSourceIdleBeforeHistoryAppend` fails before repair. Only a `turn_state`
+clear for the watched conversation invalidates its retained turn-state reading;
+other reading clears remain distinct and cannot certify completion themselves.
+This preserves both exact execution ownership and the independently captured
+terminal delivery requirement. The isolated clear-reset diagnostic rerun passed
+all three events, including its successor recall, without any new skip.
