@@ -853,7 +853,44 @@ review and dispatcher admission. Preserve valid prior checks and all failures.
 Author security assessment: this strengthens test proof by requiring independently
 observed matching terminal identity. It does not project source facts into actual
 app envelopes or change product authentication, persistence, permissions or
-transport. The terminal must still follow actual execution and retained source
-end. No exported API or global state is added. Publish author evidence separately
+transport. The terminal must follow actual execution, and its retained source end
+must exist. No exported API or global state is added. Publish author evidence separately
 from the real independent FAIL, obtain fresh independent review, keep the PR draft
 and stop in Documentation. No merge, release or deployment is authorised.
+
+### Terminal ownership author validation
+
+Source candidate 47f6835d06815e1ea34c94dd32f4fadcd0631de9. Normal Linux admission supplies these named
+outcomes, excluding package results. All selections have zero failures or skips.
+
+| Selection | Passed | Evidence |
+| --- | ---: | --- |
+| Complete shared scenario package | 398 | terminal-owner-scenario.json |
+| Unchanged independent ownership probe against the repair | 6 | terminal-owner-independent-probe.json |
+| Grouped tagged reconnect/history/reset controls | 45 | terminal-owner-tagged-controls.json |
+| Recorded completion consumers, queue cases and permission family | 28 | terminal-owner-recorded.json |
+| Actual authenticated reset, permission isolation and question consumers | 7 | terminal-owner-live.json |
+
+Shared scenario, tagged realclaude and tagged liverelay vet all pass. Exact
+commands, candidate identities, OS, timestamps and exit codes are the corresponding
+terminal-owner-*-command.json files under the retained manual evidence directory.
+The probe source is unchanged from the real independent failing execution; only
+the scratch overlay maps it into this retained source checkout. These successful
+reruns are author validation, not a new independent review. No provider execution
+is attributed to the 45 hermetic tagged controls or tagged compilation.
+
+Omitted, null, empty, malformed and non-string terminal sessions cannot complete.
+Seven existing completion consumers must wait past an unowned terminal for actual
+owned delivery. The complete suite retains early idle, cleared/running state,
+foreign ownership, predecessor rejection and overlapping queue controls. Positive
+unit fixtures now declare the same owner as their synthetic source facts. Actual
+runtime observations are never tagged from source data. Product code, deadlines,
+permissions, persistence and public APIs are unchanged.
+
+The real independent FAIL on 3743f4ba remains published and its original red probe
+and all configured stdout/stderr captures are retained under independent-fail-3743f4ba.
+Its initial integration capture failed one suggestion reconnect case which passed
+the normal repeat. That original failed capture stays failed. No new full unit,
+integration or live acceptance is inferred from this targeted author validation.
+Fresh independent review and required normal configured/live acceptance remain
+pending. Keep the PR draft and stop in Documentation. No merge or deployment.
