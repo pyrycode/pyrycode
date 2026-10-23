@@ -931,3 +931,31 @@ wire/source adapters and all product authentication, persistence, permissions an
 transport remain unchanged. No new API or global state. Publish author evidence
 separately from independent review. Keep the PR draft and stop in Documentation.
 No merge, release or deployment is authorised.
+
+### Encrypted completion fixture author validation
+
+Tested source 497e3e059a07ad5cea00c52670b550abeda33884. Both affected encrypted fixture
+families and their wiring/helper controls pass 48 named events with zero failures
+or skips under normal Linux race admission. All prior positive and negative
+assertions remain. Six new missing/foreign/null session negatives exercise actual
+encrypted fixture delivery and must fail completion for its ownership reason.
+
+The complete tagged package was then executed without either provider credential
+variable. It passes 2450 named events, fails zero and skips 120. The existing
+provider authentication guard and opt-in guards account for these skips. Exact
+per-name skip messages are retained in completion-fixture-skip-reasons.json.
+This is broad provider-free validation, not authenticated live acceptance. No
+provider-dependent skip is treated as passed coverage. Tagged realclaude vet
+passes. Shared helper and product source remain unchanged from fb216ba8.
+
+Commands, source identity, OS, timestamps, exit codes, JSON and stderr are the
+completion-fixture-*-command.json and sibling outputs in the retained manual
+evidence directory. The original complete fb216ba8 live capture remains failed:
+2548 named passes, 15 failed events and 27 skips. Its candidate repeat has the
+same failures and its unchanged-base selection passes 38. Complete captures and
+metadata remain under live-failed-fb216ba8. No previous outcome is changed.
+
+The independent PASS and completed offline checks on fb216ba8 remain historical
+source/gate evidence. This small tagged fixture correction requires fresh
+independent re-review and normal complete acceptance. Keep the PR draft and stop
+in Documentation. No merge, release or deployment is authorised.
