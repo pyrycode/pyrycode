@@ -539,3 +539,24 @@ between a cold placeholder and an existing producer, preserving pending control
 operations only for the first producer of the same session. Later producer or
 ownership changes must still advance generation and reject stale results.
 No production change is yet validated.
+
+### Manual socket reader correction
+
+The two original live reset checks failed on a032af1a. The clear case reported
+WebSocket framing corruption. The new actual encrypted socket regression repeats
+that same failure for both polling and synchronous successor consumers. A source
+poll may finish a consumer with one raw read still pending in its local closure.
+The next consumer creates another read on the same connection.
+
+Move ownership of the pending read to the fakephone connection. Short observation
+polls retain it; all subsequent consumers inherit it before starting another read.
+Keep decryption on the test goroutine in actual wire order. Close must release and
+join the pending read. Preserve ordinary blocking-read deadline behaviour when
+there is no outstanding poll. Generic non-phone receivers retain the existing
+polling path. Add no production transport or cryptographic exceptions.
+
+Author security assessment: the owner is test-only and retains at most one raw
+frame. No secrets or payloads are logged. Shutdown closes the socket before joining.
+The actual two-frame regression requires ordered decryption through both consumer
+kinds, so a missing or duplicated frame cannot satisfy it. Independent review of
+the final candidate is pending.
