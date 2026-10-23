@@ -352,16 +352,56 @@ grow the codec's supplied `SessionID`. See the
 `RetireLiveState`'s producer-gap close, `StatusProducerGap` (`4414`), rather than
 the actual push-queue byte ceiling (`4413`). The first terminal cause latched
 under `pushMu` wins: prior byte overflow stays `4413`, and pushes after retirement
-cannot relabel it or grow the queue. Latching the queue must
+cannot relabel it or grow the queue. Hosted-capacity overflow uses the same
+latch, including callback-first overflow. Latching the queue must
 immediately stop `drainOnce`, `drainLiveOnce` and `signalLiveDrain` from consuming
 dependent items or current readings: Run may select a ready drain before the
 queued teardown. `TestRetiredThreadQueueDoesNotDrain` authenticates a held
 append and explicitly drains in that order before checking final removal.
 `TestRetiredLivePendingDoesNotDrain` also preserves the pending reading and
-avoids invoking its snapshot reader. Recovery uses a fresh Noise handshake,
-current transient-state reconciliation and explicit thread catch-up from the
-last completed checkpoint; live publication cannot backfill the missing range.
-See [close codes and recovery](../../protocol-mobile.md#error-codes) and
+avoids invoking its snapshot reader.
+
+Cancelling a transport-admitted write during teardown makes
+`transport.Client.sendPump` retire the shared binary socket, stranding the
+following close and unrelated peers. `handlePushOverflow` therefore lets only
+the already-selected hosted write finish within its existing delivery deadline
+before `closeWith` sends ordered `4414` through `Connection.SendContext`.
+`hostedDeliver` commits selection (`active` and queue removal) under `pushMu`
+after hosted-lock work and rechecks retirement there; an entry check alone can
+race the latch. Query cancellation and query-marker cuts in `cancelThreadQuery`
+and `threadQueryGate` hold `hostedMu` then `pushMu` through the retirement check
+and bounded cancellation, so a rejected update cannot cancel the selected send.
+Callbacks use that same admission order; see
+[callback cancellation](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
+No path acquires `hostedMu` while holding `pushMu`; encryption, peer I/O and
+teardown run after releasing `pushMu`. Completion and timeout preserve the
+latched terminal cause even if delivery fails. An unavailable transport fails
+within the bounded delivery contexts and releases retirement work; an attempted
+close is not proof of receipt, and replacement handshakes cancel old terminal work.
+
+`TestProducerGapOrderedClose` holds transport admission before writing;
+`TestProducerGapCancellationAdmission` and `TestProducerGapCallbackAdmission`
+require the selected phone frame followed by exact socket close `4414`, an
+unchanged binary generation, an unrelated authenticated peer and a next-nonce
+probe. Callback invocation alone would miss the socket-loss defect.
+`TestProducerGapSelectionAdmission` pauses across hosted admission and the final
+transport probe, checking that retirement spends neither a sender ID nor a
+dependent nonce. `TestProducerGapCapacityAdmission` and
+`TestProducerGapCallbackFirstCause` preserve cause ordering;
+`TestProducerGapDeliveryFailure` keeps transport unavailable and requires failed
+active/terminal sends plus queue cleanup.
+
+Recovery uses a fresh authenticated Noise/thread handshake, current
+transient-state reconciliation and explicit named catch-up from the last
+completed checkpoint, without resending accepted input. Live publication cannot
+backfill the missing range. `TestRelayV2ProducerGapRecovery` uses real phone and
+relay sockets, fake-Claude completion and production history/thread providers:
+both retained-checkpoint and reset/newest-window recovery retain exactly one
+accepted second user item, its completed assistant content, the receiving session
+and current source-owned idle. Its reset removes disposable index state while
+retaining source history; hello must not query items. See the
+[delivery and recovery contract](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract),
+[close codes](../../protocol-mobile.md#error-codes) and
 [hosted-admission quarantine](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
 
 `ActiveThreadConns(ctx, conversation)` enumerates on Run using delivery's

@@ -38,11 +38,22 @@ func (m *V2SessionManager) HostedAppsChanged(change apps.Change) {
 	if m.hostedStopped {
 		return
 	}
-	for _, in := range m.hostedInboxes {
+	for connID, in := range m.hostedInboxes {
 		if !in.subscribed || in.retired || in.overflow {
 			continue
 		}
+		// Callback admission and cancellation share retirement's first-cause
+		// latch, under the hostedMu-before-pushMu lock order.
+		m.pushMu.Lock()
+		q := m.queues[connID]
+		if q != nil && q.overflowed {
+			m.pushMu.Unlock()
+			continue
+		}
 		if in.used == hostedQueueLimit {
+			if q != nil {
+				q.overflowed = true
+			}
 			in.overflow = true
 			in.pending = nil
 			in.cancel()
@@ -50,6 +61,7 @@ func (m *V2SessionManager) HostedAppsChanged(change apps.Change) {
 			in.used++
 			in.pending = append(in.pending, &hostedOutput{typ: typ, payload: payload, unsolicited: true})
 		}
+		m.pushMu.Unlock()
 	}
 	select {
 	case m.hostedChanges <- struct{}{}:
@@ -94,11 +106,28 @@ func (m *V2SessionManager) takeHostedChanges(ctx context.Context, s *V2Session) 
 	in.pending = nil
 	m.hostedMu.Unlock()
 	if overflow {
-		m.closeWith(ctx, s, StatusQueueOverflow, nil)
+		m.closeHostedOverflow(ctx, s)
 		return
 	}
 	s.hosted.queue = append(s.hosted.queue, pending...)
 }
+
+// closeHostedOverflow records capacity failure without replacing the first
+// terminal cause. Teardown and delivery always run after releasing pushMu.
+func (m *V2SessionManager) closeHostedOverflow(ctx context.Context, s *V2Session) {
+	m.pushMu.Lock()
+	q := m.queues[s.connID]
+	if q != nil {
+		q.overflowed = true
+	}
+	m.pushMu.Unlock()
+	if q == nil {
+		m.closeWith(ctx, s, StatusQueueOverflow, nil)
+		return
+	}
+	m.handlePushOverflow(ctx, s.connID)
+}
+
 func (m *V2SessionManager) releaseHosted(s *V2Session, count int) {
 	m.hostedMu.Lock()
 	defer m.hostedMu.Unlock()
@@ -168,7 +197,7 @@ func hostedRecord(r apps.Record) protocol.HostedAppRecord {
 }
 
 // hostedPushAvailable is only a wake hint; reserveHostedPush performs admission.
-// Both run off pushMu so callback and producer locks are never nested.
+// Both run without pushMu, preserving the hostedMu-before-pushMu lock order.
 func (m *V2SessionManager) hostedPushAvailable(s *V2Session) bool {
 	if s == nil || s.hosted == nil {
 		return true

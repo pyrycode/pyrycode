@@ -397,8 +397,8 @@ type V2Session struct {
 	// between them.
 	//
 	// Run-owned single-writer, exactly like state — no lock, no
-	// atomic, and pushMu is NOT involved, so pushMu's "taken alone, never held
-	// across an Encrypt, m.send, or any channel op" invariant is untouched by
+	// atomic, and pushMu is NOT involved, so pushMu's "never held
+	// across an Encrypt, m.send, or any blocking channel op" invariant is untouched by
 	// construction rather than by discipline. The off-Run assembleBundle goroutine
 	// never reads or writes it.
 	//
@@ -480,11 +480,11 @@ type V2SessionManager struct {
 	manualRekey chan manualRekeyReq
 
 	// pushMu is a leaf lock guarding queues (the map) and every pushQueue's
-	// contents. Held only around map lookup + enqueue/pop (both O(cap), cap
-	// small); NEVER held across an Encrypt, m.send, or any channel op, and
-	// never nested with any other lock. It orders below nothing — it is always
-	// taken alone. This is what lets an off-Run Push reach the addressed
-	// session's queue WITHOUT reading Run-owned m.sessions or touching s.send.
+	// contents and retirement admission. It may nest inside hostedMu for bounded
+	// query cancellation/marker cuts; no holder may acquire another manager mutex. Never
+	// held across encryption, peer I/O, teardown or a blocking channel operation.
+	// Off-Run producers access queues without reading Run-owned session state or
+	// touching ciphers; Run commits hosted selection under this same latch lock.
 	pushMu sync.Mutex
 
 	// queues maps connID → the per-session bounded push buffer. The KEY SET is
@@ -677,7 +677,11 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 				if s.hosted != nil && !m.hostedAuthorized(s) {
 					m.closeWith(runCtx, s, StatusUnauthorized, nil)
 				} else if s.hosted != nil && s.hosted.deliveryCtx != nil && s.hosted.deliveryCtx.Err() != nil {
-					m.closeWith(runCtx, s, StatusSessionGone, nil)
+					if m.pushRetired(s.connID) {
+						m.handlePushOverflow(runCtx, s.connID)
+					} else {
+						m.closeWith(runCtx, s, StatusSessionGone, nil)
+					}
 				}
 			}
 		case w := <-m.wake:

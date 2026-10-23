@@ -139,6 +139,12 @@ func (m *V2SessionManager) handlePushOverflow(ctx context.Context, connID string
 			"event", "v2.push.producer_gap.teardown",
 			"conn_id", connID,
 			"close_code", int(StatusProducerGap))
+		// Cancelling an admitted write retires the shared binary socket. Let
+		// the selected frame finish before its ordered terminal close; the
+		// queue latch prevents dependent output from being selected meanwhile.
+		if h := s.hosted; h != nil && h.active != nil && h.deliveryCtx != nil && h.deliveryCtx.Err() == nil {
+			return
+		}
 		m.closeWith(ctx, s, StatusProducerGap, nil)
 		return
 	}
