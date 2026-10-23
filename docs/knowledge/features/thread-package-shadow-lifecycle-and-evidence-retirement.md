@@ -79,8 +79,8 @@ on Linux at candidate `ad1cb1aec21452edd41c01ddc76a1c39e566dbcd`
 merged with main `ac0a13f59ebe` (2026-10-22). That configured live run counted
 2267 executed, 2267 passed, 0 failed and 27 skipped; skips are not evidence for
 those skipped probes. This supersedes the PR/verifier's earlier pending-live
-handoff, not parent #3718's final family acceptance. Other operating systems
-are outside this ticket's verification scope. See
+handoff. Its child scope is supplemented by the integrated acceptance below.
+Other operating systems are outside this ticket's verification scope. See
 [the reviewed implementation and handoff](https://github.com/pyrycode/pyrycode/pull/3830)
 and [the plan](../../specs/architecture/3735-retire-agent-publication.md).
 
@@ -147,8 +147,8 @@ corrections subsequently passed 43/43 events with zero failed/skipped. The PR
 retains the earlier red retirement/focused results. Staticcheck's U1000 finding
 on `81831fd4` was resolved by removing the unused test helper. Shared receipt
 adapters remained at that candidate and are removed by #3737 below. This evidence
-covers the Linux ticket; macOS is outside its verification scope. Parent #3718
-still owns final family acceptance. See the
+covers the Linux child ticket; macOS is outside its verification scope.
+Final integrated acceptance is recorded below. See the
 [plan and revisions](../../specs/architecture/3736-session-content-retirement.md).
 
 ## Residual content retirement (#3737)
@@ -165,8 +165,8 @@ with conversation/session/generation identity and ordered delivery intact.
 `historyVisibilityMetadata`/`historyEntryShown` and constructor seams survive;
 exclusive receipt/prompt/post publishers are removed. The interactive ring and
 counter still serve supported live state. Replay admission/pump retirement is
-\#3738, shared ring/`SetReplaySource` removal is #3739, and #3718's final family
-acceptance remains pending.
+\#3738 and shared ring/`SetReplaySource` removal is #3739. The integrated
+acceptance below closes #3718 without claiming either downstream retirement.
 
 `TestResidualContentRetired` applies actual canonical live updates and compares
 explicit catch-up across conversations with reused turn/answer IDs and original
@@ -228,5 +228,74 @@ compilation only; offline hook fixtures execute no Claude turns. Mixed tagged
 oracles retain the no-read refusal window, correlated ACK, later live phase,
 canonical queue delivery, actual wake and held-turn/successor order rather than
 merely deleting compatibility tests. macOS is outside this Linux ticket's
-verification scope. None of this establishes parent #3718's final family
-acceptance. See the [plan and revisions](../../specs/architecture/3737-retire-content-adapters.md).
+verification scope. These child results alone do not establish parent
+acceptance; the current combined proof follows below. See the
+[plan and revisions](../../specs/architecture/3737-retire-content-adapters.md).
+
+## Integrated retirement acceptance (#3718)
+
+The [archived contract](https://github.com/pyrycode/pyrycode/issues/3718#issuecomment-6323312178)
+is pinned by SHA-256
+`1500d9c108066e72576389f580c06ebd973d676cf1e67fa337b93429ed2f48ee`.
+The [requirement-to-evidence map](../../specs/architecture/3718-integrated-content-retirement.md#requirement-to-evidence-map)
+retains the four merged child PRs/revisions, accepted stage IDs, exact selections,
+original failures and accepted reruns. Those ancestor implementations remain
+applicable because later children remove additional publication paths while
+preserving source/fold contracts. Their acceptance alone did not establish the
+integrated boundary or the changed reader's live behavior.
+
+Final verifier PASS on [PR #3838](https://github.com/pyrycode/pyrycode/pull/3838)
+was recorded at `74387269216c2ce891c4436e8956c33218d6d456` on Linux.
+The dispatcher then tested that feature revision merged with main `b779b6acacf3`
+in the configured real-Claude gate, run `2026-10-23T01-49-42-876Z` (8m 40s).
+The daemon was built from that tested tree. Subsequent documentation edits
+change no production, test or build inputs.
+
+| Final configured selection | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| `python3 scripts/test-admission.py -- go test -timeout=30m -race -json ./...` | 28076 | 28076 | 0 | 27 |
+| `python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -count=1 -json ./internal/e2e/...` | 1971 | 1971 | 0 | 2 |
+| `go test -tags e2e_realclaude -timeout 30m -json ./internal/e2e/realclaude/...` | 2264 | 2264 | 0 | 27 |
+
+These are dispatcher-reported leaf counts, excluding skips from executed.
+The verifier's parent/subtest-event totals use a different unit and are not
+summed with them. Citation/docs guards, vet, helper tests, staticcheck,
+substrate guard and build passed. The restoration selector passed with exhaustive
+restoration not required because relevant code/dependencies/build inputs were
+unchanged; this is no executed exhaustive sweep. Affected tagged vet also passed,
+establishing compilation separately from live acceptance.
+
+| Retained obligation | Final evidence and disposition |
+| --- | --- |
+| Combined retirement and storage boundary | `TestInteractiveContentRetired`, `TestAgentContentRetired`, `TestSessionContentRetired`, `TestResidualContentRetired` and applicable storage/answer families retain source/fold, canonical live/catch-up, reused-identity and no-raw-publication controls. The integrated race gate passed. |
+| Actual child/roster lifecycle neutrality | The verifier individually confirmed `TestRelayV2_AgentContentLifecycleNeutral` and `TestRelayV2_AgentContentRetiredReconnect` passed in the fake-daemon gate. The former requires actual encrypted main running/idle, then source child/roster/outcome witnesses plus live task progress and a correlated ordered reply without another turn-state envelope. `TestAgentContentRetired` additionally checks emitted phases for both capabilities and reused identities. |
+| Main completion/source identity | `TestCompletedSourceText` and all four `TestCompletedSourceTextIdentity` leaves passed in the configured tagged gate: session reuse, agent-kind reuse, later child completion and text after completion. |
+| Changed reader's actual live consumers | `TestInteractiveStreamMultiTurnContinuity` passed (7.3s); `TestInteractiveConversationSystemPrompt_ReachesTheReply` passed (6.6s). Both retain actual running/idle before reading the completed source text. Their previously pending live obligation is satisfied. |
+| Supported controls, isolation and ordering | Current configured unit/fake/live gates supplement the child requirement map and retained mixed lifecycle/control assertions. `TestInteractiveStreamForwardsSubagentText` passed (24.8s) in this full live run, without a flaky rerun. |
+| Skipped probes and downstream work | The 27 live skips are opt-in captures, unconfigured Codex captures and API-key MCP probes, not acceptance of those behaviors. Replay admission/pump (#3738), shared ring/`SetReplaySource` (#3739), deployment and operator/approval hold release remain outside this acceptance. |
+
+The integrated live gate had zero flaky passes. Earlier failures remain failed:
+\#3737's subagent-text original and named accepted rerun remain separately counted
+above; #3734's failed full modal run and failed named rerun, #3735's original
+replay-equality failures and #3736's package/staticcheck failures remain in the
+linked map. For this ticket, the controlled old source reader passed only the
+legacy fixture: 6 events, 1 passed/5 failed/0 skipped (5 leaves, 1 passed/4 failed).
+The corrected focused run passed 6/6 events (5/5 leaves), with no failures/skips.
+The earlier verifier FAIL concerned PR live-test selection; the published
+routing repair closed it without rewriting any failed evidence.
+
+**Lifecycle neutrality requires a wire witness.** A source callback cannot see a
+leaked `turn_state`, and silence is vacuous without proving traffic occurred.
+Keep source joins and progress witnesses independent of the encrypted reader;
+drain to an ordered control reply after the witnessed main idle. Reconnect's
+absence-of-roster proof alone does not establish phase neutrality.
+For completion joins, use both producing kind/session and the main completion's
+entry boundary; a reused turn ID or a later child completion can otherwise select
+foreign text. See [source-reader identity controls](history-package-producers-interactive-provenance.md#interactive-provenance-2981).
+
+Disposition: integrated content-publication retirement and both retained #3734
+coverage findings are accepted on Linux. This supersedes ADR 042's transitional
+raw-publication compatibility rule while preserving its retained sources and
+supported live state. macOS is outside this ticket's verification scope. No
+second-OS pass, skipped-probe pass, downstream replay removal or hold release is
+implied.

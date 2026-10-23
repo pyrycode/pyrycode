@@ -139,3 +139,31 @@ The controlled failure retains the legacy fixture pass and four failing identity
 `go vet ./...`, `go build -o /tmp/builder-3718/pyry ./cmd/pyry`, `go vet -tags e2e_realclaude ./internal/e2e/realclaude/...` and `go vet -tags e2e ./internal/e2e/...` passed; final tagged vet logs are `tagged-vet-final.log` and `e2e-vet-final.log`. These are static/build results, with zero live tests claimed. Formatting and `git diff --check` passed.
 
 Disposition: both retained #3734 coverage findings are addressed by focused proof, with current live acceptance still **pending** for `TestInteractiveStreamMultiTurnContinuity` and `TestInteractiveConversationSystemPrompt_ReachesTheReply` on the corrected reader. Full integrated unit/race, fake-daemon integration, configured/static/restoration selection and applicable counted live gates remain **pending dispatcher/verifier**. Documentation remains **pending documentation stage** at the exact paths/sections above. No extra paired capture, deployment, second-OS result, replay retirement or operator/approval hold release is claimed.
+
+## Final integrated documentation disposition
+
+The builder's pending statuses above describe its historical handoff. The final
+verifier PASS and subsequent dispatcher counted live gate supersede those
+statuses for this ticket. The
+[evergreen integrated acceptance record](../../knowledge/features/thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
+records final revision/base, Linux selections and counts, named lifecycle and
+reader-consumer results, skips and accepted dispositions. Both retained #3734
+findings and the current-reader live obligation are satisfied. Historical failed
+controls, child failures/reruns and the first verifier's routing-only FAIL remain
+separate; no earlier result is rewritten as passed.
+
+Documentation handoff satisfied:
+
+- `docs/protocol-mobile.md`: Application message types, Daemon thread updates
+  and affected retained source/reconnect descriptions distinguish source facts,
+  authoritative content, and supported live controls.
+- `docs/knowledge/features/thread-package.md` and its linked retirement evidence:
+  final combined acceptance and durable lifecycle/source-identity lessons.
+- `docs/knowledge/features/history-package-producers.md`: Producers and Resolved
+  remote prompt answers preserve recording, provenance, answer ownership and
+  responsiveness without receipts; linked interactive/runtime/compatibility and
+  channel-delivery prose is reconciled with removed publication.
+
+Replay admission/pump and shared ring/SetReplaySource remain #3738/#3739.
+Existing operator/approval holds remain binding; macOS is outside this Linux
+verification scope.

@@ -38,8 +38,10 @@ remain usable with conversation/session/generation identity. Ordered
 `daemonLiveState` and `daemonThreadPublisher` delivery remain intact. The
 interactive counter/ring still serve supported state through `publishLiveState`;
 replay admission/pump retirement belongs to #3738, shared event-ring storage and
-`SetReplaySource` removal to #3739. This cleanup does not complete parent #3718's
-final family acceptance. Constructor APIs remain stable; the channel announcement
+`SetReplaySource` removal to #3739.
+[Integrated Linux acceptance](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
+records #3718's combined proof separately from the child results. Constructor
+APIs remain stable; the channel announcement
 seam is inert and its completion hook only wakes after a new durable completion.
 
 **Source visibility and publication need independent assertions.** A hidden info

@@ -53,7 +53,21 @@ including peers without `thread`. Their source folding and explicit catch-up
 remain; no raw content or substitute receipt is a fallback for nil/failed
 storage. Supported live phase/progress retains its delivery behavior independently
 of storage, and append failures retain content-free diagnostics. Channel posts
-below retain their separate publication pending #3737.
+also retain recording without raw publication (#3737); completed posts feed
+canonical thread items and explicit catch-up.
+
+**Join completed text by producing identity and boundary.** A turn ID can recur
+across sessions or agent kinds. `completedSourceText` selects the newest
+main-lane completion, skips parented completions, and collects chronological
+main text with that turn ID and exactly the same optional kind/session provenance,
+strictly before its completion entry. Absent provenance matches only absent
+provenance; trailing uncompleted text is excluded. Ordinary unique-ID fixtures
+stayed green while this join was broken; `TestCompletedSourceTextIdentity`
+instead reuses IDs across sessions/kinds and adds later child completion/trailing
+text.
+`drainForCompletedSourceText` still requires actual encrypted running then idle;
+a source read alone cannot establish live completion. See
+[integrated evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718).
 
 Relay correlation identity is the authenticated pairing's bound Noise public
 key (`dispatch.Conn.Auth().StaticKey`), in its existing lowercase-hex form,
@@ -75,7 +89,9 @@ Channel posts are a fourth writer: `channelDelivery.deliver` bypasses the
 common seam and calls `AppendWithMetadata` through `channelDeliveryHistory`
 for each assistant delta and its `channelPostTurnEndPayload`. It uses the
 same `historyVisibilityMetadata` classifier: post text is shown, completion
-is hidden. All history writes must succeed before publication; see
+is hidden. Only a newly recorded successful completion triggers the wake;
+failed completion stays pending and cleanup-only reload never wakes again.
+Raw post publication is removed; see
 [channel delivery and recovery](control-plane-channel-post-live-delivery.md#live-announcements-bounded-replay-and-durable-recovery).
 
 `channelDelivery.accept` captures session provenance once, after `channelPoster`
@@ -106,4 +122,4 @@ coexist with a pending post's captured snapshot. Requiring provenance equality
 would duplicate that prefix. `channelDelivery.deliver` matches chunk and
 completion payloads across every raw page, appends only missing entries with
 the saved provenance and leaves existing entries unchanged. A fully recorded
-post requires cleanup only, with no repeated announcement.
+post requires cleanup only, with no repeated wake.

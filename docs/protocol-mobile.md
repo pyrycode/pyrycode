@@ -1053,46 +1053,28 @@ This subsection covers reconnect **timing** only; the **application-layer** reco
 
 ## Application message types
 
-Session transitions, both model-refusal notices, compaction boundaries and
-unsupported-content notices are source history only (#3736). No app receives
-`session_transition`, `model_refusal_fallback`, `model_refusal_no_fallback`,
-`compaction_boundary` or `unrecognized_message` frames, new replay copies or
-substitute transition-divider receipts, including apps without `thread`.
-Retained transition and `session_divider` records feed canonical session dividers;
-retained content notices feed canonical notice/compaction items and explicit
-catch-up. Recording continues without clients; nil/failed history never restores
-raw publication. Model/settings/catalogs, prompts, progress, retry and compaction
-live state and controls retain their separate delivery, source tags and ordered
-readings/clears.
+Conversation content is delivered only through authoritative thread updates and
+explicit thread catch-up/pages (#3718, after #3734–#3737). Assistant text,
+tool calls/results/denials, turn completions, sessions, agents/rosters, banners,
+refusals, compaction boundaries, unsupported-content notices, resolved answers
+and channel posts remain retained source vocabulary. Their values, timestamps,
+visibility, producing-session provenance and neutral lifecycle facts feed the
+fold; they produce no raw app frames, inert receipts, new content replay copies
+or connect-time roster snapshots. This holds for apps without `thread`, absent
+clients and nil/failed history. Storage failure cannot restore publication.
 
-Standalone banners, runtime/startup and resolved prompt-answer receipts, and
-channel-post raw content publication are also retired for every app (#3737).
-No raw `banner`, post `assistant_delta`/`turn_end`, inert substitute receipt or
-new content replay copy is produced on initial connection, live output or
-reconnect, with or without `thread`. Source recording retains values,
-timestamps, visibility and captured provenance, including without clients;
-absent/failing storage never restores publication. With working storage,
-thread clients observe saved facts and completed posts through canonical live
-items and explicit catch-up. Open prompts, single dismissals, controls and
-ordered live state remain supported with their conversation/session/generation
-identity. Replay admission/pump retirement belongs to #3738, shared event-ring
-storage/`SetReplaySource` removal to #3739; parent #3718's final family acceptance
-remains separate.
+Open prompts and single dismissals, tool/task progress and actions, retries,
+compaction progress, model/session settings and catalogs remain supported.
+Their live readings/clears keep conversation/session/generation identity,
+host isolation and ordering with thread delivery. Task stop acceptance alone
+establishes no completion. Thread backfill requires an explicit named request;
+handshake and listing do not initialize content.
 
-Background-agent lifecycle and roster values remain source history for canonical
-thread items and explicit catch-up (#3735). No app receives their raw content
-frames, agent receipt banners or connect-time roster snapshots, including apps
-without `thread`. Task progress and stop controls remain supported; stop
-acceptance alone does not establish completion. Nil/failed history cannot restore
-these publications.
-
-The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
-`tool_denied` and `turn_end` as source history for canonical thread updates and
-explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
-appended reconnect copies to any app, including connections without `thread`
-(#3734). Supported live state remains separate. Nil or failed history does not
-restore raw content delivery or substitute receipts. Channel-post
-`assistant_delta` and `turn_end` likewise remain source history only (#3737).
+This supersedes ADR 042's transitional unchanged-stream rule for non-thread
+apps, preserving its source/live-state contract. Replay admission/pump retirement
+belongs to #3738 and shared ring/`SetReplaySource` removal to #3739. See the
+[integrated Linux acceptance and retained dispositions](knowledge/features/thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718).
+Existing operator/approval holds remain in force.
 
 Unchanged from v1 except where noted. Emitted types below are sent as the **decrypted payload of a `noise_msg`** (post-handshake) or as the **early-data payload of a `noise_init` / `noise_resp`** (during handshake — only `hello` and `hello_ack` ride there). Rows marked declared describe contracts ahead of production delivery.
 
@@ -1101,7 +1083,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `hello` | phone → binary | yes (in `noise_init`) | Includes the device-token; optional `last_event_id` for mid-turn reconnect replay (#647). Also accepts `last_seen_ts`, which **no daemon code reads** — it is decoded and dropped, drives no backfill, and a `hello` carrying it behaves identically to one omitting it (#2090). |
 | `hello_ack` | binary → phone | yes (in `noise_resp`) | Includes `conn_id`; for an authorised peer, may include the daemon host's absolute `workspace_root` for resolving relative workspace paths. |
 | `send_message` | phone → binary | no | Operator sends are observed through canonical thread items and explicit catch-up; raw user-message pushes and queued acceptance, delivery, drop and loss receipts are retired for every app. See [Queue observation and delivery identity](#queue-observation-and-delivery-identity). Carries an **optional** `attachment_ids` — the uploaded attachments this message references, so the daemon names them instead of inferring the set from upload order or arrival timing (#2036). Each element is a lowercase UUIDv4 per [The `attachment_id` shape](#the-attachment_id-shape); **at most 32 per message**, counting elements rather than distinct ids. A message naming none **omits the key entirely** — `null` and `[]` are also accepted and a receiver cannot tell the three apart. **Consumed since #2038**: the daemon names each attachment's on-host path in `claude`'s prompt, refuses an over-bound list with `protocol.malformed`, and deduplicates a repeated id. See [Naming a message's attachments](#naming-a-messages-attachments). **Two fixed literals in `text` are exceptions to ordinary message delivery**: `/clear` (#2456) and `/reset` (#3607), independent of `slash_command_list`. After trimming, either must be the first whitespace-delimited token, matched case-sensitively with Unicode whitespace boundaries; trailing text after whitespace is discarded too. `/clear extra` and `/reset extra` reset; `/clearcache`, `/resetfoo`, `/RESET`, `/Reset` and `please /reset` remain ordinary messages. Payload decoding, the attachment-count bound and conversation routing still reject invalid requests before interception. For a valid, routable match, the daemon sends the ordinary `ack` **before** calling `StartNewSession` for that conversation, using the same wrap-up, handoff and rotation routine as a named `new_session` (see [`resetting`](#resetting)). Neither literal is enqueued or delivered to claude. Its `attachment_ids` are dropped without resolution, so they cannot produce `attachment.not_found`; the handler neither touches `LastUsedAt` nor auto-names the conversation. The reset is **not gated on the negotiated `interactive` capability** the way the `resetting` frames themselves are: a non-interactive client can use either literal but does not see those frames. An absent resetter or any reset error, including a refused workspace, still drops the message with only the ordinary `ack`; there is no `new_session.workspace_refused`-shaped reply on this path. Only a successful reset invalidates held reply suggestions; refusal preserves them (see [Clear and invalidation](#reply_suggestion)). A client that renders its own optimistic echo of either literal as a sent row will not find that row in history after a reload, since the daemon never delivers the message — the session delimiter appears with nothing above it. Accepted, not a bug. Also carries an **optional `client_sent_at`** (RFC 3339, #2704): when the client says Send was tapped, on the client's own clock. An absent or unparseable value is **dropped, not refused** — the message is enqueued and delivered exactly as if the key were missing. It is never used for ordering (the client's clock may be wrong) and never logged. See [A history entry](#a-history-entry) for where it, and the sender's device name and app version, land on the stored turn. |
-| `message` | binary → phone | no | v1 / dispatch-leg coarse assistant-turn type; v2 assistant output uses the structured interactive stream (#699). Queued sends are observed through canonical thread items and explicit catch-up; queued acceptance, delivery, drop and loss facts produce no legacy receipts (#3733). Raw user-message pushes and their reconnect replay publication are retired for every app (#3732), including connections without `thread`. Safe delivery source records remain internal history inputs; see [Queue observation and delivery identity](#queue-observation-and-delivery-identity). |
+| `message` | binary → phone | no | Retired app content type; v2 assistant output uses authoritative thread updates and explicit catch-up (#3718). Queued sends are observed through canonical thread items and explicit catch-up; queued acceptance, delivery, drop and loss facts produce no legacy receipts (#3733). Raw user-message pushes and their reconnect replay publication are retired for every app (#3732), including connections without `thread`. Safe delivery source records remain internal history inputs; see [Queue observation and delivery identity](#queue-observation-and-delivery-identity). |
 | `list_conversations` | phone → binary | no | |
 | `conversations` | binary → phone | no | Reply to `list_conversations`, correlated by `in_reply_to`. Every row carries **`current_session_id`** (#940): an **always-present JSON string** copied from that conversation's stored session binding, including `""` when unbound. This supplies initial session ID discovery on the first list response, without waiting for a transition frame or making an extra `request_session_settings` request or `/clear`. A nonempty binding does **not** guarantee a running process or a successful session-scoped mutation. Every row carries **`workspace_label`** (#2208): the operator-set display name stored for that row's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every row of every reply, so a client may treat a missing one as a malformed row rather than as an unlabelled workspace, and before any workspace is ever named every row carries `null`. It is keyed by **workspace, not conversation**: rows sharing one `cwd` carry the same value, a row never carries a neighbour's, and the only thing that changes it is [`rename_workspace`](#renaming-a-workspace) — which is how a client that renames on one device sees the new label on another. **Archived rows are not exempt**: this reply is unfiltered, and archiving a conversation does not un-name its folder. The value is a stored opaque string echoed **verbatim**; as [§ Renaming a workspace](#renaming-a-workspace) already states, its 128-byte bound is a size limit and not a safety property, so rendering it safely is the client's job. Every row also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation, `false` by default. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, which is how a client paired with an older daemon keeps notifying rather than silently going quiet. Both clients raise their own alerts from events they already receive; the daemon only stores and reports this flag. Every row also carries **`archived_at`** (#2698): an RFC3339 UTC timestamp for the moment `archive_conversation` archived this row. Archiving it again keeps the original stamp, and `unarchive_conversation` clears it back to `null`. **Nullable but never omitted** — `null` on every active row, and also on a row archived before this field existed, so a client cannot distinguish "never archived" from "archived, no stamp recorded" and falls back to ordering those rows by `last_used_at`. Clients order the Archive screen newest-archived-first by this value. `conversation_updated` does not carry this field. Every row carries **`read_up_to`**, the host operator's durable read mark, as an always-present unsigned 64-bit integer including `0`, shared by every paired client/device on this host. The only unread evidence is authoritative **`last_shown_version`** on connections that negotiated `thread`: unread is `last_shown_version > read_up_to` when that field is present. Absent shown evidence means unknown, never zero. Every otherwise eligible row survives unavailable evidence with its shown field omitted; listing succeeds without legacy history, including an empty registry. The `latest_entry_id` field and whole-list legacy-history refusal are retired (#3722). [`mark_conversation_read`](#marking-a-conversation-read) raises the durable mark and still refuses retryably when authoritative evidence is unavailable. **`agent`** (`"claude"` \| `"codex"`, #2643) is the agent that runs the row's bound session — present only for a conn that negotiated the [`multi_agent`](#capability-negotiation-v2) capability, `omitempty` so it is absent, not `null`, for a conn that did not. A conversation with no bound session, or one whose bound session the daemon does not hold, reads `"claude"`. **A conn that did not negotiate `multi_agent` is not merely sent an unlabelled row: every row whose agent is `"codex"` is left out of the reply entirely**, so it receives only Claude rows, and every remaining row carries no `agent` key at all. Optional **`last_shown_version`** on negotiated thread connections comes from usable loaded status or an eligible unloaded clean certificate (#3330), whose consumed version V must exactly equal independently known current raw history progress H: absent for stale/invalid evidence or unknown progress, numeric `0` for authoritative zero including valid empty evidence at V = H = 0; see [`conversations`](#conversations). It tracks shown thread additions/text appends and preserves the stored binding and durable read mark.  Every row also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; an absent field from an older host means unpinned. All list/update producers preserve stored pins, including command-package announcements (#3538). See [pin requests](#set_conversation_pinned) for the host-local contract. |
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
@@ -1218,46 +1200,15 @@ Payload shapes inherited from v1 are preserved in git history (the v1 doc has th
 
 ### Daemon thread updates (v2, supplied delivery contract)
 
-Session transitions, both model-refusal notices, compaction boundaries and
-unsupported-content notices are source history only (#3736). No app receives
-`session_transition`, `model_refusal_fallback`, `model_refusal_no_fallback`,
-`compaction_boundary` or `unrecognized_message` frames, new replay copies or
-substitute transition-divider receipts, including apps without `thread`.
-Retained transition and `session_divider` records feed canonical session dividers;
-retained content notices feed canonical notice/compaction items and explicit
-catch-up. Recording continues without clients; nil/failed history never restores
-raw publication. Model/settings/catalogs, prompts, progress, retry and compaction
-live state and controls retain their separate delivery, source tags and ordered
-readings/clears.
-
-Standalone banners, runtime/startup and resolved prompt-answer receipts, and
-channel-post raw content publication are also retired for every app (#3737).
-No raw `banner`, post `assistant_delta`/`turn_end`, inert substitute receipt or
-new content replay copy is produced on initial connection, live output or
-reconnect, with or without `thread`. Source recording retains values,
-timestamps, visibility and captured provenance, including without clients;
-absent/failing storage never restores publication. With working storage,
-thread clients observe saved facts and completed posts through canonical live
-items and explicit catch-up. Open prompts, single dismissals, controls and
-ordered live state remain supported with their conversation/session/generation
-identity. Replay admission/pump retirement belongs to #3738, shared event-ring
-storage/`SetReplaySource` removal to #3739; parent #3718's final family acceptance
-remains separate.
-
-Background-agent lifecycle and roster values remain source history for canonical
-thread items and explicit catch-up (#3735). No app receives their raw content
-frames, agent receipt banners or connect-time roster snapshots, including apps
-without `thread`. Task progress and stop controls remain supported; stop
-acceptance alone does not establish completion. Nil/failed history cannot restore
-these publications.
-
-The interactive emitter retains `assistant_delta`, `tool_use`, `tool_result`,
-`tool_denied` and `turn_end` as source history for canonical thread updates and
-explicit catch-up; it sends no raw assistant/tool/turn-end frames or newly
-appended reconnect copies to any app, including connections without `thread`
-(#3734). Supported live state remains separate. Nil or failed history does not
-restore raw content delivery or substitute receipts. Channel-post
-`assistant_delta` and `turn_end` likewise remain source history only (#3737).
+Retained content sources feed the fold; compatibility content publication is
+removed for every app. The [application-message boundary](#application-message-types)
+covers assistant/tool/completion, agent/roster, session/notice, banner, resolved
+answer and channel-post content, including nil/failed history and peers without
+`thread`. Supported live controls/readings remain separate and ordered with
+thread updates. Initial connection supplies current live state; content backfill
+requires explicit thread catch-up/pages. The
+[integrated acceptance record](knowledge/features/thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
+closes the content-publication slice without claiming downstream replay removal.
 
 `thread_item_added`, `thread_item_changed` and `thread_text_append` have a
 per-connection relay delivery contract (#3081), including the bounded codec
@@ -3650,6 +3601,10 @@ appended reconnect copies to any app, including connections without `thread`
 restore raw content delivery or substitute receipts. Channel-post
 `assistant_delta` and `turn_end` likewise remain source history only (#3737).
 
+All retired content families follow the [application-message boundary](#application-message-types),
+including agent/roster, session/notice and banner sources. Resolved answers are
+saved facts consumed by canonical notices; open prompts and dismissals stay live.
+
 For retired content types, field tables and payload descriptions below document
 stored fold inputs, including historical envelope bounds; they are not app
 delivery promises. Other live frames are sent **binary → phone
@@ -5820,7 +5775,8 @@ these publications.
 
 Thread peers bypass this legacy event-ring replay and `resync`; recover each
 open conversation through explicit canonical catch-up. The ring behavior below
-applies to peers without `thread` and does not restore retired agent content.
+applies to supported fallback live state for peers without `thread`; no retired
+content family is restored. Replay infrastructure removal remains #3738/#3739.
 
 The inbound half of the [replay cursor](#interactive-events-v2-capability-gated). On mid-turn reconnect a phone advertises the latest `event_id` it saw as `hello.last_event_id` (see [`hello`](#hello-v2-specific-note)). The daemon resolves the conversation to replay from its **own** current cursor — never from anything the phone sends — and queries the bounded per-conversation event ring (ADR 025 § Backpressure / replay):
 

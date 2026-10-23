@@ -38,8 +38,11 @@ identities; task progress and bound-session stop controls remain supported.
 The counted Linux live gate passed `TestRealClaudeStopBackgroundTaskCompletion`
 and `TestRealClaudeComposerStopPreservesBackgroundTask` on `ad1cb1aec214`;
 [the linked evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#shadow-lifecycle-and-evidence)
-distinguishes that acceptance from offline helpers and parent #3718's remaining
-family acceptance. Stop acceptance alone cannot establish completion.
+distinguishes that child acceptance from offline helpers. The
+[integrated acceptance](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
+closes #3718's retained lifecycle/source-reader findings with actual envelopes
+and counted current-reader live proof. Stop acceptance alone cannot establish
+completion.
 
 Session transitions, refusal notices, compaction boundaries and unsupported
 content likewise remain retained sources with no raw frames, new replay copies
@@ -50,7 +53,7 @@ neutrality and source isolation; its storage controls prevent publication from
 returning when history fails. The
 [counted Linux evidence and ordering lessons](thread-package-shadow-lifecycle-and-evidence-retirement.md#session-and-content-notice-retirement-3736)
 include the subsequent deterministic and configured live passes on `9ebba3462074`.
-They do not establish #3718's final family acceptance.
+Their child scope is supplemented by the integrated evidence linked above.
 
 Standalone banners, runtime/startup and resolved prompt-answer facts, and channel
 post chunks/completion also retain source recording without raw frames, new
@@ -60,8 +63,9 @@ prompts, dismissals, controls and ordered live state remain supported.
 [Residual retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737)
 records prompt responsiveness, completion-before-wake/recovery and counted Linux
 prompt/hook acceptance, preserving original failures. Replay admission/pump and
-shared ring/`SetReplaySource` retirement remain #3738/#3739; #3718 still owns final
-family acceptance.
+shared ring/`SetReplaySource` retirement remain #3738/#3739. Integrated #3718
+acceptance supersedes ADR 042's transitional compatibility-publication rule;
+its retained source/live-state contract and existing operator/approval holds remain.
 
 ### Reusable fold regression corpus
 
