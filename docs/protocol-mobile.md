@@ -1253,6 +1253,35 @@ conversation. Reconnect reconciles current transient readings; explicit
 catch-up from the last completed checkpoint initializes thread items. Live
 publication alone does not backfill them.
 
+With an available binary transport, producer-gap retirement delivers exact
+WebSocket close `4414` through the ordered output path. A write already selected
+before retirement may finish within its existing five-second delivery deadline;
+the close follows that frame, and any frame attached to the terminal routing
+envelope precedes the close. Quarantined dependent output cannot be selected or
+spend another Noise nonce. Retiring this consumer preserves the shared binary
+socket generation and unrelated admitted peers. The first latched cause wins:
+an earlier byte or hosted-capacity overflow remains `4413`, while a genuine gap
+latched first remains `4414`.
+
+If transport is unavailable or the selected write expires, retirement releases
+the pending work and attempts the terminal close within its own five-second
+delivery deadline. Failed delivery is not successful receipt; a disconnected
+phone may receive no close. Run shutdown cancels terminal work, and a replacement
+handshake fences any old close from reaching the replacement connection.
+
+After `4414`, perform a fresh authenticated Noise handshake with `interactive`
+and `thread`, then explicitly request `thread_catch_up` for the same named
+conversation using the last **completed** epoch/version checkpoint. Do not
+resend input already accepted before disconnection: its retained user item and
+completed thread content are recovered by catch-up with their receiving source
+and session identity. If the checkpoint receives `thread_reset`, initialize
+with version zero for the newest window and use pages for older items as needed.
+Only the query's separate successful final marker advances the checkpoint;
+partial items and reset do not. Current source-owned transient state, including
+terminal idle, reconciles separately. Hello alone never queries thread content,
+and reconnect retains the existing authentication, eligibility and query/live
+fencing rules. See [thread query messages](#thread-query-messages).
+
 **Total scheduling/coalescing waiting is at most 250 ms** from a committed fold
 change becoming usable to enqueueing its update. Discovery and following each
 wait at most 50 ms (at most 100 ms together); store batches coalesce text without

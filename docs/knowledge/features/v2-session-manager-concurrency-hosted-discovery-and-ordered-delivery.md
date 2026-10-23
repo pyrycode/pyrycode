@@ -12,14 +12,31 @@ same-ID reconnect. A delivered page is finished work; its cursor holds no worker
 `TestHostedDiscoveryBlockedRead` requires retirement and `app.busy` responses
 before releasing the read, then verifies capacity recovers without a late page.
 
-`HostedAppsChanged` runs under the registry's commit mutex. It holds only the
-leaf `hostedMu` for bounded inbox admission and signals a coalesced wake; it never
-accesses mutable session/cipher state, performs peer I/O, creates workers or
-calls the registry/unsubscribe. Waiting for transport here would block both
+`HostedAppsChanged` runs under the registry's commit mutex. Bounded inbox
+admission holds `hostedMu` then `pushMu` through the retirement check and any
+context cancellation, then signals a coalesced wake. A latched producer gap
+skips the callback without cancelling the selected write. A live callback that
+exhausts capacity latches ordinary overflow before cancelling its inbox, so a
+later gap cannot replace its `4413` cause. Both locks are released before Run
+teardown or transport I/O; no path acquires `hostedMu` while holding `pushMu`.
+The callback never accesses mutable session/cipher state, performs peer I/O,
+creates workers or calls the registry/unsubscribe. Waiting for transport here would block both
 mutations and registry readers. `Run` drains distinct generation inboxes and
 rechecks paired authorization before sealing. Handshake installs the inbox
 before any list request; list cancellation retires list work without removing
 lifecycle eligibility. See [registry callback ownership](apps-package-concurrency-and-testing.md#concurrency-and-persistence).
+
+Preserving the numeric terminal cause only when Run consumes callback overflow
+is too late: callback cancellation can already have retired the shared socket
+through its admitted writer. `TestProducerGapCallbackAdmission` fills capacity
+through actual callbacks while a selected transport write is held before
+publication, then invokes a callback after retirement or blocks it at admission
+across retirement. It requires uncancelled contexts, selected phone frame then
+exact `4414`, no dependent nonce, the original binary generation and an unrelated
+authenticated peer. Setting an overflow flag without an active writer misses
+this boundary. `TestProducerGapCallbackFirstCause` separately preserves
+callback-first `4413`. See
+[retirement quarantine](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md).
 
 The control/ordinary output lane and callback handoff share at most 16 envelopes
 per connection, including active delivery, queued output, pending lifecycle callbacks
@@ -146,10 +163,10 @@ batch without destination admission would turn delayed transport completion
 into an overflow close. `drainOnce` reserves one slot before popping, transfers
 it once into `hostedEnqueue`, and releases unused capacity if forwarding filters
 or rejects the head. Callback admission competes atomically with that reservation
-and may still retire the generation on genuine overflow. `pushMu` and `hostedMu`
-are taken separately. Candidate selection alone cannot protect quarantine across
-that off-lock admission: the final pop must reread the queue's retirement latch
-under `pushMu`, or `RetireLiveState` or byte-ceiling retirement could leave a
+and may still retire the generation on genuine overflow. Reservation and pop
+take `hostedMu` and `pushMu` separately. Candidate selection alone cannot protect
+quarantine across that off-lock admission: the final pop must reread the queue's
+retirement latch under `pushMu`, or `RetireLiveState` or byte-ceiling retirement could leave a
 quarantined head eligible for delivery. `TestHostedPushAdmissionRetirement`
 forces both races and checks that declined output returns its reservation.
 
@@ -295,7 +312,11 @@ return so failed/cancelled prefix sends cannot strand the observer. The shared
 catch-up/page fixture in `testThreadQueryInterrupted` applies these two barriers
 before interrupting and awaiting sender completion.
 
-`pushSource` cancels an active thread query before looking up its push queue.
+For a live queue, `pushSource` cancels an active thread query before its enqueue
+lookup. `cancelThreadQuery` holds `hostedMu` then `pushMu` and checks retirement
+through cancellation; a quarantined push must leave the selected query write
+intact. An entry-only `pushRetired` check would race retirement while waiting for
+`hostedMu`. `threadQueryGate` uses the same order for query-marker cuts.
 Cancellation of a sealed page can retire the connection before that lookup, so
 the interrupting live push may return `ErrConnNotFound`. Requiring successful
 admission races the required retirement. `TestThreadCatchUpInterrupted` and
