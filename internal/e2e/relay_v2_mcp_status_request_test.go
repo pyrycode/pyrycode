@@ -76,7 +76,7 @@ func consumeMCPBootstrap(t *testing.T, home string, next scenario.Next) {
 		if json.Unmarshal(env.Payload, &got) != nil || got.ConversationID == "" {
 			t.Fatal("invalid bootstrap status")
 		}
-		for _, entry := range readHistoryEntries(home, got.ConversationID) {
+		for _, entry := range scenario.SourceSnapshot(t, home)(got.ConversationID) {
 			if entry.Type != protocol.TypeMCPStatus {
 				continue
 			}
