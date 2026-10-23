@@ -38,11 +38,22 @@ func (m *V2SessionManager) HostedAppsChanged(change apps.Change) {
 	if m.hostedStopped {
 		return
 	}
-	for _, in := range m.hostedInboxes {
+	for connID, in := range m.hostedInboxes {
 		if !in.subscribed || in.retired || in.overflow {
 			continue
 		}
+		// Callback admission and cancellation share retirement's first-cause
+		// latch, under the hostedMu-before-pushMu lock order.
+		m.pushMu.Lock()
+		q := m.queues[connID]
+		if q != nil && q.overflowed {
+			m.pushMu.Unlock()
+			continue
+		}
 		if in.used == hostedQueueLimit {
+			if q != nil {
+				q.overflowed = true
+			}
 			in.overflow = true
 			in.pending = nil
 			in.cancel()
@@ -50,6 +61,7 @@ func (m *V2SessionManager) HostedAppsChanged(change apps.Change) {
 			in.used++
 			in.pending = append(in.pending, &hostedOutput{typ: typ, payload: payload, unsolicited: true})
 		}
+		m.pushMu.Unlock()
 	}
 	select {
 	case m.hostedChanges <- struct{}{}:
