@@ -108,3 +108,75 @@ Pending for the documentation stage; reconcile the already-merged child handoffs
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-23
+
+## Evidence review — 2026-10-23
+
+Reviewed integrated base `1ac43b7e8d9346f77e7dbfac004c3e743a27b1a7` and its
+documentation-only descendant on `feature/3719`. PR #3838 merged at `ecc719bf`,
+PR #3839 at `9e1882b1`, and PR #3840 at the integrated base. All three causal
+dependencies are closed and their accepted sources are ancestors. No new
+integration correction or uncovered combined behaviour was found.
+
+Accepted stage sources:
+
+- **R38:** #3738 verifier run `f2db2a930e80c154dae1ad88281a0e81fa0c7ab776763f83c6b39154e7ab0ff6`, candidate `ce0f0169ae4b6aa18d642d6f931ecc2d604439e3`, PASS without findings; bundle digest `7837dbf70006efdd2e911f46101959568e3b5ef2442863fb6cda1fd1234d1c78`.
+- **R39:** #3739 verifier run `f26e1e0f1e599c9285b9d1c1081cd7dc26aaa0ba46a1ee803b0da913ca49f86e`, candidate `52fdaeca7a4d664cbe3c05c75f961995e368f694`, PASS with the inherited comment finding; bundle digest `0dde91191674cacca738b4cd2530be4a9f03befed74b8b93034c9c7bfff28c64`.
+- **L18:** #3718 accepted live run `a601bc69c25946658ebd6237376d4340b3dbcaf27dea31051f3c24e889a46ba5`, candidate `74387269216c2ce891c4436e8956c33218d6d456`. Both required reader consumers passed: `TestInteractiveStreamMultiTurnContinuity` and `TestInteractiveConversationSystemPrompt_ReachesTheReply`. This is ancestor publication evidence, not current #3719 live acceptance.
+
+All downloaded bundle checksums match; full unit/fake logs also match each
+bundle's retained-pointer SHA-256. L18's full retained log hash matches too.
+Counts were independently read from those full logs, not their truncated tails.
+R39 already contains both removals and the projection repair. Its entire diff to
+the integrated base contains only knowledge documentation; this ticket changes
+only this plan. Production, tests, dependencies and build inputs are identical,
+so R39's combined-behaviour proof remains applicable. R38 explains the earlier
+retirement; R39 supersedes its old storage fixtures. This applicability review
+does not bypass the dispatcher's separate exact-candidate gate/retention rules.
+
+| Obligation from original archive/current criteria | Integrated source and retained proof |
+| --- | --- |
+| Ignore absent/zero/stale/max/string/object/array/null cursor; no replay/resync or later muting | `HelloClientPayload` lacks the field; `handleNoiseInit` ignores unknown JSON keys. R39 `TestV2Session_LastEventIDIgnored` covers both capability postures, same/other conversation updates, another connection and fresh-cipher reuse of a closed connection ID. |
+| Explicit per-open-conversation catch-up, pages, reset and final completion | R39 `TestThreadRecoveryAfterReconnect`, `TestThreadCatchUpRequestedScope`, `TestThreadPageRequestedScope`, `TestThreadCatchUpAdmission`, `TestThreadPageAdmission`: no implicit provider call on hello; unusable checkpoint resets; explicit newest window/page returns scoped content and final boundary. |
+| Remove pump/watermarks/guards, raw resync, setter, storage/wiring/config and exclusive assertions/helpers | Merged #3738 deletes `v2session_replay.go` and replay-only tests while moving snapshot handling; #3739 deletes `internal/eventring` and ring-only fixtures. Removed-symbol/source inventory finds no surviving production replay consumer or raw resync assertion. Remaining legacy cursor injection is test-only; generic `Envelope.EventID` remains intentionally. |
+| Durable source history and `HistoryEntryID`, including zero recipients and nil/failed storage | Ring-free `publishLiveState`; R39 `TestLiveProducers_HistoryEntryID` and retained daemon history/provenance tests compare durable records with actual fanout and retain envelope ordering. |
+| Outstanding prompts/current live truth and snapshot refusals | R39 modal/question/model/slash/turn-phase reconciliation families, `TestLiveStateConnect`, `TestLiveStateGates`, `TestV2Session_OpenState_RequestSnapshot`; no obsolete ring tail gates supported state. |
+| Conversation/host isolation and bounded ordered delivery | R39 requested-scope/admission tests, `TestHostedLifecycleHostIsolation`, `TestLiveStateOrdering`, `TestHostedPushCapacityPendingFence`, `TestHostedPushCapacityTeardown`, `TestV2Session_Push_ByteCeilingTearsDownSession`. |
+| Transport-down nonce safety, reconnect flushing, rekey and teardown | R39 `TestV2Session_InlineReply_TransportDown_BurnsNoNonce`, `TestV2Session_Push_ReconnectWhileDownDoesNotSeal`, `TestV2Session_Push_FlushesOnReconnectSignal`, `TestV2Session_RekeyInitiator_Emit_ReArmViaResponder`, hosted teardown and session-sweep/reconnect checks. |
+| Surviving deletion observers with/without relay; sweep/cancellation/recreation | `cleanupOnConversationDelete` composes surviving owners in both wiring paths. R39 `TestConversationDeleteCleanup`, `TestConversationDeleteCleanup_NilRegistry`, `TestThreadShadowRemoval`, `TestReplyFallbackRegistryRemovalCancellation`, `TestDaemonLiveConversationRemoval`, `TestDaemonLiveNoRelayRemoval`. |
+| ID-free canonical model pushes project once; retained readings/correlated replies do not merge twice | `forwardEnvelopeSource`, `mergedForConn`, `reconcileModelLists` carry explicit projection provenance. R39 `TestV2Session_PushedModelList_MergedForMultiAgentConn`, `TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision`, `TestLiveStateReplies` and daemon catalog/reconnect regressions. |
+
+Linux x86_64 retained counts below are executed/passed/failed/skipped. Offline
+rows count parent/subtest terminal events; L18 explicitly counts leaves.
+
+| Selection | Executed | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| R38 `go test -timeout=30m -race -json ./...` through admission | 30690 | 30690 | 0 | 27 |
+| R38 `check-restoration.py` separate required proof | 202 | 202 | 0 | 0 |
+| R38 `go test -timeout=30m -tags e2e -race -count=1 -json ./internal/e2e/...` through admission | 2174 | 2174 | 0 | 2 |
+| R39 same admitted unit/race selection | 30641 | 30641 | 0 | 27 |
+| R39 same admitted fake-integration selection | 2174 | 2174 | 0 | 2 |
+| L18 configured live selection, leaf counts | 2264 | 2264 | 0 | 27 |
+
+R39's cite/docs guards, vet, 30 helper tests, staticcheck, substrate guard and
+build passed. R39's restoration selector required no repeat; R38's exhaustive
+proof remains separate evidence. Child tagged checks for `e2e`, `e2e_realclaude`
+and `e2e_liverelay` compiled successfully and executed zero live tests. No tests,
+native task, full gate, paired capture or live suite was launched by this review.
+
+Dispositions: preserve R38's original relay fixture failure (1834 RUN / 1832
+passed / 2 failed / 0 skipped), its repaired 2/2 selection, R39's controlled-red
+and fixture-build attempts, and #3718's original PR live-selection FAIL separately
+from their accepted reruns. No historical failure or hold is erased. The
+`reconcileModelLists` ring/dedup comment remains an explicit inherited nonblocking
+SHOULD FIX from R39; no functional defect or correction is claimed here.
+
+Pending: this PR's configured verifier/dispatcher acceptance; required slow checks
+including `TestDaemonThreadMetadataReadiness` and
+`TestPushWakeFeedbackExpiryIntegration`; other skipped opt-in/environment checks
+under their existing owners; configured release/live acceptance if selected;
+and the documentation handoff above. No skip is a pass. macOS is outside this
+Linux ticket's verification scope. No deployment, migration or hold release.
+
+## Revisions
+
+- 2026-10-23: Evidence inspection distinguished the live gate's leaf tally (2264 passed) from its raw terminal-event tally (2544 passed, including parents). Report its accepted leaf counts separately from the offline parent/subtest counts; both have zero failures and 27 skips. This changes evidence units, not product scope or acceptance requirements.
