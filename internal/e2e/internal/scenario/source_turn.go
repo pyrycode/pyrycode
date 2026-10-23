@@ -231,6 +231,13 @@ func sourceFacts(t *testing.T, sources []SourceFacts, conv string) []history.Ent
 
 func (s *sourceTurn) idle(t *testing.T, env protocol.Envelope, conv string) bool {
 	t.Helper()
+	if env.SessionStateCleared {
+		var id string
+		if json.Unmarshal(env.ConversationID, &id) == nil && id == conv {
+			s.liveIdle = nil
+		}
+		return false
+	}
 	if env.Type == protocol.TypeTurnState {
 		var p protocol.TurnStatePayload
 		if json.Unmarshal(env.Payload, &p) != nil {
