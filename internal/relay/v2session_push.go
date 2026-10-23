@@ -51,10 +51,10 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 }
 
 func (m *V2SessionManager) push(ctx context.Context, connID string, env protocol.Envelope, live *LiveState) error {
-	return m.pushSource(ctx, connID, env, live, false)
+	return m.pushSource(ctx, connID, env, live, false, false)
 }
 
-func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env protocol.Envelope, live *LiveState, ready bool) error {
+func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env protocol.Envelope, live *LiveState, ready, modelListProjected bool) error {
 	m.cancelThreadQuery(connID, env)
 	if err := ctx.Err(); err != nil {
 		return err
@@ -66,7 +66,7 @@ func (m *V2SessionManager) pushSource(ctx context.Context, connID string, env pr
 		return ErrConnNotFound
 	}
 	before := q.overflowed
-	dropped := q.enqueueSource(env, live, ready)
+	dropped := q.enqueueSource(env, live, ready, modelListProjected)
 	droppedCount := q.dropped
 	// Capture both the LEVEL (still latched ⇒ keep signalling) and the EDGE
 	// (just tripped ⇒ log once) under the same hold, so neither can be read
@@ -231,7 +231,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 			if err := m.forwardLiveState(ctx, s, *head.live); err != nil {
 				m.cfg.Logger.Warn("relay: supplied live state dropped", "event", "v2.live_state.invalid", "conn_id", connID)
 			}
-		} else if err := m.forwardEnvelope(ctx, connID, env); err != nil {
+		} else if err := m.forwardEnvelopeSource(ctx, connID, env, nil, head.modelListProjected); err != nil {
 			m.cfg.Logger.Debug("relay: v2 push drain drop", "event", "v2.push.drain_drop", "conn_id", connID, "err", err)
 		}
 		m.releaseHostedPush(s)
@@ -259,10 +259,10 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 // log level); they MUST NOT echo env, plaintext, ciphertext, or key
 // bytes, matching the package's no-AEAD-bytes-in-logs discipline.
 func (m *V2SessionManager) forwardEnvelope(ctx context.Context, connID string, env protocol.Envelope) error {
-	return m.forwardEnvelopeSource(ctx, connID, env, nil)
+	return m.forwardEnvelopeSource(ctx, connID, env, nil, false)
 }
 
-func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, reading *LiveState) error {
+func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID string, env protocol.Envelope, reading *LiveState, modelListProjected bool) error {
 	supplied := reading != nil
 	s, ok := m.sessions[connID]
 	if !ok {
@@ -288,7 +288,7 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	if stale && !supplied {
 		return nil
 	}
-	unprojected := !supplied && env.InReplyTo == nil || supplied && reading.ModelListUnprojected
+	unprojected := !modelListProjected && (!supplied && env.InReplyTo == nil || supplied && reading.ModelListUnprojected)
 	env = m.mergedForConn(s, env, unprojected)
 	env = m.agentTaggedForConn(s, env)
 	env = m.threadProjected(s, env)

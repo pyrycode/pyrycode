@@ -520,7 +520,7 @@ func (m *V2SessionManager) hostedEnvelope(ctx context.Context, s *V2Session, env
 	}
 	if !s.hosted.pushReserved && env.Type != protocol.TypeRekeyRequest {
 		if !m.reserveHostedPush(s) {
-			if err := m.pushSource(ctx, s.connID, env, nil, true); err != nil {
+			if err := m.pushSource(ctx, s.connID, env, nil, true, false); err != nil {
 				m.cfg.Logger.Debug("relay: ordinary output handoff dropped", "event", "v2.push.drain_drop", "conn_id", s.connID, "err", err)
 			}
 			return true
