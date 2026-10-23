@@ -71,13 +71,13 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, pairing.Token)
-	consumeMCPBootstrap(t, home, scenario.PollingReceive(t, phone, recv))
+	poll := scenario.PollingReceive(t, phone, recv)
+	consumeMCPBootstrap(t, home, poll)
 
 	first := waitForRunnerStatus(t, h, 20*time.Second, "first child running",
 		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 	var statuses []protocol.MCPStatusPayload
 	source := scenario.NewSourceObserver(t, home)
-	poll := scenario.PollingReceive(t, phone, recv)
 	drainTurn := func(text string, reqID uint64) bool {
 		t.Helper()
 		source.Watch(mcpStatusConvID)
