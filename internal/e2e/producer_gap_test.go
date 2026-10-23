@@ -374,12 +374,16 @@ func TestRelayV2ProducerGapRecovery(t *testing.T) {
 			gapAwait(t, gate.retired)
 			mgr.ActiveConns(ctx)
 			unblock()
+			sawControl := false
 			for {
 				raw, err := phone.phone.ReceiveBytes(5 * time.Second)
 				if err != nil {
 					code, ok := phone.phone.LastCloseStatus()
 					if !ok || code != relay.StatusProducerGap {
 						t.Fatalf("phone close=%d present=%t err=%v", code, ok, err)
+					}
+					if !sawControl {
+						t.Fatal("phone close overtook selected control")
 					}
 					break
 				}
@@ -394,6 +398,7 @@ func TestRelayV2ProducerGapRecovery(t *testing.T) {
 				}
 				var e protocol.Envelope
 				_ = json.Unmarshal(plain, &e)
+				sawControl = sawControl || e.Type == protocol.TypeError && bytes.Contains(e.Payload, []byte("held control"))
 				if string(e.Payload) == `{"dependent":true}` {
 					t.Fatal("quarantined reading escaped")
 				}
