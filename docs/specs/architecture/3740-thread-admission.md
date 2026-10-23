@@ -138,3 +138,32 @@ strong admission check. Reset state is delivered through the production live
 publisher, whose current-state coalescing can omit superseded intermediate
 edges; the switch fixture still checks the inactive state before delayed
 publication, exclusion, successive agent attribution and durable delimiters.
+
+2026-10-23 verifier rework (`f1276c1f`, findings 1–4): finish the same supported
+fixture migration. Hosted resource peers offer and verify thread independently
+of hosted-app capability. Handshake catch-up uses correlated query completion
+and preserves every interleaved decrypted envelope on its phone for the next
+scenario receiver; it creates no disposable derived content reader. Receivers
+consume buffered frames before further decryption. Explicit generated clears
+remain distinguishable from readings, and scenario consumers handle them before
+validating prompt ownership or rate-limit vocabulary. Investigate terminal idle
+against supported source/session attribution rather than removing completion
+checks. Reconnect capacity coverage enumerates retained `ThreadLiveState`
+records, including generated clear, without post-admission manual pushes.
+
+The repair remains one admission behavior with its required consumer fixtures;
+the recorded grandchild/verification-floor exception still applies. Expected
+repair: 400–650 written lines, no new exported types, no production admission
+changes. Focused race proof covers hosted readiness, every named recorded/channel/
+eviction regression, reconnect model/slash/suggestion snapshots, shared scenario
+receiver and relay admission/auth/version/static-key/capacity tests. Tagged live
+compilation is required; full acceptance and live execution remain pending with
+the dispatcher. Tests cover repeated catch-up, interleaved snapshots, cleared
+prompt/readings, and terminal idle ownership under `go test -race`.
+
+Security review of this repair: PASS. The test-only receive buffer belongs to one
+phone and is synchronized; teardown discards it with that phone. Preserve Noise
+nonce order by storing decrypted envelopes without resealing or manufacturing
+content. Correlated acknowledgments and successful named queries prove supported
+admission. No new credential/log/path/subprocess/cryptographic boundary. Ownership,
+generic authentication refusals and source provenance checks remain required.
