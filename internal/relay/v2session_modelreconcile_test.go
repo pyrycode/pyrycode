@@ -352,12 +352,8 @@ func TestV2Session_ModelListReconcile_ContentFreeLogging(t *testing.T) {
 	}
 }
 
-// #2651: the opening conn's multi_agent decision reaches RetainedModelLists, so a
-// conn with the capability is reconciled with the merged, tagged lists and one
-// without it with today's, on the same daemon. #2652's MergedModelOptions is wired
-// too, as production wires both: the reconcile snapshot is already merged, so it
-// must reach the capable conn as RetainedModelLists built it, not merged again.
-func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testing.T) {
+// Raw model snapshots are projected once for each connection's multi_agent grant.
+func TestV2Session_ModelListReconcile_ProjectsRawSnapshotByCapability(t *testing.T) {
 	t.Parallel()
 
 	plain := sampleModelListPayload("conv-modellist-agents", "sonnet")
@@ -387,7 +383,7 @@ func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testin
 				Devices:            v2PairedRegistry(t, v2TestToken),
 				ServerID:           v2TestServerID,
 				Logger:             silentLogger(),
-				MergedModelOptions: gateMergeSeam,
+				MergedModelOptions: func([]protocol.ModelOption) []protocol.ModelOption { return merged.Models },
 				RetainedModelLists: func(multiAgent bool) []protocol.ModelListPayload {
 					if multiAgent {
 						return []protocol.ModelListPayload{merged}

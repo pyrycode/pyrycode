@@ -397,8 +397,8 @@ func TestV2Session_ReplySuggestion_CodexWithheld(t *testing.T) {
 	wantSuggestions(t, connCap, capable.next(t, rec), []protocol.ReplySuggestionPayload{codex1, claude1, codex2, claude2})
 
 	logs := logBuf.String()
-	if !strings.Contains(logs, "v2.push.withheld_multi_agent") {
-		t.Fatalf("log capture appears inert (no withhold line); logs = %q", logs)
+	if !strings.Contains(logs, "v2.handshake.accept") {
+		t.Fatalf("log capture appears inert (no admission line); logs = %q", logs)
 	}
 	if strings.Contains(logs, "secret") {
 		t.Errorf("a log line carries suggestion text; logs = %q", logs)

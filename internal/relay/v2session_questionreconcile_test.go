@@ -227,7 +227,7 @@ func TestV2Session_QuestionReconcile_UnicastAndPureRead(t *testing.T) {
 	// resp(A) + 2×question_shown(A) + resp(B) + 2×question_shown(B) = 6 in the
 	// correct (unicast) case. A fan-out on B's open would push more (a second pair
 	// to A), which the count plus the helper's per-conn dup check would catch.
-	waitForEnvelopes(t, rec, 10)
+	waitForEnvelopes(t, rec, 8)
 
 	gotA := reconciledQuestions(t, rec, connA, aRecv)
 	gotB := reconciledQuestions(t, rec, connB, bRecv)

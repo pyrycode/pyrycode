@@ -26,11 +26,8 @@ func sleepUntil(t time.Time) {
 
 // --- unsolicited push surface tests (#571) ---
 
-// buildMessageEnvelope constructs a fully-formed binary→phone `message`
-// envelope (TypeMessage + protocol.MessagePayload) — the shape cmd/pyry's
-// fan-out emitters hand to Push after enumerating open conns with ActiveConns.
-// text identifies the frame so the decrypting side can assert the payload
-// round-tripped intact.
+// buildMessageEnvelope constructs a control-frame fixture with recognizable
+// payload bytes for transport ordering and encryption assertions.
 func buildMessageEnvelope(t *testing.T, id uint64, text string) protocol.Envelope {
 	t.Helper()
 	payload, err := json.Marshal(protocol.MessagePayload{
@@ -550,9 +547,7 @@ func TestV2Session_Push_NonBlockingUnderStall(t *testing.T) {
 	// Arm the stall: the next forward (the first drained push) blocks in gated.
 	stall.Store(true)
 
-	// Pre-build push envelopes on the test goroutine (avoid building inside the
-	// pusher goroutine). Deltas with strictly-increasing IDs 0..nPush-1, enough
-	// to overflow the cap so the drop policy engages.
+	// Control frames with increasing IDs exercise the queue's soft count limit.
 	const nPush = pushQueueCap + 64
 	pushes := make([]protocol.Envelope, nPush)
 	for i := range pushes {
@@ -580,13 +575,12 @@ func TestV2Session_Push_NonBlockingUnderStall(t *testing.T) {
 		t.Fatal("Push calls did not return while outbound stalled — producer wedged")
 	}
 
-	// The buffer filled past cap, so the drop counter engaged. Read under the
-	// leaf lock. No more enqueues happen after this point, so dropped is final.
+	// Supported control frames remain retained beyond the soft count limit.
 	sess.mgr.pushMu.Lock()
 	dropped := sess.mgr.queues[v2TestConnID].dropped
 	sess.mgr.pushMu.Unlock()
 	if dropped != 0 {
-		t.Fatalf("dropped = %d, want 0 (buffer should overflow past cap=%d with %d pushes)", dropped, pushQueueCap, nPush)
+		t.Fatalf("dropped = %d, want 0 for supported control frames", dropped)
 	}
 
 	// Release the stall; the drain pumps the survivors one-per-pass. Exactly

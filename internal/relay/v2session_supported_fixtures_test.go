@@ -104,7 +104,7 @@ func startModelReconcileManager(t *testing.T, cfg V2SessionConfig) (*V2SessionMa
 	if cfg.RetainedModelLists != nil {
 		cfg.ThreadLiveState = func() func() (LiveState, bool) {
 			var readings []LiveState
-			for _, p := range cfg.RetainedModelLists(true) {
+			for _, p := range cfg.RetainedModelLists(false) {
 				raw, err := json.Marshal(p)
 				if err != nil {
 					t.Fatal(err)

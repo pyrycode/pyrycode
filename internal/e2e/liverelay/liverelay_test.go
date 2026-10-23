@@ -38,6 +38,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -619,9 +620,14 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	if err != nil {
 		t.Fatalf("decode noise_resp data: %v", err)
 	}
-	_, initSend, initRecv, err := initiator.ReadResp(respRaw)
+	earlyAck, initSend, initRecv, err := initiator.ReadResp(respRaw)
 	if err != nil {
 		t.Fatalf("initiator.ReadResp: %v", err)
+	}
+	var ackEnv protocol.Envelope
+	var ack protocol.HelloAckPayload
+	if json.Unmarshal(earlyAck, &ackEnv) != nil || ackEnv.Type != protocol.TypeHelloAck || json.Unmarshal(ackEnv.Payload, &ack) != nil || !slices.Contains(ack.Capabilities, protocol.CapabilityThread) {
+		t.Fatal("thread capability not acknowledged")
 	}
 	return initSend, initRecv
 }
