@@ -95,6 +95,34 @@ func consumeMCPBootstrap(t *testing.T, home string, next scenario.Next) {
 	t.Fatal("supported bootstrap MCP reading missing")
 }
 
+// consumeMCPReading validates public state independently of requester-only replies.
+func consumeMCPReading(t *testing.T, env protocol.Envelope, conv, session string) bool {
+	t.Helper()
+	if env.InReplyTo != nil {
+		return false
+	}
+	if env.SessionStateCleared {
+		var id string
+		if json.Unmarshal(env.ConversationID, &id) != nil || id != conv {
+			t.Fatal("MCP clear lost conversation identity")
+		}
+		return true
+	}
+	var got protocol.MCPStatusPayload
+	var owner string
+	if json.Unmarshal(env.Payload, &got) != nil || got.ConversationID != conv || got.DroppedServers != 0 || len(got.Servers) != 1 || json.Unmarshal(env.SessionID, &owner) != nil || owner != session {
+		t.Fatal("public MCP reading lost payload or source ownership")
+	}
+	initial := protocol.MCPServerStatus{Name: "pyry_mcp_test", Status: "failed", Error: "canned connection failure", Scope: "local", Version: "9.8.7-test"}
+	fresh := protocol.MCPServerStatus{Name: "pyry_mcp_fresh", Status: "connected", Scope: "project", Version: "10.0.0-fresh"}
+	pending := fresh
+	pending.Status = "pending"
+	if got.Servers[0] != initial && got.Servers[0] != fresh && got.Servers[0] != pending {
+		t.Fatal("public MCP reading differs from the controlled child")
+	}
+	return true
+}
+
 func sendMCPQueryTurn(t *testing.T, phone, observer mcpQueryPhone, requestID uint64, text string) {
 	t.Helper()
 	phone.source.Watch(mcpQueryConvID)
@@ -122,7 +150,7 @@ func drainMCPQueryTurn(t *testing.T, phone mcpQueryPhone, text string) (statuses
 		if env.Type == protocol.TypeError {
 			t.Fatal("turn refused")
 		}
-		if env.Type == protocol.TypeMCPStatus && !env.SessionStateCleared {
+		if env.Type == protocol.TypeMCPStatus && !consumeMCPReading(t, env, mcpQueryConvID, mcpQueryInitialUUID) {
 			statuses++
 		}
 	}
@@ -205,6 +233,9 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 			t.Fatalf("MCP status request returned error: %s", env.Payload)
 		}
 		if env.Type != protocol.TypeMCPStatus {
+			continue
+		}
+		if consumeMCPReading(t, env, mcpQueryConvID, mcpQueryInitialUUID) {
 			continue
 		}
 		statusCountA++

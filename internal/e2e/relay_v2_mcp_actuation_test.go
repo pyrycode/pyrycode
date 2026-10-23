@@ -65,7 +65,7 @@ func drainMCPActTurn(t *testing.T, phone mcpQueryPhone, text string) (statuses i
 		if env.Type == protocol.TypeError {
 			t.Fatal("turn refused")
 		}
-		if env.Type == protocol.TypeMCPStatus && !env.SessionStateCleared {
+		if env.Type == protocol.TypeMCPStatus && !consumeMCPReading(t, env, mcpActConvID, mcpActInitialUUID) {
 			statuses++
 		}
 	}
@@ -91,6 +91,9 @@ func awaitMCPActuationReply(t *testing.T, phone mcpQueryPhone, inReplyTo uint64)
 			t.Fatalf("actuation %d was refused: %s", inReplyTo, env.Payload)
 		}
 		if env.Type != protocol.TypeMCPStatus {
+			continue
+		}
+		if consumeMCPReading(t, env, mcpActConvID, mcpActInitialUUID) {
 			continue
 		}
 		if env.InReplyTo == nil || *env.InReplyTo != inReplyTo {
@@ -257,7 +260,7 @@ func assertMCPActuationRefused(t *testing.T, phone mcpQueryPhone, inReplyTo uint
 		if !ok {
 			t.Fatal("the gate neither answered nor refused an unprivileged device's actuation")
 		}
-		if env.Type == protocol.TypeMCPStatus {
+		if env.Type == protocol.TypeMCPStatus && !consumeMCPReading(t, env, mcpActConvID, mcpActInitialUUID) {
 			t.Fatal("an unprivileged device received an MCP status in reply to an actuation")
 		}
 		if env.Type != protocol.TypeError {

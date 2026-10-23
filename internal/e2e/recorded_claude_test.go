@@ -456,6 +456,8 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 			if json.Unmarshal(raw, &receipt) != nil || !receipt.Success || receipt.Frames == 0 {
 				t.Fatalf("incomplete Claude tape: %s", receipt.Error)
 			}
+			_, beforeStop := os.Stat(c.Claim + ".duplicate")
+			t.Logf("recorded seal: duplicate_before_stop=%t", beforeStop == nil)
 			h.Stop(t)
 			if _, err := os.Stat(c.Claim + ".duplicate"); err == nil {
 				t.Fatal("unrecorded additional Claude process")

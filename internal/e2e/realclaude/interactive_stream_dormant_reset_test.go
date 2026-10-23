@@ -109,9 +109,9 @@ func TestInteractiveStreamDormantResetAfterRestart(t *testing.T) {
 		ConversationID: clearConvID, Active: true,
 		Phase: protocol.ResetPhaseRestarting, Handoff: protocol.ResetHandoffWritten,
 	})
-	assertResetEdge(t, "inactive", w.edges[2], protocol.ResettingPayload{ConversationID: clearConvID})
-	if len(w.edges) != 3 || len(w.transitions) != 1 {
-		t.Fatalf("reset produced %d edges and %d transitions", len(w.edges), len(w.transitions))
+	w.assertClear(t, clearConvID)
+	if len(w.edges)+len(w.clears) != 3 || len(w.transitions) != 1 {
+		t.Fatalf("reset produced %d observations and %d transitions", len(w.edges)+len(w.clears), len(w.transitions))
 	}
 	tr := w.transitions[0]
 	if tr.edgesBefore < 2 || tr.payload.ConversationID != clearConvID ||

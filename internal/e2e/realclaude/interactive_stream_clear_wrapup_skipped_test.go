@@ -283,12 +283,7 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 		Phase:          protocol.ResetPhaseRestarting,
 		Handoff:        protocol.ResetHandoffSkipped,
 	})
-	assertResetEdge(t, "the falling edge", w.edges[2], protocol.ResettingPayload{
-		ConversationID: skipConvID,
-		Active:         false,
-		Phase:          "",
-		Handoff:        "",
-	})
+	w.assertClear(t, skipConvID)
 
 	// The retained rotation must be recorded after both rising live reset edges.
 	// Their daemon timestamps prove this independently of source polling time.
@@ -311,10 +306,10 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	// window rather than over awaitReset's own postcondition.
 	settleResetWindow(t, w, phone, initRecv, skipWindowQuiet)
 
-	if len(w.edges) != 3 {
+	if len(w.edges)+len(w.clears) != 3 {
 		t.Errorf("the client saw %d resetting frames across the whole window, want exactly 3 "+
 			"(wrapping_up, restarting, falling): %+v — a repeated active:true carrying a new phase is a phase "+
-			"change, not a second reset, so a fourth frame means something started one", len(w.edges), w.edges)
+			"change, not a second reset, so a fourth frame means something started one", len(w.edges)+len(w.clears), w.edges)
 	}
 	if len(w.transitions) != 1 {
 		t.Errorf("the client saw %d session_transition frames across the whole window, want exactly 1: %+v — "+
@@ -329,13 +324,13 @@ func TestInteractiveStreamClearWrapUpSkipped(t *testing.T) {
 	t.Logf("CAPTURE (#2486): a live /clear under -pyry-wrapup-deadline=%s ran the daemon's reset to "+
 		"completion with the wrap-up abandoned — resetting{active=%v phase=%q handoff=%q} → "+
 		"resetting{active=%v phase=%q handoff=%q} → retained_session_transition{reason=%q, conversation_id=%q, "+
-		"occurred_at=%s} (after %d edges) → resetting{active=%v phase=%q handoff=%q}",
+		"occurred_at=%s} (after %d edges) → resetting clear{count=%d}",
 		wrapUpSkipBound,
 		w.edges[0].Active, w.edges[0].Phase, w.edges[0].Handoff,
 		w.edges[1].Active, w.edges[1].Phase, w.edges[1].Handoff,
 		tr.payload.Reason, tr.payload.ConversationID,
 		tr.payload.OccurredAt.Format(time.RFC3339Nano), tr.edgesBefore,
-		w.edges[2].Active, w.edges[2].Phase, w.edges[2].Handoff)
+		len(w.clears))
 
 	// --- AC 3: the predecessor's note stands -----------------------------------
 	// Read AFTER the falling edge and the quiet period, which is well past the only

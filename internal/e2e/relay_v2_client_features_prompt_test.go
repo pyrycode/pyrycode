@@ -107,7 +107,7 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 	}
 	phone, seal, next := connect(before)
 	conv := createConversationOverWire(t, seal, next, 2)
-	// A successful named query establishes the supported route before posting.
+	// A successful named query establishes the supported route before live reads.
 	// Reconnects join the retained conversations in connect.
 	joinCreated := func() {
 		t.Helper()
@@ -120,7 +120,6 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 		}, Next: func(d time.Time) protocol.Envelope { env, _ := next(d); return env }}
 		scenario.JoinConversations(t, wire, phone.DeferEnvelopes)
 	}
-	joinCreated()
 	row := waitForConversation(t, home, conv)
 	post := func(id, text string) {
 		t.Helper()
@@ -181,6 +180,7 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 		return ""
 	}
 	post(conv, "first turn")
+	joinCreated()
 	path := promptPath(row.CurrentSessionID, 1)
 	initial := mustReadFile(t, path)
 	attributed := `"Phone" (version "1") (self-reported features "` + before + `")`
@@ -203,8 +203,8 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 		t.Fatal("reconnect rewrote active prompt")
 	}
 	other := createConversationOverWire(t, seal, next, 3)
-	joinCreated()
 	post(other, "evict original through active cap")
+	joinCreated()
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	waitForSessionState(t, regPath, row.CurrentSessionID, "evicted", 5*time.Second)
 	post(conv, "reactivated")

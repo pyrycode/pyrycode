@@ -133,7 +133,7 @@ func TestInteractiveStreamSendFile(t *testing.T) {
 	}
 
 	modalID := raiseSendFileModal(t, h, 2, convID, filename)
-	continuationSource := scenario.SourceSince(t, h.home, convID)
+	continuationSource, _ := scenario.QuestionBoundary(t, scenario.SourceSnapshot(t, h.home), convID)
 
 	// Answer allow_once from the paired phone. The device gate
 	// (--allow-remote-permissions) is armed by the harness; without it ResolveAnswer
