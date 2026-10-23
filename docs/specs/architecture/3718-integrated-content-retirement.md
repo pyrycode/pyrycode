@@ -81,6 +81,8 @@ Pending documentation stage:
 
 ## Revisions
 
+- 2026-10-23 (verifier rework, finding 1): PR #3838's `Live tests` section must contain only `TestInteractiveStreamMultiTurnContinuity` and `TestInteractiveConversationSystemPrompt_ReachesTheReply`, one name per line. Move the pending-evidence explanation under `Live evidence status` so the dispatcher recognizes both required tests. Validate the published body after editing; this routing-only repair changes no code or evidence disposition and requires no repeated Go checks. The existing security review remains applicable: no runtime, trust-boundary or credential changes.
+
 - 2026-10-23 (prospective): The retained verifier finding explicitly asks for the live reader. Supplement the daemon broadcaster assertion with `TestRelayV2_AgentContentLifecycleNeutral` in `internal/e2e/agent_content_lifecycle_test.go`: observe an actual encrypted main running/idle sequence, release a second fake-Claude fragment containing only roster/task/child traffic, require its retained sources and actual task-progress envelope, and drain through a correlated ordered reply while rejecting any turn-state envelope. Existing two-fragment replay provides the release barrier and owns child shutdown; no new helper or production changes. This reads `writeTaskRosterRows` and the fake-Claude replay path in `stream_json.go`. Forecast remains under 500 written lines, zero exports or production call-site changes. Security self-review PASS: isolated mode-0600 fragments, bounded existing encrypted reader/deadline, no credential/logging/crypto changes. The precise system-prompt consumer name is `TestInteractiveConversationSystemPrompt_ReachesTheReply`; its live proof remains dispatcher-owned.
 
 ## Requirement-to-evidence map
