@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,8 +22,8 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/history"
-	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -127,9 +126,11 @@ func TestInteractiveStreamMultiTurnContinuity(t *testing.T) {
 	// After the loop, recallText holds the recall turn's (the last turn's) reply.
 	// Only that turn's text drives the continuity assertion.
 	var recallText string
+	next := scenario.PollingReceive(t, phone, initRecv)
 	for _, turn := range turns {
+		source := scenario.SourceSince(t, home, streamMultiTurnConvID)
 		sealSendMessage(t, phone, initSend, turn.id, streamMultiTurnConvID, turn.msgID, turn.prompt)
-		recallText = drainForCompletedSourceText(t, phone, initRecv, home, streamMultiTurnConvID, perTurnReplyBudget)
+		recallText = drainForCompletedSourceText(t, next, source, home, streamMultiTurnConvID, perTurnReplyBudget)
 	}
 
 	// Continuity by content: the recall reply must echo the planted token. A
@@ -145,64 +146,16 @@ func TestInteractiveStreamMultiTurnContinuity(t *testing.T) {
 
 // --- capturing turn drain ---------------------------------------------------
 
-// drainForCompletedSourceText waits for the named live turn to run and return
-// idle, then reads that completed turn's text from retained source history.
-func drainForCompletedSourceText(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, home, convID string, timeout time.Duration) string {
+// drainForCompletedSourceText requires actual owned delivery and retained source
+// completion before independently reading the completed turn's recorded text.
+func drainForCompletedSourceText(t *testing.T, next scenario.Next, source scenario.SourceFacts, home, convID string, timeout time.Duration) string {
 	t.Helper()
-	sawRunning := false
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("conversation %q did not run and close within %s", convID, timeout)
-		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				continue // deadline reached — re-loop into the milestone-specific t.Fatalf above
-			}
-			t.Fatalf("phone receive (drain): %v", err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame (drain): %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			// A non-noise_msg control frame (e.g. rekey) does not advance the
-			// receive nonce — skip without decrypting.
-			continue
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data (drain): %v", err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope (drain): %v", err)
-		}
-		if env.Type != protocol.TypeTurnState {
-			continue
-		}
-		var phase protocol.TurnStatePayload
-		if err := json.Unmarshal(env.Payload, &phase); err != nil {
-			t.Fatal(err)
-		}
-		if phase.ConversationID != convID {
-			continue
-		}
-		if phase.State != "idle" {
-			sawRunning = true
-			continue
-		}
-		if !sawRunning {
-			continue
-		}
-		return completedSourceText(t, home, convID)
+	owned := scenario.CompletedTurn(t, next, convID, timeout, false, source)
+	recorded := completedSourceText(t, home, convID)
+	if recorded != owned {
+		t.Fatal("recorded completion differs from the command-owned source reply")
 	}
+	return recorded
 }
 
 func completedSourceText(t *testing.T, home, convID string) string {
@@ -331,5 +284,49 @@ func TestCompletedSourceTextIdentity(t *testing.T) {
 				t.Fatalf("completed source text = %q, want onetwo", got)
 			}
 		})
+	}
+}
+
+func TestCompletedSourceTextWaitsForOwnedHistory(t *testing.T) {
+	const conv = conversations.ConversationID(streamMultiTurnConvID)
+	home := t.TempDir()
+	store := history.New(filepath.Join(home, ".pyry", "test"))
+	appendTurn := func(session, turn, text string, opened time.Time) {
+		t.Helper()
+		for i, fact := range []struct {
+			kind  string
+			value any
+		}{
+			{"main_turn_opened", map[string]any{"conversation_id": conv, "turn_id": turn, "occurred_at": opened}},
+			{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: string(conv), TurnID: turn, Text: text}},
+			{protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: string(conv), TurnID: turn, StopReason: "end_turn"}},
+		} {
+			raw, err := json.Marshal(fact.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AppendWithMetadata(conv, fact.kind, raw, opened.Add(time.Duration(i)*time.Second), history.Metadata{Session: &history.SessionProvenance{Kind: "claude", SessionID: session}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	appendTurn("previous", "old", "old reply", time.Now().UTC().Add(-time.Minute))
+	source := scenario.SourceSince(t, home, string(conv))
+	opened := time.Now().UTC()
+	reads := 0
+	next := func(time.Time) protocol.Envelope {
+		reads++
+		switch reads {
+		case 1:
+			return protocol.Envelope{Type: protocol.TypeTurnState, SessionID: json.RawMessage(`"current"`), ConversationID: json.RawMessage(`"` + string(conv) + `"`), TS: opened.Add(time.Second), Payload: mustJSON(t, protocol.TurnStatePayload{ConversationID: string(conv), State: "idle"})}
+		case 2:
+			appendTurn("current", "fresh", "fresh reply", opened)
+		default:
+			t.Fatal("owned idle and later history did not complete")
+		}
+		return protocol.Envelope{}
+	}
+	if got := drainForCompletedSourceText(t, next, source, home, string(conv), time.Second); got != "fresh reply" || reads != 2 {
+		t.Fatalf("text=%q reads=%d, want the fresh reply after delayed history", got, reads)
 	}
 }
