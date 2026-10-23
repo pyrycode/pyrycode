@@ -242,8 +242,16 @@ func (w *suggestWatch) pumpUntil(t *testing.T, frames <-chan suggestFrame, timeo
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	var sourcePoll <-chan time.Time
+	if w.observer != nil {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		sourcePoll = ticker.C
+	}
 	for !done() {
 		select {
+		case <-sourcePoll:
+			w.observe(t, protocol.Envelope{})
 		case f, ok := <-frames:
 			if !ok {
 				t.Fatalf("phone reader stopped")
