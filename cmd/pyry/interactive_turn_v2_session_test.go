@@ -605,17 +605,7 @@ func TestInteractiveTurnEmitterV2_MCPStatusFansOutAndRecordsOnce(t *testing.T) {
 		t.Fatalf("server order changed: %+v", payload.Servers)
 	}
 
-	ring, gap := e.ring.After(testConvID, 0)
-	if gap || len(ring) != 1 {
-		t.Fatalf("ring = %#v (gap=%v), want one logical event", ring, gap)
-	}
-	if ring[0].Type != protocol.TypeMCPStatus || !bytes.Equal(ring[0].Payload, pushA.Payload) {
-		t.Fatalf("ring event differs from wire: ring=%s/%s wire=%s/%s",
-			ring[0].Type, ring[0].Payload, pushA.Type, pushA.Payload)
-	}
-	if pushA.EventID == nil || *pushA.EventID != ring[0].ID {
-		t.Fatalf("wire event id = %v, want ring id %d", pushA.EventID, ring[0].ID)
-	}
+	assertLogMatchesLive(t, historyEntries(t, e.hist, testConvID), bcast.pushes)
 }
 
 func TestInteractiveTurnEmitterV2_EmptyMCPStatusIsLifecycleNeutral(t *testing.T) {
@@ -965,19 +955,7 @@ func TestInteractiveTurnEmitterV2_ContextUsageFansOutAndGatesCapability(t *testi
 		t.Fatalf("category order changed: %+v", payload.Categories)
 	}
 
-	// ONE logical event: the ring records once, before the per-conn fan-out, and
-	// every conn's envelope carries that one durable id.
-	ring, gap := e.ring.After(testConvID, 0)
-	if gap || len(ring) != 1 {
-		t.Fatalf("ring = %#v (gap=%v), want one logical event", ring, gap)
-	}
-	if ring[0].Type != protocol.TypeContextUsage || !bytes.Equal(ring[0].Payload, pushA.Payload) {
-		t.Fatalf("ring event differs from wire: ring=%s/%s wire=%s/%s",
-			ring[0].Type, ring[0].Payload, pushA.Type, pushA.Payload)
-	}
-	if pushA.EventID == nil || *pushA.EventID != ring[0].ID {
-		t.Fatalf("wire event id = %v, want ring id %d", pushA.EventID, ring[0].ID)
-	}
+	assertLogMatchesLive(t, historyEntries(t, e.hist, testConvID), bcast.pushes)
 }
 
 // TestInteractiveTurnEmitterV2_ContextUsagePreservesMidTurnSequence pins the

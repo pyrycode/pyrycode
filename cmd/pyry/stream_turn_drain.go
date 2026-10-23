@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -137,10 +136,9 @@ type streamChildKey struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
-	liveCaptureReady  func()           // optional scheduling seam, called outside locks
-	live              *daemonLiveState // installed before producers start
-	shadowProcessed   atomic.Uint64    // last fully published accepted output
-	runtimeReplayRing *eventring.Ring  // installed before workers; boundaries publish on the drain
+	liveCaptureReady func()           // optional scheduling seam, called outside locks
+	live             *daemonLiveState // installed before producers start
+	shadowProcessed  atomic.Uint64    // last fully published accepted output
 
 	runtimeNextProducer uint64                       // guarded by offerMu
 	runtimeProducers    map[string]uint64            // latest activation per routing ID, guarded by offerMu

@@ -128,7 +128,7 @@ func TestThreadShadowLegacy(t *testing.T) {
 		}
 		e := newInteractiveTurnEmitterV2(&activeConversation{}, mgr, discardLogger())
 		e.hist, e.runtimeFacts = h, true
-		mgr.SetReplaySource(e.ring, func() string { return testConvID })
+
 		done := make(chan struct{})
 		go func() { defer close(done); _ = mgr.Run(ctx) }()
 		defer func() { cancel(); <-done }()

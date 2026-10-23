@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"slices"
@@ -118,14 +117,12 @@ func TestOrdinaryQueuePlacement_OrderWithDelayedConfirmation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				replay, gap := emitter.ring.After(testConvID, *preceding[len(preceding)-1].EventID)
-				if gap || len(replay) != len(got) {
-					t.Fatalf("replay=%d live=%d gap=%v", len(replay), len(got), gap)
-				}
-				for i, e := range replay {
-					if e.Type == protocol.TypeMessage || e.Type != got[i].Type || e.ID != *got[i].EventID || !e.TS.Equal(got[i].TS) || !bytes.Equal(e.Payload, got[i].Payload) {
-						t.Fatal("raw user publication or replay mismatch")
+				lastID := preceding[len(preceding)-1].ID
+				for _, env := range got {
+					if env.Type == protocol.TypeMessage || env.EventID != nil || env.ID <= lastID {
+						t.Fatal("raw user publication or unordered live state")
 					}
+					lastID = env.ID
 				}
 				if len(testCanonicalUsers(t, store, testConvID)) != 1 {
 					t.Fatal("late callback duplicated canonical item")

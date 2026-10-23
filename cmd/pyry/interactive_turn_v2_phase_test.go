@@ -319,8 +319,7 @@ func TestInteractiveProvenancePhaseProjection(t *testing.T) {
 					if !slices.Equal(phases, wantPhaseSources) {
 						t.Errorf("phase sources = %v, want %v", phases, wantPhaseSources)
 					}
-					replayed, _ := e.ring.After(testConvID, 0)
-					assertLogMatchesRing(t, entries, replayed)
+					assertLogMatchesLive(t, entries, bcast.pushes)
 				}
 			})
 		}

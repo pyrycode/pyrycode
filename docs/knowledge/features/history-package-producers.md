@@ -105,11 +105,11 @@ turns, write reservations and teardown still bound pending delivery.
 `legacyRuntimeReceipt` and prompt/post publication workers, queues and counters
 are removed. `historyVisibilityMetadata`/`historyEntryShown`, source payloads,
 constructor seams and ordered `daemonLiveState`/`daemonThreadPublisher` delivery
-remain. The interactive ring/counter still serve supported live state; replay
-admission/pump retirement belongs to #3738 and shared ring/`SetReplaySource`
-removal to #3739. The
+remain. The interactive envelope counter still serves supported live state;
+event replay and shared ring/`SetReplaySource` are removed (#3738/#3739).
+Successful source appends still supply `HistoryEntryID` independently of delivery. The
 [integrated acceptance record](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
-supplements child evidence without changing those downstream boundaries.
+supplements child evidence; #3719 owns final recovery/storage integration acceptance.
 
 ### Producer topics
 

@@ -12,7 +12,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
@@ -124,17 +123,9 @@ type interactiveTurnEmitterV2 struct {
 	// The conversation projects the most recently active source's running phase.
 	nextPhaseOrder uint64
 
-	// nextID is the session-monotonic envelope-ID counter. It is NEVER reset
-	// across turns (mirrors #589's policy; the basis for #611 mid-turn-reconnect
-	// resync). nextID++ runs per conn per envelope, so the same logical envelope
-	// gets a distinct env.ID on each conn — each conn still sees a strictly
-	// increasing subsequence.
+	// nextID advances per connection per envelope and never resets across turns.
+	// Each connection sees a strictly increasing subsequence.
 	nextID uint64
-
-	// ring retains supported fallback live state for reconnect under a distinct,
-	// connection-independent ID. It is synchronized separately from the drain's
-	// lifecycle state. Content sources never enter this ring.
-	ring *eventring.Ring
 
 	// hist records source facts before any publication. Session content reaches
 	// apps through the canonical thread only, even when storage is absent or fails.
@@ -225,7 +216,6 @@ func newInteractiveTurnEmitterV2(sup cursorReader, bcast interactiveBroadcaster,
 		convTurnState: &convTurnState{},
 		turns:         make(map[string]*convTurnState),
 		flushTimer:    t,
-		ring:          eventring.New(eventring.MaxEventsPerConversation),
 	}
 }
 

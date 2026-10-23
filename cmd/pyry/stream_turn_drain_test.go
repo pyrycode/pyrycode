@@ -516,9 +516,6 @@ func TestStreamTurnDrainV2_UnresolvedSessionDrops(t *testing.T) {
 
 	waitDropKind(t, drops, "turn_end")
 	assertNoPush(t, bcast.pushed)
-	if events, _ := emitter.ring.After(testConvID, 0); len(events) != 0 {
-		t.Errorf("ring holds %d events for an unresolved session, want 0", len(events))
-	}
 
 	// The record's field set is exactly event, kind and session id: no content.
 	for len(recs) > 0 {

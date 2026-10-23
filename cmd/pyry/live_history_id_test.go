@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
@@ -20,10 +19,7 @@ import (
 func TestLiveProducers_HistoryEntryID(t *testing.T) {
 	t.Parallel()
 	for _, producer := range []string{"interactive", "transition"} {
-		for _, scenario := range []string{"recipients", "no recipients", "absent store", "failed append", "no ring"} {
-			if scenario == "no ring" && producer != "operator" {
-				continue
-			}
+		for _, scenario := range []string{"recipients", "no recipients", "absent store", "failed append"} {
 			t.Run(producer+"/"+scenario, func(t *testing.T) {
 				t.Parallel()
 				const text = "ZZ2861-PRIVATE-CONTENT-ZZ"
@@ -59,19 +55,12 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 						{ConnID: "i3", Interactive: true},
 					}}
 				}
-				var ring *eventring.Ring
-				if producer != "transition" && scenario != "no ring" {
-					ring = eventring.New(16)
-					for range 3 {
-						ring.Append(testConvID, protocol.TypeMessage, json.RawMessage(`{}`), historyTS)
-					}
-				}
 				var nextID *uint64
 				wantType := protocol.TypeMessage
 				switch producer {
 				case "interactive":
 					e := newInteractiveTurnEmitterV2(&stubCursor{}, bcast, logger)
-					e.hist, e.ring, e.nextID = store, ring, 100
+					e.hist, e.nextID = store, 100
 					nextID = &e.nextID
 					wantType = protocol.TypeToolProgress
 					e.emit(ctx, testConvID, wantType, map[string]string{"conversation_id": testConvID, "text": text})
@@ -101,25 +90,11 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 						t.Fatalf("appended entry = %+v", entry)
 					}
 				}
-				var event eventring.Event
-				if ring != nil {
-					events, gap := ring.After(testConvID, 3)
-					if gap || len(events) != 1 {
-						t.Fatalf("ring events=%d gap=%v, want one logical event", len(events), gap)
-					}
-					event = events[0]
-					if event.ID != 4 || event.Type != wantType {
-						t.Fatalf("ring event=%+v", event)
-					}
-					if event.HistoryEntryID != entry.ID {
-						t.Fatalf("ring history id=%d, want %d", event.HistoryEntryID, entry.ID)
-					}
-					if stored {
-						assertLogMatchesRing(t, []history.Entry{entry}, events)
-					}
-				}
 				for i, p := range bcast.pushes {
 					env := p.env
+					if env.EventID != nil {
+						t.Fatal("live state carries a retired ring event_id")
+					}
 					if p.connID != []string{"i1", "i2", "i3"}[i] || env.ID != 101+uint64(i) || env.Type != wantType {
 						t.Fatalf("unexpected recipient/envelope: %+v", p)
 					}
@@ -143,13 +118,7 @@ func TestLiveProducers_HistoryEntryID(t *testing.T) {
 							t.Fatalf("history_entry_id must be omitted: %s", wire)
 						}
 					}
-					if ring == nil {
-						if env.EventID != nil {
-							t.Fatal("event_id present without ring")
-						}
-					} else if env.EventID == nil || *env.EventID != event.ID || !bytes.Equal(env.Payload, event.Payload) || !env.TS.Equal(event.TS) {
-						t.Fatal("live envelope does not match ring event")
-					}
+
 				}
 				if scenario == "failed append" {
 					if !strings.Contains(logs.String(), "history_append_err") || !strings.Contains(logs.String(), "reason=write") {

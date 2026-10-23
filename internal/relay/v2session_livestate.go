@@ -157,7 +157,7 @@ func (m *V2SessionManager) liveWithheld(s *V2Session, conversation string) bool 
 func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r LiveState) error {
 	if !s.thread {
 		r.Envelope.ConversationID = nil
-		return m.forwardEnvelope(ctx, s.connID, r.Envelope)
+		return m.forwardEnvelopeSource(ctx, s.connID, r.Envelope, nil, !r.ModelListUnprojected)
 	}
 	if !r.Envelope.SessionStateCleared && (r.Envelope.Type == protocol.TypeModalShown || r.Envelope.Type == protocol.TypeQuestionShown) && r.Answerable != nil && !*r.Answerable {
 		return nil
@@ -205,7 +205,7 @@ func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r
 	if e.SessionStateCleared {
 		e = liveStateClear(e)
 	}
-	if err := m.forwardEnvelopeSource(ctx, s.connID, e, &r); err != nil {
+	if err := m.forwardEnvelopeSource(ctx, s.connID, e, &r, false); err != nil {
 		return err
 	}
 	if needsClear {

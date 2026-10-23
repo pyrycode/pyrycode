@@ -16,7 +16,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/keys"
@@ -477,7 +476,7 @@ func startRelay(
 	w relayWiring,
 ) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), announceConversation func(protocol.ConversationUpdatedPayload), announcePost func(protocol.AssistantDeltaPayload), pairingProvider localPairingProvider, err error) {
 	if w.relayURL == "" {
-		dropRingOnConversationDelete(w.convReg, nil, w.suggestions, w.streamSink, w.shadow)
+		cleanupOnConversationDelete(w.convReg, w.suggestions, w.streamSink, w.shadow)
 		logger.Info("relay: disabled (no URL configured)")
 		if w.streamSink != nil {
 			bcast := historyOnlyBroadcaster{}
@@ -607,26 +606,16 @@ func relay4409Threshold(logger *slog.Logger) int {
 	return n
 }
 
-// dropRingOnConversationDelete joins the conversations registry's removal
-// observer to the emitter's replay ring (#1502): each conversation the registry
-// removes — by delete_conversation or by the idle sweep, both of which go
-// through Registry.Delete — has its ring entry dropped, so its retained events
-// stop pinning daemon memory. The ring is keyed by the same conversation id
-// string the registry stores. Pending reply work and suggestion state are also
-// cancelled and forgotten; shadow coordination is retired and joined, and the
-// stream live owner releases its conversation and producer bookkeeping.
-// A nil registry (no conversations registry in this
-// posture) leaves nothing to observe.
-func dropRingOnConversationDelete(reg *conversations.Registry, ring *eventring.Ring, suggestions *replySuggestions, owners ...conversationRemovalOwner) {
+// cleanupOnConversationDelete composes cleanup for direct deletion and idle sweep.
+// It cancels pending inference, forgets suggestions, joins shadow coordination and
+// releases stream/live ownership. A nil registry leaves nothing to observe.
+func cleanupOnConversationDelete(reg *conversations.Registry, suggestions *replySuggestions, owners ...conversationRemovalOwner) {
 	if reg == nil {
 		return
 	}
 	reg.SetOnDelete(func(id conversations.ConversationID) {
 		if suggestions != nil {
 			suggestions.forget(string(id))
-		}
-		if ring != nil {
-			ring.Drop(string(id))
 		}
 		for _, owner := range owners {
 			if owner != nil {
@@ -1637,22 +1626,12 @@ func startRelayV2(
 		// consumes parsed turnevent.Events from the sink, so it runs whenever
 		// stream mode is selected.
 		//
-		// The emitter is constructed here rather than inside the drain so this leg
-		// owns the reconnect wiring: the active-conversation cursor it stamps with
-		// and the session-scoped replay source it registers. SetReplaySource runs at
-		// most once, because this branch does.
+		// Construct the emitter before the drain starts so every producer shares
+		// the composition root's source store and removal ownership.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
-		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
-		// Free a removed conversation's replay events when the registry drops it
-		// (#1502); installed here because this is where the ring is born.
-		dropRingOnConversationDelete(w.convReg, emitter.ring, suggestions, w.streamSink, w.shadow)
-		// The durable conversation log (#2114), assigned the same way the ring is
-		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
-		// positional parameter is not separable from them in Go. w.hist is minted
-		// at the composition root, not here, because #2115's delivery-path
-		// producer must consume THIS store rather than a second one over the same
-		// instance directory — two stores mint duplicate ids for a conversation
-		// and each can truncate away the other's just-appended entry.
+		cleanupOnConversationDelete(w.convReg, suggestions, w.streamSink, w.shadow)
+		// All history producers must share one store: separate stores over the
+		// same directory can mint duplicate IDs and truncate concurrent appends.
 		emitter.hist = w.hist
 		// The #2460 registry memory, assigned the same way and for the same
 		// call-site reason. It is the SAME value the on-demand flight above holds,

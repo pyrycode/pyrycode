@@ -323,12 +323,7 @@ func TestAgentSessionEndings_DrainOrdering(t *testing.T) {
 	if ending == 0 || !(ending < divider && divider < successor) {
 		t.Fatalf("order %d %d %d", ending, divider, successor)
 	}
-	ring, _ := e.ring.After(testConvID, 0)
-	for _, entry := range ring {
-		if entry.Type == historyAgentSessionEnded {
-			t.Fatal("raw ending replayed")
-		}
-	}
+
 }
 
 func TestAgentSessionEndings_FactValidation(t *testing.T) {

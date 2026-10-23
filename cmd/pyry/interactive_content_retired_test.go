@@ -121,12 +121,6 @@ func TestInteractiveContentRetired(t *testing.T) {
 		if !reflect.DeepEqual(texts, []string{conv + "source-a", "child", conv + "source-b", "child"}) || tools != 2 || notices != 1 {
 			t.Fatalf("canonical content: texts=%v tools=%d notices=%d", texts, tools, notices)
 		}
-		events, _ := e.ring.After(conv, 0)
-		for _, event := range events {
-			if testRetiredInteractiveType(event.Type) || event.Type == protocol.TypeBanner {
-				t.Fatalf("retired replay: %s", event.Type)
-			}
-		}
 		for _, push := range b.pushes {
 			if testRetiredInteractiveType(push.env.Type) || push.env.Type == protocol.TypeBanner {
 				t.Fatalf("retired live frame: %s", push.env.Type)
@@ -224,9 +218,6 @@ func TestInteractiveContentRetiredStorage(t *testing.T) {
 			}
 			if len(b.pushes) != 0 {
 				t.Fatal("storage mode restored raw delivery", pushTypes(b.pushes))
-			}
-			if events, _ := e.ring.After(testConvID, 0); len(events) != 0 {
-				t.Fatal("storage mode restored raw replay")
 			}
 			if mode == "no-clients" && len(historyEntries(t, e.hist, testConvID)) != 8 {
 				t.Fatal("missing source append without clients")

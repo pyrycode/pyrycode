@@ -163,7 +163,7 @@ func TestDaemonLiveConversationRemoval(t *testing.T) {
 	send(turnevent.ToolProgress{ToolCallID: "tool"})
 	old := (<-s.ch).live.source
 	cursor := o.snapshot("conv")
-	dropRingOnConversationDelete(reg, nil, nil, nil, s)
+	cleanupOnConversationDelete(reg, nil, nil, s)
 	reg.Delete(id)
 	o.acceptEvent(old, turnevent.Stall{})
 	s.queueBoundary(sessions.SessionTransition{ConversationID: "conv", PreviousID: "a", NewID: "a", NextAgent: "claude"}, func() {}, nil)

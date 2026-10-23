@@ -26,10 +26,11 @@ import (
 // gap the phone's recv nonce (MAC failure → 4421 close). Sealing happens on
 // the Run goroutine, in order, only for the frames that are actually sent.
 type queuedEnv struct {
-	env       protocol.Envelope
-	live      *LiveState
-	ready     bool // already projected ordinary output awaiting hosted admission
-	droppable bool // env.Type == protocol.TypeAssistantDelta
+	env                protocol.Envelope
+	live               *LiveState
+	ready              bool // already projected ordinary output awaiting hosted admission
+	modelListProjected bool // retained provider rows must not be merged again
+	droppable          bool // env.Type == protocol.TypeAssistantDelta
 	// barrier is an internal FIFO completion marker, never a wire envelope.
 	barrier chan struct{}
 }
@@ -109,14 +110,14 @@ type pushQueue struct {
 //     What bounds BOTH is pushQueueByteCeiling: past it the envelope is
 //     rejected and overflowed latches, which tears the session down.
 func (q *pushQueue) enqueue(env protocol.Envelope) bool {
-	return q.enqueueSource(env, nil, false)
+	return q.enqueueSource(env, nil, false, false)
 }
 
-func (q *pushQueue) enqueueSource(env protocol.Envelope, live *LiveState, ready bool) bool {
+func (q *pushQueue) enqueueSource(env protocol.Envelope, live *LiveState, ready, modelListProjected bool) bool {
 	if q.overflowed {
 		return false
 	}
-	qe := queuedEnv{env: env, live: live, ready: ready, droppable: env.Type == protocol.TypeAssistantDelta}
+	qe := queuedEnv{env: env, live: live, ready: ready, modelListProjected: modelListProjected, droppable: env.Type == protocol.TypeAssistantDelta}
 	if len(q.items) < pushQueueCap {
 		q.items = append(q.items, qe)
 		q.bytes += len(env.Payload)

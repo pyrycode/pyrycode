@@ -26,7 +26,7 @@ without `thread` and nil/failed history. Supported live state remains separate;
 channel-post publication is also retired (#3737).
 `TestInteractiveContentRetired` compares actual canonical live revisions with explicit catch-up, checking settled ordered
 text, tool/parent attribution and reused identities without raw frames/replay or
-substitute receipts. Its replay/storage controls and tagged compilation are
+substitute receipts. Its storage controls and tagged compilation are
 deterministic evidence, not live acceptance.
 
 Background-agent start/update/roster values and neutral attribution/ending facts
@@ -62,9 +62,12 @@ items and explicit catch-up consume saved facts and completed posts; open
 prompts, dismissals, controls and ordered live state remain supported.
 [Residual retirement evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#residual-content-retirement-3737)
 records prompt responsiveness, completion-before-wake/recovery and counted Linux
-prompt/hook acceptance, preserving original failures. Replay admission/pump and
-shared ring/`SetReplaySource` retirement remain #3738/#3739. Integrated #3718
-acceptance supersedes ADR 042's transitional compatibility-publication rule;
+prompt/hook acceptance, preserving original failures. Event replay and shared
+ring storage/`SetReplaySource` are removed (#3738/#3739); durable source history
+and supported live state remain separate. Content recovery uses explicit
+per-conversation thread catch-up/pages/reset. See [reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md)
+and [composed removal](thread-package-shadow-lifecycle-and-evidence-coordination.md).
+Integrated #3718 acceptance supersedes ADR 042's transitional compatibility-publication rule;
 its retained source/live-state contract and existing operator/approval holds remain.
 
 ### Reusable fold regression corpus

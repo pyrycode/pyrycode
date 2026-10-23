@@ -125,12 +125,7 @@ func TestSessionContentRetired(t *testing.T) {
 				t.Fatalf("retired live publication: %s", push.env.Type)
 			}
 		}
-		events, _ := e.ring.After(conv, 0)
-		for _, event := range events {
-			if testRetiredSessionContentType(event.Type) || event.Type == protocol.TypeBanner {
-				t.Fatalf("retired replay publication: %s", event.Type)
-			}
-		}
+
 	}
 }
 
@@ -158,12 +153,12 @@ func TestSessionContentRetiredStorage(t *testing.T) {
 			}
 			tr := newSessionTransitionEmitterV2(b, nil, bufLogger(&logs))
 			tr.hist = e.hist
-			tr.runtimeSink = &streamTurnSink{runtimeReplayRing: e.ring}
+			tr.runtimeSink = &streamTurnSink{}
 			var switched bool
 			tr.switched = func(string) { switched = true }
 			tr.broadcast(t.Context(), sessions.SessionTransition{ConversationID: testConvID, PreviousID: "old", NewID: "new", Cause: sessions.CauseAgentSwitch, Reason: sessions.ReasonClear, AgentSwitch: true, OccurredAt: occurred})
-			events, _ := e.ring.After(testConvID, 0)
-			if len(b.pushes) != 0 || !switched || len(events) != 0 {
+
+			if len(b.pushes) != 0 || !switched {
 				t.Fatal("storage mode restored publication/replay or lost switch completion")
 			}
 			if mode == "no-clients" && len(historyEntries(t, e.hist, testConvID)) != 6 {

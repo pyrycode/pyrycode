@@ -9,9 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/thread"
@@ -482,9 +480,6 @@ func testThreadQueryRequestedScope(t *testing.T, page bool) {
 		}
 		return thread.QueryResult{}, nil
 	}, nil)
-	ring := eventring.New(eventring.MaxEventsPerConversation)
-	ring.Append(catchUpConversation, protocol.TypeAssistantDelta, json.RawMessage(`{}`), time.Now())
-	p.mgr.SetReplaySource(ring, func() string { return "22222222-2222-4222-8222-222222222222" })
 	for _, isThread := range []bool{true, false} {
 		q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: fmt.Sprint("reconnect-", isThread), pub: p.pub, events: p.events, ids: map[uint64]bool{1: true}}
 		caps := []string{protocol.CapabilityInteractive}

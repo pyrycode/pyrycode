@@ -95,10 +95,9 @@ func (m *V2SessionManager) reconcileModelLists(ctx context.Context, s *V2Session
 			Type:    protocol.TypeModelList,
 			TS:      ts,
 			Payload: payload,
-			// EventID left nil: a control snapshot, never part of the turn-event
-			// replay ring (forwardEnvelope's dedup is inert for EventID == nil).
 		}
-		if err := m.Push(ctx, s.connID, env); err != nil {
+		// The provider has already selected and projected rows for this peer.
+		if err := m.pushSource(ctx, s.connID, env, nil, false, true); err != nil {
 			// ctx teardown ⇒ stop (the session is going away and the remaining
 			// payloads have nowhere to land); any other sentinel (ErrConnNotFound is
 			// unreachable — the push queue was created a few statements earlier in

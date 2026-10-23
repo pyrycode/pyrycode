@@ -179,15 +179,9 @@ func TestAgentContentRetired(t *testing.T) {
 			}
 		}
 		testDaemonThreadJSONEqual(t, historyEntries(t, h, conv), historyEntries(t, history.New(dir), conv))
-		events, _ := e.ring.After(conv, 0)
 		agentFacts := map[uint64]bool{}
 		for _, entry := range historyEntries(t, h, conv) {
 			agentFacts[entry.ID] = agentHistoryType(entry.Type)
-		}
-		for _, event := range events {
-			if testRetiredAgentType(event.Type) || event.Type == protocol.TypeBanner && agentFacts[event.HistoryEntryID] {
-				t.Fatal("retired agent replay: ", event.Type)
-			}
 		}
 		for _, push := range b.pushes {
 			var meta struct {

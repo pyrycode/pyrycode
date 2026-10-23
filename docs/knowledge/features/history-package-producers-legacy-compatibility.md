@@ -36,9 +36,9 @@ and `promptAnswerPublisher` are removed with their exclusive delivery state.
 model/settings/catalogs, progress, retries, compaction readings and task controls
 remain usable with conversation/session/generation identity. Ordered
 `daemonLiveState` and `daemonThreadPublisher` delivery remain intact. The
-interactive counter/ring still serve supported state through `publishLiveState`;
-replay admission/pump retirement belongs to #3738, shared event-ring storage and
-`SetReplaySource` removal to #3739.
+interactive envelope counter still serves supported state through
+`publishLiveState`, without a ring-derived `EventID`. Event replay, shared ring
+storage and `SetReplaySource` are removed (#3738/#3739).
 [Integrated Linux acceptance](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
 records #3718's combined proof separately from the child results. Constructor
 APIs remain stable; the channel announcement
@@ -115,15 +115,13 @@ raw content delivery or establishes foreground presentation. See
 **Carry the append result, not a second lookup or another counter (#2861).**
 For retained legacy live-state delivery, `appendConversationHistory` returns
 the successful `Store.AppendWithMetadata` ID as an immutable `*uint64`.
-`publishLiveState` carries that exact result through `Ring.AppendWithHistoryID`
-before fan-out, even without recipients. Publishing first and adding metadata
-later would let concurrent replay observe an incomplete record. Replay uses the
-original ID/timestamp without another history append. Nil/failed storage leaves
-zero ring metadata and an omitted wire key for supported state; it cannot
-restore retired content. The connection counter and ring cursor are different
-namespaces from the durable per-conversation ID. Channel posts have no new raw
-ring/live events; their completion payload remains durable recovery input.
-See [ring publication](eventring-package.md#concurrency).
+`publishLiveState` carries that exact result to each recipient with the original
+payload and logical timestamp, without assigning `EventID`. Source append attempts
+remain independent of recipient count. Nil/failed storage omits the wire history
+key for supported state; it cannot restore retired content. The connection
+counter is a different namespace from the durable per-conversation ID. Channel
+post completion remains durable recovery input without raw publication.
+See [source IDs and fan-out](eventring-package.md#where-the-durable-id-is-assigned-the-load-bearing-point).
 
 **Why this producer reads `text`, never the delivered payload.** Since #2038
 a queued message carries two strings — `text` (client-readable) and

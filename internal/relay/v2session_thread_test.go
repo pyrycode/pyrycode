@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/dispatch"
-	"github.com/pyrycode/pyrycode/internal/eventring"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -332,12 +331,7 @@ func TestV2Session_ThreadContentWithheld(t *testing.T) {
 	cfg := threadConfig(t, frames, rec, priv)
 	mgr, stop := startManager(t, cfg)
 	t.Cleanup(stop)
-	ring := eventring.New(eventring.MaxEventsPerConversation)
-	ts := time.Now().UTC()
-	ring.Append(gateClaudeConv, "assistant_delta", json.RawMessage(`{"conversation_id":"conv-claude"}`), ts)
-	suppressed := ring.Append(gateClaudeConv, "tool_use", json.RawMessage(`{"conversation_id":"conv-claude"}`), ts)
-	ring.Append(gateClaudeConv, "tool_progress", json.RawMessage(`{"conversation_id":"conv-claude","elapsed":5}`), ts)
-	mgr.SetReplaySource(ring, func() string { return gateClaudeConv })
+	suppressed := uint64(2)
 	last := uint64(1)
 	recv := openGateConn(t, frames, rec, v2TestConnID, pub, v2TestInstallPriv, threadCaps, &last)
 	live := protocol.Envelope{ID: 9, Type: "workspace_updated", Payload: json.RawMessage(`{}`)}

@@ -163,10 +163,10 @@ Successful source appends feed authoritative thread items and explicit catch-up.
 Open prompts, single dismissals, controls and live state remain separate,
 with conversation/session/generation identity and ordered delivery intact.
 `historyVisibilityMetadata`/`historyEntryShown` and constructor seams survive;
-exclusive receipt/prompt/post publishers are removed. The interactive ring and
-counter still serve supported live state. Replay admission/pump retirement is
-\#3738 and shared ring/`SetReplaySource` removal is #3739. The integrated
-acceptance below closes #3718 without claiming either downstream retirement.
+exclusive receipt/prompt/post publishers are removed. The interactive envelope
+counter still serves supported live state; event replay and ring storage/wiring
+are now removed (#3738/#3739). The integrated acceptance below covers #3718;
+parent #3719 owns final recovery/storage integration acceptance.
 
 `TestResidualContentRetired` applies actual canonical live updates and compares
 explicit catch-up across conversations with reused turn/answer IDs and original

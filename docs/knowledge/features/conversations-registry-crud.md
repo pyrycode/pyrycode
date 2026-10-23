@@ -58,19 +58,29 @@ The byte-exact `==` comparison on `ID` matches `Get`'s contract; no normalizatio
 
 Installs `fn` as the registry's single removal observer, replacing any earlier one; `nil` clears it. On a hit, `Delete` calls `fn` once with the removed id **after releasing `r.mu`**; a miss never calls it. Because `Delete` is the one funnel both removal paths use — the `delete_conversation` handler and the idle `Sweep` — this one slot sees every removal regardless of which path caused it, with no change to either call site.
 
-Calling outside the lock, not from within `Delete`'s critical section, is the point: it lets `fn` call back into the registry (e.g. `Get`) without deadlocking on the non-reentrant `sync.Mutex`, and it adds no lock-order edge below `r.mu` — a `saveMu → mu`-shaped hazard (see § *Save concurrency* in [`conversations-registry.md`](conversations-registry.md)) would otherwise be easy to introduce here. The cost is a small window where `Delete` has already returned `true` and mutated the in-memory slice, but `fn` has not run yet — no production caller depends on synchronous delivery.
+Calling outside the lock, not from within `Delete`'s critical section, is the point: it lets `fn` call back into the registry (e.g. `Get`) without deadlocking on the non-reentrant `sync.Mutex`, and it adds no lock-order edge below `r.mu` — a `saveMu → mu`-shaped hazard (see § *Save concurrency* in [`conversations-registry.md`](conversations-registry.md)) would otherwise be easy to introduce here. The observer runs synchronously after the in-memory removal and unlock, before `Delete` returns; concurrent registry readers can see the removal while cleanup is still running.
 
-The registry's production caller (`cmd/pyry`) composes `replySuggestions.forget`
-and `(*eventring.Ring).Drop` in `dropRingOnConversationDelete`: removal cancels
-pending native waits or reply inference and releases both suggestion state and
-retained replay events. Installing a second observer would replace replay
-cleanup, since this is one slot, not a subscriber list. Reconnect-time pruning
-is insufficient for active background work. Test deletion and idle sweeping
-through this production callback; calling `forget` directly would pass even
-with missing wiring. See [reply cancellation and stale-result checks](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831)
-and [`eventring` ownership](eventring-package.md). `fn` must not block for long:
-the deleting goroutine waits on it, so cancellation forgets state without joining
-workers; daemon shutdown owns the join.
+The production `cleanupOnConversationDelete` callback first calls
+`replySuggestions.forget` to cancel pending native waits or reply inference and
+release suggestion state, then removes each supplied owner. Both relay-enabled
+and relay-disabled wiring include stream/live ownership and thread shadow/store
+cleanup. Thread removal tombstones the ID, cancels query demand, joins shadow
+coordination and unloads its store worker. Stream/live removal rejects stale
+captures so they cannot attach to a recreated conversation. Other conversations
+retain their state. A nil registry is a no-op; there is no event-ring `Drop`.
+
+Installing a second observer would replace this composed cleanup. Reconnect-time
+pruning cannot stop active background work. Exercise the production callback
+through direct deletion and idle sweep: a test calling `forget` directly could
+pass with missing wiring. `TestConversationDeleteCleanup` checks both paths and
+all supplied owners, and `TestConversationDeleteCleanup_NilRegistry` pins the
+no-op. `TestReplyFallbackRegistryRemovalCancellation`, `TestThreadShadowRemoval`,
+`TestDaemonLiveConversationRemoval` and `TestDaemonLiveNoRelayRemoval` cover the
+surviving cancellation, isolation and identity-reuse contracts. The deleting
+goroutine waits for the callback; suggestion cancellation forgets state without
+joining inference workers, while thread cleanup joins its coordinator before
+unloading. See [reply cancellation and stale-result checks](streamsup-package-draining-turnevents-into-the-interactive-emitter-native-reply-suggestions.md#native-reply-suggestions-after-the-result-2831)
+and [thread lifecycle](thread-package-shadow-lifecycle-and-evidence-coordination.md).
 
 ## `RebindSession(oldID, newID string) bool` (#739)
 
