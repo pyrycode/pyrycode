@@ -72,10 +72,6 @@ func TestProducerGapDeliveryFailure(t *testing.T) {
 	if _, _, _, err := init.ReadResp(decodeRespFrame(t, p.next())); err != nil {
 		t.Fatal(err)
 	}
-	// Discard the completed handshake's transport acknowledgment.
-	if err := gapDeliveryResult(t, p.delivered); err != nil {
-		t.Fatal(err)
-	}
 	entered, release := p.gate.arm(t)
 	if err := p.mgr.Push(t.Context(), v2TestConnID, protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"state":"running"}`)}); err != nil {
 		t.Fatal(err)
@@ -128,8 +124,11 @@ func TestProducerGapHostedNonceQuarantine(t *testing.T) {
 	if s.hosted == nil {
 		m.initHosted(t.Context(), s)
 	}
+	queryCtx, cancelQuery := context.WithCancel(t.Context())
+	defer cancelQuery()
+	s.hosted.inbox.query = &threadQuery{conversation: gateClaudeConv, ctx: queryCtx, cancel: cancelQuery}
 	first := protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"state":"running"}`)}
-	m.hostedEnqueue(t.Context(), s, &hostedOutput{env: &first})
+	m.hostedEnqueue(t.Context(), s, &hostedOutput{env: &first, callerCtx: queryCtx})
 	active := s.hosted.active
 	if active == nil {
 		t.Fatal("selected write missing")
@@ -137,6 +136,10 @@ func TestProducerGapHostedNonceQuarantine(t *testing.T) {
 	nextID := s.nextID
 	if err := m.RetireLiveState(t.Context(), s.connID); err != nil {
 		t.Fatal(err)
+	}
+	_ = m.Push(t.Context(), s.connID, protocol.Envelope{Type: protocol.TypeThreadItemAdded, Payload: json.RawMessage(`{"conversation_id":"` + gateClaudeConv + `"}`)})
+	if queryCtx.Err() != nil {
+		t.Fatal("quarantined live push cancelled the admitted query write")
 	}
 	dependent := protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"dependent":true}`)}
 	m.hostedEnqueue(t.Context(), s, &hostedOutput{env: &dependent})

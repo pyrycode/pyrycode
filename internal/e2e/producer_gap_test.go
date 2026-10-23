@@ -353,7 +353,7 @@ func TestRelayV2ProducerGapRecovery(t *testing.T) {
 			}
 			send(phone, 4, protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: conv, MessageID: "second", Text: "accepted second turn"})
 			gapAwait(t, acceptedCh)
-			// Hold an already-selected reading in the actual binary transport pump.
+			// Hold a selected control in the actual binary transport pump.
 			entered, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
@@ -361,11 +361,11 @@ func TestRelayV2ProducerGapRecovery(t *testing.T) {
 			gate.mu.Lock()
 			gate.entered, gate.release = entered, release
 			gate.mu.Unlock()
-			if err := mgr.Push(ctx, "c-1", protocol.Envelope{Type: protocol.TypeTurnState, Payload: mustJSON(t, map[string]any{"conversation_id": conv, "state": "running"})}); err != nil {
+			if err := mgr.Push(ctx, "c-1", protocol.Envelope{Type: protocol.TypeError, Payload: mustJSON(t, protocol.ErrorPayload{Code: "thread.query_failed", Message: "held control"})}); err != nil {
 				t.Fatal(err)
 			}
 			gapAwait(t, entered)
-			if err := mgr.Push(ctx, "c-1", protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"dependent":true}`)}); err != nil {
+			if err := mgr.Push(ctx, "c-1", protocol.Envelope{Type: protocol.TypeError, Payload: json.RawMessage(`{"dependent":true}`)}); err != nil {
 				t.Fatal(err)
 			}
 			if err := mgr.RetireLiveState(ctx, "c-1"); err != nil {
