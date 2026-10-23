@@ -836,7 +836,15 @@ repeated claims, a fresh successor or a foreign persisted binding fail closed.
 After the plant turn completes, a typed idle checkpoint authorizes only the
 current original provider's impending eviction. After the original WARN gate,
 the recording hook joins actual owned output EOF and requires the predecessor
-PID to be gone. Capture then takes the complete stable private native JSONL.
+PID to be gone. Successful bootstrap receipt publication can precede provider
+disappearance: `waitLifecycleResumePredecessor` validates the successful matching
+receipt and polls its owned predecessor with signal zero until `ESRCH`. Receipt
+waiting and retirement observation share the existing 15-second boundary budget;
+a present predecessor stays pending, while a foreign/failed receipt, unknown
+process observation or expiry fails. Even `ESRCH` must be observed before expiry.
+This bounded retirement barrier must finish before snapshot publication or the
+resume send; it sends no termination signal and retries no scenario. Capture then
+takes the complete stable private native JSONL.
 Replay exclusively installs those reviewed raw bytes after the same strict user
 input and actual eviction, before the unchanged resume send. The production
 by-ID existence probe still runs and must select resume. Native parent folders

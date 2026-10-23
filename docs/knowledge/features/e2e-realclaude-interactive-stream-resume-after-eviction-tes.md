@@ -1,37 +1,46 @@
 # interactive_stream_resume_after_eviction_test.go
-- `interactive_stream_resume_after_eviction_test.go` (#1177) — the
-  real-`claude` proof that an idle-evicted **stream** session resumes via
-  `--resume` with prior context intact, closing the last uncovered rung of
-  the streamrunner plan's "restart after eviction" risk. Idle-evict +
-  respawn was covered only against fakeclaude and only on the PTY/bootstrap
-  runner (`TestE2E_IdleEviction_RespawnsOnSendMessage`, #396); the stream
-  path's `TestE2E_PerConversation_IdleEvictsAndReactivates` (#680)
-  explicitly deferred content-recall to "realclaude's domain" — this is that
-  deferred work (see [idle-eviction.md § Testing](idle-eviction.md#testing)).
-  `TestInteractiveStreamResumeAfterEviction` transcribes #1153's setup, then:
-  plants a per-run-unique token in a turn drained via #1153's
-  `drainForCompletedTurn` (the sync point guaranteeing the token committed
-  before eviction); polls the daemon's stderr for the
-  `session.idle_eviction` WARN via the new `waitForIdleEvictionWARN` — the
-  non-vacuity gate proving eviction happened *before* the resume turn is
-  sent; drives a second turn via the new `drainForResumedTurnText` (a fork
-  of `drainForCompletedTurn` that accumulates delta text instead of stopping
-  at the first); and asserts the reply recalls the token
-  (`strings.Contains(strings.ToUpper(...))`) — a forked fresh spawn has no
-  memory of it, so this is the discriminator. First stream spec to *enable*
-  the idle timer (`-pyry-idle-timeout=30s` via the new
-  `spawnBootstrapDaemonWithIdle`, a self-contained near-copy of
-  `spawnBootstrapDaemon` keeping zero shared-file merge surface with
-  siblings #1173–#1176); every prior spec disables it. Standing coupling
-  constraint documented in-file: the idle timer arms once at activation and
-  never resets per-turn, so the 30s window must exceed plant-turn
-  completion or the plant drain REDs loudly. `waitForIdleEvictionWARN` pins
-  the WARN's `session_id` **value** (stronger than #396's key-only pin),
-  sound because the stream path's `--session-id`-first `buildArgs` never
-  forks, so the pool id equals the on-disk transcript stem across
-  `--resume`. Ticket-encoded fixed UUIDs (single-char-repeat stems
-  exhausted by prior siblings). Zero production files touched. Split from
-  #1083. See [`codebase/1177.md`](../codebase/1177.md).
+
+## Idle eviction and resume
+
+`TestInteractiveStreamResumeAfterEviction` plants a unique token, drains the
+completed plant turn and waits for a new `session.idle_eviction` WARN for its
+bootstrap session before sending the recall turn. Counting past earlier WARNs
+prevents an eviction before planting from satisfying the gate. The five-second
+`resumeAfterEvictionIdle` timer and original turn deadlines remain load-bearing:
+a never-evicted provider would make recall vacuous, while a fresh successor
+would lack the planted context. The by-ID existence probe must select `--resume`.
+See the [idle-eviction tests](idle-eviction.md#testing) and the
+[recording contract](../../testing/daemon-recordings.md#idle-eviction-and-literal-native-resume-inputs).
+
+## Resume snapshot boundary
+
+A successful bootstrap EOF receipt can be visible before the daemon finishes
+waiting for and reaping its provider. An immediate PID check rejects that valid
+intermediate state. After the counted WARN, `lifecycleRecordingResumeSnapshot`
+uses `waitLifecycleResumePredecessor` to require a successful receipt with empty
+error, nonzero frames and the exact original job owner, then signal-zero
+observation of that owner's disappearance (`ESRCH`). A present PID remains
+pending; unknown observations and invalid receipts fail. Receipt waiting and
+retirement share one absolute 15-second deadline, and even ESRCH returned after
+expiry fails. Only after this barrier may capture read, or replay install, the
+native snapshot and publish it before the original resume send. EOF, kernel
+ownership, strict native inputs and final prefix/cleanup audits remain required;
+no termination signal, scenario retry or settling sleep establishes retirement.
+
+A passing fresh-home replay alone does not distinguish this race.
+`TestResumePredecessorWaitsForRetirement` publishes the receipt while a real owned
+child is held alive on stdin, synchronizes repeated signal-zero observations,
+then closes stdin and joins `Wait` before permitting the fresh ESRCH observation.
+The old immediate check fails this ordering; the bounded barrier completes only
+after retirement. `TestResumePredecessorRejectsBoundary` covers foreign/failed,
+error-bearing and empty receipts plus unknown process observations;
+`TestResumePredecessorDeadline` covers missing receipts, persistent predecessors
+and late ESRCH. These controls exercise the tagged helper without live Claude.
+See the [retained failure/passing evidence](../../../internal/e2e/realclaude/testdata/3834-resume-retirement-evidence.md)
+and [controlled regression guidance](development-verification-prove-that-tests-distinguish-the-change.md).
+
+## Related live scenarios
+
 - `interactive_stream_permission_deny_test.go` (#1175) — the security-relevant
   **deny** half of the remote permission round-trip on the stream-json runner
   (security-sensitive; architect security-review verdict PASS). #1154 proved

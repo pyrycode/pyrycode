@@ -4,9 +4,11 @@ package realclaude
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -106,9 +108,10 @@ func lifecycleRecordingResumeRole(c lifecycleRecordingConfig, session string, ar
 	return binding, nil
 }
 
-// The original WARN gate already passed. Join the actual owned predecessor EOF
-// before snapshotting its complete native output. Replay restores it before the
-// unchanged resume send, so production's real existence probe must select resume.
+// The original WARN gate already passed. Join the successful owned EOF receipt
+// and predecessor disappearance before snapshotting its complete native output.
+// Replay restores it before the unchanged resume send, so production's real
+// existence probe must select resume.
 func lifecycleRecordingResumeSnapshot(t *testing.T, home string) {
 	t.Helper()
 	c, ok := lifecycleRecordingCurrent(t)
@@ -123,9 +126,9 @@ func lifecycleRecordingResumeSnapshot(t *testing.T, home string) {
 	if err != nil || job.Config.OwnerPID <= 1 {
 		t.Fatal("missing predecessor snapshot producer")
 	}
-	terminal := waitLifecycleReceipt(t, prefix+".receipt")
-	if terminal.OwnerPID != job.Config.OwnerPID || syscall.Kill(job.Config.OwnerPID, 0) != syscall.ESRCH {
-		t.Fatal("original eviction did not stop its owned predecessor")
+	terminal, err := waitLifecycleResumePredecessor(prefix+".receipt", job.Config.OwnerPID, time.Now().Add(15*time.Second), syscall.Kill)
+	if err != nil {
+		t.Fatal(err)
 	}
 	var delivery claudetape.LifecycleDelivery
 	if claudetape.ReadLifecycleControl(prefix+".user-000001", 16384, &delivery) != nil || delivery.Version != 1 || delivery.Kind != "user-input-forwarded" || delivery.OwnerPID != job.Config.OwnerPID || delivery.BrokerPID != terminal.BrokerPID || delivery.Sequence != 1 {
@@ -164,4 +167,27 @@ func lifecycleRecordingResumeSnapshot(t *testing.T, home string) {
 	if claudetape.PublishLifecycleControl(filepath.Join(home, "recording-snapshots", "bootstrap.stage"), stage) != nil {
 		t.Fatal("predecessor transcript causal stage repeated")
 	}
+}
+
+func waitLifecycleResumePredecessor(path string, owner int, deadline time.Time, observe func(int, syscall.Signal) error) (claudetape.LifecycleReceipt, error) {
+	for time.Now().Before(deadline) {
+		var r claudetape.LifecycleReceipt
+		if daemonRecordingRead(path, &r) == nil {
+			if !r.Success || r.Error != "" || r.Frames == 0 || r.OwnerPID != owner {
+				return r, fmt.Errorf("resume predecessor receipt failed or has foreign ownership")
+			}
+			switch err := observe(owner, 0); err {
+			case syscall.ESRCH:
+				if time.Now().Before(deadline) {
+					return r, nil
+				}
+			case nil:
+				// Receipt publication can precede the daemon's provider Wait.
+			default:
+				return r, fmt.Errorf("resume predecessor observation: %w", err)
+			}
+		}
+		time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
+	}
+	return claudetape.LifecycleReceipt{}, fmt.Errorf("resume predecessor boundary: %w", context.DeadlineExceeded)
 }
