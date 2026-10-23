@@ -83,7 +83,7 @@ applicability gap and disposition before handoff.
 
 ## Documentation handoff
 
-Pending for the documentation stage; reconcile the already-merged child handoffs:
+Completed in the documentation stage; see [final disposition](#documentation-stage-disposition). Reconciled child handoffs:
 
 - `docs/protocol-mobile.md` → **hello (v2-specific note)**, **Reconnect replay & resync**, **Reconnect / Backfill semantics**, **Compatibility**, hello fields and reconnect/error recovery: ignore obsolete cursors; explicitly catch up each open conversation by completed epoch/version, fetch older pages and recover the newest window after `thread_reset`; preserve prompt/live-state reconciliation. Remove remaining production ring claims in **Application message types**' `mcp_status` row, **mcp_status**, and envelope metadata wording.
 - `docs/knowledge/features/eventring-package.md` → **Where the durable id is assigned**, **Ownership & wiring**, **Files**: retain retirement wording, durable source-history/`HistoryEntryID` distinctions and no ring-derived IDs. `docs/knowledge/features/conversations-registry-crud.md` → **SetOnDelete**: composed thread, stream/live, suggestion and pending-inference cleanup in both relay postures, without ring Drop.
@@ -170,7 +170,7 @@ from their accepted reruns. No historical failure or hold is erased. The
 `reconcileModelLists` ring/dedup comment remains an explicit inherited nonblocking
 SHOULD FIX from R39; no functional defect or correction is claimed here.
 
-Pending: this PR's configured verifier/dispatcher acceptance; required slow checks
+Pending at builder handoff (superseded by the final disposition below): this PR's configured verifier/dispatcher acceptance; required slow checks
 including `TestDaemonThreadMetadataReadiness` and
 `TestPushWakeFeedbackExpiryIntegration`; other skipped opt-in/environment checks
 under their existing owners; configured release/live acceptance if selected;
@@ -180,3 +180,43 @@ Linux ticket's verification scope. No deployment, migration or hold release.
 ## Revisions
 
 - 2026-10-23: Evidence inspection distinguished the live gate's leaf tally (2264 passed) from its raw terminal-event tally (2544 passed, including parents). Report its accepted leaf counts separately from the offline parent/subtest counts; both have zero failures and 27 skips. This changes evidence units, not product scope or acceptance requirements.
+
+## Documentation-stage disposition
+
+The [final verifier review](https://github.com/pyrycode/pyrycode/pull/3841#issuecomment-6358552426)
+returned PASS on Linux x86_64 for `630a921ad9a36e9c5d671a96bfba3d52035d192e`.
+All ten configured deterministic gate steps passed; the restoration dependency
+selector required no repeat. The supplied dispatcher report records unit/race
+counts of **28029 executed / 28029 passed / 0 failed / 27 skipped**, and fake
+integration **1971 / 1971 / 0 / 2**. The verifier separately reports raw Go JSON
+terminal-event counts including parents of **30641 / 30641 / 0 / 27** and
+**2174 / 2174 / 0 / 2**, plus **30 / 30 / 0 / 0** helper tests. Documentation
+inspection reproduced those raw terminal-event totals from the retained full
+logs. These are separate reported tallies, not additional test executions; no
+conversion or equality with the dispatcher's summary tally is asserted. The
+[execution guidance](../../knowledge/features/development-verification-test-execution-and-artifact-survival.md)
+explains why counting units must accompany evidence.
+
+All documentation handoffs are satisfied: `docs/protocol-mobile.md` reconciles
+hello, envelope metadata, reconnect/backfill, compatibility, error recovery and
+MCP status without production ring claims. The eventring retirement, registry
+`SetOnDelete`, protocol envelope, thread overview/lifecycle/evidence, v2 session
+reconnect, turn-phase, inline-reply and model-projection topics were checked
+against retained code/tests; already-correct child wording remains. Durable
+source history, generic envelope metadata, projection provenance,
+publish-before-fan-out ordering and pre-seal transport-down guards are preserved.
+
+The inherited `reconcileModelLists` ring/dedup comment remains nonblocking SHOULD
+FIX; this documentation stage changes no production code or tests. Earlier
+failed attempts above remain failed. `TestDaemonThreadMetadataReadiness` and
+`TestPushWakeFeedbackExpiryIntegration` are still skipped, confirmed in the
+current unit log, and pending with dispatcher-owned slow checks. Other opt-in
+skips and any configured release/live acceptance retain their owners. Ancestor
+L18 evidence is not a current live pass; tagged compilation executes no live
+tests. macOS is outside this Linux ticket's verification scope. No deployment,
+migration or operator/approval hold release is authorized or claimed.
+
+
+Documentation validation on Linux: `make docs-guard` and `git diff --check`
+passed. No new document or deletion required a catalog/index change. No product
+test, release/live check or QMD index refresh was launched by documentation.

@@ -166,7 +166,8 @@ with conversation/session/generation identity and ordered delivery intact.
 exclusive receipt/prompt/post publishers are removed. The interactive envelope
 counter still serves supported live state; event replay and ring storage/wiring
 are now removed (#3738/#3739). The integrated acceptance below covers #3718;
-parent #3719 owns final recovery/storage integration acceptance.
+[integrated recovery acceptance](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance)
+records #3719's final verdict and pending checks.
 
 `TestResidualContentRetired` applies actual canonical live updates and compares
 explicit catch-up across conversations with reused turn/answer IDs and original

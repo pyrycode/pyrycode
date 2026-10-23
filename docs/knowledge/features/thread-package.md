@@ -65,7 +65,9 @@ records prompt responsiveness, completion-before-wake/recovery and counted Linux
 prompt/hook acceptance, preserving original failures. Event replay and shared
 ring storage/`SetReplaySource` are removed (#3738/#3739); durable source history
 and supported live state remain separate. Content recovery uses explicit
-per-conversation thread catch-up/pages/reset. See [reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md)
+per-open-conversation epoch/version catch-up, older pages and a newest window
+after `thread_reset`. [Integrated recovery acceptance](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance)
+records the final #3719 verdict and pending slow/release/live checks. See [reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md)
 and [composed removal](thread-package-shadow-lifecycle-and-evidence-coordination.md).
 Integrated #3718 acceptance supersedes ADR 042's transitional compatibility-publication rule;
 its retained source/live-state contract and existing operator/approval holds remain.

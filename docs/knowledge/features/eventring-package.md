@@ -6,8 +6,9 @@ explicit per-conversation thread catch-up/pages/reset.
 
 Event replay admission and delivery were removed in #3738; storage, configuration
 and API wiring were removed in #3739. This page keeps the former package's path
-so existing links resolve. Historical ring designs describe a removed component;
-parent #3719 owns final integration acceptance.
+so existing links resolve. Historical ring designs describe a removed component.
+[Integrated acceptance](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance)
+records #3719's verdict and retained dispositions.
 
 ## Where the durable id is assigned (the load-bearing point)
 
