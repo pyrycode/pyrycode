@@ -612,3 +612,45 @@ Build output stays in the evidence directory. These are author results. Fresh
 independent review, full configured acceptance and the Documentation handoff remain
 pending. No merge, release or deployment is authorised. Documentation-only changes
 to this validation record do not alter the tested source tree.
+
+## Manual rework of independent review 839ecccc
+
+The final independent verdict is FAIL despite all ten configured offline commands
+passing. The exact-ticket manual hold is effective at revision 147, with no ticket
+worker or child. Resume the existing feature/3740 branch at the reviewed combined
+candidate. Preserve its successful gates, the two independently failing probes
+and all older failures. No new requirement or weaker acceptance is proposed.
+
+The shared callable SourceFacts API drops watch metadata. Avoid a second source
+protocol or fabricated history entries: enforce the captured command window in
+one adapter shared by SourceSince and ObserveSource. Capture its time before the
+history watermark and submission. Scan real opening records and the first actual
+acceptance within that window before exposing main-turn content. Only main facts
+whose producing identity has an opening within that command window can be selected.
+Keep subagent facts, unsupported-content alarms and other source families intact.
+QuestionBoundary keeps the original valid opening for an already parked turn;
+answering it must not start a new command window. Existing SourceObserver.Watch
+already owns its pre-command boundary. Also invalidate a selected source turn if
+later acceptance proves it began before the command. No received terminal frame is
+synthesized or replaced by source evidence.
+
+Audit all feed consumers: completed reply, attachment, outside-read, permission,
+refusal, answer, suggestion, subagent, hook and cancellation. Exercise both real
+adapters, including predecessor facts before acceptance in one and split source
+observations. Keep idle-before-history and parked-continuation controls. Reuse the
+independent exact-candidate red logs, then run affected shared race tests, recorded
+consumers and relevant authenticated cases through ordinary admission.
+
+Retain the actual active reset envelope beside its payload. Require top-level
+conversation and session metadata to match the rotation's conversation and
+predecessor, rejecting missing, null, malformed or foreign values. Keep successor
+clear validation and all fresh-note/recall/skipped-note proof. Commit the independent
+owned and four missing/foreign negative controls, then rerun the three actual reset
+cases. This is author validation. Changed-candidate independent review and complete
+configured/live acceptance remain mandatory before Documentation.
+
+Author security assessment: only test observation changes. No authentication,
+permissions, data storage, transport, encryption or product admission is weakened.
+Source filtering uses actual recorded execution identity and producer time, never
+history append order alone. Non-main alarms remain observable. Unknown ownership
+cannot certify completion. No new goroutine, global state or credential handling.
