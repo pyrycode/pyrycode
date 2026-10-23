@@ -276,3 +276,16 @@ floor/grandchild sizing exception retains this necessary process-accounting seam
 Security review: PASS; closed argv and bounded safe input, private receipt under
 the existing fixture home, actual process parent plus production Wait, zero
 provider execution, and no new goroutines or admission/credential changes.
+
+The final connected replay exposed an ordering bug in the held thinking fixture:
+the phone received its one progress reading and retained reply, but the source
+callback could observe the reply while the reader was already waiting for another
+frame, leaving the terminal unreleased. Release from either existing observation
+callback as soon as both predicates hold. Both callbacks run on the one receiver;
+no goroutine, artificial frame or weaker completion predicate is added. Preserve
+the failed 13-pass/1-fail comparison and rerun crossing/below-bound controls.
+Ancillary process ownership/exit controls are covered separately by
+`TestRecordedSubagentWorkerWait`; the process policy controls remain in
+`TestRecordedSubagentWorkerPolicy`. Subagent source polling after its first-main
+checkpoint now uses 100ms between rescans, with immediate scans on real turn-state
+readings; the 281-event helper race run preserves the exact first-main boundary.

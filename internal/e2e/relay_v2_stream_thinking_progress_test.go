@@ -191,6 +191,16 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 	released := false
 	wantProgress := thinkingDeltaSum(t, thinkingLines) >= thinkingProgressBound
 	deadline := time.Now().Add(30 * time.Second)
+	maybeRelease := func() {
+		// Source appends and app readings can arrive in either order. The receiver
+		// must release the producer at either observation, before waiting again.
+		if !released && obs.sawNeedle && (!wantProgress || len(obs.progress) != 0) {
+			if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			released = true
+		}
+	}
 	source.OnEntry = func(entry history.Entry) {
 		switch entry.Type {
 		case protocol.TypeAssistantDelta:
@@ -204,17 +214,10 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 		case protocol.TypeTurnEnd:
 			obs.sawTurnEnd = true
 		}
+		maybeRelease()
 	}
 
 	for !obs.sawTurnEnd {
-		// Thread live state coalesces transient readings. Hold the terminal event
-		// until the supported peer has observed the in-flight reading under test.
-		if !released && obs.sawNeedle && (!wantProgress || len(obs.progress) != 0) {
-			if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			released = true
-		}
 		env, ok := nextEnv(deadline)
 		if !ok {
 			t.Logf("drain deadline reached: thinking_progress=%d unrecognized=%d needle=%v turn_end=%v",
@@ -227,6 +230,7 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 		case protocol.TypeThinkingProgress:
 			if !env.SessionStateCleared {
 				obs.progress = append(obs.progress, append(json.RawMessage(nil), env.Payload...))
+				maybeRelease()
 			}
 		case protocol.TypeUnrecognizedMessage:
 			obs.unrecognized++
