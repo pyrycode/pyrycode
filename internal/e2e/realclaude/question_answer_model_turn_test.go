@@ -60,6 +60,7 @@ func TestQuestionAnswerModelTurnControls(t *testing.T) {
 		{"malformed_rate", "rate-limit status"}, {"modal", "unexpected modal_shown"},
 		{"missing_reply", "M1:"}, {"foreign_reply", "M1:"}, {"missing_idle", "M2:"},
 		{"foreign_idle", "M2:"}, {"queued_idle_only", "M2:"},
+		{"omitted_session", "M2:"}, {"foreign_session", "M2:"}, {"null_session", "M2:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -98,7 +99,7 @@ func TestQuestionAnswerModelTurnHelperProcess(t *testing.T) {
 		return protocol.Envelope{Type: protocol.TypeAssistantDelta, Payload: mustJSON(t, protocol.AssistantDeltaPayload{ConversationID: conv, TurnID: "turn", Text: "ok"})}
 	}
 	idle := func(conv string) protocol.Envelope {
-		return protocol.Envelope{Type: protocol.TypeTurnState, Payload: mustJSON(t, protocol.TurnStatePayload{ConversationID: conv, State: "idle"})}
+		return protocol.Envelope{Type: protocol.TypeTurnState, SessionID: json.RawMessage(`"fixture"`), Payload: mustJSON(t, protocol.TurnStatePayload{ConversationID: conv, State: "idle"})}
 	}
 	m, d, end := model("conv", "target"), delta("conv"), idle("conv")
 	frames := []protocol.Envelope{m, d, end}
@@ -133,6 +134,8 @@ func TestQuestionAnswerModelTurnHelperProcess(t *testing.T) {
 		frames[1] = delta("other")
 	case "missing_idle":
 		frames = frames[:2]
+	case "omitted_session", "foreign_session", "null_session":
+		frames[2].SessionID = map[string]json.RawMessage{"omitted_session": nil, "foreign_session": json.RawMessage(`"foreign"`), "null_session": json.RawMessage(`null`)}[name]
 	case "queued_idle_only":
 		frames = []protocol.Envelope{m, end, d}
 	case "foreign_idle":
