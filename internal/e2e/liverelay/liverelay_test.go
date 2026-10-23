@@ -605,7 +605,7 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHello(t, token))
+	initMsg, err := initiator.WriteInit(buildHello(t, token, protocol.CapabilityThread))
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -629,6 +629,7 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 // buildHello marshals the phone's early-data hello with optional capabilities.
 func buildHello(t *testing.T, token string, capabilities ...string) []byte {
 	t.Helper()
+	capabilities = append(append([]string(nil), capabilities...), protocol.CapabilityThread)
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
 		DeviceName:       "liverelay-e2e-phone",

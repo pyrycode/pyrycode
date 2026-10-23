@@ -98,7 +98,7 @@ func (w *switchWire) openCapabilities(id string, caps []string) {
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: id + "-token", Capabilities: caps})
+	payload, _ := json.Marshal(protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: id + "-token", Capabilities: append(append([]string(nil), caps...), protocol.CapabilityThread)})
 	raw, _ := json.Marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: payload})
 	data, err := init.WriteInit(raw)
 	if err != nil {
@@ -201,7 +201,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(capture, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	adapter := &relayAgentSwitcher{switcher: sw}
 	gate := gatedRelaySwitch{inner: adapter, entered: make(chan context.Context, 1), release: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
-	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()), Logger: logger, AgentSwitcher: gate, CodexConversation: codexConversation(reg, func(id string) (string, bool) {
+	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{KnownConversation: func(string) bool { return true }, ThreadReady: func() bool { return true }, Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()), Logger: logger, AgentSwitcher: gate, CodexConversation: codexConversation(reg, func(id string) (string, bool) {
 		h, err := pool.HarnessFor(sessions.SessionID(id))
 		return h, err == nil
 	}), ConversationAgent: conversationAgent(reg, func(id string) (string, bool) {

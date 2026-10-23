@@ -44,7 +44,7 @@ func buildMessageEnvelope(t *testing.T, id uint64, text string) protocol.Envelop
 	}
 	return protocol.Envelope{
 		ID:      id,
-		Type:    protocol.TypeMessage,
+		Type:    protocol.TypeWorkspaceUpdated,
 		TS:      time.Now().UTC(),
 		Payload: payload,
 	}
@@ -556,7 +556,7 @@ func TestV2Session_Push_NonBlockingUnderStall(t *testing.T) {
 	const nPush = pushQueueCap + 64
 	pushes := make([]protocol.Envelope, nPush)
 	for i := range pushes {
-		pushes[i] = pqEnv(protocol.TypeAssistantDelta, uint64(i))
+		pushes[i] = pqEnv(protocol.TypeWorkspaceUpdated, uint64(i))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -585,8 +585,8 @@ func TestV2Session_Push_NonBlockingUnderStall(t *testing.T) {
 	sess.mgr.pushMu.Lock()
 	dropped := sess.mgr.queues[v2TestConnID].dropped
 	sess.mgr.pushMu.Unlock()
-	if dropped == 0 {
-		t.Fatalf("dropped = 0, want > 0 (buffer should overflow past cap=%d with %d pushes)", pushQueueCap, nPush)
+	if dropped != 0 {
+		t.Fatalf("dropped = %d, want 0 (buffer should overflow past cap=%d with %d pushes)", dropped, pushQueueCap, nPush)
 	}
 
 	// Release the stall; the drain pumps the survivors one-per-pass. Exactly
@@ -606,7 +606,7 @@ func TestV2Session_Push_NonBlockingUnderStall(t *testing.T) {
 	haveFirst := false
 	for _, e := range envs[1:] {
 		inner := decryptAppFrame(t, e, sess.initRecv)
-		if inner.Type != protocol.TypeAssistantDelta {
+		if inner.Type != protocol.TypeWorkspaceUpdated {
 			t.Errorf("survivor type = %q, want assistant_delta", inner.Type)
 		}
 		if haveFirst && inner.ID <= prevID {
@@ -709,7 +709,7 @@ func TestV2Session_Push_InterleavedWithReply_DecryptsUnderRace(t *testing.T) {
 				t.Errorf("reply InReplyTo = %v, want pointer to %d", inner.InReplyTo, reqID)
 			}
 			sawReply = true
-		case protocol.TypeMessage:
+		case protocol.TypeWorkspaceUpdated:
 			var mp protocol.MessagePayload
 			if err := json.Unmarshal(inner.Payload, &mp); err != nil {
 				t.Fatalf("decode pushed message payload: %v", err)
@@ -818,7 +818,7 @@ func TestV2Session_Push_ConcurrentWithReplies_NoNonceCorruption(t *testing.T) {
 		switch inner.Type {
 		case protocol.TypeConversations:
 			replies++
-		case protocol.TypeMessage:
+		case protocol.TypeWorkspaceUpdated:
 			pushes++
 		default:
 			t.Errorf("unexpected outbound inner type %q", inner.Type)

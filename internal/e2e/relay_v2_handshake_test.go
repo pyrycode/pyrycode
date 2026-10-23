@@ -99,13 +99,14 @@ func startV2Harness(t *testing.T, reg *devices.Registry, handlers map[string]dis
 	t.Cleanup(mgrCancel)
 
 	cfg := relay.V2SessionConfig{
-		Frames:     conn.Frames(),
-		Outbound:   conn.Send,
-		StaticPriv: binPriv.Bytes(),
-		Devices:    reg,
-		ServerID:   string(serverID),
-		Logger:     relayTestLogger(),
-		Handlers:   handlers,
+		Frames:      conn.Frames(),
+		Outbound:    conn.Send,
+		StaticPriv:  binPriv.Bytes(),
+		Devices:     reg,
+		ServerID:    string(serverID),
+		Logger:      relayTestLogger(),
+		Handlers:    handlers,
+		ThreadReady: func() bool { return true },
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -187,6 +188,7 @@ func buildHelloEarly(t *testing.T, token string) []byte {
 		ClientVersion:    "0.0.1-test",
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
+		Capabilities:     []string{protocol.CapabilityThread},
 	})
 	if err != nil {
 		t.Fatalf("marshal hello payload: %v", err)

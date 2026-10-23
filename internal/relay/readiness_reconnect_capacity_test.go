@@ -11,7 +11,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-func TestReadinessLegacyReconnectSnapshotCapacity(t *testing.T) {
+func TestReadinessThreadReconnectSnapshotCapacity(t *testing.T) {
 	p := testHostedRealTransport(t, true)
 	payloads := make([]protocol.ModelListPayload, 4*hostedQueueLimit)
 	totalBytes := 0
@@ -26,7 +26,7 @@ func TestReadinessLegacyReconnectSnapshotCapacity(t *testing.T) {
 	if len(payloads) >= pushQueueCap || totalBytes >= pushQueueByteCeiling {
 		t.Fatal("fixture exceeds ordinary bounds")
 	}
-	p.mgr.cfg.RetainedModelLists = func(bool) []protocol.ModelListPayload { return payloads }
+	p.mgr.cfg.KnownConversation = func(string) bool { return true }
 	entered, release := p.gate.arm(t)
 	init := p.hello([]string{protocol.CapabilityInteractive})
 	testHostedAwait(t, entered)
@@ -34,6 +34,15 @@ func TestReadinessLegacyReconnectSnapshotCapacity(t *testing.T) {
 	waitConnOpen(t, p.mgr, v2TestConnID)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
+	for _, payload := range payloads {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.mgr.Push(ctx, v2TestConnID, protocol.Envelope{Type: protocol.TypeModelList, Payload: raw}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	flushed := make(chan error, 1)
 	go func() { flushed <- p.mgr.FlushPushes(ctx) }()
 	select {

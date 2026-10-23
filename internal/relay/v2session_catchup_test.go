@@ -165,7 +165,7 @@ func TestThreadCatchUpAdmission(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("invalid request reached provider")
 	}
-	for _, gate := range []string{"thread", "interactive", "codex", "missing"} {
+	for _, gate := range []string{"interactive", "codex", "missing"} {
 		t.Run(gate, func(t *testing.T) {
 			p := testCatchUpPeer(t, nil, func(c *V2SessionConfig) {
 				c.ThreadCatchUp = func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
@@ -173,8 +173,6 @@ func TestThreadCatchUpAdmission(t *testing.T) {
 					return thread.QueryResult{}, nil
 				}
 				switch gate {
-				case "thread":
-					c.ThreadReady = func() bool { return false }
 				case "codex":
 					c.CodexConversation = func(string) bool { return true }
 				case "missing":
@@ -480,7 +478,7 @@ func testThreadQueryRequestedScope(t *testing.T, page bool) {
 		}
 		return thread.QueryResult{}, nil
 	}, nil)
-	for _, isThread := range []bool{true, false} {
+	for _, isThread := range []bool{true} {
 		q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: fmt.Sprint("reconnect-", isThread), pub: p.pub, events: p.events, ids: map[uint64]bool{1: true}}
 		caps := []string{protocol.CapabilityInteractive}
 		if isThread {
@@ -551,7 +549,7 @@ func testThreadQueryProviderShutdown(t *testing.T, page bool) {
 	testHostedAwait(t, exited)
 }
 
-func TestThreadCatchUpLegacyRefusal(t *testing.T) {
+func TestThreadCatchUpNoninteractiveRefusal(t *testing.T) {
 	p := testHostedStartCaps(t, nil, nil, func(c *V2SessionConfig) {
 		c.HostedAppsSend = nil
 		c.OutboundContext = nil

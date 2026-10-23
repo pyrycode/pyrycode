@@ -64,7 +64,7 @@ func openGateConn(t *testing.T, frames chan protocol.RoutingEnvelope, rec *v2Rec
 		ClientVersion:    "v2-test",
 		ProtocolVersions: []string{"v2"},
 		Token:            v2TestToken,
-		Capabilities:     caps,
+		Capabilities:     supportedCaps(caps),
 	})
 	if err != nil {
 		t.Fatalf("marshal hello payload: %v", err)
@@ -174,6 +174,7 @@ func TestV2Session_CodexFrames_ReachOnlyMultiAgentConns(t *testing.T) {
 		ServerID:          v2TestServerID,
 		Logger:            silentLogger(),
 		CodexConversation: gateCodexSeam,
+		KnownConversation: func(string) bool { return true },
 	})
 	t.Cleanup(stop)
 
@@ -183,11 +184,11 @@ func TestV2Session_CodexFrames_ReachOnlyMultiAgentConns(t *testing.T) {
 	ts := time.Now().UTC()
 	reply := uint64(7)
 	envs := []protocol.Envelope{
-		{ID: 1, Type: protocol.TypeAssistantDelta, TS: ts, Payload: json.RawMessage(`{"conversation_id":"conv-codex","text":"x"}`)},
+		{ID: 1, Type: protocol.TypeToolProgress, TS: ts, Payload: json.RawMessage(`{"conversation_id":"conv-codex","text":"x"}`)},
 		{ID: 2, Type: protocol.TypeConversationUpdated, TS: ts, Payload: json.RawMessage(`{"id":"conv-codex","name":"n"}`)},
-		{ID: 3, Type: protocol.TypeAssistantDelta, TS: ts, Payload: json.RawMessage(`{"conversation_id":"conv-claude","text":"x"}`)},
+		{ID: 3, Type: protocol.TypeToolProgress, TS: ts, Payload: json.RawMessage(`{"conversation_id":"conv-claude","text":"x"}`)},
 		{ID: 4, Type: protocol.TypeConversationUpdated, TS: ts, Payload: json.RawMessage(`{"id":"conv-claude","name":"n"}`)},
-		{ID: 5, Type: protocol.TypeAssistantDelta, TS: ts, Payload: json.RawMessage(`{"conversation_id":"conv-codex","text":"x"}`), InReplyTo: &reply},
+		{ID: 5, Type: protocol.TypeToolProgress, TS: ts, Payload: json.RawMessage(`{"conversation_id":"conv-codex","text":"x"}`), InReplyTo: &reply},
 		{ID: 6, Type: protocol.TypeWorkspaceUpdated, TS: ts, Payload: json.RawMessage(`{"path":"/w","label":"w"}`)},
 	}
 	for _, conn := range []string{capable, old} {
@@ -199,17 +200,16 @@ func TestV2Session_CodexFrames_ReachOnlyMultiAgentConns(t *testing.T) {
 	}
 
 	gateEqual(t, capable, gateFramesUntil(t, rec, capable, recvA, protocol.TypeWorkspaceUpdated), []string{
-		"assistant_delta/conv-codex",
+		"tool_progress/conv-codex",
 		"conversation_updated/conv-codex",
-		"assistant_delta/conv-claude",
+		"tool_progress/conv-claude",
 		"conversation_updated/conv-claude",
-		"assistant_delta/conv-codex/reply",
+		"tool_progress/conv-codex/reply",
 		"workspace_updated/",
 	})
 	gateEqual(t, old, gateFramesUntil(t, rec, old, recvB, protocol.TypeWorkspaceUpdated), []string{
-		"assistant_delta/conv-claude",
+		"tool_progress/conv-claude",
 		"conversation_updated/conv-claude",
-		"assistant_delta/conv-codex/reply",
 		"workspace_updated/",
 	})
 }
@@ -285,12 +285,13 @@ func TestV2Session_PushedModelList_MergedForMultiAgentConn(t *testing.T) {
 			frames := make(chan protocol.RoutingEnvelope, 2)
 			rec := &v2Recorder{}
 			cfg := V2SessionConfig{
-				Frames:     frames,
-				Outbound:   rec.outbound,
-				StaticPriv: respPriv,
-				Devices:    v2PairedRegistry(t, v2TestToken),
-				ServerID:   v2TestServerID,
-				Logger:     silentLogger(),
+				Frames:            frames,
+				Outbound:          rec.outbound,
+				StaticPriv:        respPriv,
+				Devices:           v2PairedRegistry(t, v2TestToken),
+				ServerID:          v2TestServerID,
+				Logger:            silentLogger(),
+				KnownConversation: func(string) bool { return true },
 			}
 			if wired {
 				cfg.MergedModelOptions = gateMergeSeam

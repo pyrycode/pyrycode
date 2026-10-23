@@ -78,3 +78,18 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-23
+
+## Revisions
+
+2026-10-23: The affected package run showed retained modal, question, model, slash,
+turn-phase and suggestion fixtures still supplied only legacy live-state seams.
+Their fixture adapters now supply the same records through `ThreadLiveState`,
+assert generated clears and retain payload, unicast, revision and optional-gate
+checks. Generic transport tests use supported workspace updates; obsolete
+non-thread positives become admission refusals. Droppable legacy deltas remain
+covered by pure queue tests; the supported nonblocking transport scenario now
+proves FIFO delivery of control frames without drops. Shared fake/live helpers
+complete named catch-up through the existing scenario query reader. Total written
+work remains approximately 1200 lines under the recorded verification-floor and
+grandchild exception. The existing binding-race test's exact name is
+`TestV2Session_StaticKey_RaceAcceptsAtMostOne`.

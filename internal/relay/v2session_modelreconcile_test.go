@@ -56,6 +56,9 @@ func reconciledModelLists(t *testing.T, rec *v2Recorder, connID string, recv *no
 	out := make(map[string]protocol.ModelListPayload)
 	for _, env := range noiseMsgsForConn(t, rec, connID) {
 		inner := decryptAppFrame(t, env, recv)
+		if inner.SessionStateCleared {
+			continue
+		}
 		if inner.Type != protocol.TypeModelList {
 			t.Fatalf("conn %q: noise_msg Type = %q, want %q", connID, inner.Type, protocol.TypeModelList)
 		}
@@ -117,7 +120,7 @@ func TestV2Session_ModelListReconcile_Delivery(t *testing.T) {
 			reg := v2PairedRegistry(t, v2TestToken)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startModelReconcileManager(t, V2SessionConfig{
 				Frames:             frames,
 				Outbound:           rec.outbound,
 				StaticPriv:         respPriv,
@@ -132,7 +135,7 @@ func TestV2Session_ModelListReconcile_Delivery(t *testing.T) {
 
 			// noise_resp + one model_list per retained list; exactly that many are
 			// ever emitted here, so the snapshot is final once they are recorded.
-			waitForEnvelopes(t, rec, 1+len(tt.payloads))
+			waitForEnvelopes(t, rec, 1+2*len(tt.payloads))
 
 			got := reconciledModelLists(t, rec, connA, aRecv)
 			if len(got) != len(tt.payloads) {
@@ -164,7 +167,7 @@ func TestV2Session_ModelListReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModelReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -183,7 +186,7 @@ func TestV2Session_ModelListReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	// resp(A) + model_list(A) + resp(B) + model_list(B) = 4 in the correct (unicast)
 	// case. A fan-out on B's open would push a 5th (a second model_list to A), which
 	// the count plus the helper's per-conn dup check below would catch.
-	waitForEnvelopes(t, rec, 4)
+	waitForEnvelopes(t, rec, 6)
 
 	gotA := reconciledModelLists(t, rec, connA, aRecv)
 	gotB := reconciledModelLists(t, rec, connB, bRecv)
@@ -245,7 +248,7 @@ func TestV2Session_ModelListReconcile_NoFrame(t *testing.T) {
 			reg := v2PairedRegistry(t, v2TestToken)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startModelReconcileManager(t, V2SessionConfig{
 				Frames:             frames,
 				Outbound:           rec.outbound,
 				StaticPriv:         respPriv,
@@ -265,7 +268,7 @@ func TestV2Session_ModelListReconcile_NoFrame(t *testing.T) {
 			var ctlRecv *noise.CipherState
 			if tt.controlConn {
 				_, ctlRecv = openModalConn(t, mgr, frames, rec, respPub, connCtl, []string{protocol.CapabilityInteractive})
-				wantEnvelopes = 3 // + resp(CTL) + model_list(CTL)
+				wantEnvelopes = 4 // + resp(CTL), clear and model_list(CTL)
 			}
 			waitForEnvelopes(t, rec, wantEnvelopes)
 
@@ -318,7 +321,7 @@ func TestV2Session_ModelListReconcile_ContentFreeLogging(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModelReconcileManager(t, V2SessionConfig{
 		Frames:             frames,
 		Outbound:           rec.outbound,
 		StaticPriv:         respPriv,
@@ -333,7 +336,7 @@ func TestV2Session_ModelListReconcile_ContentFreeLogging(t *testing.T) {
 
 	// noise_resp + the one reconciled model_list: once both are recorded the open
 	// path (and any log line it would emit) has run.
-	waitForEnvelopes(t, rec, 2)
+	waitForEnvelopes(t, rec, 3)
 	if got := reconciledModelLists(t, rec, connA, aRecv); !reflect.DeepEqual(got[convID], payload) {
 		t.Fatalf("conn %q: reconcile did not send the sentinel payload (got %+v)", connA, got)
 	}
@@ -377,7 +380,7 @@ func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testin
 			respPriv, respPub := genV2Keypair(t)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startModelReconcileManager(t, V2SessionConfig{
 				Frames:             frames,
 				Outbound:           rec.outbound,
 				StaticPriv:         respPriv,
@@ -395,7 +398,7 @@ func TestV2Session_ModelListReconcile_PassesTheConnsMultiAgentDecision(t *testin
 			t.Cleanup(stop)
 
 			_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, tc.caps)
-			waitForEnvelopes(t, rec, 2)
+			waitForEnvelopes(t, rec, 3)
 
 			got := reconciledModelLists(t, rec, connA, aRecv)
 			if len(got) != 1 || !reflect.DeepEqual(got[tc.want.ConversationID], tc.want) {

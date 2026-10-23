@@ -277,6 +277,7 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend,
 		t.Fatalf("conversation_created (req %d) has empty id", reqID)
 	}
 	daemonRecordingRegisterConversation(t, p.ID)
+	joinThreadConversation(t, phone, initSend, initRecv, p.ID)
 	return p.ID
 }
 

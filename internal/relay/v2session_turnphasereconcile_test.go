@@ -27,6 +27,9 @@ func reconciledTurnStates(t *testing.T, rec *v2Recorder, connID string, recv *no
 	out := make(map[string]protocol.TurnStatePayload)
 	for _, env := range noiseMsgsForConn(t, rec, connID) {
 		inner := decryptAppFrame(t, env, recv)
+		if inner.SessionStateCleared {
+			continue
+		}
 		if inner.Type != protocol.TypeTurnState {
 			t.Fatalf("conn %q: noise_msg Type = %q, want %q", connID, inner.Type, protocol.TypeTurnState)
 		}
@@ -70,7 +73,7 @@ func TestV2Session_TurnPhaseReconcile_Delivery(t *testing.T) {
 			reg := v2PairedRegistry(t, v2TestToken)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 				Frames:            frames,
 				Outbound:          rec.outbound,
 				StaticPriv:        respPriv,
@@ -82,7 +85,7 @@ func TestV2Session_TurnPhaseReconcile_Delivery(t *testing.T) {
 			t.Cleanup(stop)
 
 			_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
-			waitForEnvelopes(t, rec, 1+len(tt.payloads))
+			waitForEnvelopes(t, rec, testSnapshotCount(tt.payloads))
 
 			got := reconciledTurnStates(t, rec, connA, aRecv)
 			if len(got) != len(tt.payloads) {
@@ -112,7 +115,7 @@ func TestV2Session_TurnPhaseReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -130,7 +133,7 @@ func TestV2Session_TurnPhaseReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 
 	// resp(A) + phase(A) + resp(B) + phase(B); a fan-out on B's open would add a
 	// second phase to A, caught by the count and the per-conn dup check.
-	waitForEnvelopes(t, rec, 4)
+	waitForEnvelopes(t, rec, 6)
 
 	if got := reconciledTurnStates(t, rec, connA, aRecv); len(got) != 1 {
 		t.Errorf("conn %q (opened first): got %d turn_state, want exactly 1", connA, len(got))
@@ -179,7 +182,7 @@ func TestV2Session_TurnPhaseReconcile_NoFrame(t *testing.T) {
 			reg := v2PairedRegistry(t, v2TestToken)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 				Frames:            frames,
 				Outbound:          rec.outbound,
 				StaticPriv:        respPriv,
@@ -196,7 +199,7 @@ func TestV2Session_TurnPhaseReconcile_NoFrame(t *testing.T) {
 			var ctlRecv *noise.CipherState
 			if tt.controlConn {
 				_, ctlRecv = openModalConn(t, mgr, frames, rec, respPub, connCtl, []string{protocol.CapabilityInteractive})
-				wantEnvelopes = 3 // + resp(CTL) + phase(CTL)
+				wantEnvelopes = 4 // + resp(CTL) + phase(CTL)
 			}
 			waitForEnvelopes(t, rec, wantEnvelopes)
 

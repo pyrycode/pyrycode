@@ -53,6 +53,9 @@ func reconciledModals(t *testing.T, rec *v2Recorder, connID string, recv *noise.
 	out := make(map[string]protocol.ModalShownPayload)
 	for _, env := range noiseMsgsForConn(t, rec, connID) {
 		inner := decryptAppFrame(t, env, recv)
+		if inner.SessionStateCleared {
+			continue
+		}
 		if inner.Type != protocol.TypeModalShown {
 			t.Fatalf("conn %q: noise_msg Type = %q, want %q", connID, inner.Type, protocol.TypeModalShown)
 		}
@@ -84,7 +87,7 @@ func TestV2Session_ModalReconcile_InteractiveOpen(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -99,7 +102,7 @@ func TestV2Session_ModalReconcile_InteractiveOpen(t *testing.T) {
 
 	// noise_resp + one reconciled modal_shown = 2 envelopes; exactly two are
 	// ever emitted here, so the snapshot is final once two are recorded.
-	waitForEnvelopes(t, rec, 2)
+	waitForEnvelopes(t, rec, 3)
 
 	got := reconciledModals(t, rec, connA, aRecv)
 	if len(got) != 1 {
@@ -131,7 +134,7 @@ func TestV2Session_ModalReconcile_TwoModals(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -147,7 +150,7 @@ func TestV2Session_ModalReconcile_TwoModals(t *testing.T) {
 	_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
 
 	// noise_resp + two reconciled modal_shown = 3 envelopes.
-	waitForEnvelopes(t, rec, 3)
+	waitForEnvelopes(t, rec, 4)
 
 	got := reconciledModals(t, rec, connA, aRecv)
 	if len(got) != 2 {
@@ -178,7 +181,7 @@ func TestV2Session_ModalReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -195,7 +198,7 @@ func TestV2Session_ModalReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	// resp(A) + modal_shown(A) + resp(B) + modal_shown(B) = 4 in the correct
 	// (unicast) case. A broadcast on B's open would push a 5th (a second
 	// modal_shown to A), which the count + A-side dup check below would catch.
-	waitForEnvelopes(t, rec, 4)
+	waitForEnvelopes(t, rec, 6)
 
 	gotA := reconciledModals(t, rec, connA, aRecv)
 	gotB := reconciledModals(t, rec, connB, bRecv)
@@ -224,7 +227,7 @@ func TestV2Session_ModalReconcile_NonInteractiveNoResend(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -242,7 +245,7 @@ func TestV2Session_ModalReconcile_NonInteractiveNoResend(t *testing.T) {
 	_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
 
 	// resp(C) + resp(A) + modal_shown(A) = 3 envelopes.
-	waitForEnvelopes(t, rec, 3)
+	waitForEnvelopes(t, rec, 4)
 
 	if got := reconciledModals(t, rec, connA, aRecv); len(got) != 1 {
 		t.Fatalf("interactive control conn %q: got %d modal_shown, want 1", connA, len(got))
@@ -264,7 +267,7 @@ func TestV2Session_ModalReconcile_NothingOutstanding(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -298,7 +301,7 @@ func TestV2Session_ModalReconcile_NilSeamInert(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -356,7 +359,7 @@ func TestV2Session_ModalReconcile_ResolvedBeforeOpenNotResent(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -397,7 +400,7 @@ func TestV2Session_ModalReconcile_PureReadNoMintNoRearm(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startModalReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -411,7 +414,7 @@ func TestV2Session_ModalReconcile_PureReadNoMintNoRearm(t *testing.T) {
 	_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
 
 	// noise_resp + the one reconciled modal_shown.
-	waitForEnvelopes(t, rec, 2)
+	waitForEnvelopes(t, rec, 3)
 	if got := reconciledModals(t, rec, connA, aRecv); len(got) != 1 || got[modalID].ModalID != modalID {
 		t.Fatalf("conn %q: reconcile did not re-send modal %q (got %+v)", connA, modalID, got)
 	}

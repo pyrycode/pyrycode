@@ -184,7 +184,7 @@ func mcpActuateManagerFor(
 		Devices:           v2PairedRegistry(t, v2TestToken),
 		ServerID:          v2TestServerID,
 		Logger:            logger,
-		KnownConversation: known,
+		KnownConversation: func(id string) bool { return known(id) || id == mcpActuateAccepted.ConversationID },
 		MCPActuator:       actuator,
 	})
 	t.Cleanup(stop)
@@ -580,7 +580,7 @@ func TestV2Session_MCPActuation_InterceptedNotRouted(t *testing.T) {
 				Devices:           v2PairedRegistry(t, v2TestToken),
 				ServerID:          v2TestServerID,
 				Logger:            silentLogger(),
-				KnownConversation: func(id string) bool { return id == mcpActuateKnownConv },
+				KnownConversation: func(id string) bool { return id == mcpActuateKnownConv || id == mcpActuateAccepted.ConversationID },
 				MCPActuator:       &fakeMCPActuator{accept: true, payload: mcpActuateAccepted},
 				Handlers: map[string]dispatch.Handler{
 					protocol.TypeMCPReconnect: sentinel,

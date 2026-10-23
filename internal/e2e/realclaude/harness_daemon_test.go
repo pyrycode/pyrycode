@@ -109,6 +109,7 @@ func driveHandshakeInteractive(t *testing.T, phone *fakephone.Client, pubKey []b
 // the first client here to advertise multi_agent).
 func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, caps ...string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
+	caps = append(append([]string(nil), caps...), protocol.CapabilityThread)
 	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
@@ -147,7 +148,37 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 			t.Fatalf("daemon did not grant %s (hello_ack capabilities=%v); the turn stream would not reach this conn", c, ack.Capabilities)
 		}
 	}
+	if slices.Contains(caps, protocol.CapabilityInteractive) {
+		catchUpOpenConversations(t, phone, initSend, initRecv)
+	}
 	return initSend, initRecv
+}
+
+func catchUpOpenConversations(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState) {
+	t.Helper()
+	const request = 3740000
+	sealEnvelope(t, phone, send, protocol.Envelope{ID: request, Type: protocol.TypeListConversations, TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)})
+	env := drainForReply(t, phone, recv, protocol.TypeConversations, request, 30*time.Second)
+	var rows protocol.ConversationsPayload
+	if err := json.Unmarshal(env.Payload, &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows.Conversations {
+		joinThreadConversation(t, phone, send, recv, row.ID)
+	}
+}
+
+// joinThreadConversation completes the named catch-up before a scenario expects live content.
+func joinThreadConversation(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState, conv string) {
+	t.Helper()
+	_ = scenario.QueuePlacementFrames(t, scenario.Wire{
+		Send: func(kind string, payload any) uint64 {
+			const request = 3740001
+			sealEnvelope(t, phone, send, protocol.Envelope{ID: request, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+			return request
+		},
+		Next: scenario.Receive(t, phone, recv),
+	}, conv)
 }
 
 func buildHelloEarly(t *testing.T, token string, caps []string) []byte {

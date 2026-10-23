@@ -1108,8 +1108,8 @@ func TestV2Session_DebugBundle_AssemblyDoesNotStallRun(t *testing.T) {
 		t.Fatalf("Push to %s: %v", connC, err)
 	}
 	cMsgs := waitForConnNoiseMsg(t, rec, connC, 1)
-	if inner := decryptAppFrame(t, cMsgs[0], recvC); inner.Type != protocol.TypeMessage {
-		t.Errorf("conn C push Type = %q, want %q", inner.Type, protocol.TypeMessage)
+	if inner := decryptAppFrame(t, cMsgs[0], recvC); inner.Type != protocol.TypeWorkspaceUpdated {
+		t.Errorf("conn C push Type = %q, want %q", inner.Type, protocol.TypeWorkspaceUpdated)
 	}
 
 	// (3) The manualRekey arm: Rekey blocks on Run's reply, which comes only

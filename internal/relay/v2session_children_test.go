@@ -69,6 +69,10 @@ func testChildrenRead(t *testing.T, p *testHostedPeer, id uint64) (protocol.Thre
 
 func TestThreadExpansionHandshake(t *testing.T) {
 	for mask := 0; mask < 64; mask++ {
+		// Missing thread/readiness is refused at admission, covered separately.
+		if mask&10 != 10 {
+			continue
+		}
 		t.Run(fmt.Sprint(mask), func(t *testing.T) {
 			var caps []string
 			for i, cap := range []string{protocol.CapabilityThreadExpansion, protocol.CapabilityThread, protocol.CapabilityInteractive} {

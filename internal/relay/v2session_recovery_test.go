@@ -36,7 +36,7 @@ func testRecoveryOpen(t *testing.T, p *testHostedPeer, caps []string, last strin
 	t.Helper()
 	q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: "returning", pub: p.pub, events: p.events, ids: map[uint64]bool{1: true}}
 	var hello protocol.Envelope
-	if err := json.Unmarshal(buildHelloEarlyDataCaps(t, v2TestToken, caps), &hello); err != nil {
+	if err := json.Unmarshal(buildHelloEarlyDataCaps(t, v2TestToken, supportedCaps(caps)), &hello); err != nil {
 		t.Fatal(err)
 	}
 	if last != "" {

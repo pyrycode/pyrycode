@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -30,7 +31,7 @@ func buildHelloEarlyInteractive(t *testing.T, token string) []byte {
 		ClientVersion:    "0.0.1-test",
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
-		Capabilities:     []string{protocol.CapabilityInteractive},
+		Capabilities:     []string{protocol.CapabilityInteractive, protocol.CapabilityThread},
 	})
 	if err != nil {
 		t.Fatalf("marshal interactive hello payload: %v", err)
@@ -109,13 +110,52 @@ func driveHandshakeToOpenDaemonInteractive(t *testing.T, phone *fakephone.Client
 	if err := json.Unmarshal(ackEnv.Payload, &ack); err != nil {
 		t.Fatalf("decode hello_ack payload: %v", err)
 	}
-	if !slices.Contains(ack.Capabilities, protocol.CapabilityInteractive) {
-		t.Fatalf("daemon did not grant interactive (hello_ack capabilities=%v); test precondition unmet", ack.Capabilities)
+	if !slices.Contains(ack.Capabilities, protocol.CapabilityInteractive) || !slices.Contains(ack.Capabilities, protocol.CapabilityThread) {
+		t.Fatalf("daemon did not grant interactive/thread (hello_ack capabilities=%v); test precondition unmet", ack.Capabilities)
 	}
 	for _, cap := range caps {
 		if !slices.Contains(ack.Capabilities, cap) {
 			t.Fatalf("daemon did not grant %s", cap)
 		}
 	}
+	catchUpOpenConversations(t, phone, initSend, initRecv)
 	return initSend, initRecv
+}
+
+func catchUpOpenConversations(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState) {
+	t.Helper()
+	request := uint64(3740000)
+	next := scenario.Receive(t, phone, recv)
+	wire := scenario.Wire{Next: next, Send: func(kind string, payload any) uint64 {
+		request++
+		raw, err := json.Marshal(protocol.Envelope{ID: request, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sealed, err := send.Encrypt(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendNoiseMsg(t, phone, sealed)
+		return request
+	}}
+	id := wire.Send(protocol.TypeListConversations, json.RawMessage(`{}`))
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		env := next(deadline)
+		if env.Type == "" || env.Type == protocol.TypeError {
+			t.Fatal("conversation list before catch-up failed")
+		}
+		if env.Type != protocol.TypeConversations || env.InReplyTo == nil || *env.InReplyTo != id {
+			continue
+		}
+		var rows protocol.ConversationsPayload
+		if err := json.Unmarshal(env.Payload, &rows); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows.Conversations {
+			_ = scenario.QueuePlacementFrames(t, wire, row.ID)
+		}
+		return
+	}
 }
