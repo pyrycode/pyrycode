@@ -78,3 +78,7 @@ Pending documentation stage:
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-23
+
+## Revisions
+
+- 2026-10-23 (prospective): The retained verifier finding explicitly asks for the live reader. Supplement the daemon broadcaster assertion with `TestRelayV2_AgentContentLifecycleNeutral` in `internal/e2e/agent_content_lifecycle_test.go`: observe an actual encrypted main running/idle sequence, release a second fake-Claude fragment containing only roster/task/child traffic, require its retained sources and actual task-progress envelope, and drain through a correlated ordered reply while rejecting any turn-state envelope. Existing two-fragment replay provides the release barrier and owns child shutdown; no new helper or production changes. This reads `writeTaskRosterRows` and the fake-Claude replay path in `stream_json.go`. Forecast remains under 500 written lines, zero exports or production call-site changes. Security self-review PASS: isolated mode-0600 fragments, bounded existing encrypted reader/deadline, no credential/logging/crypto changes. The precise system-prompt consumer name is `TestInteractiveConversationSystemPrompt_ReachesTheReply`; its live proof remains dispatcher-owned.
