@@ -30,16 +30,18 @@ func TestSharedHarnessWireReconnect(t *testing.T) {
 	const conv = "37340000-0000-4000-8000-000000000001"
 	h := &perConvHarness{home: t.TempDir()}
 	store := history.New(filepath.Join(h.home, ".pyry", "test"))
-	appendSource := func(text string) uint64 {
+	owner := &history.SessionProvenance{Kind: "claude", SessionID: "source-owner"}
+	appendSource := func(kind string, payload any) uint64 {
 		t.Helper()
-		id, err := store.Append(conversations.ConversationID(conv), protocol.TypeAssistantDelta,
-			mustJSON(t, protocol.AssistantDeltaPayload{ConversationID: conv, TurnID: "owned", Text: text}), time.Now().UTC())
+		id, err := store.AppendWithMetadata(conversations.ConversationID(conv), kind,
+			mustJSON(t, payload), time.Now().UTC(), history.Metadata{Session: owner})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return id
 	}
-	appendSource("predecessor")
+	appendSource("main_turn_opened", map[string]any{"conversation_id": conv, "turn_id": "predecessor", "occurred_at": time.Now().UTC()})
+	appendSource(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: conv, TurnID: "predecessor", Text: "predecessor"})
 	peers := make(chan *websocket.Conn, 1)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +57,7 @@ func TestSharedHarnessWireReconnect(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var wireSourceID uint64
+	var wireOpeningID, wireSourceID uint64
 	var w scenario.Wire
 	for generation := 0; generation < 3; generation++ {
 		phone, err := fakephone.Dial(ctx, strings.Replace(server.URL, "http", "ws", 1), "server", "token", "phone")
@@ -98,10 +100,11 @@ func TestSharedHarnessWireReconnect(t *testing.T) {
 			t.Fatal("reconnect lost command sequence or current send cipher")
 		}
 		if generation == 0 {
-			wireSourceID = appendSource("current turn")
+			wireOpeningID = appendSource("main_turn_opened", map[string]any{"conversation_id": conv, "turn_id": "owned", "occurred_at": time.Now().UTC()})
+			wireSourceID = appendSource(protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: conv, TurnID: "owned", Text: "current turn"})
 		}
 		entries := w.Source(conv)
-		if len(entries) != 1 || entries[0].ID != wireSourceID {
+		if len(entries) != 2 || entries[0].ID != wireOpeningID || entries[1].ID != wireSourceID {
 			t.Fatal("reconnect changed the pre-command source boundary")
 		}
 		cipher, err = peerSend.Encrypt(mustJSON(t, protocol.Envelope{ID: uint64(generation + 10),
