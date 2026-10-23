@@ -459,6 +459,11 @@ func runRecordedClaude(t *testing.T, scenario string, holdInitialize time.Durati
 			_, beforeStop := os.Stat(c.Claim + ".duplicate")
 			t.Logf("recorded seal: duplicate_before_stop=%t", beforeStop == nil)
 			h.Stop(t)
+			if scenario == "subagent-text" {
+				if err := verifyRecordedSubagentWorker(c, h.PID, stderr.String()); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if _, err := os.Stat(c.Claim + ".duplicate"); err == nil {
 				t.Fatal("unrecorded additional Claude process")
 			}

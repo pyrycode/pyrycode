@@ -388,6 +388,9 @@ func nativeStreamArgs(args []string) bool {
 }
 
 func runClaudeTapeProcess(c tapeProcessConfig, args []string) (int, error) {
+	if c.Scenario == "subagent-text" && recordedSubagentWorkerInvocation(args) {
+		return 0, declineRecordedSubagentWorker(c, os.Stdin)
+	}
 	if c.Scenario == "native-suggestions" && !nativeStreamArgs(args) {
 		return 0, errTapeNativePrintRefused
 	}
