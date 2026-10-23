@@ -500,3 +500,25 @@ not product authentication, admission, permissions, cryptography or persistence.
 Only actually received lifecycle frames may prove completion. Exact conversation,
 session, turn, answer attribution and fresh-session isolation remain mandatory.
 Independent review and execution are pending. No release or deployment is included.
+
+### Confirmed dormant reset prerequisite
+
+The admitted controlled regression fails at the intended assertion: revival
+discards the reset operation before rotation. Existing late-transition rejection
+still passes. Dormant revival calls the real runtime-producer registration seam.
+That advances the live generation after start's first failed bound lookup already
+reserved a reset operation. The operation then loses every progress result.
+This is a production prerequisite exposed by mandatory thread admission.
+
+After successful revival, reserve again under the existing synchronous live
+binding boundary. Require its captured session ID still equal the revived ID.
+A changed binding must remain inert. Capture stays before workspace resolution
+and asynchronous reset work, so a later transition still invalidates it. Do not
+weaken generation checks, retag old payloads or hold the live boundary across
+revival, filesystem work or producer activation. Nil legacy wiring keeps its
+existing path. Verify positive revival and rebound refusal, existing late-change
+rejection and dormant reset guards before the original authenticated live case.
+
+Author security review: this repair preserves source ownership by checking the
+revived identity before reservation. It adds no permission, authentication or
+privacy exception. Independent review of the changed candidate remains pending.
