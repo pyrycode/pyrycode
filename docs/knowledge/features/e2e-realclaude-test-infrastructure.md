@@ -25,7 +25,7 @@ On failure, `runRecordedLifecycleSuite` logs the diagnostic with scenario and
 role from bounded receipt data before disposable-home cleanup. It also logs
 source revision and actual helper/daemon SHA256 identities, so retained test
 output can be tied to the executed binaries. Preserve that output outside the
-temporary home. See [absolute timing and settlement](e2e-harness.md#recorded-lifecycle-timing-and-settlement)
+temporary home. See [absolute timing and settlement](e2e-harness-recorded-lifecycle-timing-and-settlement.md#recorded-lifecycle-timing-and-settlement)
 and [retained failure/pass evidence](development-verification-test-execution-and-artifact-survival.md#diagnosing-recorded-lifecycle-output-timing).
 
 `LifecycleDiagnostic` separately reports terminal broker progress on success and
@@ -68,7 +68,7 @@ therefore have a real production Wait and no registered native exchange.
 For session-resume replay with no reviewed workers, a helper that finishes
 startup stays silent until production cancellation, with a bounded failure
 deadline and no broker, job or receipt. Only the outer harness's independent
-[current ownership and cancellation proof](e2e-harness.md#recorded-lifecycle-timing-and-settlement)
+[current ownership and cancellation proof](e2e-harness-recorded-lifecycle-timing-and-settlement.md#recorded-lifecycle-timing-and-settlement)
 can account for that launch. Missing registration by itself proves neither
 absence of a launch nor successful native completion; the
 [strict worker contract](../../testing/daemon-recordings.md#idle-eviction-and-literal-native-resume-inputs)

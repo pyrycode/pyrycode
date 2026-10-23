@@ -1,0 +1,144 @@
+{
+  "ticket": 3835,
+  "platform": "Linux x86_64",
+  "mode": "offline replay; no live Claude or capture",
+  "historical_failure": {
+    "revision": "895f4ff0c9bf84fe5723dacfbedff9f253a9d92d",
+    "verifier_ticket": 3737,
+    "evidence_owner": 3833,
+    "original_root_tracker": 3834,
+    "verdict": "remains failed; isolated passes do not prove historical root repair"
+  },
+  "environment": {
+    "PYRY_CLAUDE_TAPE_MODE": "replay",
+    "PYRY_CLAUDE_TAPE_SCENARIOS": "[\"session-resume\"]",
+    "PYRY_CLAUDE_TAPE_EVIDENCE": "/tmp/builder-3835/{baseline,final}/evidence",
+    "homes": "new isolated homes on every invocation; build caches warm, host load not measured"
+  },
+  "admission_refusal": {
+    "selection": "^TestRecordedClaude$/^session-resume$",
+    "reason": "catch-all or unbounded Go selection",
+    "executed": 0
+  },
+  "baseline": {
+    "source_revision": "e82a33698d05549ba1a8c4fe404e58a88d93ac99",
+    "selection": "^TestRecordedClaude/session-resume$",
+    "counts": {
+      "test_events": {
+        "executed": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leaf_tests": {
+        "executed": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "log": "baseline-replay.jsonl",
+    "sha256": "fdb3e9f2217fabe478bef93a081ccd2ab28553b1d0015241d526dc2268ba32bb"
+  },
+  "baseline_selection_note": "Go also selected TestRecordedClaudeFirstTurnWaitsForStartup. Both leaves passed. Final selection anchors the root and uses the single-scenario environment.",
+  "old_cleanup_regression": {
+    "source_revision": "336744f286ee21459e1615a3477f15e21d2f2e6b",
+    "selection": "^TestRecordedLifecycleDiagnosticCleanup$",
+    "counts": {
+      "test_events": {
+        "executed": 5,
+        "passed": 0,
+        "failed": 5,
+        "skipped": 0
+      },
+      "leaf_tests": {
+        "executed": 4,
+        "passed": 0,
+        "failed": 4,
+        "skipped": 0
+      }
+    },
+    "log": "old-cleanup.jsonl",
+    "sha256": "5feba6cd4d8606ed1398390518ee7757cda9e5f337b3238856126b423bc87a9e"
+  },
+  "old_cleanup_source_note": "Run used the unchanged cleanup path extracted into the shared helper plus the new four-case regression; that exact source tree was committed as the revision above after execution. All four cases failed closed-before-handler-completion assertions, deterministically under -race.",
+  "repair_cleanup_and_replay": {
+    "source_revision": "21b6eaeda00e448abc8e9d130e213e6d62325414",
+    "selection": "^(TestRecordedLifecycleDiagnosticCleanup|TestRecordedClaude)$",
+    "counts": {
+      "test_events": {
+        "executed": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leaf_tests": {
+        "executed": 6,
+        "passed": 6,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "log": "repaired-cleanup-and-replay.jsonl",
+    "sha256": "a89e2a2238a604648053f5c4d632c8c581772e6e242f3c824ffac20e5f5081d6"
+  },
+  "repair_leaf_results": {
+    "cleanup": {
+      "executed": 5,
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    "session_resume": {
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "intentional_helper_verdict": "Each cleanup helper retains its intentional original assertion failure; parent verifies no descriptor-lifetime failure, retained content, one close and required child reaping."
+  },
+  "original_root": {
+    "name": "TestInteractiveStreamResumeAfterEviction",
+    "counts": {
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    "evidence": "/tmp/builder-3835/final/evidence/session-resume-replay.jsonl"
+  },
+  "affected_package": {
+    "source_revision": "21b6eaeda00e448abc8e9d130e213e6d62325414",
+    "selection": "./internal/e2e/internal/claudetape (all tests)",
+    "counts": {
+      "test_events": {
+        "executed": 1052,
+        "passed": 1052,
+        "failed": 0,
+        "skipped": 0
+      },
+      "leaf_tests": {
+        "executed": 948,
+        "passed": 948,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    "log": "/tmp/builder-3835/final/claudetape.json",
+    "sha256": "6825e5fd196f35d7e6259baedda7f1b63338ab61d47f6043ab420115ded67b8c"
+  },
+  "commands": [
+    "python3 scripts/test-admission.py -- go test -timeout=30m -tags=e2e -race -count=1 -json -run <selection> ./internal/e2e",
+    "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/e2e/internal/claudetape",
+    "go vet ./...",
+    "go vet -tags=e2e ./internal/e2e",
+    "go build -o /tmp/builder-3835/final/pyry ./cmd/pyry"
+  ],
+  "static_checks": {
+    "source_revision": "21b6eaeda00e448abc8e9d130e213e6d62325414",
+    "vet_exit": 0,
+    "tagged_vet_exit": 0,
+    "build_exit": 0
+  },
+  "handoff": "Complete gates belong to dispatcher/verifier. macOS is outside this Linux ticket. Evidence-only commits after the tested source do not change Go code."
+}

@@ -254,18 +254,16 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 	ownedBrokers := map[string]*exec.Cmd{}
 	var ownedBrokersMu sync.Mutex
-	server, err := claudetape.NewLifecycleBrokerServer(filepath.Join(home, "broker.sock"), brokerJobs, func(jobPath string, peer int) (*exec.Cmd, error) {
+	server, err := claudetape.NewLifecycleBrokerServer(filepath.Join(home, "broker.sock"), brokerJobs, func(jobPath string, peer int) (*exec.Cmd, io.Closer, error) {
 		var job claudetape.LifecycleJob
 		if claudetape.ReadLifecycleControl(jobPath, claudetape.MaxBytes, &job) != nil || claudetape.ValidateLifecycleLaunch(job, jobPath, peer, os.Getpid(), process, sourceSHA, daemon) != nil {
-			return nil, os.ErrInvalid
+			return nil, nil, os.ErrInvalid
 		}
 		cmd := exec.Command(binary, "-test.run=^TestLifecycleTapeBrokerProcess$", "--", jobPath)
-		diagnostic, err := os.OpenFile(filepath.Join(retained, job.Role+".diagnostic.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		diagnostic, err := recordedLifecycleDiagnostic(cmd, filepath.Join(retained, job.Role+".diagnostic.json"))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		t.Cleanup(func() { _ = diagnostic.Close() })
-		cmd.Stdout = diagnostic
 		cmd.Env = os.Environ()
 		if mode == "replay" {
 			cmd.Env = recordedPoolOfflineEnv()
@@ -274,7 +272,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		ownedBrokersMu.Lock()
 		ownedBrokers[job.Role] = cmd
 		ownedBrokersMu.Unlock()
-		return cmd, nil
+		return cmd, diagnostic, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -314,18 +312,18 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 		for i := 1; i <= workerLimit; i++ {
 			jobs = append(jobs, claudetape.FallbackWorkerJobPath(home, i))
 		}
-		workerServer, err = claudetape.NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), jobs, func(path string, peer int) (*exec.Cmd, error) {
+		workerServer, err = claudetape.NewLifecycleBrokerServer(filepath.Join(home, "worker.sock"), jobs, func(path string, peer int) (*exec.Cmd, io.Closer, error) {
 			var job claudetape.FallbackWorkerJob
 			if claudetape.ReadLifecycleControl(path, 16384, &job) != nil || claudetape.ValidateFallbackWorkerLaunch(job, path, peer, os.Getpid(), process, sourceSHA) != nil {
-				return nil, os.ErrInvalid
+				return nil, nil, os.ErrInvalid
 			}
 			if claudetape.ValidateFallbackReplayWait(job, path, mode, home, workerWaits) != nil {
-				return nil, os.ErrInvalid
+				return nil, nil, os.ErrInvalid
 			}
 			launchRaw, err := os.ReadFile(path)
 			var sameJob claudetape.FallbackWorkerJob
 			if err != nil || len(launchRaw) > 16384 || json.Unmarshal(launchRaw, &sameJob) != nil || !reflect.DeepEqual(job, sameJob) {
-				return nil, os.ErrInvalid
+				return nil, nil, os.ErrInvalid
 			}
 			workerLaunchMu.Lock()
 			workerLaunchHashes[path] = sha256.Sum256(launchRaw)
@@ -341,7 +339,7 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 			workerLaunchMu.Lock()
 			workerProofs[path] = proof
 			workerLaunchMu.Unlock()
-			return cmd, nil
+			return cmd, nil, nil
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -626,6 +624,15 @@ func runRecordedLifecycleSuite(t *testing.T, name string) {
 	}
 
 	t.Logf("mode=%s scenario=%s original_daemon_roots=1 child_roles=%d", mode, name, len(profile.Roles))
+}
+
+func recordedLifecycleDiagnostic(cmd *exec.Cmd, path string) (*os.File, error) {
+	diagnostic, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout = diagnostic
+	return diagnostic, nil
 }
 
 type recordedWorkerCompletion struct {

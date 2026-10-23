@@ -36,7 +36,7 @@ role failures were `before-wait`, anchored to user 1, with 107–121 ms lateness
 input observation was at most 25.6 ms, input-witness work was zero and startup
 preceded readiness. This established accumulated observer work as the demonstrated
 defect, rather than a reason to enlarge the 100 ms allowance. The
-[result-boundary observer](e2e-harness.md#recorded-lifecycle-timing-and-settlement)
+[result-boundary observer](e2e-harness-recorded-lifecycle-timing-and-settlement.md#recorded-lifecycle-timing-and-settlement)
 retains full validation and the final independent audit.
 
 The [committed timing evidence](../../../internal/e2e/internal/claudetape/testdata/lifecycle_timing_3666.json)
