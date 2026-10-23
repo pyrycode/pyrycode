@@ -798,3 +798,28 @@ and shared observation code remain untouched. The expected retained source facts
 stay explicit, and actual encrypted reconnect delivery remains required. No
 synthetic app envelope, new exported API, timeout exception or global state.
 Stop in Documentation after required review and acceptance. No merge or deploy.
+
+### Reconnect fixture author validation
+
+Source candidate 1da350cbb953a1fa81f2586f097abff0d48767cd changes only the
+hermetic test in shared_scenario_wire_reconnect_test.go. Its retained records now
+have valid producing-session metadata and a current execution opening. Every
+connection requires the same exact current opening and content IDs, excluding
+the valid pre-command predecessor records. All encrypted correlation, replaced
+cipher and pending-reader assertions remain. The shared helper is unchanged.
+
+Normal admitted race checking executes 45 named hermetic tagged controls, all
+passing with zero failures or skips. These group reconnect, prompt history and
+reset ownership/completion, including missing/foreign/malformed negative cases.
+Other direct history fixtures were inspected together; their provenance is
+already explicit. Tagged realclaude vet also passes. No provider credentials or
+provider execution are claimed for these controls. Evidence and exact commands:
+reconnect-fixture-controls.json, reconnect-fixture-controls-command.json and
+reconnect-fixture-vet.log under the existing manual evidence directory.
+
+The original complete full live attempt remains failed: 2562 named passes, one
+failure and 27 skips. The same-tree repeat fails and unchanged-base single-case
+comparison passes. All those captures and metadata remain under live-failed-7da07191.
+The offline independent PASS is still for 7da07191. This tagged-only fixture
+correction needs independent re-review and required normal acceptance. No original
+outcome is changed, no gate is waived and no full current live pass is claimed.
