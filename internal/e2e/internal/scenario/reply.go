@@ -151,7 +151,7 @@ func PollingReceiveWithStop(t *testing.T, phone interface {
 
 const WarnRateLimitStatus = "allowed_warning"
 
-// CompletedTurn requires attributed nonempty text followed by terminal idle.
+// CompletedTurn requires attributed nonempty source text and actual terminal idle.
 // Provider wording and chunk counts are unconstrained; parser gaps and unknown
 // rate-limit statuses remain global alarms, including on foreign conversations.
 func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration, rejectModal bool, sources ...SourceFacts) string {
@@ -171,6 +171,7 @@ func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 		}
 		env := next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, sources, convID))
+		idle := turn.idle(t, env, convID)
 		if env.SessionStateCleared {
 			continue
 		}
@@ -218,21 +219,8 @@ func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 				p.Status, p.LimitType, p.ResetsAt, p.TruncatedFields, p.ConversationID)
 		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
 			t.Fatal("retired interactive content delivered on the wire")
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if st.State != "idle" || st.ConversationID != convID {
-				continue // the leading responding state precedes the delta
-			}
-			if strings.TrimSpace(turn.text.String()) == "" || !turn.idle(t, env, convID) {
-				// A prior cancelled turn can leave its terminal idle queued after
-				// drainForCancelledTurnEnd returns at turn_end. Without a delta,
-				// this idle cannot be attributed to the turn being drained.
-				continue
-			}
-			// M2: after matching nonempty text, terminal idle closes the turn.
+		}
+		if idle && strings.TrimSpace(turn.text.String()) != "" {
 			t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
 			return turn.text.String()
 		}

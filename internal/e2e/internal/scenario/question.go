@@ -135,7 +135,7 @@ func ChooseAnswers(t *testing.T, batch protocol.QuestionShownPayload) ([]protoco
 }
 
 // AnsweredTurn retains all three milestones regardless of dismissal/idle order.
-// Idle preceding the first matching nonempty text cannot close this turn.
+// Actual idle may precede the independent append of owned continuation text.
 func AnsweredTurn(t *testing.T, next Next, convID, batchID string, budget time.Duration, sources ...SourceFacts) string {
 	t.Helper()
 	deadline := time.Now().Add(budget)
@@ -144,7 +144,11 @@ func AnsweredTurn(t *testing.T, next Next, convID, batchID string, budget time.D
 	for time.Now().Before(deadline) {
 		env := next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, sources, convID))
+		idle = turn.idle(t, env, convID) && strings.TrimSpace(turn.text.String()) != ""
 		alarm(t, env)
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeQuestionDismissed:
 			var p protocol.QuestionDismissedPayload
@@ -154,14 +158,6 @@ func AnsweredTurn(t *testing.T, next Next, convID, batchID string, budget time.D
 			dismissed = true
 		case protocol.TypeAssistantDelta:
 			t.Fatal("retired question continuation delivered on wire")
-		case protocol.TypeTurnState:
-			var p protocol.TurnStatePayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid question turn state")
-			}
-			if turn.idle(t, env, convID) && strings.TrimSpace(turn.text.String()) != "" {
-				idle = true
-			}
 		}
 		if dismissed && idle {
 			return turn.text.String()

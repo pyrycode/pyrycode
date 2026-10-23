@@ -65,6 +65,7 @@ func permissionTurn(t *testing.T, w Wire, convID string, pending map[string]bool
 	for time.Now().Before(deadline) {
 		env := w.Next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
+		idle = turn.idle(t, env, convID) && (option == "reject_once" || strings.TrimSpace(turn.text.String()) != "")
 		alarm(t, env)
 		if env.SessionStateCleared {
 			continue
@@ -86,6 +87,7 @@ func permissionTurn(t *testing.T, w Wire, convID string, pending map[string]bool
 			retries++
 			seen[shown.ModalID], pending[shown.ModalID] = true, true
 			idle = false
+			turn.liveIdle = nil
 			w.Send(protocol.TypeModalAnswer, protocol.ModalAnswerPayload{ModalID: shown.ModalID, OptionID: option, AnswerToken: fmt.Sprintf("e2e-deny-retry-%d", retries)})
 		case protocol.TypeModalDismissed:
 			var dis protocol.ModalDismissedPayload
@@ -95,14 +97,6 @@ func permissionTurn(t *testing.T, w Wire, convID string, pending map[string]bool
 			delete(pending, dis.ModalID)
 		case protocol.TypeAssistantDelta:
 			t.Fatal("retired permission continuation delivered on wire")
-		case protocol.TypeTurnState:
-			var state protocol.TurnStatePayload
-			if json.Unmarshal(env.Payload, &state) != nil {
-				t.Fatal("invalid permission turn state")
-			}
-			if turn.idle(t, env, convID) && (option == "reject_once" || strings.TrimSpace(turn.text.String()) != "") {
-				idle = true
-			}
 		}
 		if idle && len(pending) == 0 {
 			return turn.text.String()

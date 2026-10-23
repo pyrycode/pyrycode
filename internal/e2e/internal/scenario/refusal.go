@@ -36,6 +36,7 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 	for time.Now().Before(deadline) {
 		env := w.Next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, []SourceFacts{w.Source}, convID))
+		idle = turn.idle(t, env, convID)
 		alarm(t, env)
 		if env.SessionStateCleared {
 			continue
@@ -67,6 +68,7 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 			obs.ExtraRefusals++
 			seen[shown.QuestionBatchID], questions[shown.QuestionBatchID] = true, true
 			idle = false
+			turn.liveIdle = nil
 			w.Send(protocol.TypeQuestionRefused, protocol.QuestionRefusedPayload{QuestionBatchID: shown.QuestionBatchID, AnswerToken: fmt.Sprintf("e2e-reask-%d", obs.ExtraRefusals)})
 		case protocol.TypeModalShown:
 			var shown protocol.ModalShownPayload
@@ -79,6 +81,7 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 			obs.ModalsAllowed++
 			modals[shown.ModalID] = true
 			idle = false
+			turn.liveIdle = nil
 			w.Send(protocol.TypeModalAnswer, protocol.ModalAnswerPayload{ModalID: shown.ModalID, OptionID: "allow_once", AnswerToken: fmt.Sprintf("e2e-refusal-allow-%d", obs.ModalsAllowed)})
 		case protocol.TypeModalDismissed:
 			var dis protocol.ModalDismissedPayload
@@ -98,14 +101,6 @@ func RefusedTurn(t *testing.T, w Wire, convID, batchID string, budget time.Durat
 				if p.Active {
 					lastAttempt, maxRetry = p.Current, p.Total
 				}
-			}
-		case protocol.TypeTurnState:
-			var p protocol.TurnStatePayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid refusal turn state")
-			}
-			if turn.idle(t, env, convID) {
-				idle = true
 			}
 		}
 		if idle && sawDismissal && len(questions) == 0 && len(modals) == 0 {

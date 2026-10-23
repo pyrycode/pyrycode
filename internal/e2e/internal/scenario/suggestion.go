@@ -34,19 +34,15 @@ func NativeSuggestions(t *testing.T, w Wire, c NativeSuggestionConfig) {
 	observe := func(env protocol.Envelope) {
 		turn.feed(t, c.ConversationID, sourceFacts(t, []SourceFacts{w.Source}, c.ConversationID))
 		sawDelta = strings.TrimSpace(turn.text.String()) != ""
+		idle = turn.idle(t, env, c.ConversationID) && sawDelta
+		if env.SessionStateCleared {
+			return
+		}
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatal("native suggestion turn was refused")
 		case protocol.TypeAssistantDelta:
 			t.Fatal("retired suggestion content delivered on wire")
-		case protocol.TypeTurnState:
-			var p protocol.TurnStatePayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid suggestion turn state")
-			}
-			if turn.idle(t, env, c.ConversationID) && sawDelta {
-				idle = true
-			}
 		case protocol.TypeReplySuggestion:
 			var p struct {
 				ConversationID string          `json:"conversation_id"`

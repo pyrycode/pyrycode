@@ -55,7 +55,7 @@ func NewSourceObserver(t *testing.T, home string) *SourceObserver {
 // Watch captures the source boundary before submitting a command.
 func (o *SourceObserver) Watch(conv string) {
 	o.t.Helper()
-	w := &sourceWatch{}
+	w := &sourceWatch{turn: sourceTurn{commandAt: time.Now()}}
 	for _, e := range o.snapshot(conv) {
 		w.mark = e.ID
 	}
@@ -91,9 +91,7 @@ func (o *SourceObserver) Next(next Next, deadline time.Time) (protocol.Envelope,
 	for conv, w := range o.watches {
 		entries := o.snapshot(conv)
 		w.turn.feed(o.t, conv, entries)
-		if w.turn.idle(o.t, env, conv) {
-			w.idle = true
-		}
+		w.idle = w.turn.idle(o.t, env, conv)
 		for _, e := range entries {
 			if e.ID <= w.mark {
 				continue

@@ -42,11 +42,12 @@ func OutsideRead(t *testing.T, w Wire, convID string, deadline time.Time) (strin
 				convID, budget, turn.text.Len(), answered, tools)
 		}
 		env := w.Next(pollDeadline(deadline))
+		entries := sourceFacts(t, []SourceFacts{w.Source}, convID)
+		turn.feed(t, convID, entries)
+		idle := turn.idle(t, env, convID)
 		if env.SessionStateCleared {
 			continue
 		}
-		entries := sourceFacts(t, []SourceFacts{w.Source}, convID)
-		turn.feed(t, convID, entries)
 		sawDelta = strings.TrimSpace(turn.text.String()) != ""
 		for _, entry := range entries {
 			if entry.Type != protocol.TypeToolUse {
@@ -106,14 +107,8 @@ func OutsideRead(t *testing.T, w Wire, convID string, deadline time.Time) (strin
 			answered++
 			w.Send(protocol.TypeModalAnswer, protocol.ModalAnswerPayload{ModalID: shown.ModalID, OptionID: string(turnevent.PermissionOptionKindAllowOnce), AnswerToken: "e2e-2474-posture-probe"})
 
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if !turn.idle(t, env, convID) || !sawDelta {
-				continue
-			}
+		}
+		if idle && sawDelta {
 			return turn.text.String(), tools, first, answered
 		}
 	}

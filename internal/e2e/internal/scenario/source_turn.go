@@ -94,6 +94,7 @@ type sourceTurn struct {
 	end       history.Entry
 	reason    string
 	started   time.Time
+	commandAt time.Time
 	opened    map[string]time.Time
 	queued    bool
 	liveIdle  *protocol.Envelope
@@ -118,6 +119,9 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 			t.Fatal("invalid source payload")
 		}
 		if p.ConversationID == conv && (e.Type == "send_accepted" || e.Type == protocol.TypeMessage) {
+			if !s.queued && e.TS.After(s.commandAt) {
+				s.commandAt = e.TS
+			}
 			s.queued = true
 		}
 		if p.ConversationID != conv || p.Parent != "" || p.TurnID == "" {
@@ -140,7 +144,9 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 		}
 		if s.turn == "" && (e.Type == protocol.TypeAssistantDelta || e.Type == protocol.TypeTurnEnd) {
 			opened, executing := s.opened[e.Session.Kind+"\x00"+e.Session.SessionID+"\x00"+p.TurnID]
-			if s.queued && !executing {
+			// Append order cannot establish execution order: a predecessor's opening
+			// can be retained after the watched command was accepted.
+			if (s.queued && !executing) || (executing && opened.Before(s.commandAt)) {
 				continue
 			}
 			s.turn, s.session = p.TurnID, *e.Session
