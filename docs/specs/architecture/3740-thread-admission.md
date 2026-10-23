@@ -654,3 +654,39 @@ permissions, data storage, transport, encryption or product admission is weakene
 Source filtering uses actual recorded execution identity and producer time, never
 history append order alone. Non-main alarms remain observable. Unknown ownership
 cannot certify completion. No new goroutine, global state or credential handling.
+
+### Manual rework validation
+
+Source candidate ec00848e84f3dff6b33009f35bdfbd04ea2f788c. Linux commands used
+ordinary test admission. All named counts exclude package outcomes. This record
+changes documentation only after the tested source candidate.
+
+| Selection | Passed | Failed | Skipped | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| Both command adapters and completion consumers | 38 | 0 | 0 | completion-window-controls.json |
+| Reset envelope ownership and existing source controls | 19 | 0 | 0 | reset-ownership-controls.json |
+| Complete shared scenario package | 385 | 0 | 0 | completion-rework-scenario-final.json |
+| Recorded reply, permission, question, attachment, suggestion, child and hook consumers | 14 | 0 | 0 | completion-rework-recorded.json |
+| Actual dormant reset, normal clear, skipped wrap-up, permission isolation and three question flows | 7 | 0 | 0 | completion-rework-live.json |
+
+All three admitted vet commands passed: the shared scenario package, tagged
+realclaude packages and tagged liverelay packages. Exact commands and source
+candidate records are retained beside their logs. The first complete scenario
+attempt failed one old fixture lacking an actual execution opening. Its failed
+completion-rework-scenario.json remains; the corrected fixture still asserts
+predecessor-idle rejection. Independent failed probes and the final FAIL on
+839ecccc remain authoritative historical results. Its ten passing offline gates
+are ancestor evidence, not complete acceptance of this new candidate.
+
+The captured command window now applies to both real source adapters, including
+predecessor observations in a separate poll before successor acceptance. Main
+content requires its real execution opening within the watched command window.
+Child source facts and unsupported-content alarms remain visible. Active reset
+proof retains and validates actual conversation and predecessor-session metadata.
+Missing, null, malformed and foreign values fail. The seven authenticated cases
+retain actual encrypted delivery, successor prompts and recall, parked question
+and permission continuation, skipped-note preservation and session isolation.
+
+These are manual author results, not an independent PASS. Fresh independent
+source/security review and complete configured/live acceptance remain pending.
+Keep the PR draft and stop at Documentation. No merge, release or deployment.
