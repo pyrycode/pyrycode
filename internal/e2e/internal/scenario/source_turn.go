@@ -40,29 +40,89 @@ func SourceSnapshot(t *testing.T, home string) SourceFacts {
 	}
 }
 
-// SourceSince captures a conversation watermark before submitting a message.
+// SourceSince captures the command window before submitting a message.
 func SourceSince(t *testing.T, home, conv string) SourceFacts {
 	t.Helper()
-	snapshot := SourceSnapshot(t, home)
-	entries := snapshot(conv)
+	return commandSource(t, SourceSnapshot(t, home), conv)
+}
+
+// commandSource admits main-turn content only from an execution opening within
+// the watched command window. Append order alone never identifies the command.
+func commandSource(t *testing.T, snapshot SourceFacts, conv string) SourceFacts {
+	t.Helper()
+	watched := time.Now().UTC()
 	var mark uint64
-	if len(entries) != 0 {
-		mark = entries[len(entries)-1].ID
+	for _, e := range snapshot(conv) {
+		mark = e.ID
 	}
 	return func(id string) []history.Entry {
+		t.Helper()
 		if id != conv {
 			t.Fatal("source cursor used for another conversation")
 		}
-		return slices.DeleteFunc(snapshot(conv), func(e history.Entry) bool { return e.ID <= mark })
+		entries := snapshot(conv)
+		boundary := watched
+		accepted := false
+		type sourcePayload struct {
+			Conversation string    `json:"conversation_id"`
+			Turn         string    `json:"turn_id"`
+			Parent       string    `json:"parent_tool_use_id"`
+			Occurred     time.Time `json:"occurred_at"`
+		}
+		opened := map[string]time.Time{}
+		key := func(e history.Entry, p sourcePayload) string {
+			if e.Session == nil {
+				return ""
+			}
+			return e.Session.Kind + "\x00" + e.Session.SessionID + "\x00" + p.Turn
+		}
+		for _, e := range entries {
+			var p sourcePayload
+			if json.Unmarshal(e.Payload, &p) != nil {
+				t.Fatal("invalid source payload")
+			}
+			if p.Conversation != conv {
+				continue
+			}
+			if e.ID > mark && !accepted && (e.Type == "send_accepted" || e.Type == protocol.TypeMessage) && !e.TS.Before(watched) {
+				boundary = e.TS
+				accepted = true
+			}
+			if e.Type == "main_turn_opened" && e.Session != nil && !p.Occurred.IsZero() {
+				opened[key(e, p)] = p.Occurred
+			}
+		}
+		return slices.DeleteFunc(entries, func(e history.Entry) bool {
+			if e.ID <= mark {
+				return true
+			}
+			var p sourcePayload
+			if json.Unmarshal(e.Payload, &p) != nil {
+				t.Fatal("invalid source payload")
+			}
+			if p.Conversation != conv || p.Parent != "" || p.Turn == "" {
+				return false
+			}
+			switch e.Type {
+			case "main_turn_opened", protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
+				if e.Session == nil || e.Session.SessionID == "" {
+					t.Fatal("source content lacks producing session")
+				}
+				at, ok := opened[key(e, p)]
+				return !ok || at.Before(boundary)
+			default:
+				return false
+			}
+		})
 	}
 }
 
-// ObserveSource keeps one wire reader and marks source history before each
+// ObserveSource keeps one wire reader and captures a command window before each
 // submitted turn. It never projects source facts into app envelopes.
 func ObserveSource(t *testing.T, home string, w Wire) Wire {
 	t.Helper()
 	snapshot := SourceSnapshot(t, home)
-	marks := map[string]uint64{}
+	windows := map[string]SourceFacts{}
 	send := w.Send
 	w.Send = func(kind string, payload any) uint64 {
 		if kind == protocol.TypeSendMessage {
@@ -70,17 +130,15 @@ func ObserveSource(t *testing.T, home string, w Wire) Wire {
 			if !ok {
 				t.Fatal("source observer requires a typed send_message")
 			}
-			entries := snapshot(p.ConversationID)
-			marks[p.ConversationID] = 0
-			if len(entries) != 0 {
-				marks[p.ConversationID] = entries[len(entries)-1].ID
-			}
+			windows[p.ConversationID] = commandSource(t, snapshot, p.ConversationID)
 		}
 		return send(kind, payload)
 	}
 	w.Source = func(conv string) []history.Entry {
-		entries := snapshot(conv)
-		return slices.DeleteFunc(entries, func(e history.Entry) bool { return e.ID <= marks[conv] })
+		if source := windows[conv]; source != nil {
+			return source(conv)
+		}
+		return snapshot(conv)
 	}
 	return w
 }
@@ -121,6 +179,12 @@ func (s *sourceTurn) feed(t *testing.T, conv string, entries []history.Entry) {
 		if p.ConversationID == conv && (e.Type == "send_accepted" || e.Type == protocol.TypeMessage) {
 			if !s.queued && e.TS.After(s.commandAt) {
 				s.commandAt = e.TS
+				if s.turn != "" && s.started.Before(s.commandAt) {
+					s.turn, s.session = "", history.SessionProvenance{}
+					s.text.Reset()
+					s.ended, s.end, s.reason = false, history.Entry{}, ""
+					s.started, s.liveIdle = time.Time{}, nil
+				}
 			}
 			s.queued = true
 		}

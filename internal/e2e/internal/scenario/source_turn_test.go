@@ -145,6 +145,7 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 			kind  string
 			value any
 		}{
+			{"main_turn_opened", map[string]any{"conversation_id": id, "turn_id": "reused", "occurred_at": endTime}},
 			{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: id, TurnID: "reused", Text: text}},
 			{protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: id, TurnID: "reused", StopReason: "end_turn"}},
 		} {
@@ -162,7 +163,11 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 	source := SourceSince(t, home, conv)
 	reads := 0
 	w := ObserveSource(t, home, Wire{
-		Send: func(string, any) uint64 { appendTurn(conv, "successor", "fresh reply"); return 42 },
+		Send: func(string, any) uint64 {
+			endTime = time.Now().UTC()
+			appendTurn(conv, "successor", "fresh reply")
+			return 42
+		},
 		Next: func(time.Time) protocol.Envelope {
 			reads++
 			ts := endTime
@@ -183,7 +188,7 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 	}
 	for _, facts := range []SourceFacts{source, w.Source} {
 		entries := facts(conv)
-		if len(entries) != 2 || entries[0].ID != 3 || entries[0].Session.SessionID != "successor" {
+		if len(entries) != 3 || entries[0].ID != 4 || entries[0].Session.SessionID != "successor" {
 			t.Fatal("source watermark mixed conversations or producing sessions")
 		}
 	}
