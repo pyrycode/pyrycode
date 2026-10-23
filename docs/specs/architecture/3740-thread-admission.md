@@ -93,3 +93,28 @@ complete named catch-up through the existing scenario query reader. Total writte
 work remains approximately 1200 lines under the recorded verification-floor and
 grandchild exception. The existing binding-race test's exact name is
 `TestV2Session_StaticKey_RaceAcceptsAtMostOne`.
+
+2026-10-23 rework: Linux candidate b862b6f8 reproduces all 13 reported command
+families (33 test events: 7 passed, 26 failed, zero skipped). The common invariant
+is incomplete supported-fixture migration, not another product deliverable.
+Keep the recorded verification-floor/grandchild sizing exception. Repair
+`switchWire` so its low-level hello preserves exact advertisements, validates the
+correlated `hello_ack`, and returns its actual grants; supported opening requires
+thread plus a bounded manager admission snapshot. Explicit refusal helpers assert
+the sealed correlated error and close before proving no open session. Supported
+daemon fixtures install query/live providers and a running publisher, consume
+snapshot clears, and finish named catch-up before content assertions. Replace
+obsolete non-thread/unready positives with 4412/4421 refusals or supported-thread
+scenarios, preserving projection, prompt responsiveness, attribution, unread,
+isolation and lifecycle checks. Coverage includes the reported 13 families and
+the shared command package, plus existing relay admission/auth/version/key races
+and tagged compilation. Earlier failed gates remain failed; complete acceptance
+and live execution remain dispatcher-owned pending work.
+
+Rework security review: PASS. No production boundary changes. Exact advertisements
+and correlated grants prevent fixtures from mistaking Noise completion for
+authorization; refusal checks retain workspace privacy and authentication
+precedence. Existing cryptography, bounded transport, token storage, subprocess
+and publisher cancellation contracts remain unchanged. Manager snapshot waits
+use bounded contexts; new test publishers retain joined shutdown paths. No new
+exports, dependencies, paths, logs or credentials are introduced.
