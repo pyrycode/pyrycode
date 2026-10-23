@@ -50,6 +50,21 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 	})
 	h := &Harness{SocketPath: socket, HomeDir: home, PID: cmd.Process.Pid, cmd: cmd, Stdout: stdout, Stderr: stderr, doneCh: done}
 	t.Cleanup(func() { h.teardown(t) })
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		f, err := os.CreateTemp("", "pyry-client-features-failure-*.log")
+		if err != nil {
+			t.Log("cannot retain daemon diagnostic")
+			return
+		}
+		_, writeErr := f.WriteString(h.Stderr.String())
+		closeErr := f.Close()
+		if writeErr == nil && closeErr == nil {
+			t.Log("private daemon diagnostic:", f.Name())
+		}
+	})
 	if err := h.waitForReady(); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +89,7 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 		early := mustJSON(t, protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.HelloClientPayload{
 			Role: "client", DeviceName: "Phone", ClientVersion: "1", ClientFeatures: report,
 			ProtocolVersions: []string{"v2"}, Token: paired.Token,
-			Capabilities: []string{protocol.CapabilityThread},
+			Capabilities: []string{protocol.CapabilityThread, protocol.CapabilityInteractive},
 		})})
 		init, err := initiator.WriteInit(early)
 		if err != nil {
@@ -98,7 +113,7 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 			t.Fatal("missing authenticated hello ack")
 		}
 		var grant protocol.HelloAckPayload
-		if json.Unmarshal(env.Payload, &grant) != nil || !slices.Contains(grant.Capabilities, protocol.CapabilityThread) {
+		if json.Unmarshal(env.Payload, &grant) != nil || !slices.Contains(grant.Capabilities, protocol.CapabilityThread) || !slices.Contains(grant.Capabilities, protocol.CapabilityInteractive) {
 			t.Fatal("thread not negotiated")
 		}
 		catchUpOpenConversations(t, phone, send, recv)
