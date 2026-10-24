@@ -176,3 +176,35 @@ and add no goroutines/network/subprocess authority or crypto changes. SHOULD
 FIX: identify workers under the Store lock then release it before recording;
 serialize diagnostic state independently, and join Store shutdown before dumping.
 Any cause-specific repair still needs evidence and a prospective revision.
+
+### 2026-10-24 — durable comparison results, no demonstrated repair
+
+Pushed diagnostic source `4c09ab74fe0415b3c7cb6c6cfb53a5cf6d0a32cf`
+contains the accepted producer. On Linux 7.0.0-28 / Go 1.26.9 / GOMAXPROCS 6,
+the actual fixture reports ext4 `/work`, `rw,relatime`, without volatile sync.
+All runs used admitted race checks and fresh histories; OS page caches were
+uncontrolled. Capture alone passed 60/60/0/0 events; the named predecessor
+sequence 90/90/0/0; requested concurrent selectors 1930/1930/0/0 twice;
+the exact original compatibility selection 2250/2250/0/0. Each ran ten times.
+The first combined run started daemon/relay 46 seconds after thread while
+compiling. The warm repeat and original selection started within 1.5 seconds;
+actual intervals, selectors, ordering, counts and hashes are retained in
+`internal/thread/testdata/3854-durable-comparison.json`. Raw JSON, pressure/I/O
+observations and per-reload analysis remain under `/tmp/builder-3854/`.
+
+All 150 actual replacements were distinct workers and reached usable version 3
+before releasing the old query, in 43.721–302.808 ms. All five outcomes retained
+their contracts. The slowest reload spent 175.134 ms writing the scalar cache,
+including 101.929 ms file Sync and 68.837 ms directory sync; validation took
+2.757 ms and publication 0.049 ms. In the exact original selection checkpoint
+import stayed below 0.201 ms and Snapshot below 3.236 ms. Readiness samples
+preceded successful rendered reloads by at most 4.834 ms when observed; three
+publications advanced between the Status sample and Snapshot capture.
+
+These measurements cover the formerly omitted phases and meaningful durable
+I/O, but reproduce no five-second stall. Wall times include scheduling; loadavg
+ranged 5.38–11.01. Historical filesystem/load and blocked stacks remain unknown,
+so neither persistence nor scheduling is established as the original cause.
+No cause-specific repair or distinguishing regression is claimed. Both original
+Open questions remain unresolved. Vet and build passed at the diagnostic source.
+Keep PR #3855 draft and complete acceptance pending; do not mark this ticket built.
