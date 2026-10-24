@@ -4,16 +4,20 @@ package e2e
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -31,8 +35,23 @@ func TestHostedAppProcess(t *testing.T) {
 		return
 	}
 	child := exec.Command("/bin/sleep", "99999")
+	// The cleanup regression deliberately models a retained admission capability.
+	if os.Getenv("PYRY_HOSTED_LOCK_PROOF") == "1" {
+		fd, err := strconv.Atoi(os.Getenv("PYRY_TEST_ADMISSION_FD"))
+		if err != nil {
+			os.Exit(5)
+		}
+		child.ExtraFiles = []*os.File{os.NewFile(uintptr(fd), "isolated-admission")}
+	}
 	if child.Start() != nil {
 		os.Exit(2)
+	}
+	if socket := os.Args[len(os.Args)-2]; socket != "" && socket != "--" {
+		if err := hostedRegisterProcess(socket, os.Getpid(), child.Process.Pid); err != nil {
+			_ = child.Process.Kill() // Registration failed before fixture ownership.
+			_ = child.Wait()
+			os.Exit(5)
+		}
 	}
 	var port int
 	_, _ = fmt.Sscan(os.Getenv("PYRY_APP_PORT"), &port)
@@ -60,6 +79,29 @@ func TestHostedAppProcess(t *testing.T) {
 	_ = server.ListenAndServe()
 	os.Exit(0)
 }
+
+func hostedRegisterProcess(socket string, pid, descendant int) error {
+	c, err := net.DialTimeout("unix", socket, termGrace)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.SetDeadline(time.Now().Add(termGrace)); err != nil {
+		return err
+	}
+	if err := binary.Write(c, binary.LittleEndian, [2]int32{int32(pid), int32(descendant)}); err != nil {
+		return err
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(c, ack[:]); err != nil {
+		return err
+	}
+	if ack[0] != 1 {
+		return errors.New("hosted fixture registration rejected")
+	}
+	return nil
+}
+
 func hostedNodeEnv(t *testing.T) []string {
 	t.Helper()
 	bin, err := os.Executable()
@@ -67,7 +109,8 @@ func hostedNodeEnv(t *testing.T) []string {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.15.0; else exec '%s' -test.run='^TestHostedAppProcess$' -- hosted-app-child; fi\n", strings.ReplaceAll(bin, "'", "'\\''"))
+	socket := hostedFixtureSocket(t)
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.15.0; else exec '%s' -test.run='^TestHostedAppProcess$' -- '%s' hosted-app-child; fi\n", strings.ReplaceAll(bin, "'", "'\\''"), socket)
 	if err := os.WriteFile(filepath.Join(dir, "node"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
