@@ -103,3 +103,13 @@ unit and fake-daemon acceptance remain pending for the dispatcher on Linux.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-10-24
+
+## Revisions
+
+- 2026-10-24: The first causal test attempt timed out waiting for a handshake
+  acknowledgment callback. The minimal real-transport harness sends that handshake
+  through admission-only `Outbound`; it does not call `OutboundContext`. The held
+  scenario now sends an unsupported `list_apps` request to enter the acknowledged
+  delivery lane on a peer without hosted-app capability, then closes the peer
+  while that exact write is accepted. The production cancellation contract and
+  fixture-repair design are unchanged. Preserve the failed setup log as evidence.

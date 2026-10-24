@@ -15,19 +15,18 @@ func TestPeerCloseAcceptedDeliveryRetiresTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	init := p.hello(nil)
-	if _, _, _, err := init.ReadResp(decodeRespFrame(t, p.next())); err != nil {
+	_, send, _, err := init.ReadResp(decodeRespFrame(t, p.next()))
+	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-p.delivered:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal("handshake delivery did not finish")
-	}
 	accepted, release := p.gate.arm(t)
-	p.push()
+	// Even a peer without hosted-app capability uses acknowledged delivery for
+	// an unsupported discovery reply, so teardown must cancel its active writer.
+	msg, err := send.Encrypt([]byte(`{"id":10,"type":"list_apps","ts":"2026-10-24T12:00:00Z","payload":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.write(wrapInnerFrame(t, v2TestConnID, protocol.TypeNoiseMsg, msg))
 	testHostedAwait(t, accepted)
 	p.write(protocol.RoutingEnvelope{ConnID: v2TestConnID, CloseCode: uint16(websocket.StatusNormalClosure)})
 	for len(p.mgr.ActiveConns(ctx)) != 0 {
