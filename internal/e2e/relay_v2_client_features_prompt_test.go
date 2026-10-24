@@ -23,6 +23,16 @@ import (
 )
 
 func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		name := "thread-only"
+		if interactive {
+			name = "thread-interactive"
+		}
+		t.Run(name, func(t *testing.T) { testClientFeaturesSpawnSnapshot(t, interactive) })
+	}
+}
+
+func testClientFeaturesSpawnSnapshot(t *testing.T, interactive bool) {
 	const before = "FEATURES-BEFORE-2898: Markdown tables"
 	const after = "FEATURES-AFTER-2898: image previews"
 	home := shortHome(t)
@@ -86,10 +96,14 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		caps := []string{protocol.CapabilityThread}
+		if interactive {
+			caps = append(caps, protocol.CapabilityInteractive)
+		}
 		early := mustJSON(t, protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: mustJSON(t, protocol.HelloClientPayload{
 			Role: "client", DeviceName: "Phone", ClientVersion: "1", ClientFeatures: report,
 			ProtocolVersions: []string{"v2"}, Token: paired.Token,
-			Capabilities: []string{protocol.CapabilityThread, protocol.CapabilityInteractive},
+			Capabilities: caps,
 		})})
 		init, err := initiator.WriteInit(early)
 		if err != nil {
@@ -113,8 +127,8 @@ func TestRelayV2_ClientFeaturesSpawnSnapshot(t *testing.T) {
 			t.Fatal("missing authenticated hello ack")
 		}
 		var grant protocol.HelloAckPayload
-		if json.Unmarshal(env.Payload, &grant) != nil || !slices.Contains(grant.Capabilities, protocol.CapabilityThread) || !slices.Contains(grant.Capabilities, protocol.CapabilityInteractive) {
-			t.Fatal("thread not negotiated")
+		if json.Unmarshal(env.Payload, &grant) != nil || len(grant.Capabilities) != len(caps) || !slices.Contains(grant.Capabilities, protocol.CapabilityThread) || slices.Contains(grant.Capabilities, protocol.CapabilityInteractive) != interactive {
+			t.Fatalf("capability grants: %v, want %v", grant.Capabilities, caps)
 		}
 		catchUpOpenConversations(t, phone, send, recv)
 		seal, next := noiseWire(t, phone, send, recv)

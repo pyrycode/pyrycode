@@ -93,8 +93,15 @@ across bounded envelopes. An oversized item reuses `ThreadUpdatePart` and
 `ThreadContinuation` under `thread_items`, serializing the whole single-item
 batch with `final: false`. Inspect `continuation`'s JSON type before DTO decoding:
 decoding every reply as `ThreadUpdatePart` rejects a valid page final, whose
-continuation is numeric rather than an assembly object. Fragment
-`continuation.final` completes only validated assembly; an interrupted assembly
+continuation is numeric rather than an assembly object. Conversely, decoding
+every reply as `ThreadItemsPayload` rejects the object continuation of a
+fragmented row. Gates needing only shared epoch/version/projection/query-final
+fields should decode those fields independently of continuation shape;
+`threadQueryGate` must establish its temporary checkpoint for the selected reply
+even from the first fragment, without treating it as a completed join. Ordinary
+rows alone cannot test that boundary; see the
+[held-delivery regression](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md).
+Fragment `continuation.final` completes only validated assembly; an interrupted assembly
 followed by a request marker cannot
 complete the query. Variable envelope conversation/session metadata must be
 supplied before encoding and preserved, as must request correlation. Errors

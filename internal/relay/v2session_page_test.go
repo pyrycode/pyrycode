@@ -92,21 +92,18 @@ func TestThreadPageAdmission(t *testing.T) {
 		p.request(uint64(40+i), protocol.TypeThreadPage, payload)
 		testCatchUpError(t, p, uint64(40+i))
 	}
-	for _, gate := range []string{"interactive", "codex", "missing", "revoked"} {
+	for _, gate := range []string{"membership", "codex", "missing", "revoked"} {
 		t.Run(gate, func(t *testing.T) {
 			p := testPagePeer(t, provider, func(c *V2SessionConfig) {
 				switch gate {
+				case "membership":
+					c.KnownConversation = nil
 				case "codex":
 					c.CodexConversation = func(string) bool { return true }
 				case "missing":
 					c.ThreadPage = nil
 				}
 			})
-			if gate == "interactive" {
-				q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: "noninteractive-page", pub: p.pub, events: p.events}
-				q.open([]string{protocol.CapabilityThread})
-				p = q
-			}
 			if gate == "revoked" {
 				for _, device := range p.mgr.cfg.Devices.List() {
 					p.mgr.cfg.Devices.Remove(device.Name)

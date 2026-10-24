@@ -285,7 +285,7 @@ func (m *V2SessionManager) hostedDeliver(ctx context.Context, s *V2Session) {
 		if o.callerCtx != nil {
 			rejection = o.callerCtx.Err()
 		}
-		if rejection == nil && o.env != nil && ((threadContent(o.env.Type) && m.threadWithheld(s, *o.env)) || (o.callerCtx != nil && (!s.thread || !s.interactive))) {
+		if rejection == nil && o.env != nil && ((threadContent(o.env.Type) && m.threadWithheld(s, *o.env)) || (o.callerCtx != nil && !s.thread)) {
 			rejection = ErrThreadWithheld
 		}
 		if rejection == nil {
@@ -461,6 +461,13 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 			return
 		}
 		if res.err != nil {
+			reason := "send_failed"
+			if errors.Is(res.err, context.Canceled) {
+				reason = "canceled"
+			} else if errors.Is(res.err, context.DeadlineExceeded) {
+				reason = "deadline"
+			}
+			m.cfg.Logger.Debug("relay: hosted delivery failed", "event", "v2.hosted.delivery_failed", "conn_id", s.connID, "reason", reason)
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return
 		}
