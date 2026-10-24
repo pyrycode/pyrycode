@@ -414,7 +414,14 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		}
 		return nil
 	}
-	var p protocol.ThreadItemsPayload
+	// Only shared fields are needed: continuation is numeric on page markers
+	// and an object on fragmented rows. Fragment completion is not query finality.
+	var p struct {
+		Epoch      string `json:"epoch"`
+		Version    uint64 `json:"version"`
+		Projection string `json:"projection"`
+		Final      bool   `json:"final"`
+	}
 	if env.Type == protocol.TypeThreadItems && json.Unmarshal(env.Payload, &p) == nil {
 		if err := o.query.ctx.Err(); err != nil {
 			return err
