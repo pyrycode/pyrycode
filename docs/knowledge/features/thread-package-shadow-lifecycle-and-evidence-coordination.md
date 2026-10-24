@@ -13,10 +13,15 @@ Unload releases items, private joins and pending reports while coordination
 retains the consumed version. Later commits reload through cache validation and
 fresh log replay, including a direct post or an append racing `Unload`; cached
 public items never seed continuation state. Capture the consumed status
-boundary before publication can wait on delivery, then retain that boundary at
-unload. Reading a newer boundary after held delivery can mark an unpublished
-commit consumed and prevent its reload. `TestDaemonThreadIdleCommit` exercises
-this race; reload must still prove the publication range or retire consumers.
+boundary before publication can wait on delivery. Idle retirement must then
+match that status to the successful publisher cursor and the current inactive
+Store publication, with no admitted fold transaction. Otherwise keep following
+and publish pending progress before retrying; record the consumed boundary only
+after successful retirement. Retiring newer unpublished progress can discard a
+valid retained range even when clean reload preserves the epoch.
+`TestDaemonThreadIdleCommit` holds delivery across this race and requires the
+next addition without retirement. See the
+[publication boundary and controlled repeated-turn regression](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
 
 Offscreen summary recovery needs a notification as well as valid evidence.
 During `Unload`, `Store.Status` deliberately reports `StateNotLoaded` while the

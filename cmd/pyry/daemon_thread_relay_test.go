@@ -614,9 +614,9 @@ func TestDaemonThreadIdleCommit(t *testing.T) {
 	testShadowAppend(t, h, testConvID)
 	testShadowWait(t, func() bool { return store.Observe(testConvID).Version == 3 })
 	close(release)
-	testShadowWait(t, func() bool { return retired.Load() > 0 && s.consumed(testConvID) == 3 })
-	if published.Load() != 2 {
-		t.Fatal("reload broadcast an unproven addition")
+	testShadowWait(t, func() bool { return s.consumed(testConvID) == 3 })
+	if published.Load() != 3 || retired.Load() != 0 {
+		t.Fatal("held delivery lost provable progress before idle retirement")
 	}
 	var cfg relay.V2SessionConfig
 	installDaemonThreadRelay(&cfg, s)

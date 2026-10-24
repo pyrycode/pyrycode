@@ -52,6 +52,7 @@ type conversationWorker struct {
 	cancel       context.CancelFunc
 	done         chan struct{}
 	retiring     bool
+	processing   bool // feed admission through completed capture/publication, under Store.mu
 	renderFailed bool
 	snapshot     Snapshot
 	items        []*Item
@@ -300,6 +301,13 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		if len(entries) == 0 {
 			return nil
 		}
+		s.mu.Lock()
+		if w.retiring || ctx.Err() != nil {
+			s.mu.Unlock()
+			return context.Canceled
+		}
+		w.processing = true
+		s.mu.Unlock()
 		if s.beforeFold != nil {
 			if err := s.beforeFold(ctx, id); err != nil {
 				return err
@@ -387,6 +395,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 		w.snapshot = changes.Snapshot
 		w.items = items
 		w.query = index
+		w.processing = false
 		w.notify()
 	}
 }
@@ -436,15 +445,34 @@ func (s *Store) Status(id conversations.ConversationID) Snapshot {
 // and releases all items/private fold state.
 // Persistence or incomplete recovery failures are returned without source data.
 func (s *Store) Unload(id conversations.ConversationID) error {
+	_, err := s.unload(id, "", 0, false)
+	return err
+}
+
+// UnloadIfCurrent retires an inactive usable worker only at the supplied exact
+// publication boundary, between completed feed/capture transactions. False means
+// no retirement occurred; the caller must publish fresh progress before retrying.
+func (s *Store) UnloadIfCurrent(id conversations.ConversationID, epoch string, version uint64) (bool, error) {
+	return s.unload(id, epoch, version, true)
+}
+
+func (s *Store) unload(id conversations.ConversationID, epoch string, version uint64, conditional bool) (bool, error) {
 	if !conversations.ValidID(string(id)) {
-		return history.ErrInvalidID
+		return false, history.ErrInvalidID
 	}
 	s.mu.Lock()
 	w := s.workers[id]
 	if w == nil {
 		err := s.records[id].Err
 		s.mu.Unlock()
-		return err
+		if conditional {
+			return false, nil
+		}
+		return false, err
+	}
+	if conditional && (w.retiring || w.processing || w.snapshot.State != StateUsable || w.snapshot.Active || w.snapshot.Epoch != epoch || w.snapshot.Version != version) {
+		s.mu.Unlock()
+		return false, nil
 	}
 	w.retiring = true
 	w.snapshot = Snapshot{}
@@ -460,7 +488,7 @@ func (s *Store) Unload(id conversations.ConversationID) error {
 		delete(s.workers, id)
 	}
 	s.mu.Unlock()
-	return w.err
+	return true, w.err
 }
 
 // Shutdown closes admission and joins workers, certifying each independently.
