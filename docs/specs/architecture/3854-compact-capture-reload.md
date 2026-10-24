@@ -251,3 +251,28 @@ state, isolation, cancellation, security and required review/checks remain.
 Do not repeat the completed durable comparisons merely to obtain another green
 run. The ticket's numeric written-line and production-file estimates can be
 removed because they do not describe a user outcome or establish diagnosis.
+
+### 2026-10-24 — corrected request accepted for recovery assessment
+
+At branch head `0592076856febe984e49554bc217567a273a70a3`, this builder
+confirmed that request revision `590d577230677a419e217a1beb353b9509fcd2dc`
+contains accepted producer `ea1dcb1fce648fc80b2cf8962f15a718477e2fa8`.
+Its only differences from measured source `4c09ab74` are the plan and retained
+comparison JSON; no Go source differs between those two revisions.
+
+The current run's normal managed task client submitted the committed corrected
+request unchanged. It returned `assessment-queued`, assessment
+`6098a38565127e3c02df1549df846f42fe81cd08db4aa10d4d38da3780938c3d`,
+and `executed: 0`. The receipt and request hash are retained in
+`internal/thread/testdata/3854-investigation-receipt.json`. The earlier malformed
+request remains rejected; the original timeout remains failed. This receipt
+queues recovery assessment after this worker ends, starts no diagnostic, and
+does not authorise any additional execution.
+
+No Go source, security boundary, fixture assertion or deadline changed in this
+continuation. No tests were repeated: the completed comparisons and package
+check remain historical evidence at their recorded revisions. Both Open
+questions, causal diagnosis, supported repair and distinguishing regression
+remain unresolved. Preserve draft PR #3855 and all prior work. Recovery must
+select the next bounded diagnostic; ordinary review and dispatcher-owned
+complete acceptance remain pending. This ticket is not built.
