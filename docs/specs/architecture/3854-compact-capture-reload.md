@@ -387,3 +387,12 @@ queued assessment
 for the measured overlap gap (zero tests executed). The manifest retains the
 request/receipt hashes and durable paths. This is assessment only; it grants no
 additional execution and does not complete this ticket. Preserve draft #3855.
+
+
+## Manual controlled-overlap continuation, 2026-10-24
+
+The user directly requested completion of 3854 and 3857. Both have protected manual holds and no active workers. This isolated checkout retains feature/3854 and all previous evidence. The discarded recovery proposal is evidence, not an accepted controller decision.
+
+The concrete remaining comparison is uncontrolled daemon/capture timing. Add an opt-in task-private Unix-socket rendezvous before daemon producer fixture setup and immediately before Capture/success retirement. A single admitted coordinator releases both after both arrive. Its bounded coordination ends before measured retirement/reload and introduces no wait within the existing five-second readiness check. Record actual operation overlap and keep all five capture outcomes, cancellation and joined cleanup.
+
+Run one Linux race selection with original thread predecessors through capture and the three original daemon tests. Relay and later unrelated summary cases are already complete and need no duplicate diagnostic. Use fresh durable /work histories, existing runtime recording, exact source, outcome counts, pressure and scheduler/syscall/synchronization profiles. This is a timing perturbation, not evidence of unknown historical load. Only a supported cause justifies product repair. All prior failures and normal review/complete acceptance remain.
