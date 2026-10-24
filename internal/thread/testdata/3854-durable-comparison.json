@@ -68,6 +68,18 @@
     "static_checks": "go vet ./... and go build -o /tmp/builder-3854/recovery-pyry ./cmd/pyry passed at the candidate; recovery-vet.log and recovery-build.log empty",
     "complete_acceptance": "pending dispatcher; no live Claude proof required; macOS outside verification scope"
   },
+  "touched_package_check": {
+    "Go_source_revision": "4c09ab74fe0415b3c7cb6c6cfb53a5cf6d0a32cf",
+    "tree_note": "only spec/evidence records changed during execution; no subsequent Go changes",
+    "command": "TMPDIR=/work/builder-3854-tmp python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=1 ./internal/thread/...",
+    "path": "/tmp/builder-3854/recovery-thread.json",
+    "sha256": "e900950996481dced56dac01128351cdabca710fdc494805b9083e483c4cc55e",
+    "counts": [2209,2207,0,2],
+    "seconds": 586.955,
+    "skips": {"TestCheckpointResumeCorpus":"complete restoration sweep: run make test-exhaustive", "TestReferenceDiskHeap":"run separately with -args -measure-thread-heap"},
+    "exit_code": 0,
+    "limitation": "package verification, not a diagnosis or complete configured acceptance"
+  },
   "further_diagnostic_request": {
     "revision": "590d577230677a419e217a1beb353b9509fcd2dc",
     "path": "/tmp/builder-3854/recovery-investigation-request.json",

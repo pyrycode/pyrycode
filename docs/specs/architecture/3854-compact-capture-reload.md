@@ -216,3 +216,10 @@ and has no assessment ID; do not treat it as queued. The request is preserved at
 `/tmp/builder-3854/recovery-investigation-request.json`. No alternate route or
 retry was attempted. The earlier `a7c382d7` assessment produced this recovery
 brief, not diagnostic execution. Current role work remains incomplete.
+
+The final admitted race check of `./internal/thread/...` finished in 586.955 s:
+2209 executed / 2207 passed / 0 failed / 2 existing opt-in skips
+(`TestCheckpointResumeCorpus` and `TestReferenceDiskHeap`). Go source remained
+`4c09ab74`; only these spec/evidence records changed. Command, raw JSON hash and
+skip reasons are retained with the comparisons. This package pass does not
+resolve the original failure or complete dispatcher-owned acceptance.
