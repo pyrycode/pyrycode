@@ -1,0 +1,30 @@
+{
+  "identity": {
+    "started": 1792837617.779767,
+    "core_source": "e5e0ace803e1ed70d8948ceb9ce7d75ad2e58f6a",
+    "core_status": "",
+    "mobile_source": "fde2ca234d278361c0f477f90eb1227149ee7b75",
+    "mobile_status": "",
+    "daemon_sha256": "fd3d503551caab8e21d903ef25162d5396d048f940f7879727cb793362e65a5b",
+    "relay_sha256": "17e24131cfd3f5a0bc48f972021db17925347311e3dcdf362f2aa8cfe48fc710"
+  },
+  "exit": 1,
+  "counts": {
+    "tests": 2,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 0
+  },
+  "cases": [],
+  "built_apks_sha256": {
+    "app-debug.apk": "685ba7a6d63ae5c1f0572fd3a1aaf217a4901a04213e67f6372fac3609e3d5da",
+    "app-debug-androidTest.apk": "6cb2068f33c0297324e1a61804e320a012e09c0d4a16378a50e94921298436d4"
+  },
+  "installed_byte_readback": false,
+  "nested_manifests": [
+    {
+      "path": "harness/SHA256SUMS",
+      "verified": 4
+    }
+  ]
+}
