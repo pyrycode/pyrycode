@@ -101,6 +101,47 @@ consumers before replacement even if withdrawal/reload races the status read.
 See [observation readiness](thread-package-background-store-replay.md#loading-and-replay-readiness)
 and [relay gap quarantine and recipient gates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md#thread-delivery-and-summary-projection).
 
+Idle retirement must preserve the successful publisher boundary, not merely a
+usable same-epoch source. A follower can consume the second accepted turn after
+publication but before the coordinator finishes checking quiescence. Unconditional
+unload then discards still-valid retained changes ahead of the publisher cursor.
+Clean reload can retain the epoch while reconstructing only from the newer
+retirement boundary; `Store.Changes` rejects the publisher's older range and
+`daemonThreadPublisher.publish` retires the original peer with `baseline_required`.
+The controlled regression proves this missing-range boundary without requiring
+an unusable capture, unproven fold coverage or public-row withdrawal. The gap
+reason alone does not establish which boundary failed in another recording.
+
+`threadShadow.unloadIdle` holds the publication gate and requires the captured
+status epoch/version to equal the successful publisher cursor before calling
+`Store.UnloadIfCurrent`. Without a publisher, the captured status supplies the
+boundary. Under `Store.mu`, conditional unload requires that exact inactive,
+usable publication and no admitted feed/capture/publication transaction. Snapshot
+equality alone is insufficient: a chunk paused before folding still holds the old
+snapshot but can advance progress before cancellation. Chunk admission marks
+processing under the same mutex, and publication clears it. A declined retirement
+keeps the worker and retained ranges; following publishes pending progress before
+retrying. Only successful retirement records the idle/unloaded boundary. Query
+demand fencing and forced `Store.Unload` keep their existing contracts.
+
+`TestDaemonThreadRepeatedTurnRetirement` drives real accepted-send history,
+the follower, Store and daemon publisher through coalesced and separated source
+schedules held between publication and quiescence. It proves valid `Changes`
+before retirement, then publication through clean idle unload/reload on the
+original peer. Applying live rows must match raw-history replay, with stable
+item identity/text/revisions and exactly one second accepted-user addition.
+`TestStoreConditionalUnload` holds an admitted chunk before folding to reject
+retirement even at an equal snapshot; `TestDaemonThreadIdleCommit` covers progress
+arriving during held delivery. The retained
+[Linux race evidence](../../../cmd/pyry/testdata/repeated_turn/evidence.json)
+pins failing-before and passing-after boundaries, schedules, source revisions,
+commands and counts without conversation content or credentials. Offline
+`TestRecordedClaude/two-turn` retains matching acknowledgements and source/session-owned
+terminal idle through `runTapeTwoTurn` and `recordedScenarioContext.turn`, without
+the former producer-gap skip. These proofs preserve valid continuity; actual
+epoch/range loss, published-row suppression and unavailable-source retirement
+remain fail-closed, and reconnect still requires explicit named catch-up.
+
 For journal diagnostics, each `daemonThreadPublisher.gap` invocation emits one
 Warn with message `relay: thread gap`, event `daemon.thread.gap` and a fixed
 `reason` identifying the rejecting branch:
