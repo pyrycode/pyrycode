@@ -105,3 +105,6 @@ from genuine gaps requiring explicit catch-up; describe only the proved cause.
 - Threat model: protocol Security model authentication, replay and conversation-isolation gates remain unchanged; no new user-controlled boundary or deferred security finding.
 
 **Reviewer:** builder self-review. **Date:** 2026-10-24.
+
+## Revisions
+- 2026-10-24: `TestDaemonThreadRepeatedTurnRetirement` confirms the planned cause on production base `556f9e8277b75e2a1d86b4bc24edf28129201f43` (plan-only head `6a1a749d`). Both schedules have valid `Changes` before retirement. Coalesced: publisher 6, retired source 13, reload 14; separated: publisher 6, retired source 12, reload 13. Both retain the epoch but reject the older retained range and retire the original peer. `/tmp/builder-3844/before.jsonl` retains 3 executed/0 passed/3 failed/0 skipped test events. This resolves the open question for the demonstrated schedule; it does not claim every historical `baseline_required` has this cause.
