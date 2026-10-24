@@ -86,3 +86,8 @@ Pending for the documentation stage, including the transferred #3720 final compa
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-24
+
+## Revisions
+
+- 2026-10-24: Affected-package validation at `4d696d5135ab621ee88daf2dd9bfaa95408122cc` exposed catch-up/page fixtures still treating omitted interactive as ineligible; migrate those negative cases to unavailable membership, with positive thread-only coverage in `TestThreadCompleteCapabilities`. A synthetic tool-body regression also showed that a blanket no-thread output drop suppressed its content-free refusal. Apply thread gates to content and supplied state while retaining error delivery. Remove the now-unused session argument from `threadProjected` and its two callers (one additional production file, `v2session_push.go`). No exported API or new lifecycle; total written work remains below 800 lines. Preserve all original failed runs.
+- 2026-10-24: The focused admission rerun exposed the synthetic tool-body fixture's capability mutation inside `KnownConversation`. Check the thread flag after resolving membership so admission observes that mutation before provider work, retaining the existing fail-closed regression and its content-free refusal.

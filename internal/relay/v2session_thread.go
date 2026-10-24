@@ -19,16 +19,13 @@ func threadItemUpdate(typ string) bool {
 // Complete-thread content needs a known, eligible conversation independently of
 // interactive access to supplied state and controls.
 func (m *V2SessionManager) threadConversationWithheld(s *V2Session, conversation string) bool {
-	return !s.thread || conversation == "" || m.cfg.KnownConversation == nil || !m.cfg.KnownConversation(conversation) ||
+	return conversation == "" || m.cfg.KnownConversation == nil || !m.cfg.KnownConversation(conversation) || !s.thread ||
 		(!s.multiAgent && m.cfg.CodexConversation != nil && m.cfg.CodexConversation(conversation))
 }
 
 // threadWithheld gates items independently of reply correlation and filters
 // replaced unsolicited content. It runs before sealing, so drops spend no nonce.
 func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) bool {
-	if !s.thread {
-		return true
-	}
 	if threadContent(env.Type) {
 		id := pushedConversationID(env)
 		// A compact update needs a hosted inbox: only there is a join recorded and
@@ -40,7 +37,7 @@ func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) b
 		if m.cfg.ThreadLiveState != nil && env.InReplyTo == nil {
 			return true
 		}
-		if !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
+		if !s.thread || !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
 			return true
 		}
 		id := pushedConversationID(env)
@@ -139,7 +136,7 @@ func (m *V2SessionManager) threadSummary(raw json.RawMessage) json.RawMessage {
 	return replaceObjectField(raw, "last_shown_version", reading)
 }
 
-func (m *V2SessionManager) threadProjected(_ *V2Session, env protocol.Envelope) protocol.Envelope {
+func (m *V2SessionManager) threadProjected(env protocol.Envelope) protocol.Envelope {
 	switch env.Type {
 	case protocol.TypeConversationUpdated:
 		env.Payload = m.threadSummary(env.Payload)
@@ -176,7 +173,7 @@ func (m *V2SessionManager) threadReply(s *V2Session, frame json.RawMessage) (jso
 	if m.threadWithheld(s, env) {
 		return nil, true
 	}
-	projected := m.threadProjected(s, env)
+	projected := m.threadProjected(env)
 	if !bytes.Equal(projected.Payload, env.Payload) {
 		frame = replaceObjectField(frame, "payload", projected.Payload)
 	}
