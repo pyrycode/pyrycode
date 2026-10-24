@@ -1,0 +1,319 @@
+{
+  "phone_diagnostic": [
+    {
+      "artifact": "device/logcat-de.pyryco.mobile.e2e.DeterministicInteractiveStreamE2ETest-interactiveTurn_seededChannel_durableGapCatchUp.txt",
+      "artifact_sha256": "cd8656bc2061bc9cc07f008e0389ba8fa93c933be51a26628ac29fa0e34c22bf",
+      "line": 20664,
+      "fields": {
+        "post_observed": "false",
+        "produced": "false",
+        "owned": "false",
+        "rejected": "true",
+        "rejection": "query_failed",
+        "retired": "true",
+        "pending": "false",
+        "accepted": "null",
+        "last_query": "3",
+        "completed_query": "2",
+        "items": "2",
+        "checkpoint": "2",
+        "completed_version": "2",
+        "older": "false",
+        "repair": "false",
+        "reset": "false"
+      }
+    }
+  ],
+  "phone_state_limit": "owned=false and retired=true are observation state at the final producer timeout; they do not identify the Core inbox retirement time or generation.",
+  "harness_inputs": {
+    "daemon_revision": "e5e0ace803e1ed70d8948ceb9ce7d75ad2e58f6a",
+    "daemon_sha256": "fd3d503551caab8e21d903ef25162d5396d048f940f7879727cb793362e65a5b",
+    "daemon_source_revision": "e5e0ace803e1ed70d8948ceb9ce7d75ad2e58f6a",
+    "mobile_revision": "fde2ca234d278361c0f477f90eb1227149ee7b75",
+    "retention_status": "complete",
+    "harness_exit_code": 1
+  },
+  "harness_inputs_sha256": "a45919e55677a121fec45757051923d8301b46ca8de22cad58db2124a59d5264",
+  "native_cases": [
+    {
+      "name": "interactiveTurn_seededChannel_durableGapCatchUp",
+      "failed": true,
+      "skipped": false
+    },
+    {
+      "name": "interactiveTurn_seededChannel_streamsScriptedPingReplyIntoThread",
+      "failed": false,
+      "skipped": false
+    }
+  ],
+  "daemon_file_sha256": "fd3d503551caab8e21d903ef25162d5396d048f940f7879727cb793362e65a5b",
+  "daemon_embedded_source": "e5e0ace803e1ed70d8948ceb9ce7d75ad2e58f6a",
+  "daemon_embedded_dirty": false,
+  "private_raw_exported": false,
+  "exact_peer_events": [
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 27,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:41.590+03:00",
+        "event": "v2.handshake.accept"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 209,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.435+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "237",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "false"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 210,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "238",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 211,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "238",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 212,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "240",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 213,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "237",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 214,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "240",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 215,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "242",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 216,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.live_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "242",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 217,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "238",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 218,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.436+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "238",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 219,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.437+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "240",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 220,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.437+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "240",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 221,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.437+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "242",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 222,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:36:44.438+03:00",
+        "event": "local.thread_query.gate_cancel",
+        "query_id": "3",
+        "request_version": "2",
+        "update_version": "242",
+        "request_same_epoch": "true",
+        "captured": "false",
+        "already_cancelled": "true"
+      }
+    },
+    {
+      "artifact": "harness/daemon.log",
+      "artifact_sha256": "232b47d235a47285ab5a66da806ec9e50538a91180d830e7256efaabe95a9175",
+      "line": 225,
+      "peer_alias": "producer-1",
+      "fields": {
+        "time": "2026-10-24T13:38:14.541+03:00",
+        "event": "v2.peer_close.teardown",
+        "close_code": "1000"
+      }
+    }
+  ],
+  "peer_generation_contrast": [
+    {
+      "line": 27,
+      "is_exact_diagnostic_connection": true,
+      "same_device_label_as_first_peer": true
+    },
+    {
+      "line": 253,
+      "is_exact_diagnostic_connection": false,
+      "same_device_label_as_first_peer": true
+    }
+  ],
+  "peer_mapping_basis": "The diagnostic conn_id equals the first accepted synthetic -peer connection at daemon line 27. The later ping uses the same device label but a distinct conn_id at line 253. Raw identifiers are kept local.",
+  "native_xml_artifacts": [
+    {
+      "artifact": "device/TEST-pixel2Api33Atd-_app-.xml",
+      "sha256": "40c84346e78497369a127dbd3dbb592a7849495785f2da24d7a2e7ae454aa34b"
+    }
+  ]
+}
