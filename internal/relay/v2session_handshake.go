@@ -585,63 +585,11 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// bounding the CipherStates' lifetime under connect/disconnect churn.
 	s.idleTimer = m.armIdleTimer(ctx, s, idleTimeout)
 
-	if s.thread {
-		if s.interactive && m.cfg.ThreadLiveState != nil {
-			s.liveSnapshot = m.cfg.ThreadLiveState()
-			m.signalLiveDrain()
-		}
-		// Thread state comes from current source readings, never legacy snapshots.
-		return
+	// Recovery uses current supplied state with interactive eligibility.
+	if s.interactive && m.cfg.ThreadLiveState != nil {
+		s.liveSnapshot = m.cfg.ThreadLiveState()
+		m.signalLiveDrain()
 	}
-
-	// Surface outstanding prompts before retained menus and current turn state.
-	m.reconcileModals(ctx, s)
-
-	// Connect-time question reconcile (#1979): re-send the still-outstanding
-	// question_shown batches to this conn — the fourth Mode B instance — so a client
-	// that connected/reconnected after claude asked a clarifying question can answer
-	// it instead of leaving it to run out its window unseen. No-op for a
-	// non-interactive conn or an unwired seam. Correctness does not depend on where in
-	// this tail the call lands: the four reconciles carry distinct payload types and
-	// none reads another's effect. Placed beside the modal reconcile rather than after
-	// the model-list one because an outstanding batch rides the daemon's approval
-	// window — the same time-sensitivity that put the modal reconcile first and the
-	// model-list reconcile last.
-	m.reconcileQuestions(ctx, s)
-
-	// Connect-time model-list reconcile (#1863): send the retained model_list for
-	// each session holding one to this conn — the third Mode B instance alongside
-	// the two reconciles above — so a client attaching later can populate its model
-	// menu without sending a message first. The live turn lane never reaches such a
-	// client (and on the bootstrap session reaches none), for the three loss points
-	// reconcileModelLists names. No-op for a non-interactive conn or an unwired
-	// seam. Ordering relative to the other two is immaterial
-	// (distinct payload types); placed third to keep the time-sensitive permission
-	// prompt first, the same reason the queue reconcile is already second.
-	m.reconcileModelLists(ctx, s)
-
-	// Connect-time slash-command-list reconcile (#2006): send the retained
-	// slash_command_list for each session holding one to this conn — the fifth Mode B
-	// instance alongside the four reconciles above — so a client attaching later gets
-	// a correct command menu without waiting for a turn that may never come. The live
-	// turn lane never reaches such a client, for the three loss points
-	// reconcileSlashCommandLists names. No-op for a non-interactive conn or an unwired
-	// seam. Correctness does not depend on the position: the five carry distinct
-	// payload types, none reads another's effect, and none of the five frames is
-	// droppable (pushQueue.enqueue marks only TypeAssistantDelta so). This tail is
-	// ordered by time-sensitivity — permission prompt first — and a command menu is the
-	// least time-sensitive of the five, so it goes last.
-	m.reconcileSlashCommandLists(ctx, s)
-
-	// Reassert current phase independently of conversation content recovery.
-	m.reconcileTurnPhases(ctx, s)
-
-	// Connect-time reply-suggestion reconcile (#2830), the eighth Mode B instance.
-	// Its position is not load-bearing: the frames never enter the replay ring, and
-	// forwardEnvelope's per-conversation revision guard orders them against any
-	// live copy whichever drains first. No-op for a non-interactive conn or an
-	// unwired seam.
-	m.reconcileReplySuggestions(ctx, s)
 }
 
 // clientVersionReject says why a hello's client_version is refused. The zero

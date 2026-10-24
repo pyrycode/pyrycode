@@ -279,7 +279,12 @@ the hello first, then one routing envelope containing the correlated sealed
 `error` inside `noise_msg` and the exact close code. The rejected ack omits
 `workspace_root`; it grants no session authority even if it echoes other
 capabilities. If error sealing fails, the close still follows `noise_resp`.
-There is no fallback admission or compatibility switch.
+There is no fallback admission or compatibility switch. Every admitted app
+session uses thread content delivery/projection; the non-thread forwarding,
+tag-stripping and legacy connect-recovery branches are removed (#3741).
+Complete-thread queries, pages and eligible updates do not require `interactive`.
+Supplied live state and controls retain interactive gates; expansion/compact
+retain their negotiated prerequisites and projection-aware joins.
 
 Unknown/expired tokens and mismatched static keys retain indistinguishable
 `auth.invalid_token`/`4401` precedence regardless of thread advertisement or
@@ -417,11 +422,12 @@ Envelope-level fields beyond the v1 set:
 | `session_id` | nonempty string or null | no | **Thread-only supplied live-state metadata (#3082/#3162).** Omitted means unresolved provenance; explicit `null` positively means no producing session; a nonempty string names the actual captured producer. Preserved from the source for pushes and on-demand replies, independently of existing payload session fields. A model catalog may name a bootstrap or predecessor producer; never substitute the target's session. This tag neither admits a session nor attributes every capability-merged row to that producer. Daemon provider installation (#3163) and production negotiation (#3164) are active. |
 | `session_state_cleared` | bool | no (omitempty) | **Thread-only supplied live-state clear (#3082).** `true` with payload `{}` clears only this family's readings in the envelope's target conversation before fresh readings for that target generation. For `model_list`, it invalidates catalog inventory independently of current-session admission. Generated and supplied clears omit `in_reply_to`. Ordinary updates omit the flag. See [session-scoped live state](#session-scoped-live-state-v2-supplied-delivery-contract). |
 
-The relay strips supplied conversation/session metadata from non-thread
-connections and omits explicit clear frames entirely on those connections.
-Daemon source-bearing providers (#3163) and production `ThreadReady`
-activation (#3164) are installed. On connections that negotiated
-[`thread`](#capability-negotiation-v2), live-state producers and consumers must
+Every admitted app session negotiates [`thread`](#capability-negotiation-v2).
+Pushes, correlated replies and continuations retain supplied session metadata
+and clear flags; no non-thread projection strips them. Supplied live-state
+delivery additionally requires `interactive`, including clears and correlated
+replies. Daemon source-bearing providers (#3163) and production `ThreadReady`
+activation (#3164) are installed. Live-state producers and consumers must
 validate `session_id` as null or a nonempty string and enforce payload `{}` for
 a clear. Omission cannot be read as a positive no-session fact. Clients must preserve omitted/null/string
 distinctions through decoding and re-encoding; these tags convey no authorization.
@@ -1116,7 +1122,7 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | `create_conversation` | phone → binary | no | A non-null `cwd` is a request, not a stored value (#2568): the daemon resolves it — tilde-expanded, confined to `$HOME`, symlink-resolved to its realpath — before recording it or spawning the conversation's session there, so `default`, `~/pyry-workspace/default` and its absolute form all bind to the one folder they name rather than three. A `cwd` that cannot be confined (it escapes `$HOME`, or names no resolvable path) is refused with `protocol.malformed`, non-retryable, and no conversation is created. A `null` `cwd` is unaffected — it still records the daemon's own default workdir. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the new conversation's session runs on; absent or `null` means claude, and a request without it behaves exactly as before this ticket, including a byte-identical `conversation_created` for a client without `multi_agent`. `"codex"` is accepted only from a client that negotiated the [`multi_agent`](#capability-negotiation-v2) capability; that value from a client that did not, or any value naming neither agent, is refused before anything is created — see [Error codes](#error-codes) `protocol.unsupported`. **`model`** and **`effort`** (both `omitempty`, #2665) are the settings the new session starts on; absent keeps what a mint gives today — see [`conversation_created`](#conversation_created) below for what that is per agent. A present value is checked against the *resolved* agent's own vocabulary (ADR 039), by the same two-stage check [`set_session_settings`](#set_session_settings) runs against a bound session: shape first (`validModel` / `validEffort`'s own grammar), then membership. An `effort` is checked against the model the session will start on — the request's own `model` if it set one, else the mint's default — read from one snapshot shared with the mint itself, so a concurrent operator-default change cannot validate against one model and mint on another. A shape refusal, and a membership refusal on `effort`, both answer `protocol.malformed`, non-retryable, with this verb's **own** static message — never [`set_session_settings`](#set_session_settings)'s. A `model` absent from the vocabulary answers `protocol.malformed`, non-retryable, `requested model is not offered` — the same message `set_session_settings` gives for that cause. An incomplete or missing vocabulary answers the retryable `model_list.unavailable`. Every refusal creates nothing — no session, no registry entry, no conversation row — before `resolveSpawnDir` or the mint runs, and never echoes the requested value in a reply or a log. A request naming neither field is byte-identical on the wire to one from before this ticket. |
 | `conversation_created` | binary → phone | no | Reply to `create_conversation`, correlated by `in_reply_to`. Its `cwd` is the resolved realpath the conversation's session actually spawns in for a non-null request (#2568), never the string the request sent, and is the same value `list_conversations` reports for that row from then on; a `null` request's `cwd` is the daemon's default. Carries **`workspace_label`** (#2210): the operator-set display name stored for this conversation's own `cwd`, or `null` when that workspace has none. **Nullable but never omitted** — the key is present on every frame, so a client may treat a missing one as malformed rather than as an unlabelled workspace. A conversation created into an already-named folder is named by it immediately, from this reply, without a `list_conversations` round trip. Same value and same contract as the [`conversations`](#conversations) row's field, including that its 128-byte bound is a size limit and **not** a safety property — rendering it safely is the client's job. **`agent`** (`"claude"` \| `"codex"`, `omitempty`, #2647) is the agent the created conversation's session runs on, set only for a client that negotiated `multi_agent` — the `conversations` row's own rule. `omitempty` is load-bearing here: a request without `agent` from a client without `multi_agent` gets a reply with no `agent` key at all, byte-identical to the frame this document described before Codex conversations existed. **Since #2665, a request's `model` and `effort` become the created session's stored settings from the mint**, field by field — an absent field keeps what a mint gives without them: a Claude conversation still inherits the operator's configured model/effort, a Codex conversation still starts with neither set and runs at Codex's own defaults. A refused `model` or `effort` is answered on `create_conversation` itself (see that row) and never reaches this reply — no conversation is created. |
 | `promote_conversation` | phone → binary | no | |
-| `conversation_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `promote_conversation`, `rename_conversation`, `archive_conversation` / `unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted`, `set_conversation_pinned` or [`mark_conversation_read`](#marking-a-conversation-read). As an **unsolicited push** it carries **no `in_reply_to` at all**, and has **these producers**: when a conversation is created on the host by `pyry channel new` (#2156) or `conversation.new`, or announced after an agent switch; when a conversation that has never had a name takes one from the first message sent to it (#2159 — the daemon cuts a short title from that message's text and stores it, so a chat started from a client stops reading as `Untitled`; it fires at most once per conversation, since a name set by create, rename, promote or an earlier message is never overwritten); when a conversation's mute flag is set or cleared by `set_conversation_muted` (#2572); when its pin is set or cleared by [`set_conversation_pinned`](#set_conversation_pinned) (#3538), including no-ops; and when `mark_conversation_read` (#2780) actually **advances** the conversation's read mark — not on a no-op request, which still gets its reply but pushes nothing. **Three also answer a correlated reply for the same write** — `set_conversation_muted` and `set_conversation_pinned` always, `mark_conversation_read` only when it advances — so their requester receives both: the correlated `conversation_updated` reply and the uncorrelated push, which does not exclude it. Either way the daemon fans the stored record to every interactive-capable conn, because no client asked and none would otherwise learn of the change until its next `list_conversations` — and on the auto-naming, mute, pin and read-mark pushes in particular the requester is **not** excluded, since `send_message`'s own reply is a bare `ack` carrying no record and the correlated replies above are separate frames from their pushes. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `id` instead. The record is the same either way, and it is read back from the registry, so its `cwd` is the daemon's confined, symlink-resolved path. The push is **live-only** — there is no replay, and a client that was disconnected sees the row in its next list. Interactive-capability-gated: a conn without it is skipped. Every frame of both kinds carries **`workspace_label`** (#2210): the operator-set display name stored for that frame's own `cwd`, or `null` when that workspace has none, **nullable but never omitted** — so a client patching a row in place from a push renders the operator's chosen name instead of falling back to the folder name until its next list. After a `change_workspace` it names the **destination** workspace, which is the case a client cannot resolve for itself: `recent_workspaces` rows carry no label, and `workspace_updated` fires when a *label* changes, not when a *conversation moves*. Same value and same contract as the [`conversations`](#conversations) row's field, its 128-byte size-not-safety bound included. It is **not** a precedent for putting `system_prompt` here: the label is already on every `list_conversations` row, so broadcasting it widens no audience, which is exactly what a prompt reachable from no other read path would do. Every frame of both kinds also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, so a client paired with an older daemon keeps notifying. This matters for the push in particular: mobile folds each frame into its list in place (`ConversationListProjection.upsertConversation`), so a record that dropped the key would read as not muted and a plain rename would silently unmute the conversation. Every frame of both kinds also carries **`read_up_to`** (#2779): the same durable, per-conversation, host/operator-scoped read mark the [`conversations`](#conversations) row reports, unsigned 64-bit, **always present including `0`**. Read from the stored conversation at send time by every reply and push producer — so a `rename_conversation` on a conversation with a nonzero mark reports that mark unchanged, exactly as it already does for `is_muted`. Ordinary producers of this frame omit `current_session_id`; the stored binding is available in [`list_conversations`](#list_conversations). For a conn that negotiated **`multi_agent`**, every pushed or reply frame about a registry-known conversation also carries **`agent`** (#2669), resolved by the same [`conversations`](#conversations)-row rule at the moment this frame is sent, so replacing a cached row cannot lose the agent and a later agent change is observable. A conn without `multi_agent` receives the pre-#2669 bytes with no `agent` key. A registry miss leaves the frame untagged rather than inventing an agent for a conversation the daemon no longer knows. On a connection that negotiated **`thread`**, every push and reply adds that conversation's authoritative **numeric `last_shown_version`** from usable loaded status or an eligible unloaded clean certificate. The certificate must pass current schema/rules, epoch and evidence-field validation, and its consumed version V must exactly equal independently known current raw history progress H. Numeric `0` is authoritative, including valid empty evidence at V = H = 0. Unregistered/removed IDs and rebuilding/unavailable views remove the key, including any supplied stale value. For unloaded conversations, missing/unreadable/malformed/dirty/incompatible/invalid certificates, history lookup failures, V != H in either direction and cold/unknown raw progress also remove it. Any later append invalidates an unloaded reading even when it would not raise the shown watermark; ordinary loading/folding can restore it. The lookup never warms a cold cursor by reading segments or trusts V as H. Certificate metadata proves neither replay/checksum equality nor catch-up continuity; see [`conversations`](#conversations). Non-thread connections always omit it. Unread is **`last_shown_version > read_up_to`** only with present shown evidence; omission means unknown, never zero. Projection preserves every other supplied field and its presence, including the durable `read_up_to` and any stored `current_session_id`; it adds no binding when absent. Read-mark storage is unchanged. Production fold/watermark, retained-state and bounded query providers are installed (#3163/#3164/#3236), with thread-only replay/resync replacement (#3253/#3235). Each open conversation requires explicit catch-up; only its separate successful final marker certifies completion.  Every frame also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; absence from an older host means unpinned. The active [`set_conversation_pinned`](#set_conversation_pinned) handler (#3538) replies with this type before the matching uncorrelated push reaches the requester, including on no-ops; both requester and other interactive clients receive that push. All handler and command producers preserve stored pins, including channel/conversation creation and agent-switch announcements. |
+| `conversation_updated` | binary → phone | no | Has **two kinds of producer**, and a client MUST accept both. As a **reply** it is correlated by `in_reply_to` and answers `promote_conversation`, `rename_conversation`, `archive_conversation` / `unarchive_conversation`, `change_workspace`, `set_system_prompt`, `set_conversation_muted`, `set_conversation_pinned` or [`mark_conversation_read`](#marking-a-conversation-read). As an **unsolicited push** it carries **no `in_reply_to` at all**, and has **these producers**: when a conversation is created on the host by `pyry channel new` (#2156) or `conversation.new`, or announced after an agent switch; when a conversation that has never had a name takes one from the first message sent to it (#2159 — the daemon cuts a short title from that message's text and stores it, so a chat started from a client stops reading as `Untitled`; it fires at most once per conversation, since a name set by create, rename, promote or an earlier message is never overwritten); when a conversation's mute flag is set or cleared by `set_conversation_muted` (#2572); when its pin is set or cleared by [`set_conversation_pinned`](#set_conversation_pinned) (#3538), including no-ops; and when `mark_conversation_read` (#2780) actually **advances** the conversation's read mark — not on a no-op request, which still gets its reply but pushes nothing. **Three also answer a correlated reply for the same write** — `set_conversation_muted` and `set_conversation_pinned` always, `mark_conversation_read` only when it advances — so their requester receives both: the correlated `conversation_updated` reply and the uncorrelated push, which does not exclude it. Either way the daemon fans the stored record to every interactive-capable conn, because no client asked and none would otherwise learn of the change until its next `list_conversations` — and on the auto-naming, mute, pin and read-mark pushes in particular the requester is **not** excluded, since `send_message`'s own reply is a bare `ack` carrying no record and the correlated replies above are separate frames from their pushes. A client that matches this type on correlation alone will drop the pushed frame; correlate on the payload's own `id` instead. The record is the same either way, and it is read back from the registry, so its `cwd` is the daemon's confined, symlink-resolved path. The push is **live-only** — there is no replay, and a client that was disconnected sees the row in its next list. Interactive-capability-gated: a conn without it is skipped. Every frame of both kinds carries **`workspace_label`** (#2210): the operator-set display name stored for that frame's own `cwd`, or `null` when that workspace has none, **nullable but never omitted** — so a client patching a row in place from a push renders the operator's chosen name instead of falling back to the folder name until its next list. After a `change_workspace` it names the **destination** workspace, which is the case a client cannot resolve for itself: `recent_workspaces` rows carry no label, and `workspace_updated` fires when a *label* changes, not when a *conversation moves*. Same value and same contract as the [`conversations`](#conversations) row's field, its 128-byte size-not-safety bound included. It is **not** a precedent for putting `system_prompt` here: the label is already on every `list_conversations` row, so broadcasting it widens no audience, which is exactly what a prompt reachable from no other read path would do. Every frame of both kinds also carries **`is_muted`** (#2571): the conversation's durable mute-notifications flag, read from the stored conversation. **Always present from a daemon that knows the field** — a client reads an absent key as not muted, so a client paired with an older daemon keeps notifying. This matters for the push in particular: mobile folds each frame into its list in place (`ConversationListProjection.upsertConversation`), so a record that dropped the key would read as not muted and a plain rename would silently unmute the conversation. Every frame of both kinds also carries **`read_up_to`** (#2779): the same durable, per-conversation, host/operator-scoped read mark the [`conversations`](#conversations) row reports, unsigned 64-bit, **always present including `0`**. Read from the stored conversation at send time by every reply and push producer — so a `rename_conversation` on a conversation with a nonzero mark reports that mark unchanged, exactly as it already does for `is_muted`. Ordinary producers of this frame omit `current_session_id`; the stored binding is available in [`list_conversations`](#list_conversations). For a conn that negotiated **`multi_agent`**, every pushed or reply frame about a registry-known conversation also carries **`agent`** (#2669), resolved by the same [`conversations`](#conversations)-row rule at the moment this frame is sent, so replacing a cached row cannot lose the agent and a later agent change is observable. A conn without `multi_agent` receives the pre-#2669 bytes with no `agent` key. A registry miss leaves the frame untagged rather than inventing an agent for a conversation the daemon no longer knows. On a connection that negotiated **`thread`**, every push and reply adds that conversation's authoritative **numeric `last_shown_version`** from usable loaded status or an eligible unloaded clean certificate. The certificate must pass current schema/rules, epoch and evidence-field validation, and its consumed version V must exactly equal independently known current raw history progress H. Numeric `0` is authoritative, including valid empty evidence at V = H = 0. Unregistered/removed IDs and rebuilding/unavailable views remove the key, including any supplied stale value. For unloaded conversations, missing/unreadable/malformed/dirty/incompatible/invalid certificates, history lookup failures, V != H in either direction and cold/unknown raw progress also remove it. Any later append invalidates an unloaded reading even when it would not raise the shown watermark; ordinary loading/folding can restore it. The lookup never warms a cold cursor by reading segments or trusts V as H. Certificate metadata proves neither replay/checksum equality nor catch-up continuity; see [`conversations`](#conversations). Every admitted session uses this authoritative projection; there is no non-thread summary fallback. Unread is **`last_shown_version > read_up_to`** only with present shown evidence; omission means unknown, never zero. Projection preserves every other supplied field and its presence, including the durable `read_up_to` and any stored `current_session_id`; it adds no binding when absent. Read-mark storage is unchanged. Production fold/watermark, retained-state and bounded query providers are installed (#3163/#3164/#3236), with thread-only replay/resync replacement (#3253/#3235). Each open conversation requires explicit catch-up; only its separate successful final marker certifies completion.  Every frame also declares **`pinned_at`** (#3536): an RFC3339 pin timestamp or explicit `null`, **never omitted**; absence from an older host means unpinned. The active [`set_conversation_pinned`](#set_conversation_pinned) handler (#3538) replies with this type before the matching uncorrelated push reaches the requester, including on no-ops; both requester and other interactive clients receive that push. All handler and command producers preserve stored pins, including channel/conversation creation and agent-switch announcements. |
 | `rename_conversation` | phone → binary | no | Renames an existing conversation; replies with the reused `conversation_updated` record. |
 | `delete_conversation` | phone → binary | no | Permanently removes a conversation (hard delete; the reversible path is `archive_conversation`); replies with `conversation_deleted`. |
 | `conversation_deleted` | binary → phone | no | Acknowledges a `delete_conversation`, correlated by `in_reply_to`; carries only the deleted conversation's `id` (the record no longer exists, so no name/cwd is projected). |
@@ -1210,12 +1216,12 @@ Unchanged from v1 except where noted. Emitted types below are sent as the **decr
 | **`mint_pairing`** | phone → binary | no | **New in v2. Security-sensitive — its reply is a bearer credential.** Inbound control — an already-paired client asks the daemon to mint a pairing for **another** device, naming an optional `device_name` and nothing else (#2126). It is the pairing flow's second entry point: `pyry pair` needs a shell on the daemon's host, which a browser build of the desktop client and a second person's client do not have. **A write verb, not a read** — it creates a credential and a registry record, which is why it is named for its action rather than filed under the `request_*` family. **Nothing a client sends is input to what is minted**, and there is deliberately **no field for the remote-permissions flag**: a minted device is always unprivileged. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`pairing_minted`](#pairing_minted). **Answered since #2127** — by a privileged-device gate, a mint under the `devices.json` lock, and a `pairing_minted` reply; every other device is refused `pairing.not_permitted` with nothing created. See [Minting a pairing from a paired client](#minting-a-pairing-from-a-paired-client). |
 | **`pairing_minted`** | binary → phone | no | **New in v2.** Outbound reply to a [`mint_pairing`](#mint_pairing), correlated by `in_reply_to` (#2126). Carries the same daemon-encoded pairing that bare `pyry pair` receives through local control and renders as the QR symbol and paste fallback — one opaque base64url string a client hands to its existing pairing dialog unchanged — and **nothing else**: the four fields inside it are not repeated as loose keys, and no field of the request is echoed back. **The string is a plaintext bearer credential**: never logged, no decoded field of it logged, and it must never leave the AEAD-sealed envelope. Unicast to the conn that asked; never broadcast. Emitted by the mint handler since #2127. See [Minting a pairing from a paired client](#minting-a-pairing-from-a-paired-client). |
 | **`reply_suggestion`** | binary → phone | no | **New in v2** (interactive, capability-gated). Next-reply state for a conversation/session pair after an eligible successful turn: native first, then one Haiku fallback after a two-second native window (#2831, #2832). Broadcast to attached interactive clients. A higher revision with explicit `suggested_reply: null` clears it; reconnect reconciles current state, including clears. No `event_id`, replay or history. Unavailable fallback stays silent. See [`reply_suggestion`](#reply_suggestion). |
-| **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered only to eligible authenticated interactive connections that negotiated `thread`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
+| **`thread_item_added`** | binary → phone | no | **Production emitted (#3164).** Full daemon-built item with `conversation_id`, `epoch`, `version`; oversized updates use bounded assembly parts (#3073). Delivered to eligible authenticated connections with mandatory `thread`; complete updates do not require `interactive`. See [daemon thread updates](#daemon-thread-updates-v2-supplied-delivery-contract). |
 | **`thread_item_changed`** | binary → phone | no | **Production emitted (#3164).** In-place field replacements with `item_id`, `base_rev`, `rev`, `changes` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_item_changed`](#thread_item_changed). |
 | **`thread_text_append`** | binary → phone | no | **Production emitted (#3164).** Message text suffix with `item_id`, `base_rev`, `rev`, `text` and the common conversation/epoch/version fields; oversized updates use bounded assembly parts (#3073). See [`thread_text_append`](#thread_text_append). |
 | **`thread_compact_update`** | binary → phone | no | Production compact root replacement or hidden-only consumed progress (#3563), gated by a negotiated compact join per conversation. Oversized rows use bounded assembly. See [Compact projection](#compact-projection-declared). |
-| **`thread_catch_up`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3253).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
-| **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible interactive `thread` access to the named conversation and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
+| **`thread_catch_up`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3253).** Request current full items after an unsigned history `version`, or a newest window at zero; carries `conversation_id`, `epoch` and optional signed `limit`. Requires authenticated, paired, eligible `thread` access to the named conversation; complete content does not require `interactive`. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
+| **`thread_page`** | phone → binary | no | **Production-installed bounded provider (#3236), with authenticated relay handling (#3235).** Request an older ordered window below exclusive unsigned `before_order`, including zero; carries explicit `conversation_id` and optional signed `limit`. Requires authenticated, paired, eligible `thread` access to the named conversation without requiring `interactive`, and shares catch-up's unfinished-query slot and completion fence. Only the separate successful final marker certifies completion. See [Thread query messages](#thread-query-messages). |
 | **`thread_items`** | binary → phone | no | **Production emitted (#3236).** Correlated full-item batches with `final: false`, followed by one separate empty `final: true` success marker carrying coverage. Oversized single-item batches use serialized-payload assembly. See [Thread query messages](#thread-query-messages). |
 | **`thread_reset`** | binary → phone | no | **Production emitted (#3236).** Correlated terminal catch-up reset carrying current `conversation_id`, `epoch`, `version`, with no items or coverage; it never advances a completed checkpoint. See [Thread query messages](#thread-query-messages). |
 | **`thread_read_tool_body`** | phone → binary | no | **Production-installed (#3523); authenticated `thread_expansion` required.** Request one public tool/agent-launch body at an expected epoch/revision. See [Bounded expansion reads](#bounded-expansion-reads). |
@@ -1232,11 +1238,14 @@ removed for every app. The [application-message boundary](#application-message-t
 covers assistant/tool/completion, agent/roster, session/notice, banner, resolved
 answer and channel-post content, including nil/failed history and peers without
 `thread`. Supported live controls/readings remain separate and ordered with
-thread updates. Initial connection supplies current live state; content backfill
+thread updates. Initial connection supplies current live state when interactive
+access is granted; content backfill
 requires explicit thread catch-up/pages. The
 [integrated acceptance record](knowledge/features/thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718)
 closes the content-publication slice. Event replay admission and delivery are
-also retired (#3738); ring storage/wiring is removed (#3739).
+also retired (#3738); ring storage/wiring is removed (#3739). Every admitted
+app session negotiates `thread` (#3740), and non-thread positive delivery,
+tag stripping and legacy connect recovery are removed (#3741).
 
 `thread_item_added`, `thread_item_changed` and `thread_text_append` have a
 per-connection relay delivery contract (#3081), including the bounded codec
@@ -1295,9 +1304,9 @@ delivery deadline. Failed delivery is not successful receipt; a disconnected
 phone may receive no close. Run shutdown cancels terminal work, and a replacement
 handshake fences any old close from reaching the replacement connection.
 
-After `4414`, perform a fresh authenticated Noise handshake with `interactive`
-and `thread`, then explicitly request `thread_catch_up` for the same named
-conversation using the last **completed** epoch/version checkpoint. Do not
+After `4414`, perform a fresh authenticated Noise handshake with mandatory
+`thread` and optional `interactive`, then explicitly request `thread_catch_up`
+for the same named conversation using the last **completed** epoch/version checkpoint. Do not
 resend input already accepted before disconnection: its retained user item and
 completed thread content are recovered by catch-up with their receiving source
 and session identity. If the checkpoint receives `thread_reset`, initialize
@@ -1318,7 +1327,8 @@ outside history commit paths and producer locks, including held delivery and
 slow-consumer recovery.
 
 Supplied item updates and every continuation reach the wire only for an
-authenticated, open connection that negotiated both `thread` and `interactive`.
+authenticated, open connection that negotiated `thread`. Complete content
+does not require `interactive`; supplied live state and controls still do.
 The payload must identify a currently registered conversation, rechecked before
 delivery; a Codex conversation withheld for
 missing `multi_agent` remains withheld. Neither an explicitly queued frame nor
@@ -1327,7 +1337,7 @@ so withheld frames consume no send nonce. Permitted continuations retain their
 order and logical payload; the supplied envelope `session_id` must not grow
 after encoding, so later scalar stamps stay within the reserved byte budget.
 
-For thread connections, the relay suppresses these replaced **unsolicited**
+For every admitted app connection, the relay suppresses these replaced **unsolicited**
 types across live forwarding and existing connect reconciliation:
 `assistant_delta`, `tool_use`, `tool_result`, `tool_denied`, `turn_end`,
 `session_transition`, `message`, `background_task_started`,
@@ -1343,12 +1353,16 @@ complemented by the supplied
 [current live-state reconciliation](#session-scoped-live-state-v2-supplied-delivery-contract)
 from #3082.
 
-Connections without `thread` receive none of the three update kinds and no
-`last_shown_version`, envelope `session_id` or `session_state_cleared`, even
-when supplied frames carry them. Explicit new-session clear frames are omitted
-entirely. Other legacy events, payloads and summary bytes retain their existing
-shape, including independent interactive and agent restrictions. Per-connection
-projection does not mutate shared push payloads.
+Missing thread fails closed; no non-thread content or recovery route remains.
+Permitted pushes, correlated replies and continuations preserve supplied
+`session_id` and `session_state_cleared`. Supplied live-state readings and clears
+also retain source `conversation_id`, with interactive/source/freshness gates.
+Summary projection always reads authoritative `last_shown_version`: present zero
+remains zero, unavailable readings remove the key, and unrelated supplied fields
+retain their values and presence. Projection does not mutate shared push payloads.
+Expansion requires `interactive` plus `thread_expansion`; compact retains its
+interactive/expansion/readiness prerequisites and complete/compact join rules.
+Omitting any optional grant never selects legacy delivery.
 
 All three payloads have these required common fields:
 
@@ -1810,7 +1824,9 @@ other conversations and old epochs cannot establish compact coverage.
 
 **Admission, implemented.** A `thread_catch_up`/`thread_page` carrying
 `projection` passes the ordinary authentication, membership, agent and
-`thread`/`interactive` gates first, exactly as a projection-less request does.
+mandatory `thread` gates first, exactly as a projection-less request does.
+Complete requests need no interactive grant; the compact grant separately
+requires `interactive` and expansion prerequisites.
 Only then is `projection` validated: it must decode to exactly `"compact-v1"`
 (null, non-string, empty or any other string refuses); the connection must
 hold `thread_compact`; and a page must carry a nonempty string `epoch`. Each
@@ -1862,6 +1878,36 @@ including any ellipsis. Blank headlines fall back to `Tool call`, `Agent` or
 explicitly requested child summaries: optional facts stay absent when unknown;
 known zero/false/empty remains explicit. Public child counts exclude private
 children, and `no_child` remains attribution rather than an inventory fact.
+
+For canonical `agent` and `tool_call` headers, optional `task_id` preserves the
+fold's authoritative association to the creating row. A nonempty string is the
+exact selected task identity; `""` is known no association at this revision;
+omission is unknown, including older producers. Apply these as replacement
+facts: explicit empty clears a prior association, and an omitted fact leaves
+the replacement unknown rather than carrying an older association forward as
+current evidence. The same fact travels through initial/older roots, compact
+catch-up/live replacements and bounded direct-child summaries. It comes only
+from validated computed fold evidence within the conversation, recorded
+provenance/session and producer lifetime or legacy scope. When several tasks
+link to one call, the greatest lexicographic task ID selected by `applyAgent`
+wins; this scalar is no task inventory. See the
+[full presence and authority rules](#bounded-expansion-reads).
+
+Use row `id`, `kind`, `parent`, `order`, `status`, `active` and `ended_order`
+for navigation, placement and lifecycle. Association establishes neither body
+availability nor query/expansion coverage, and requires no closed-body fetch.
+Published summary reads use prepared metadata without rendering tool/agent
+bodies, looking up their history or enumerating unopened descendants. Existing
+row/byte/privacy limits, capability/projection fences and separate completion
+markers still apply.
+
+The independently accepted Linux producer is
+[`ea1dcb1fce648fc80b2cf8962f15a718477e2fa8`](https://github.com/pyrycode/pyrycode/commit/ea1dcb1fce648fc80b2cf8962f15a718477e2fa8)
+([implementation contract](https://github.com/pyrycode/pyrycode/blob/ea1dcb1fce648fc80b2cf8962f15a718477e2fa8/docs/specs/architecture/3851-summary-task-associations.md),
+[Core PR #3853](https://github.com/pyrycode/pyrycode/pull/3853)).
+[Mobile #2431](https://github.com/pyrycode/pyrycode-mobile/issues/2431) owns
+consumption and final integration; Core acceptance claims no Mobile integration,
+default activation, service rollout or consumer-pin change.
 
 Every compact data batch, assembly part, success marker, live replacement,
 progress frame and reset MUST repeat `projection: "compact-v1"`,
@@ -1949,8 +1995,8 @@ active items and parent extras can exceed the ordered-row count; an item-count
 or byte-count cutoff must not silently discard required rows.
 
 Both queries require an open, authenticated, currently paired connection
-negotiating both `thread` and `interactive`. The explicitly named conversation
-must have a valid canonical ID, be currently registered through
+negotiating `thread`; complete queries do not require `interactive`. The
+explicitly named conversation must have a valid canonical ID, be currently registered through
 `KnownConversation`, and pass the Codex/`multi_agent` gate. The required fields
 must be present with their stated JSON types; missing, `null` and wrong-type
 values fail. An empty string `epoch` is allowed for an initial zero-version
@@ -2189,14 +2235,16 @@ a query. Production-installed catch-up/page handlers and both implemented
 expansion handlers enforce this stopping rule.
 
 Immediately before sealing queued thread content, Run rechecks open/authenticated
-state, current paired authorization, negotiated `thread`, interactive access,
-current conversation membership and the existing Codex/`multi_agent` gate.
+state, current paired authorization, negotiated `thread`, current conversation
+membership and the existing Codex/`multi_agent` gate. Complete content does not
+require interactive access.
 This covers live additions/changes/text appends and their continuations, as well
 as correlated `thread_items` batches, every assembly part including completion,
 the separate `final: true` marker and `thread_reset`. Tool-body data/assembly,
 child-page data and both expansion finals receive these same checks and
-additionally require recipient `thread_expansion`. Missing payload conversation
-identity fails closed; request correlation grants no access. Removal or
+additionally require recipient `interactive` and `thread_expansion`. Compact
+updates retain their negotiated compact grant and projection/epoch join checks.
+Missing payload conversation identity fails closed; request correlation grants no access. Removal or
 eligibility loss while content waits unsealed withholds it without spending a
 sender ID or Noise nonce, releases its slot and lets permitted output proceed.
 
@@ -2230,8 +2278,8 @@ Missing either expansion provider or any required capability withholds expansion
 existing `thread` negotiation remains independent. Installed authenticated
 synthetic-history tests exercise these reads and partial-provider negotiation.
 Complete history/live delivery remains the default. The separate
-[compact projection](#compact-projection-declared) is declared only (#3559),
-with production installation and client adoption pending. Expansion support
+[compact projection](#compact-projection-declared) is production-installed
+(#3563); client adoption remains downstream. Expansion support
 does not negotiate compact delivery or select a view.
 
 Both reads share complete queries' temporary daemon demand: cold or idle
@@ -2330,10 +2378,34 @@ the [full item's](#full-thread-item) metadata with these presence rules:
 | `no_child` | Boolean attribution fact, omitted when false; true means positively no producing child. |
 | `headline` | Required plain single-line text, not interpreted markup. |
 | `detail_omitted` | Required boolean, always true. |
+| `task_id` | Optional exact string for canonical `agent`/`tool_call` association. Nonempty identifies the authoritatively selected task for this creating row; explicit `""` means known no association at the captured revision; omission means unknown. |
 | `error_summary` | Optional plain single-line string, at most 200 Unicode code points including ellipsis; absent means unknown, explicit `""` means known no error. |
 | `public_child_count` | Optional nonnegative integer below 2^53; public direct children only. Known count requires `has_public_children == (count > 0)`. |
 | `has_public_children` | Optional boolean; may be known without a count. Absent is unknown; false is known no public direct children. |
 | `subtree_version` | Optional nonnegative integer below 2^53, including known zero; epoch-scoped nested-public-change freshness independent of source `rev`. |
+
+`task_id` comes only from the fold's computed association scalar in the matching
+creating recipe. `agentWork` validates task-to-call ownership within this
+conversation, recorded source/provenance and session, and producer lifetime or
+legacy scope. Reused call/task strings across those scopes cannot associate
+rows. Absent, truncated or dropped identity evidence cannot establish a link.
+`applyAgent` visits associated task IDs in lexicographic order and retains the
+greatest as the scalar when several tasks link to one call. The summary copies
+that selection without a task inventory, link/report payload or content.
+Headline text, a background flag, launch-result prose and arbitrary retained
+launch JSON cannot supply association authority.
+
+Preserve task strings exactly, including whitespace and Unicode: do not trim,
+normalize, truncate or parse them as numbers. Existing envelope/row bounds and
+numeric identity/order/revision validation below 2^53 remain unchanged. A
+replacement's nonempty value replaces the previous association, explicit empty
+clears it, and omission leaves it unknown, never known empty or proof that an
+older association still holds. Late linking, reassociation and terminal updates
+retain the canonical row's revision/lifecycle and existing freshness rules.
+The row's identity/kind, parent/order, status/activity and ending order control
+navigation, placement and lifecycle without demanding closed details. Neither
+an association nor its absence proves detail availability or any coverage;
+query and expansion completion remain separate.
 
 `NewThreadSummary` derives `headline` from the item summary, collapsing runs of
 Unicode whitespace/control characters to one space and trimming leading/trailing
@@ -2343,9 +2415,14 @@ headline uses the kind-based fallback described in the [compact contract](#compa
 `ThreadSummary.MarshalJSON` applies the same text bounds to supplied headlines
 and error summaries without inspecting content. Summary IDs, orders and revisions
 also remain integers below 2^53. Producers own numeric and count/existence
-validation. The optional facts are declared DTO fields; installed Store derivation
-of compact freshness/count/error facts follows separately. Missing facts never
-prove no children, no error or fresh cached detail.
+validation. `NewThreadSummary` leaves `task_id` unknown even if arbitrary item
+content contains that key; it has no authoritative association metadata.
+Installed Store preparation supplies association, freshness/count/error facts
+to both query and live translators without request-time body/history reads.
+Full replay, validated metadata-only checkpoint resume and unload/reload retain
+the same associations; prior captures and returned optional values stay detached.
+Missing facts never prove no association, no children, no error or fresh cached
+detail.
 
 Child `limit` defaults to **50** when omitted/zero, clamps positive values to
 **256**, and rejects negative, null, fractional, wrong-type or out-of-uint64-range
@@ -2467,7 +2544,7 @@ catch-up continuity and does not make an unloaded conversation query-ready.
 
 | Summary key | Presence and meaning |
 |---|---|
-| `last_shown_version` | JSON integer number when an authoritative usable reading is available on a thread connection, including numeric `0`. Missing, rebuilding or unavailable readings omit the key, even if supplied metadata held an old value. Always omitted without `thread`. Watermark raised by adding a shown thread item or appending text to one; never inferred from item revisions or incomplete recovery. Hidden item/live-state updates and completion-only revisions do not by themselves raise it; raw consumed progress can advance beyond it. |
+| `last_shown_version` | JSON integer number when an authoritative usable reading is available on a thread connection, including numeric `0`. Missing, rebuilding or unavailable readings omit the key, even if supplied metadata held an old value. Every admitted app session negotiates `thread`. Watermark raised by adding a shown thread item or appending text to one; never inferred from item revisions or incomplete recovery. Hidden item/live-state updates and completion-only revisions do not by themselves raise it; raw consumed progress can advance beyond it. |
 | `pinned_at` | RFC3339 host-local pin timestamp or explicit JSON `null` when unpinned; never omitted. An absent field from an older host means unpinned. All list/update projections preserve stored pins, including command-package announcements (#3538); see [`set_conversation_pinned`](#set_conversation_pinned). |
 | `current_session_id` | Always-present stored session binding, including `""` when unbound. A nonempty binding does not prove a running process. |
 | `read_up_to` | Always-present durable host/operator read mark, including zero; shared by paired devices. |
@@ -3450,7 +3527,7 @@ Defined capability strings:
 
 | Value | Meaning |
 |---|---|
-| `interactive` | The phone can render the structured interactive event stream below. |
+| `interactive` | Grants supplied live state, prompts and interactive controls. Complete-thread queries, pages and updates work without it; it remains a prerequisite for expansion and compact grants. |
 | `question` | The client understands the clarifying-question batch types — it can render a `question_shown` batch, answer it with `question_answer` / `question_refused`, and handle `question_dismissed`. **Detection only: this string grants no access.** The batch fan-out and the connect-time question reconcile gate on `interactive` alone, so a client advertising `question` by itself negotiates as non-interactive and receives none of them (#2020). |
 | `model_list` | The daemon can answer a model menu for **any** conversation, including one whose bound session has spawned no child yet — the `request_model_list` verb (#2125) plus the daemon-wide retained-vocabulary fallback it answers from (#2124). One string covers the pair because neither half is separately useful: the fallback with no verb gives a client no way to ask, and the verb with no fallback has nothing to answer for a childless conversation. **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `model_list` by itself negotiates as non-interactive, and a client advertising `interactive` without it is answered exactly as before (#2172). |
 | `context_usage` | The daemon can answer a fresh `detail:"full"` context-window reading on demand — the [`request_context_usage`](#asking-for-a-context-usage-reading-on-demand) verb (#2431). **Detection only: this string grants no access.** The verb gates on `interactive` alone and this string adds no gate of its own, so a client advertising `context_usage` by itself negotiates as non-interactive, and a client advertising `interactive` without it can still use the verb. |
@@ -3473,10 +3550,12 @@ one echo; unsupported values
 grant nothing. The decision is recorded only on successful authenticated
 admission, survives rekey and is exposed as `ActiveConn.Thread` in open-connection
 snapshots. An acknowledgement to a subsequently rejected peer grants no delivery.
-`thread` alone never grants interactive or multi-agent access: item delivery
-requires `interactive`, and Codex conversation content also requires
-`multi_agent`, even for correlated updates and continuations. Other traffic
-retains its existing conversation/agent restrictions.
+`thread` alone never grants interactive or multi-agent access. Complete-thread
+queries, pages and eligible updates do not require `interactive`; Codex
+conversation content still requires `multi_agent`, including correlated updates
+and continuations. Supplied state and controls retain interactive gates, and
+expansion/compact retain their additional prerequisites and projection-aware
+joins. Other traffic retains its existing conversation/agent restrictions.
 
 Production installs `ThreadCatchUp`, `ThreadPage`, the real fold publisher,
 `ThreadLastShownVersion`, `ThreadLiveState` and `LiveStateCurrent` together
@@ -3539,8 +3618,9 @@ conversation binding. Settings reads retain the enrichment described in
 A selected provider's unavailable result keeps the handler's existing refusal
 or zero-settings response; a failed settings update keeps its existing error
 mapping and emits no success reading. Neither outcome retries a legacy provider
-or repeats the query or mutation. A non-thread connection, or a handler without
-its optional provider, retains its legacy reply path and bytes. Existing typed
+or repeats the query or mutation. A handler without its optional source-bearing
+provider retains its typed reply path; production installs all five providers.
+There is no admitted non-thread session or legacy reconnect fallback. Existing typed
 providers and `SettingsUpdater` remain compatible.
 
 **Conversation routing.** Every delivered supplied live-state envelope carries
@@ -3650,11 +3730,12 @@ ordinary live state does not use thread-item continuation encoding.
 
 These frames carry no replay or history identity, contribute no thread items or
 catch-up data, and never advance `last_shown_version` or read watermarks.
-Connections without `thread` retain supported live frames and current-state
-snapshots, receive no envelope conversation/session metadata and receive no
-explicit clear frames. No connection receives event-ring replay or raw `resync`
-(#3738). Thread item recovery requires negotiated thread delivery and explicit
-queries through the installed bounded providers (#3236/#3253/#3235).
+All admitted sessions negotiate `thread`; supplied-state forwarding never
+strips conversation/session metadata or clears for a compatibility peer.
+Thread-only sessions receive complete content without supplied state or
+interactive controls. No connection receives event-ring replay or raw `resync`
+(#3738). Thread item recovery uses explicit queries through the installed bounded
+providers (#3236/#3253/#3235), independently of current-state reconciliation.
 
 ### Interactive events (v2, capability-gated)
 
@@ -5071,8 +5152,9 @@ live state; slash-command inventory keeps its existing contract.
 
 An unavailable result keeps
 `model_list.unavailable` without retrying `ModelListFor`. Without the optional
-provider, or without `thread`, the legacy path and bytes below remain unchanged.
-The live-lane delivery window below describes that legacy path. Thread
+provider, the typed reply path remains available to low-level configurations.
+No admitted session can omit `thread`. The historical live-lane delivery window
+below does not restore legacy connect recovery. Thread
 connect/reconnect uses supplied catalog resolution, including the fallback
 coverage under “Reconcile on (re)connect” below.
 
@@ -5140,14 +5222,11 @@ The captured stale reading remains rejected, and neither a target transition
 nor removal/recreation can be crossed by this refresh. See the
 [supplied delivery contract](#session-scoped-live-state-v2-supplied-delivery-contract).
 
-An authenticated interactive connection without `thread` retains legacy
-`reconcileModelLists`: one snapshot per registry conversation with usable
-vocabulary, without supplied clear frames
-or top-level conversation/session metadata. No legacy live frame is recovered by
-event-ring replay (#3738). Supplied thread reconciliation uses source-bearing
-providers in place of the legacy connect providers. On either path, replace the menu by
-`conversation_id`, never by position or envelope `id`; registry iteration order
-is not a delivery contract.
+Connect recovery uses supplied source-bearing providers, including their clears
+and top-level conversation/session metadata; legacy `reconcileModelLists` is
+removed (#3741). No event-ring replay restores a live frame (#3738). Replace
+the menu by routed `conversation_id`, never by position or envelope `id`; registry
+iteration order is not a delivery contract.
 
 **Vocabulary coverage and absence.** Claude inventory uses bound-session →
 bootstrap → saved vocabulary precedence. An own report wins; fallback can answer
@@ -5862,7 +5941,16 @@ Persistent stream spawns still request `--prompt-suggestions`, unless the child'
 
 A client replaces its held suggestion state keyed by **`conversation_id` and `session_id` together**, ignores a frame whose `revision` is not higher than the one held for that pair, and discards cached suggestions on a fresh handshake (`hello`/`hello_ack`). State is daemon-memory-only; a restarted daemon's revision counter does not resume above its previous value.
 
-**Legacy connect-time reconcile and revision ordering** (#2830, wired to the native owner in #2831). On a successful handshake an interactive connection without `thread` receives current state for every conversation with published suggestion state, including a literal `"suggested_reply":null` for cleared conversations. A conversation that never published contributes no frame. Reconnect therefore receives the state that stands now, including a clear made by another device. Both live and reconciled frames carry **no `event_id`** and are excluded from the replay ring and durable history. Delivery is **monotonic per conversation per connection**: the daemon drops frames at or below the highest `revision` already delivered for that conversation on that connection. A stale snapshot cannot overwrite a newer live clear. The watermark resets on a fresh connection. A Codex conversation's suggestion is withheld from a connection without [`multi_agent`](#capability-negotiation-v2), on both delivery paths.
+**Supplied reconnect and revision ordering.** Admitted sessions with
+`interactive` receive source-bound current suggestions through `ThreadLiveState`,
+including published clears. The legacy `reconcileReplySuggestions` connect path
+is removed (#3741). Generation/family/reading revision ordering prevents a stale
+snapshot from restoring an older suggestion or overtaking a newer clear; the
+ordering state is connection-local and resets on reconnect. Codex suggestions
+still require `multi_agent`. Supplied tags, target conversation identity and
+clear-before-fresh behavior follow the
+[session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
+Suggestions carry no ring/history identity or thread read evidence.
 
 #### Reconnect replay & resync (consumer, #647)
 
@@ -8476,8 +8564,9 @@ see [ADR 043](knowledge/decisions/043-hosted-app-runtime-and-isolation.md).
 ## Reconnect / Backfill semantics
 
 **Connection mode:** no connection receives event-ring replay or raw `resync`
-(#3738). Peers without `thread` retain supported current-state reconciliation. Raw `request_history` is retired for every
-connection. A thread connection reconciles supplied current live state through the
+(#3738). Every admitted session negotiates `thread`; raw `request_history` is
+retired for every connection. With optional `interactive`, a session reconciles
+supplied current live state through the
 [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
 including inactive retry/compaction and outstanding answerable prompts/questions.
 Its catalog snapshot also resolves registered targets without their own retained
@@ -8535,27 +8624,26 @@ There is no cursor-backfill Mode A: `last_event_id` cannot request past events
 or identify a conversation. Clients need the thread capability and explicit
 per-conversation queries to recover content, including across daemon restart.
 
-**Mode B — legacy control state → current-state snapshot (the reconcile-on-connect rule).** For connections without `thread`, control state reconnects by *re-asserting current truth*, replaying no past events:
+**Current control state → supplied snapshot.** Admitted connections with
+`interactive` recover current truth through the source-bearing `ThreadLiveState`
+cursor, not the removed legacy modal/question/model/turn/suggestion reconciliation
+methods. Current answerable prompts retain their original IDs; resolved prompts
+do not reappear. Catalogs resolve eligible targets even without an own reading
+or turn. Retry/compaction and other current families retain the supplied contract.
 
-- **Reconcile on connect.** On any (re)connection the daemon brings the client to **current control truth** — the still-outstanding modal (#877), every still-outstanding clarifying-question batch (#1979/#1980), the retained slash-command menus (#2006/#2007), the retained model menus (#1863/#1867, widened by #2124), and the current phase of a running turn (#2712) — and **replays no past control events**. The still-outstanding `modal_shown` (original `modal_id`) is unicast, a `question_shown` is unicast for every outstanding batch, each carrying the original `question_batch_id`, a [`slash_command_list`](#slash_command_list) is unicast for every conversation whose bound session currently holds one, a [`model_list`](#model_list) is unicast for **every conversation the registry carries** whenever any model vocabulary is retained at all — the one member of this list whose coverage is not per-conversation, because the vocabulary is machine- and account-scoped rather than conversation-scoped (see § [`model_list`](#model_list)) — and a [`turn_state`](#turn_state) is unicast for **every conversation with a turn currently running**, carrying that turn's current `thinking` or `responding` phase; a conversation that is idle gets nothing. The modal reconnect behavior is exercised in #829/#903 and the slash-command menu's late-connect delivery in #2009.
-- **Match-and-replace by stable id, applied idempotently on every connect.** Reconciliation is keyed on stable identity — `modal_id` for a modal; `question_batch_id` for a question batch; `conversation_id` for a slash-command menu; `conversation_id` for a model menu; `conversation_id` for a turn phase — so the same connect-time re-assertion is safe to apply every time:
-  - a re-delivered `modal_shown` for a **known** `modal_id` **updates the existing modal in place** and **never double-shows**; a re-sent `question_shown` for a known `question_batch_id` **replaces that batch in place**, a re-sent `slash_command_list` for a known `conversation_id` **replaces that menu in place**, a re-sent `model_list` for a known `conversation_id` **replaces that model menu in place**, and a re-sent `turn_state` for a known `conversation_id` **replaces that conversation's phase in place** — it is snapshot-shaped full state, so replacing is the same rule the live lane already asks for;
-  - an id the client has **already resolved** is a **no-op**;
-  - control state the daemon does **not** re-assert after a fresh handshake is **gone** (reset-on-reconnect): each reconnect is a fresh Noise_IK handshake, so the client **resets** its control state and rebuilds it from whatever the daemon re-asserts — anything resolved while the client was disconnected simply does not reappear.
+On a fresh handshake, discard connection-local control state and apply each
+family's routed clear before fresh readings. Route by top-level `conversation_id`,
+retain omitted/null/nonempty session provenance, and use supplied generation,
+family and reading revision ordering. Clears have `{}` payloads and no
+`in_reply_to`; fresh correlated replies retain their correlation. Match prompts
+by their stable prompt IDs and answer them only through existing authorized
+resolvers. See [supplied live state](#session-scoped-live-state-v2-supplied-delivery-contract).
 
-Current-state reconciliation does not certify thread content recovery. It
-reasserts answerable prompts and current readings independently of explicit
-catch-up/pages, regardless of outage length. Answer-once security invariants in
-[Modal](#modal-v2) and [Question](#question-v2) are unchanged under re-delivery.
-
-The list above names the **five** remaining legacy connect-time frames.
-Background-task roster snapshots are retired for every app (#3735). Queue
-snapshots are retired for all capabilities (#3727). Recover queued acceptance
-and terminal state through explicit thread catch-up and live item updates as
-[Queue (v2)](#queue-v2) describes. The running turn's phase comes from the
-interactive emitter's open-turn state, published before live fan-out so a later
-transition follows whatever phase the handshake observed. No replay watermark
-participates in this ordering.
+These snapshots certify no thread content coverage. Complete content recovery
+uses explicit named catch-up/pages independently of interactive access and outage
+length. Task rosters and queue snapshots remain retired; recover their retained
+content through thread items. Answer-once security invariants in
+[Modal](#modal-v2) and [Question](#question-v2) remain unchanged.
 
 ## Error codes
 
@@ -8805,10 +8893,14 @@ per-open-conversation epoch/version catch-up, newest-window recovery after
 `thread_reset`, and older pages. Source history remains durable;
 generic `event_id` is not a content or read-mark checkpoint. Ring storage/wiring
 is removed (#3739); [integrated acceptance](knowledge/features/v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance)
-records #3719's verdict and pending checks. Final compatibility-retirement and
-ADR reconciliation remain with #3741. Legacy-path descriptions elsewhere in this
-spec describe retained implementation branches, not permission for a no-thread
-app to open a session.
+records #3719's verdict and pending checks. #3741 removes non-thread forwarding,
+summary fallback, metadata stripping and legacy connect recovery. Complete-thread
+queries/pages/updates require no interactive grant; supplied state and controls
+still do. Optional expansion/compact prerequisites and joins remain enforced,
+and missing grants never select legacy delivery. Pushes, replies and continuations
+retain supplied attribution and clears. [ADR 042](knowledge/decisions/042-daemon-built-thread.md)
+records this completed daemon transition and its historical rationale. Earlier
+child evidence and failed results retain their original scope.
 
 **Superseded premise — 2026-09-24 (#2576).** The Versioning and Capability negotiation sections above, and ADR 025's 2026-06-22 amendment and ADR 037, were written for a single operator who updates the app and the daemon together, with no old-app install base to protect. That premise held only as long as this tool was self-hosted. Once other people install the apps from app stores, app updates lag behind the operator's own hosted daemons: the relay and every hosted daemon update at once, app releases trickle out over app-store review and staged rollout, and one app can be connected — sequentially or through several accounts — to daemons running different versions. This section states the rule that now governs every wire change, and defines the rejection a daemon sends an app build it no longer supports.
 
@@ -8816,7 +8908,7 @@ app to open a session.
 
 1. **Changes are additive.** New envelope types and new optional fields only; no field is removed, renamed, retyped or made required within a protocol version. Receivers already drop unknown envelope types and ignore unknown fields (§ Versioning above), and that stays mandatory.
 2. **A new meaning gets a new envelope type, never a new value in an existing field.** An old desktop build drops a whole frame when a known field carries a value it doesn't recognise, so a new enum value in an existing field silently loses that frame on every un-updated app — see `workspace_updated`'s own type, minted rather than reusing `conversation_updated`, for the shape this takes. The one open-ended exception is the `error.code` vocabulary and the WS close-code table: both are open sets by design (a client handles an unknown error code by its `retryable` flag, and an unknown close code as a generic close), so a new row in either is an additive change, not a violation. `client.update_required` and close `4412`, defined below, are themselves such additions.
-3. **A server-sent frame type added from now on goes only to connections that advertised a capability string for it.** The existing `hello`/`hello_ack` intersection (see [Capability negotiation](#capability-negotiation-v2)) is how a client asks for a feature and how a daemon confirms it. A reply to a request only an updated client can send satisfies this by construction — the rule bites on unsolicited pushes. Frames gated before this rule was written stay as they are: only `interactive` gates delivery today, and `question` / `model_list` / `context_usage` are detection-only strings that a client may not have advertised before receiving the frames they describe, because every released app already handles them regardless.
+3. **A server-sent frame type added from now on goes only to connections that advertised a capability string for it.** The existing `hello`/`hello_ack` intersection (see [Capability negotiation](#capability-negotiation-v2)) is how a client asks for a feature and how a daemon confirms it. A reply to a request only an updated client can send satisfies this by construction — the rule bites on unsolicited pushes. Existing gates remain specific to their surfaces: admitted content uses `thread`, supplied live state and controls use `interactive`, and expansion/compact retain additional prerequisites. `question` / `model_list` / `context_usage` are detection-only strings that a client may not have advertised before receiving the frames they describe, because every released app already handles them regardless.
 4. **The relay and every hosted daemon deploy before the app release that needs them.** An app still detects each daemon's features by capability string (ADR 037) rather than by any notion of daemon version, because during a staged rollout one app build can face daemons running different code.
 5. **A breaking change adds a protocol version**, served alongside the old one until the minimum app version (below) retires every app build that speaks only the old one. The daemon does not read the `hello.protocol_versions` array today; the first breaking change is where that starts.
 
@@ -8985,14 +9077,19 @@ phone -> relay -> binary: noise_msg containing {id:3, type:"thread_catch_up",
   payload:{conversation_id:"<canonical id from conversations>", epoch:"", version:0}}
 binary -> relay -> phone: correlated thread_items batches (or assembly parts)
 # Phone assembles every batch, then consumes the separate successful final
-# coverage marker before considering catch-up complete. Handle interleaved live
-# readings in wire order. interactive/expansion/compact remain optional grants.
+# coverage marker before considering catch-up complete. Complete catch-up, older
+# pages and eligible updates also work with capabilities:['thread'] alone.
+# Supplied readings/clears and controls require interactive; expansion and compact
+# retain additional grants/readiness and projection joins. Handle admitted live
+# readings in wire order, retaining supplied conversation/session tags and clears.
 
 # Phone sends a message on that conversation:
 phone -> relay -> binary: noise_msg containing {id:4, type:"send_message", payload:{...}}
 binary -> relay -> phone: noise_msg containing {id:4, type:"ack", in_reply_to:4, payload:{}}
 
-# Claude responds; binary publishes thread item updates plus current live state.
+# Claude responds; binary publishes attributed thread item updates. This example
+# also negotiated interactive, so eligible supplied live state follows its own
+# source identity, generation/revision, prompt and clear-before-fresh gates.
 
 # 1 hour in, phone's timer fires:
 phone -> relay -> binary: { v: 2, type: "noise_init", data: "<fresh IK message 1>" }

@@ -297,7 +297,7 @@ func (m *V2SessionManager) forwardEnvelopeSource(ctx context.Context, connID str
 	unprojected := !modelListProjected && (!supplied && env.InReplyTo == nil || supplied && reading.ModelListUnprojected)
 	env = m.mergedForConn(s, env, unprojected)
 	env = m.agentTaggedForConn(s, env)
-	env = m.threadProjected(s, env)
+	env = m.threadProjected(env)
 	envJSON, err := json.Marshal(env)
 	if err != nil {
 		// Defensive: a well-typed envelope (e.g. a message envelope, a

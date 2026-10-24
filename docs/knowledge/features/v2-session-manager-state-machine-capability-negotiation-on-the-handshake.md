@@ -36,7 +36,11 @@ See the [wire handshake](../../protocol-mobile.md#handshake).
 `slices.Contains(negotiated, protocol.CapabilityInteractive)`, never a nonempty-set
 check. Mandatory thread makes that distinction especially important: every open
 connection now has at least one grant, including peers without interactive access.
-Expansion, compact and multi-agent likewise retain value-specific gates;
+Complete catch-up/pages and eligible updates use `threadConversationWithheld`
+without requiring interactive, including `ActiveThreadConns` recipient selection.
+Supplied state and controls still require interactive; expansion, compact and
+multi-agent retain their additional value-specific gates. No omitted optional
+grant selects a compatibility route.
 `handleActiveConns` enumerates only `V2StateOpen`. Rekey preserves admitted flags
 rather than renegotiating them. Positive fixtures must provide genuine readiness,
 advertise thread and check its echo; negative helpers preserve exact omissions
@@ -130,8 +134,9 @@ settings providers. Accepted producers hand off publication before legacy
 enumeration or fan-in can refuse/delay delivery. Captured source/order fields survive adaptation;
 original payload session fields and prompt answer IDs stay intact. This wiring
 now participates in production `ThreadReady` alongside the installed fold
-publisher and watermark provider. Negotiated thread connections receive current
-readings at connect/reconnect and source-bound live updates; these snapshots
+publisher and watermark provider. Admitted connections with interactive access
+receive supplied current readings at connect/reconnect and source-bound live
+updates; the legacy reconnect methods are removed. These snapshots
 initialize transient state only. Thread item backfill requires explicit catch-up
 for each open conversation. Production bounded catch-up/page providers are
 installed; event replay/resync is retired for every connection (#3738).
@@ -158,9 +163,9 @@ the top-level routing key must survive even when the payload stays `{}` and
 `in_reply_to` is removed. `validateLiveState` rejects malformed or conflicting
 envelope/payload identity before admission or delivery changes any watermark.
 `PushLiveState` clones the raw routing buffer so caller reuse cannot reroute
-queued state. `TestLiveStateConversationRouting`,
-`TestLiveStateConversationIdentityDetached` and `TestLiveStateRoutingLegacyBytes`
-inspect authenticated decrypted bytes, including key presence and legacy omission.
+queued state. Authenticated wire assertions must preserve key presence and
+unrelated handler fields. Supplied routing/session metadata and clears are no
+longer stripped by a non-thread projection branch.
 
 Supplied-reply fixtures must align payload identity with the retained source,
 while deliberately allowing the request to name a different conversation.
@@ -174,9 +179,10 @@ re-reading mutable prompt state. Existing authorized resolvers remain the answer
 authority. Source-bearing dismissals preserve original prompt IDs and permission
 outcome/source and retire only that identity; they do not appear in snapshots. With
 `ThreadLiveState` installed, unsolicited legacy live frames are withheld from
-thread recipients. Otherwise an unsourced legacy dismissal could arrive before
-its source-bound counterpart and bypass conversation checks. Retained legacy delivery branches are not fallback admission routes; their final
-removal and integrated compatibility wording belong to #3741.
+admitted recipients. Otherwise an unsourced legacy dismissal could arrive before
+its source-bound counterpart and bypass conversation checks. Recovery now uses
+only interactive-gated supplied `ThreadLiveState`; #3741 removed the non-thread
+forwarding/recovery branches and their unused reconciliation methods.
 
 `LiveStateCurrent` checks owner generation and accepted reading revision before
 unsolicited Run delivery, including captured cursors and queued pushes. Removing

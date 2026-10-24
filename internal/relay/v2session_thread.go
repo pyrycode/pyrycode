@@ -16,6 +16,13 @@ func threadItemUpdate(typ string) bool {
 	return false
 }
 
+// Complete-thread content needs a known, eligible conversation independently of
+// interactive access to supplied state and controls.
+func (m *V2SessionManager) threadConversationWithheld(s *V2Session, conversation string) bool {
+	return conversation == "" || m.cfg.KnownConversation == nil || !m.cfg.KnownConversation(conversation) || !s.thread ||
+		(!s.multiAgent && m.cfg.CodexConversation != nil && m.cfg.CodexConversation(conversation))
+}
+
 // threadWithheld gates items independently of reply correlation and filters
 // replaced unsolicited content. It runs before sealing, so drops spend no nonce.
 func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) bool {
@@ -23,17 +30,14 @@ func (m *V2SessionManager) threadWithheld(s *V2Session, env protocol.Envelope) b
 		id := pushedConversationID(env)
 		// A compact update needs a hosted inbox: only there is a join recorded and
 		// checked by threadQueryGate, so the direct-seal Push path never carries one.
-		return !s.thread || m.liveWithheld(s, id) || (env.Type == protocol.TypeThreadToolBody || env.Type == protocol.TypeThreadChildren) && (!s.threadExpansion || !s.interactive) ||
+		return m.threadConversationWithheld(s, id) || (env.Type == protocol.TypeThreadToolBody || env.Type == protocol.TypeThreadChildren) && (!s.threadExpansion || !s.interactive) ||
 			env.Type == protocol.TypeThreadCompactUpdate && (!s.threadCompact || s.hosted == nil)
-	}
-	if !s.thread {
-		return env.SessionStateCleared
 	}
 	if liveStateFamily(env.Type) {
 		if m.cfg.ThreadLiveState != nil && env.InReplyTo == nil {
 			return true
 		}
-		if !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
+		if !s.thread || !s.interactive || !validLiveTag(env.SessionID) || env.EventID != nil {
 			return true
 		}
 		id := pushedConversationID(env)
@@ -116,7 +120,7 @@ func replaceObjectField(raw json.RawMessage, field string, replacement json.RawM
 	return append(out, '}')
 }
 
-func (m *V2SessionManager) threadSummary(s *V2Session, raw json.RawMessage) json.RawMessage {
+func (m *V2SessionManager) threadSummary(raw json.RawMessage) json.RawMessage {
 	var row struct {
 		ID string `json:"id"`
 	}
@@ -124,7 +128,7 @@ func (m *V2SessionManager) threadSummary(s *V2Session, raw json.RawMessage) json
 		return raw
 	}
 	var reading json.RawMessage
-	if s.thread && m.cfg.ThreadLastShownVersion != nil {
+	if m.cfg.ThreadLastShownVersion != nil {
 		if version, ok := m.cfg.ThreadLastShownVersion(row.ID); ok {
 			reading = json.RawMessage(strconv.FormatUint(version, 10))
 		}
@@ -132,14 +136,10 @@ func (m *V2SessionManager) threadSummary(s *V2Session, raw json.RawMessage) json
 	return replaceObjectField(raw, "last_shown_version", reading)
 }
 
-func (m *V2SessionManager) threadProjected(s *V2Session, env protocol.Envelope) protocol.Envelope {
-	if !s.thread {
-		env.SessionID = nil
-		env.SessionStateCleared = false
-	}
+func (m *V2SessionManager) threadProjected(env protocol.Envelope) protocol.Envelope {
 	switch env.Type {
 	case protocol.TypeConversationUpdated:
-		env.Payload = m.threadSummary(s, env.Payload)
+		env.Payload = m.threadSummary(env.Payload)
 	case protocol.TypeConversations:
 		var p struct {
 			Conversations []json.RawMessage `json:"conversations"`
@@ -149,7 +149,7 @@ func (m *V2SessionManager) threadProjected(s *V2Session, env protocol.Envelope) 
 		}
 		changed := false
 		for i, row := range p.Conversations {
-			projected := m.threadSummary(s, row)
+			projected := m.threadSummary(row)
 			changed = changed || !bytes.Equal(row, projected)
 			p.Conversations[i] = projected
 		}
@@ -173,15 +173,11 @@ func (m *V2SessionManager) threadReply(s *V2Session, frame json.RawMessage) (jso
 	if m.threadWithheld(s, env) {
 		return nil, true
 	}
-	projected := m.threadProjected(s, env)
-	if !s.thread {
-		frame = replaceObjectField(frame, "session_id", nil)
-		frame = replaceObjectField(frame, "session_state_cleared", nil)
-	}
+	projected := m.threadProjected(env)
 	if !bytes.Equal(projected.Payload, env.Payload) {
 		frame = replaceObjectField(frame, "payload", projected.Payload)
 	}
-	if s.thread && liveStateFamily(env.Type) && len(frame) > protocol.MaxThreadEnvelopeBytes {
+	if liveStateFamily(env.Type) && len(frame) > protocol.MaxThreadEnvelopeBytes {
 		return nil, true
 	}
 	return frame, false

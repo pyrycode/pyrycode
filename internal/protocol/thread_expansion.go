@@ -69,13 +69,17 @@ type ThreadSummary struct {
 	Subtype       string `json:"subtype,omitempty"`
 	DetailOmitted bool   `json:"detail_omitted"`
 
+	// TaskID is the exact fold-owned association, scoped to this row's owner and
+	// lifetime. Empty means known none; nil means unknown. Content cannot supply it.
+	TaskID            *string `json:"task_id,omitempty"`
 	ErrorSummary      *string `json:"error_summary,omitempty"`
 	PublicChildCount  *uint64 `json:"public_child_count,omitempty"`
 	HasPublicChildren *bool   `json:"has_public_children,omitempty"`
 	SubtreeVersion    *uint64 `json:"subtree_version,omitempty"`
 }
 
-// NewThreadSummary projects metadata without retaining Content.
+// NewThreadSummary projects metadata without retaining Content. Task association
+// remains unknown because arbitrary item content is not association authority.
 func NewThreadSummary(i ThreadItem) ThreadSummary {
 	return ThreadSummary{ID: i.ID, Kind: i.Kind, Order: i.Order, Rev: i.Rev, EndedOrder: i.EndedOrder, Session: i.Session, Agent: i.Agent, NoChild: i.NoChild, Turn: i.Turn, Parent: i.Parent, Status: i.Status, Active: i.Active, Shown: i.Shown, Headline: threadSummaryHeadline(i.Summary, i.Kind), Subtype: i.Subtype, DetailOmitted: true}
 }

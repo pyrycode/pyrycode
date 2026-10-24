@@ -23,6 +23,7 @@ type threadQuery struct {
 	inbox        *hostedInbox
 	ctx          context.Context
 	cancel       context.CancelFunc
+	captured     *threadJoin // Selected complete-reply checkpoint, guarded by hostedMu.
 }
 
 // threadJoin is one conversation's completed checkpoint on one connection.
@@ -113,7 +114,7 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	}
 	limit, err := protocol.NormalizeThreadQueryLimit(limit)
 	providerMissing := body && m.cfg.ThreadToolBody == nil || children && m.cfg.ThreadChildren == nil || !expanding && (page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil)
-	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.liveWithheld(s, *p.Conversation) || !s.thread || !s.interactive || expanding && !s.threadExpansion || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
+	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.threadConversationWithheld(s, *p.Conversation) || expanding && (!s.threadExpansion || !s.interactive) || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
 		fail()
 		return
 	}
@@ -236,7 +237,7 @@ func threadItemFrom(i thread.Item) protocol.ThreadItem {
 // threadSummaryFrom copies every header fact, including unknown (nil) ones.
 func threadSummaryFrom(row thread.ChildSummary) protocol.ThreadSummary {
 	return protocol.ThreadSummary{ID: row.ID, Kind: row.Kind, Order: row.Order, Rev: row.Rev, EndedOrder: row.EndedOrder, Session: row.Session, Agent: row.Agent, NoChild: row.NoChild, Turn: row.Turn, Parent: row.Parent, Status: row.Status, Active: row.Active, Shown: row.Shown, Headline: row.Headline, Subtype: row.Subtype, DetailOmitted: true,
-		ErrorSummary: row.ErrorSummary, PublicChildCount: row.PublicChildCount, HasPublicChildren: row.HasPublicChildren, SubtreeVersion: row.SubtreeVersion}
+		TaskID: row.TaskID, ErrorSummary: row.ErrorSummary, PublicChildCount: row.PublicChildCount, HasPublicChildren: row.HasPublicChildren, SubtreeVersion: row.SubtreeVersion}
 }
 
 // runCompactThreadQuery answers a compact query with the complete reply's bounds
@@ -312,8 +313,8 @@ func (m *V2SessionManager) sendThreadReply(s *V2Session, q *threadQuery, env pro
 
 // cancelThreadQuery admits cancellation under hostedMu then pushMu, so a
 // quarantined update cannot cancel an already-selected query delivery. A live
-// update cancels only a query of its own projection; threadQueryGate withholds
-// it from a load of the other projection instead.
+// update cancels only a query of its own projection that has not captured it;
+// threadQueryGate withholds covered updates and loads of the other projection.
 func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelope) {
 	compact := env.Type == protocol.TypeThreadCompactUpdate
 	if !compact && (!threadItemUpdate(env.Type) || env.InReplyTo != nil) {
@@ -328,12 +329,27 @@ func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelop
 		return
 	}
 	in := m.hostedInboxes[connID]
-	if in == nil || in.query == nil || in.query.conversation != conversation {
+	if in == nil || in.query == nil || in.query.conversation != conversation || in.query.coversLive(env) {
 		return
 	}
 	if compact && in.query.projection == protocol.ThreadProjectionCompact || !compact && in.query.projection == "" {
 		in.query.cancel()
 	}
+}
+
+// coversLive identifies delayed complete-view publications already represented
+// by the selected reply. It does not establish a completed client join.
+func (q *threadQuery) coversLive(env protocol.Envelope) bool {
+	if q.captured == nil || q.projection != "" || !threadItemUpdate(env.Type) || env.InReplyTo != nil {
+		return false
+	}
+	var p struct {
+		Conversation string `json:"conversation_id"`
+		Epoch        string `json:"epoch"`
+		Version      uint64 `json:"version"`
+	}
+	return json.Unmarshal(env.Payload, &p) == nil && p.Conversation == q.conversation &&
+		p.Epoch == q.captured.epoch && p.Version <= q.captured.version
 }
 
 // threadQueryGate runs immediately before sealing a selected ordered-lane head.
@@ -365,6 +381,9 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 			return ErrThreadWithheld
 		}
 		if q := in.query; q != nil && q.conversation == p.Conversation {
+			if q.coversLive(env) {
+				return ErrThreadWithheld
+			}
 			// A compact load owns its conversation's view from admission, so complete
 			// rows are withheld rather than mixed in; they never cancel it.
 			if q.projection != "" {
@@ -395,10 +414,23 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error 
 		}
 		return nil
 	}
-	var p protocol.ThreadItemsPayload
-	if env.Type == protocol.TypeThreadItems && json.Unmarshal(env.Payload, &p) == nil && p.Final {
+	// Only shared fields are needed: continuation is numeric on page markers
+	// and an object on fragmented rows. Fragment completion is not query finality.
+	var p struct {
+		Epoch      string `json:"epoch"`
+		Version    uint64 `json:"version"`
+		Projection string `json:"projection"`
+		Final      bool   `json:"final"`
+	}
+	if env.Type == protocol.TypeThreadItems && json.Unmarshal(env.Payload, &p) == nil {
 		if err := o.query.ctx.Err(); err != nil {
 			return err
+		}
+		if o.query.projection == "" && p.Epoch != "" {
+			o.query.captured = &threadJoin{epoch: p.Epoch, version: p.Version}
+		}
+		if !p.Final {
+			return nil
 		}
 		if in.threadJoins == nil {
 			in.threadJoins = make(map[string]threadJoin)

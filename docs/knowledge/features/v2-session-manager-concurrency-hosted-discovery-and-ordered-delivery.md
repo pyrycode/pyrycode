@@ -147,6 +147,15 @@ retirement and shutdown prevent later admission or rebinding. Remove retired
 unsealed output; cancellation/failure of active sealed output retires the
 connection to avoid a nonce gap. Cleanup stays off `Run` and late results check
 original pointers, so reused connection/request IDs cannot revive old work.
+
+`handleHostedDone` logs `v2.hosted.delivery_failed` before closing a failed send
+with `StatusSessionGone` (4410). Its fixed message and `conn_id` accompany only
+the reason `canceled`, `deadline` or `send_failed`; raw errors, content, tokens and
+cryptographic bytes are omitted. The close code also serves missing-session
+paths, so capture this event to distinguish delivery cancellation from an
+authentication/session rejection. It diagnoses failure without weakening
+active-send retirement; see [query selection and covered updates](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md).
+
 Transport completion establishes delivery, not app success or rollback of an
 uncertain mutation. Each API request is forwarded once: cancellation, timeout
 and disconnect neither retry it nor assert rollback of a possibly committed

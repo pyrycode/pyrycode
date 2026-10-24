@@ -1,6 +1,9 @@
 package thread
 
-import "unicode"
+import (
+	"encoding/json"
+	"unicode"
+)
 
 // childHeader holds prepared values, without pointers a caller could mutate.
 type childHeader struct {
@@ -9,6 +12,26 @@ type childHeader struct {
 	childCount             uint64
 	subtreeVersion         uint64
 	countKnown, freshKnown bool
+	taskID                 string
+	taskKnown              bool
+}
+
+// taskAssociation reads only the fold's computed scalar, never launch content.
+// Creating recipes establish known absence; metadata without that authority
+// stays unknown. Validated checkpoint recipes carry the same scalar authority.
+func (h *childHeader) taskAssociation(i Item, r contentRecipe) {
+	h.taskID, h.taskKnown = "", false
+	if (i.Kind != "agent" && i.Kind != "tool_call") || r.creating == 0 || r.creating != i.ID {
+		return
+	}
+	if field, ok := r.fields["task_id"]; ok {
+		var id *string
+		if !r.agent || field.entry != 0 || field.item != 0 || json.Unmarshal(field.value, &id) != nil || id == nil {
+			return
+		}
+		h.taskID = *id
+	}
+	h.taskKnown = true
 }
 
 func prepareChildHeader(i Item) childHeader {
@@ -72,6 +95,10 @@ func (q *queryIndex) refreshHeader(row queryRow, version uint64) {
 
 func (h childHeader) apply(s *ChildSummary) {
 	s.Headline = h.headline
+	if h.taskKnown {
+		v := h.taskID
+		s.TaskID = &v
+	}
 	if h.errorKnown {
 		v := h.errorSummary
 		s.ErrorSummary = &v

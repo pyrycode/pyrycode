@@ -4,8 +4,13 @@
 one conversation. `Store` owns background replay and tailing for independently
 loaded conversations. Both implement the history-backed storage design of
 [ADR 042](../decisions/042-daemon-built-thread.md). The daemon publishes usable
-fold observations and serves bounded catch-up/pages to eligible apps that
-negotiate `thread`. Apps initialize each open conversation with an explicit
+fold observations and serves bounded catch-up/pages to eligible apps. Every
+admitted app session negotiates `thread`; complete queries, older pages and
+updates do not require `interactive`. Supplied live state and controls retain
+interactive gates, while expansion/compact retain their additional grants and
+readiness checks. Missing optional grants never restore legacy delivery. See
+[admission and delivery](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md).
+Apps initialize each open conversation with an explicit
 named catch-up request; handshake and listing do not query items.
 Use [raw history and its metadata](history-package-shape.md#shape), including
 hidden facts; legacy receipt projections discard facts needed by the fold.
@@ -69,8 +74,20 @@ per-open-conversation epoch/version catch-up, older pages and a newest window
 after `thread_reset`. [Integrated recovery acceptance](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance)
 records the final #3719 verdict and pending slow/release/live checks. See [reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md)
 and [composed removal](thread-package-shadow-lifecycle-and-evidence-coordination.md).
-Integrated #3718 acceptance supersedes ADR 042's transitional compatibility-publication rule;
-its retained source/live-state contract and existing operator/approval holds remain.
+The daemon compatibility transition in [ADR 042](../decisions/042-daemon-built-thread.md#compatibility)
+is complete: replaced publication and replay are retired, thread is mandatory
+for admission (#3740), and non-thread forwarding, metadata stripping and legacy
+connect recovery are removed (#3741). Supplied attribution/clears and authoritative
+summary watermarks survive projection; retained source/live-state contracts and
+existing operator/approval holds remain.
+
+A cold complete-thread read needs a genuinely negotiated thread-only fixture.
+An interactive fixture stays green when admission, publication recipient selection
+or final delivery accidentally requires interactive.
+`TestRelayV2_ClientFeaturesSpawnSnapshot` keeps first-post named catch-up, final
+completion, prompt attribution, reconnect and eviction assertions in both
+`thread-only` and `thread-interactive` cases; `TestThreadCompleteCapabilities`
+covers complete pages and later updates without expansion/compact grants.
 
 ### Reusable fold regression corpus
 

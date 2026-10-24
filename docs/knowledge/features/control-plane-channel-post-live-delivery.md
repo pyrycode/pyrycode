@@ -15,9 +15,8 @@ user turn.
 `pushWaker` after a newly recorded durable completion. Its `announce` method is
 an inert constructor seam; `channelDelivery` has no announcement hook or raw
 fan-out. Neither deltas nor completion enter the interactive ring. Nil/failed
-history and absent clients cannot restore content publication. Existing live
-controls and replay infrastructure remain separate; #3738/#3739 own their
-retirement. See the [integrated evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718).
+history and absent clients cannot restore content publication. Live controls
+remain separate from retained post content. See the [integrated evidence](thread-package-shadow-lifecycle-and-evidence-retirement.md#integrated-retirement-acceptance-3718).
 
 ## A fresh `turn_id` per post
 
@@ -105,7 +104,18 @@ see [push wake](relay-package-push-wake.md).
 Catch-up and cleanup-only retry/reload do not invoke the completion hook or
 wake again. Apps recover content through explicit thread catch-up/pages; this
 creates no automatic durable tail backfill or exactly-once network receipt
-guarantee. Shared live-state ring/replay wiring remains downstream #3738/#3739.
+guarantee. Reconnect ignores `hello.last_event_id` and performs no raw event-ring
+replay; see [explicit reconnect recovery](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
+
+An outbound FCM wake proves durable post completion; asynchronous thread
+publication can still be pending. A returning phone may select a catch-up
+snapshot containing the post before that publication reaches its output lane.
+Already-covered live progress must be withheld without cancelling the selected
+reply, including when its first row is fragmented; only the separate correlated
+query-final marker completes recovery. Treating wake receipt as a publication
+barrier can hide this race behind a passing reconnect retry. See
+[selected snapshots and completed joins](v2-session-manager-state-machine-capability-negotiation-on-the-handshake-thread-delivery-and-summary-projection.md)
+and the content-free [delivery-failure diagnostic](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
 
 The hold diagnostic deadline is **five minutes from durable acceptance**
 (`channelPostHoldDeadline`). Crossing it while held emits
@@ -205,10 +215,17 @@ checks relay-disabled production wiring. The release-file-gated
 `TestChannelPost_E2E_HeldUntilRealCompletion` checks successful held acceptance,
 absence from source history before release, and the intact reply followed by its
 real completion before the separate completed post and successor turn.
-`TestChannelPost_E2E_DisconnectedWakeReplayAndHistory` routes the replay
-conversation, observes an actual content-free outbound wake, then checks the
-ordered completed post in retained source history, rejects raw reconnect content
-and requires no repeated wake.
+`TestChannelPost_E2E_DisconnectedWakeAndHistory` first proves connected-turn wake
+suppression and observes peer-close teardown before posting. It receives an
+actual content-free FCM wake, completes the returning phone's authenticated
+thread catch-up through `driveHandshakeToOpenDaemonInteractive` and
+`scenario.JoinConversations`, then checks ordered multi-chunk retained text with
+one turn identity and exactly one host-post completion. Reconnect must produce
+no raw post replay or second wake. The handshake helper includes explicit
+thread recovery before it returns, so a failure there can be a catch-up delivery
+failure after successful Noise authentication. Failure-only daemon stderr and
+`v2.hosted.delivery_failed` distinguish that path from a missing-session reject;
+4410 alone does not identify the cause.
 
 See the [original fan-out design](../../specs/architecture/2498-channel-post-live-delivery.md#revisions)
 and [durable-delivery design](../../specs/architecture/2810-durable-channel-post.md)

@@ -148,17 +148,12 @@ func (m *V2SessionManager) PushLiveState(ctx context.Context, connID string, r L
 }
 
 func (m *V2SessionManager) liveWithheld(s *V2Session, conversation string) bool {
-	return conversation == "" || !s.interactive || m.cfg.KnownConversation == nil || !m.cfg.KnownConversation(conversation) ||
-		(!s.multiAgent && m.cfg.CodexConversation != nil && m.cfg.CodexConversation(conversation))
+	return !s.interactive || m.threadConversationWithheld(s, conversation)
 }
 
 // forwardLiveState sends at most one frame. A generated clear parks the fresh
 // reading for another Run pass, preserving transport hold and single-writer crypto.
 func (m *V2SessionManager) forwardLiveState(ctx context.Context, s *V2Session, r LiveState) error {
-	if !s.thread {
-		r.Envelope.ConversationID = nil
-		return m.forwardEnvelopeSource(ctx, s.connID, r.Envelope, nil, !r.ModelListUnprojected)
-	}
 	if !r.Envelope.SessionStateCleared && (r.Envelope.Type == protocol.TypeModalShown || r.Envelope.Type == protocol.TypeQuestionShown) && r.Answerable != nil && !*r.Answerable {
 		return nil
 	}
