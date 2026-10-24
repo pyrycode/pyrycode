@@ -327,3 +327,30 @@ normal task client queued assessment
 for a traced original concurrent composition. It executed zero tests and grants
 no new diagnostic permission. Request/receipt hashes are retained in the trace
 manifest; no Go source differs from the measured source. This ticket is unbuilt.
+
+### 2026-10-24 — prospective fixture-owned concurrent recording
+
+Recovery selected the original named selector and three packages from
+`3854-durable-comparison.json`, once with Linux race instrumentation. Start
+opt-in runtime recording in parent `TestCompactCapture` before its subcases;
+stop after every subcase's query/store/task cleanup. `PYRY_COMPACT_TRACE_DIR`
+names a task-owned directory; create a unique mode-0600 file without overwriting
+prior artifacts. Report create/start/flush/close failures as test failures.
+Buffer the writer so a recording write error survives until checked at cleanup.
+A focused recorder lifecycle test proves recording, shutdown and unique files.
+No fixture deadline, assertion, production operation or ordering changes.
+
+Retain normal package concurrency, fresh durable `/work` histories, actual test
+overlap/cache conditions, raw JSON, runtime trace and sched/syscall/sync profiles,
+interval CPU throttling/pressure and any timeout stacks. A non-reproduction
+leaves diagnosis pending. No overlapping branch edits these two fixture files.
+Scope remains this defect and its regression: approximately 600 authored source,
+test and plan lines, zero exports/migrations, three criteria, no new state rejects.
+
+Security re-review: PASS for test-only recording. The opt-in path is supplied by
+the local test operator; `os.CreateTemp` creates exclusive private files. No
+product trust boundary, secret, crypto, network or subprocess contract changes.
+SHOULD FIX: check buffered write errors after `trace.Stop` joins its writer; stop
+only a successfully started recording, after child cleanup; retain artifacts on
+failure. Runtime trace contains fixture labels and process scheduling metadata;
+its private task-owned artifact is diagnostic evidence, not product telemetry.
