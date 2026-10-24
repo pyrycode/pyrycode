@@ -101,3 +101,25 @@ the eventual repair. Run affected thread race checks, `go vet ./...` and
 - Threat model: local test-only observations add no remote authority; any later recovery repair requires renewed adversarial review.
 
 **Reviewer:** builder self-review. **Date:** 2026-10-24.
+
+## Revisions
+
+### 2026-10-24 — observation implementation, repair still unresolved
+
+The unchanged capture passed 60/60/0/0 run/pass/fail/skip events over ten
+repetitions. The diagnostic fixture plus original compact preparation,
+bounded-work and lifecycle predecessors passed 90/90/0/0 events over ten
+repetitions (`/tmp/builder-3854/sequence.json`). Those measurements used the
+plan commit plus uncommitted diagnostic changes, before environment logging.
+Histories were fresh; build caches were warm; OS page-cache state was not reset.
+Version-three waits were 0.335–35.264 ms; the 30 actual unloads were
+3.479–16.098 ms. Checkpoint state syncs were 0.005–0.041 ms and resume syncs
+0.005–0.021 ms. These observations do not identify the original slow phase.
+
+The shell reports an overlay root with `fsync=volatile`; original filesystem
+and pressure state were not captured. Add runtime/temporary-filesystem logging
+inside the fixture before comparing I/O conclusions. The original success
+subcase's unmodified JSON events are retained in
+`internal/thread/testdata/3854-original-reload-failure.jsonl`; its parent source
+and complete-file hash remain in Context. No timeout or recovery behavior has
+been repaired. Do not treat the diagnostic passes as reliability acceptance.
