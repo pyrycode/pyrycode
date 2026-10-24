@@ -109,6 +109,77 @@ reader. `TestChildPageCaptureLifecycle` requires a concurrent `Snapshot` of the
 same publication to finish before advancing history; advancing first can replace
 the hooked index and conceal a deadlocking barrier.
 
+### Compact capture reload diagnostics
+
+`TestCompactCapture` holds one context-tagged content lookup with an atomic
+first-entry guard while version 2 advances to 3. The `success`, `failure` and
+`cancel` outcomes unload and replace the worker before releasing that old query;
+`current-failure` and `current-cancel` keep the current worker. Success compares
+the exact captured version-2 result and mutates returned content and pointed
+header metadata to prove detachment. Source failure returns only generic
+unavailability, cancellation returns no partial result, an old failure cannot
+withdraw a replacement, and a current failure must withdraw its own publication.
+Every outcome checks the unrelated conversation and preserves the five-second
+`testStoreWait` readiness bound.
+
+`Store.phase` is a package-private fixture observer configured before workers
+start. `Store.observePhase` calls it outside the Store mutex and returns an end
+callback. Observations cover history-bound probing, checkpoint read/import and
+resume validation, scalar cache writes and actual file Sync, restored-index
+preparation, capture, publication and snapshot rendering. `testTraceCompactStore`
+also wraps checkpoint steps, lookup, reader creation, replacement and directory
+sync without substituting their real operations. It samples conversation/current
+worker identity under the Store lock, then records through a separate diagnostic
+mutex. Snapshot phase entry samples `Status` independently of rendering; that
+sample and the subsequent snapshot need not observe the same publication.
+
+`testCompactTrace` records elapsed phases and runtime task/region annotations
+without source payloads or private source errors. Each outcome logs runtime,
+fixture filesystem and Linux load/pressure/I/O metadata; failed readiness dumps
+the observations and goroutine stacks. Regions end on their originating
+goroutine. Cleanup releases the held request, cancels and joins it, then joins
+Store shutdown before dumping observations and ending the task.
+
+For an execution recording, set `PYRY_COMPACT_TRACE_DIR` to an existing,
+task-owned artifact directory. `testRecordCompactTrace` starts recording in the
+parent capture test and stops after all child cleanup. Each run exclusively
+creates a unique mode-0600 `compact-capture-*.trace`; it retains the file on
+failure and reports create/start/flush/close errors as test failures. Preserve
+these files outside disposable fixture/worktree storage with JSON results,
+profiles, pressure samples and hashes. The environment variable is optional;
+phase logs and annotations do not themselves start runtime recording.
+
+Go's standard `-trace` already owns the process-wide recorder. Leave
+`PYRY_COMPACT_TRACE_DIR` unset when using it: requesting both recordings fails
+at startup. `TestCompactTraceRecording` skips only its isolation self-test when
+tracing is caller-owned, leaving that recording running; all five capture
+outcomes still execute. Without an external recorder, its two child cases check
+unique private files and that fixture-owned recording ends during cleanup. See
+the retained [compatibility before/after evidence](../../../internal/thread/testdata/3854-trace-compatibility.json).
+
+To align real work, set `PYRY_COMPACT_OVERLAP_SOCKET` in the thread and daemon
+test processes to the same task-private Unix listener, owned by an external
+coordinator. `testCompactOverlap` sends `capture\n` immediately before the success
+outcome's retirement; `testProducerOverlap` sends `producer\n` before
+`TestDaemonSummaryTaskProducer` prepares its fixture. The coordinator accepts
+both connections, reads the newline-terminated roles and, only after both
+arrive, writes one byte of value 1 to each connection. It must permit both test
+processes to run concurrently. Each participant bounds connection/release by
+the test context and a separate 30-second coordination deadline, checks the
+release byte and closes its connection. The coordinator owns listener shutdown
+and socket cleanup. Unset the variable for ordinary independent execution.
+
+Coordination finishes before measured retirement/reload and never extends the
+five-second readiness wait. It aligns work starts; release timestamps and the
+producer preparation end must still establish actual overlap. Concurrent package
+lifetimes alone can include compilation, predecessor tests and race-detector
+exit waiting. The [controlled Linux evidence and attribution limits](development-verification-test-execution-and-artifact-survival.md#diagnosing-compact-capture-reload)
+record healthy reloads under real producer work, while leaving the original
+timeout failed and its cause unknown. No production reliability repair is
+established by these diagnostics.
+
+### Publication and lifecycle verification
+
 `TestAffectedPublicationOracle` compares affected capture with whole-thread
 `difference` after single-entry and chunked corpus feeds, including private
 activity, late children, reparenting, delivery/suppression and no-op entries.

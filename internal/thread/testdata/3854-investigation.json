@@ -1,0 +1,63 @@
+{
+  "ticket": 3854,
+  "outcome": "incomplete: original timeout not reproduced; no cause-specific repair established",
+  "original": {
+    "revision": "8cb3fc0c8f86825ac176bdef8b50e3669130185a",
+    "path": "/tmp/builder-3851/compatibility.json",
+    "sha256": "8c33f2a9d6140e12319cc356b7323fb861d390efbf631394af5126770f7219eb",
+    "excerpt": "3854-original-reload-failure.jsonl",
+    "failed_test": "TestCompactCapture/success",
+    "failed_state": "StateRebuilding, version zero after five-second reload wait",
+    "subcase_seconds": 14.41,
+    "filesystem_and_load": "not recorded"
+  },
+  "baseline": {
+    "revision": "368e1580653d29140beb5887a874b45a1a0f4656",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=10 -run '^TestCompactCapture$' ./internal/thread",
+    "path": "/tmp/builder-3854/baseline-admitted.json",
+    "sha256": "d4abbfbfcb888bab61b0fad68b954146e75d1e66fd89a86c678fc0ee618b6a15",
+    "events": {"executed": 60, "passed": 60, "failed": 0, "skipped": 0},
+    "leaf_tests": 50
+  },
+  "predecessor_sequence": {
+    "source": "b7d5a851 plus uncommitted phase diagnostics, before runtime/filesystem logging; not exact-head acceptance",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=10 -run '^(TestCompactPreparationWork|TestCompactBoundedWork|TestCompactLifecycle|TestCompactCapture)$' ./internal/thread",
+    "path": "/tmp/builder-3854/sequence.json",
+    "sha256": "192efcf323cb1f488baaddb083e66c8771fd166a003135780c2364fbf2c13707",
+    "events": {"executed": 90, "passed": 90, "failed": 0, "skipped": 0},
+    "leaf_tests": 80,
+    "version_three_wait_ms": [0.335, 35.264],
+    "unload_ms": [3.479, 16.098],
+    "checkpoint_state_sync_ms": [0.005, 0.041],
+    "resume_sync_ms": [0.005, 0.021]
+  },
+  "diagnostic_candidate": {
+    "revision": "5156e970e937bf9710f605979ddc523365689e54",
+    "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=1 -run '^TestCompactCapture$' ./internal/thread",
+    "path": "/tmp/builder-3854/environment.json",
+    "sha256": "648c06258ff9add247cacf7cf23f3fccf42ae3e170dec8ce12bf6171e869e48a",
+    "events": {"executed": 6, "passed": 6, "failed": 0, "skipped": 0},
+    "leaf_tests": 5,
+    "runtime": "go1.26.9 linux/amd64, GOMAXPROCS=6",
+    "temp_directory": "/tmp",
+    "filesystem_type": "0x794c7630 (overlay)",
+    "root_fsync_volatile": true,
+    "loadavg": "8.26 8.87 9.15",
+    "reload_ms": [14.800993, 11.321892, 11.366209],
+    "admission_wait_seconds": 941,
+    "freshness": "fresh histories, warm build cache, uncontrolled OS page cache",
+    "limitation": "Volatile sync observations cannot establish durable filesystem I/O latency; original filesystem is unknown. No original timeout phase or historical cause is established."
+  },
+  "static_checks": {
+    "revision": "5156e970e937bf9710f605979ddc523365689e54",
+    "go vet ./...": "passed; /tmp/builder-3854/vet.log",
+    "go build -o /tmp/builder-3854/pyry ./cmd/pyry": "passed; /tmp/builder-3854/build.log"
+  },
+  "pending": {
+    "recovery_assessment": "a7c382d77587bb71528c392dcfad1a1f40fb5878c280bbeb96e891d57be7c675",
+    "request": "/tmp/builder-3854/investigation-request.json",
+    "executed_by_assessment": 0,
+    "remaining": "matched Linux state/order/load diagnosis, cause-specific repair and distinguishing regression; dispatcher-owned complete acceptance",
+    "macos": "outside this Linux ticket's verification scope"
+  }
+}

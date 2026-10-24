@@ -1,0 +1,22 @@
+{
+  "revision": "590d577230677a419e217a1beb353b9509fcd2dc",
+  "failedTests": [
+    "TestCompactCapture/success"
+  ],
+  "evidence": [
+    {
+      "runId": "cfdeb79da34090a953c97197d72885a626fbd47663b408c73f24c0c45da0777d",
+      "digest": "71b0165cff427203e329926157b64d06c5fc73b634e199432927b98bf1b98693",
+      "path": "logs/2026-10-24T06-15-06-585Z_refiner__3854.log"
+    }
+  ],
+  "scope": {
+    "kind": "sequence",
+    "selectors": [
+      "internal/thread: TestChildHeaderFacts -> TestChildHeaderFreshness -> TestChildHeaderReferenceOutcomes -> TestChildHeaderInitialProgress -> TestChildHeaderUnknownFreshness -> TestCompactSelection -> TestCompactIncremental -> TestCompactPublicMembership -> TestCompactPreparationWork -> TestCompactBoundedWork -> TestCompactLifecycle -> TestCompactCapture -> TestSummaryTaskFacts -> TestSummaryTaskShell",
+      "concurrent cmd/pyry: TestDaemonThreadCompactInstallation, TestDaemonThreadCompactNegotiation, TestDaemonSummaryTaskProducer",
+      "concurrent internal/relay: TestThreadChildrenPages, TestThreadChildrenAdmission, TestThreadChildrenProviderScope, TestThreadChildrenRefusals, TestThreadCompactNegotiation, TestThreadCompactRefusals, TestThreadCompactReplies, TestThreadCompactJoins"
+    ]
+  },
+  "narrowerInsufficient": "The original 8cb3fc0c timeout remains failed, with no historical filesystem, pressure or worker stacks. Recovery source now contains accepted producer ea1dcb1f; test source 4c09ab74 is pushed, and this request revision adds only retained spec/evidence. Added conversation/worker-labelled observations cover checkpoint read/import, validation, actual writeCacheFile Sync, publication preparation, and Status versus Snapshot. Five admitted Linux race comparisons on actual ext4 /work (no volatile sync), each ten repetitions, passed 60/60/0/0 alone, 90/90/0/0 predecessor sequence, 1930/1930/0/0 combined, 1930/1930/0/0 warm combined, 2250/2250/0/0 exact original selection. All 150 actual reloads reached version 3 while the old request stayed held, in 43.721-302.808 ms. Loadavg was 5.38-11.01; histories were fresh and OS page caches uncontrolled. First combined race compilation delayed daemon/relay starts by 46 seconds; warm runs reduced this to 1.5 seconds, with actual overlap intervals retained. The slowest measured reload spent 175.134 ms in scalar-cache writing, not a five-second stall. No cause-specific repair is supported. Commands, phase ranges, raw JSON hashes and environment are committed in internal/thread/testdata/3854-durable-comparison.json; raw files and per-reload analysis remain /tmp/builder-3854/. Further plain green repetitions cannot distinguish a historical I/O stall from runnable-worker scheduling delay. Assess the smallest native Linux diagnostic adding syscall/scheduler timelines during this bounded selection under relevant observed host contention, preserving durable I/O, the five-second bound and failure stacks. This requests deeper host-level measurement, not additional complete-suite acceptance. Do not infer a filesystem cause or fixture deadlock from these non-reproductions; no full suite is requested or authorized. Draft PR #3855 remains partial; original diagnosis, repair and controlled regression are unresolved. "
+}

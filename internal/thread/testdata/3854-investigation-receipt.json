@@ -1,0 +1,23 @@
+{
+  "ticket": 3854,
+  "recorded_at_utc": "2026-10-24T07:59:19Z",
+  "submission_source": "0592076856febe984e49554bc217567a273a70a3",
+  "request_path": "internal/thread/testdata/3854-next-investigation.json",
+  "request_sha256": "e715431b6fa35f4f63f5c6249cc2ea88e06a80043ebdd51700b09f2b06f343b0",
+  "command": "python3 /work/Projects/pyrycode-agents/dispatcher/scripts/fleet-task.py investigate --request-file internal/thread/testdata/3854-next-investigation.json",
+  "response": {
+    "status": "assessment-queued",
+    "id": "6098a38565127e3c02df1549df846f42fe81cd08db4aa10d4d38da3780938c3d",
+    "executed": 0
+  },
+  "source_relationship": {
+    "request_revision": "590d577230677a419e217a1beb353b9509fcd2dc",
+    "measured_go_source": "4c09ab74fe0415b3c7cb6c6cfb53a5cf6d0a32cf",
+    "accepted_producer_ancestor": "ea1dcb1fce648fc80b2cf8962f15a718477e2fa8",
+    "differences_from_measured_source": [
+      "docs/specs/architecture/3854-compact-capture-reload.md",
+      "internal/thread/testdata/3854-durable-comparison.json"
+    ]
+  },
+  "limitation": "Assessment only; no diagnostic or additional test scope authorised. Original failure, causal diagnosis, cause-specific repair and distinguishing regression remain unresolved. No tests repeated in this continuation; prior counts retain their recorded source revisions. Draft PR #3855 and complete configured acceptance remain pending."
+}

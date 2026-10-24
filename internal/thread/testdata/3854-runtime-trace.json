@@ -1,0 +1,46 @@
+{
+  "ticket": 3854,
+  "outcome": "NOT REPRODUCED; no cause-specific repair or reliability acceptance",
+  "source_revision": "cfe2367d533e13d9ffe9d7bd95967e089364507a",
+  "original_failure": "3854-original-reload-failure.jsonl; provenance in 3854-investigation.json; remains failed",
+  "command": "TMPDIR=/work/builder-3854-runtime-tmp python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=1 -run '^(TestCompactPreparationWork|TestCompactBoundedWork|TestCompactLifecycle|TestCompactCapture)$' -trace=/work/builder-3854-runtime-evidence/compact.trace ./internal/thread",
+  "environment": "Linux 7.0.0-28-generic amd64; Go 1.26.9; GOMAXPROCS 6; actual fixture statfs 0xef53, ext4 /work rw,relatime; fresh histories and Store per outcome; caches not cleared, OS page-cache state uncontrolled",
+  "ordering": "PreparationWork -> BoundedWork -> Lifecycle -> Capture: success, failure, cancel, current-failure, current-cancel; no shuffle or test repetition",
+  "interval_UTC": ["2026-10-24T08:50:11.823332437Z", "2026-10-24T08:50:19.07416894Z"],
+  "counts_executed_passed_failed_skipped": [9,9,0,0],
+  "leaf_counts": [8,8,0,0],
+  "exit_code": 0,
+  "artifacts_directory": "/work/builder-3854-runtime-evidence",
+  "artifact_sha256": {
+    "compact.trace": "223afeb44b0c08ca169856ba5c20bdda47c3509d2af414a99a02a2f8ec5bc677",
+    "test.json": "430512cbe79d9c4a5e46b35d3c6807c518f8a2413547d3cb5919d96ca3a9dd3e",
+    "pressure.jsonl": "a4949530aa0775d54c1fe12d8a266e7743d0fd063aa4348e9be477b81a1f2b30",
+    "sched.pprof": "23acc44d42686927bf4dea347ae34fce84b1d1174afb655c31ceec4058a58ab6",
+    "syscall.pprof": "07840bfe6f8505da082d526bd1a76425657209b85cfb470f372a411e2de9cde3",
+    "sync.pprof": "877e877071631d9448f0a48b29ccd7e898f7083faaf203d58b865bf3146220d5",
+    "trace-events.txt": "da0ab05068e1c4a059e205c8e316890f5c9c52693c83ac8b5ac7fa42a9416a25",
+    "analysis.json": "5ccef6a875f3b083e9f9b9ea6074a616470668841798f23320e8789b4f216a73",
+    "analyze.py": "a251db25ec734179b70d7b2700942795aabf545475e101fbb5814c1fa032f8c6",
+    "monitor.py": "7ca10d7f9b4916412ac322e807520b0fd387ca3b027f908a6c83a3beda79449e"
+  },
+  "analysis_method": "go tool trace -d=parsed; match task/worker regions and clip each worker's GoID state transitions to creation through first publish end; sum disjoint states. go tool trace -pprof={sched,syscall,sync}; readable *-top.txt retained. All regions balanced; tasks end after joined cleanup.",
+  "reloads_ms": [
+    {"outcome":"success", "worker":"0xc001abaf70", "goroutine":66, "readiness":46.685376, "creation_to_publish":45.034112, "Running":6.670464, "Syscall":38.288640, "Runnable_total":0.069184, "Waiting_sync":0.005824},
+    {"outcome":"failure", "worker":"0xc001d9a9c0", "goroutine":27, "readiness":49.074688, "creation_to_publish":47.932480, "Running":7.992896, "Syscall":39.907200, "Runnable_total":0.030720, "Waiting_sync":0.001664},
+    {"outcome":"cancel", "worker":"0xc000551110", "goroutine":28, "readiness":48.496832, "creation_to_publish":47.649728, "Running":6.859520, "Syscall":40.318080, "Runnable_total":0.454720, "Waiting_preempted":0.017408}
+  ],
+  "phase_ranges_ms": {"resume_validation":[2.220352,3.356416], "checkpoint_import":[0.054272,0.099392], "scalar_write":[13.472320,14.315328], "scalar_file_sync":[6.402368,7.098112], "restored_publication":[0.163648,0.184960], "publish":[0.037440,0.045440]},
+  "held_query": "All five outcomes keep their assertions and joined release/cancel cleanup. Three distinct replacements publish before query release; trace shows old-query channel waits of 96.745-105.346 ms across reload, rather than reload workers waiting on that channel.",
+  "load": "100ms sampling brackets execution by at most one sample on each side (7.369s). Shared cgroup cpu.max=600000/100000; 73 periods, zero throttled periods/usec. CPU pressure total delta: some 75887us/full 20439us; I/O some 22828us/full 22806us. Host loadavg 6.12 -> 5.87. Full samples retained, including admission/compilation outside the selected interval.",
+  "limitations": "Running is scheduled wall time, not CPU accounting. Syscall includes kernel and OS scheduling delay; nested phases must not be summed. No timeout occurred, so no new failure stacks exist. Historical load/filesystem/stacks are unknown. This healthy trace cannot identify the original cause or justify a fixture/persistence/scheduler repair.",
+  "checks": "go vet ./... and go build -o /tmp/builder-3854-runtime/pyry ./cmd/pyry passed at source_revision; empty vet.log/build.log and test.stderr retained",
+  "acceptance": "Diagnosis, supported repair and distinguishing regression remain unresolved; PR 3855 stays draft. Original five-second bound and all assertions unchanged. Full configured acceptance remains dispatcher-owned; macOS outside scope; no live Claude proof needed.",
+  "next_assessment": {
+    "revision": "83e2e335fdb0ce77ed061087e5eb8f42ae29bebb",
+    "source_relationship": "Only plan and this evidence manifest differ from measured cfe2367d; no Go source changes",
+    "request": "next-investigation.json; sha256 140b65ff11d14792315f7e1bda24f2558ce3b60a29367487195380414191654f",
+    "receipt": "next-investigation-receipt.json; sha256 aafa6f1f94cd7c71d2717f9d6b8f7b438c317395955fa928eb1458b01de87440",
+    "response": {"status":"assessment-queued", "id":"39590fee57a9e4a5a83b72d153c4e5081954989995b64c98e4845005917e4064", "executed":0},
+    "scope": "Assess traced original concurrent thread/daemon/relay composition; request/receipt retained in artifacts_directory. Assessment starts no diagnostic and grants no additional execution."
+  }
+}

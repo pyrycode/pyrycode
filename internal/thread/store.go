@@ -66,6 +66,8 @@ type conversationWorker struct {
 // Store follows raw history for caller-authorized conversations. Construct it
 // with NewStore; all public methods are safe for concurrent use.
 type Store struct {
+	// phase is a fixture observer configured before workers start, called outside mu.
+	phase          func(conversations.ConversationID, string) func()
 	mu             sync.Mutex
 	history        *history.Store
 	forward        func(conversations.ConversationID) (storeReader, error)
@@ -177,6 +179,13 @@ func (s *Store) start(ctx context.Context, id conversations.ConversationID, retr
 	}
 }
 
+func (s *Store) observePhase(id conversations.ConversationID, phase string) func() {
+	if s.phase != nil {
+		return s.phase(id, phase)
+	}
+	return func() {}
+}
+
 func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *conversationWorker, previous progressRecord) {
 	result := ErrUnavailable
 	var progress Snapshot
@@ -217,7 +226,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 	}
 	// Page reads the surviving log; LatestEntryID can retain an append cursor
 	// ahead of history after truncation. Replay must still reach this read bound.
+	finished := s.observePhase(id, "history-bound")
 	page, err := s.history.Page(id, "", 1)
+	finished()
 	if err != nil {
 		return
 	}
@@ -230,7 +241,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		return
 	}
 	source := newRecentSource(func(ids []uint64) ([]history.Entry, error) { return s.lookup(ctx, id, ids) })
+	finished = s.observePhase(id, "resume-validation")
 	checkpoint, dirty, err := s.resumeCheckpoint(ctx, id, bound, source)
+	finished()
 	if err != nil {
 		result = err
 		return
@@ -276,6 +289,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 			return
 		}
 	}
+	finished = s.observePhase(id, "restored-publication")
 	fold.captureSet = make(map[int]struct{})
 	if !checkpoint.writer.fullRefold {
 		capture.restore(fold)
@@ -290,6 +304,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		}
 		s.mu.Unlock()
 	}
+	finished()
 	checksum = dirty.Checksum
 	resumeVersion := fold.Version()
 	feed := func(entries []history.Entry) error {
@@ -333,7 +348,9 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		finished := s.observePhase(id, "capture")
 		items, changes, err := capture.capture(fold)
+		finished()
 		source.chunk = nil
 		if err != nil {
 			return err
@@ -366,6 +383,7 @@ func (s *Store) run(ctx context.Context, id conversations.ConversationID, w *con
 }
 
 func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w *conversationWorker, items []*Item, changes Observation, fold *Fold, capture *publicationCapture) {
+	defer s.observePhase(id, "publish")()
 	s.mu.Lock()
 	before := w.snapshot
 	index := w.query
@@ -403,6 +421,7 @@ func (s *Store) publish(ctx context.Context, id conversations.ConversationID, w 
 // Snapshot renders one immutable publication outside the store mutex. Source
 // failure returns only unavailable State/Err and withdraws the captured worker.
 func (s *Store) Snapshot(id conversations.ConversationID) Snapshot {
+	defer s.observePhase(id, "snapshot")()
 	s.mu.Lock()
 	var snapshot Snapshot
 	var items []*Item
