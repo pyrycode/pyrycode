@@ -65,3 +65,9 @@ Pending documentation stage: in `docs/knowledge/features/e2e-harness.md`, “Tea
 
 **Reviewer:** builder (self-review per security-review checklist)
 **Date:** 2026-10-24
+
+## Revisions
+
+- 2026-10-24: `f997d8d6` reproduces the forced-teardown escape both without a lock wrapper and after controlled owner failure with an isolated lock. App 282374 and sleep 282381 retained inode 6947394; independent admission timed out. The historical initiating branch remains unknown. Original and diagnostic failures are preserved under `/tmp/builder-3861/`.
+- Registration uses a short-lived bounded handshake; only pidfds persist until fixture cleanup. Linux explicitly requires `PidfdOpen`, with no numeric-PID signal fallback. Darwin retains its existing behavior through an empty endpoint; this Linux ticket claims no Darwin verification. Capture the sleep before any proof/service-file failure; failed registration kills and joins it locally. Existing signal cleanup remains unchanged, rather than adding a separate helper lifecycle.
+- The outer regression now joins its nested owner and allows its existing 30-second context to observe startup failure, rather than racing the inner 12-second observation deadline. Failed initial setup survivors were proven by exact fixture markers, start times and lock inode, then retired through pidfds; receipt: `failed-setup-owned-process-cleanup.json`. Descriptor proof matches inode rather than assuming descriptor 3. Total written work remains approximately 500 lines, with no product code or exported APIs changed.

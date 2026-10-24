@@ -211,15 +211,3 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 		})
 	}
 }
-
-func hostedRetiredForCleanup(pid int) bool {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if os.IsNotExist(err) {
-		return true
-	}
-	if err != nil || !strings.Contains(string(b), ") Z ") {
-		return false
-	}
-	fds, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
-	return err == nil && len(fds) == 0
-}
