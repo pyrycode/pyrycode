@@ -23,6 +23,7 @@ func (s *Store) initialPublicationIndex(items []*Item, fold *Fold, headers map[u
 		if header, ok := headers[item.ID]; ok {
 			row.header = header
 		}
+		row.header.taskAssociation(*item, fold.recipes[item.ID])
 		index.refreshHeader(row, fold.version)
 	}
 	index.compactFrom = fold.version

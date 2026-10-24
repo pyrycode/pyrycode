@@ -67,7 +67,9 @@ func (c *publicationCapture) capture(f *Fold) ([]*Item, Observation, error) {
 	}
 	c.headers = make(map[uint64]childHeader, len(after))
 	for _, item := range after {
-		c.headers[item.ID] = prepareChildHeader(item)
+		header := prepareChildHeader(item)
+		header.taskAssociation(item, f.recipes[item.ID])
+		c.headers[item.ID] = header
 	}
 	slots := make([]*Item, len(f.items))
 	copy(slots, c.slots)

@@ -30,6 +30,7 @@ type ChildSummary struct {
 	Active, Shown                 bool
 	Headline                      string
 	DetailOmitted                 bool
+	TaskID                        *string
 	ErrorSummary                  *string
 	PublicChildCount              *uint64
 	HasPublicChildren             *bool
