@@ -4,8 +4,6 @@ package e2e
 
 import (
 	"encoding/base64"
-	"encoding/json"
-	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/paireddevice"
+	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -128,19 +127,8 @@ func TestE2E_IdleEviction_DefersWhileStreamTurnOpen(t *testing.T) {
 		Payload: mustJSON(t, protocol.InterruptPayload{ConversationID: knownConvID}),
 	})
 	closeDeadline := time.Now().Add(15 * time.Second)
-	for closed := false; !closed; {
-		env, ok := nextEnv(closeDeadline)
-		if !ok {
-			t.Fatalf("the interrupted turn never closed with turn_state{idle}\nstderr tail:\n%s", stderrTail(h, 4000))
-		}
-		if env.Type != protocol.TypeTurnState {
-			continue
-		}
-		var st protocol.TurnStatePayload
-		if err := json.Unmarshal(env.Payload, &st); err != nil {
-			t.Fatalf("decode turn_state: %v", err)
-		}
-		closed = st.ConversationID == knownConvID && st.State == "idle" && source.Ended(knownConvID)
+	if !idleEvictionTurnClosed(t, source, knownConvID, nextEnv, closeDeadline) {
+		t.Fatalf("the interrupted turn never closed with turn_state{idle}\nstderr tail:\n%s", stderrTail(h, 4000))
 	}
 
 	// No turn open now: the next fire evicts, at most one window late.
@@ -148,5 +136,20 @@ func TestE2E_IdleEviction_DefersWhileStreamTurnOpen(t *testing.T) {
 	if got := evictions(); got <= baseline {
 		t.Fatalf("session evicted but no %s record followed the turn ending (count %d, baseline %d)",
 			evictNeedle, got, baseline)
+	}
+}
+
+func idleEvictionTurnClosed(t *testing.T, source *scenario.SourceObserver, conv string, next func(time.Time) (protocol.Envelope, bool), deadline time.Time) bool {
+	t.Helper()
+	for {
+		_, ok := next(deadline)
+		if !ok {
+			return false
+		}
+		// Source append and live idle arrive independently; an empty poll can
+		// complete their ownership-checked join in the observer.
+		if source.Ended(conv) {
+			return true
+		}
 	}
 }
