@@ -193,6 +193,8 @@ func TestDaemonThreadRepeatedTurnRetirement(t *testing.T) {
 			additions := 0
 			for _, frame := range frames {
 				switch frame.Type {
+				case protocol.TypeConversationUpdated:
+					continue // Clean retirement refreshes conversation-list metadata.
 				case protocol.TypeThreadItemAdded:
 					var a protocol.ThreadItemAddedPayload
 					if err := json.Unmarshal(frame.Payload, &a); err != nil {
