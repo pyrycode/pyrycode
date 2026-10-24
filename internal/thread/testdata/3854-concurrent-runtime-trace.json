@@ -1,0 +1,61 @@
+{
+  "ticket": 3854,
+  "outcome": "NOT REPRODUCED; diagnosis, cause-specific repair and distinguishing regression remain unresolved",
+  "source_revision": "e5679bde0653701c8df4882ecc5034b6ecda0df5",
+  "plan_revision": "01508211012a1bc34ecf147f1f649b98259fbfd3",
+  "original_failure": {
+    "revision": "8cb3fc0c8f86825ac176bdef8b50e3669130185a",
+    "sha256": "8c33f2a9d6140e12319cc356b7323fb861d390efbf631394af5126770f7219eb",
+    "retained_copy": "original-compatibility.json; original failed state and committed excerpt unchanged",
+    "counts_executed_passed_failed_skipped": [225,222,3,0],
+    "failure_events": ["TestCompactCapture/success", "TestCompactCapture", "TestSummaryTaskShell"],
+    "note": "SummaryTaskShell's later accepted association repair remains independent; none of these historical failure events is relabelled passed.",
+    "capture_success_interval_UTC": ["2026-10-24T06:09:55.659240447Z", "2026-10-24T06:10:10.070058179Z"],
+    "daemon_producer_interval_UTC": ["2026-10-24T06:09:48.807980782Z", "2026-10-24T06:10:03.221244213Z"],
+    "observation": "Daemon producer overlapped the failing success case until 06:10:03.221; retirement checkpoint was logged at 06:10:03.247, reload timeout at 06:10:08.249. Both producer and success took 14.41s. This correlation identifies no blocked phase or historical cause."
+  },
+  "command": "TMPDIR=/work/builder-3854-concurrent-tmp-20261024 PYRY_COMPACT_TRACE_DIR=/work/builder-3854-concurrent-evidence-20261024 python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=1 -run <exact selectors.original from 3854-durable-comparison.json> ./internal/thread ./cmd/pyry ./internal/relay",
+  "exact_command_record": "command.json; argv includes the complete unchanged selector, revision and exit_code=0",
+  "environment": "Linux 7.0.0-28-generic amd64; Go 1.26.9; GOMAXPROCS=6; GOFLAGS empty; actual fixture ext4 0xef53 /work rw,relatime; fresh histories/Store per outcome; normal package concurrency, no shuffle or repeated selection; OS page caches uncontrolled",
+  "cache_conditions": "Thread race compilation warmed by the new recorder unit test; shared GOCACHE=/home/agent/.cache/go-build retained, no -a/-p/-parallel flags or cache clearing. Exact per-action compiler cache hits unobserved. Daemon/relay started 1.695s after thread.",
+  "ordering": "All thread, daemon and relay declaration orders are retained in analysis.json packages.top_level_order; thread matches ordering.original_thread in 3854-durable-comparison.json. Capture outcomes remain success, failure, cancel, current-failure, current-cancel.",
+  "counts_executed_passed_failed_skipped": [225,225,0,0],
+  "leaf_counts": [214,214,0,0],
+  "package_counts": {"thread":[41,41,0,0], "daemon":[6,6,0,0], "relay":[178,178,0,0]},
+  "package_intervals_UTC": {
+    "thread": ["2026-10-24T09:53:51.555939619Z", "2026-10-24T09:54:01.085340763Z"],
+    "daemon": ["2026-10-24T09:53:53.250661166Z", "2026-10-24T09:53:55.518115327Z"],
+    "relay": ["2026-10-24T09:53:53.250725086Z", "2026-10-24T09:53:57.999230268Z"],
+    "capture": ["2026-10-24T09:53:58.646008195Z", "2026-10-24T09:54:00.053261438Z"]
+  },
+  "actual_overlap": "Daemon/relay overlapped thread predecessors, but both processes completed before Capture began: 0ms overlap with all three reloads. Original concurrent composition was selected unchanged; its historical slow producer/capture overlap was not reproduced. Package lifetime intervals include final race-detector wait.",
+  "reloads_ms": [
+    {"outcome":"success", "worker":"0xc00110eb60", "goroutine":70, "readiness":71.823552, "creation_to_publish":68.500672, "Running":12.081344, "Syscall":56.030656, "Runnable_total":0.388672, "Waiting_sync":0},
+    {"outcome":"failure", "worker":"0xc001691520", "goroutine":22, "readiness":54.986688, "creation_to_publish":53.825984, "Running":9.901504, "Syscall":43.715008, "Runnable_total":0.202304, "Waiting_sync":0.007168},
+    {"outcome":"cancel", "worker":"0xc0014720d0", "goroutine":126, "readiness":61.393408, "creation_to_publish":60.106688, "Running":10.414400, "Syscall":49.581056, "Runnable_total":0.094784, "Waiting_sync":0.016448}
+  ],
+  "replacement_phase_ranges_ms": {"history_bound":[0.517184,0.628288], "resume_validation":[3.692928,4.118656], "checkpoint_read":[2.627648,3.026240], "checkpoint_import":[0.093056,0.106688], "scalar_write":[15.997760,19.828736], "scalar_file_sync":[8.145728,11.841536], "restored_publication":[0.204160,0.394304], "publish":[0.036608,0.067712]},
+  "held_query_and_cleanup": "Three distinct replacement workers publish usable version 3 before the old query is released; held-query channel waits 126.236-151.225ms. All five outcomes retain original assertions, unrelated-conversation isolation and joined query/store cleanup. All regions balance; all five tasks end after worker regions. Recording stops after child cleanup. No timeout occurred, so no new failure stacks exist.",
+  "pressure": "100ms samples bracket all execution by at most one sample each side: 97 CPU periods, 0 throttled, 0 throttled_usec; cpu.max=600000/100000. Capture bracket: 16 periods, 0 throttled; shared cgroup CPU pressure some/full deltas 80348/33430us, I/O 13165/12014us. Host CPU some 228430us, host I/O some/full 316677/117494us. Whole-run loadavg 5.14 -> 6.28. Full and per-reload interval observations retained in analysis.json and pressure.jsonl.",
+  "analysis_method": "go tool trace -d=parsed; map trace timestamps to UTC using Sync Trace/Wall clock snapshot; match task/worker phase regions and clip each replacement GoID state transitions to creation through first publish end. go tool trace -pprof=sched,syscall,sync and go tool pprof -top; raw profiles and readable tops retained. Nested phases cannot be summed. Running is scheduled wall time, Syscall includes kernel/OS scheduling delay.",
+  "recorder_check": "New lifecycle test before helper implementation: build failed on undefined testRecordCompactTrace, zero test executions. After implementation: 3/3/0/0 events (2 leaves), recording active in each child and stopped afterward, two distinct private nonempty files. These tested Go bytes match source_revision. Full diagnostic trace parses through all task endings; Start/Flush/Close errors are checked.",
+  "static_checks": "go vet ./... and go build -o /tmp/builder-3854-concurrent/pyry ./cmd/pyry passed on the Go source committed as source_revision; empty logs retained",
+  "artifacts_directory": "/work/builder-3854-concurrent-evidence-20261024",
+  "artifact_sha256": {
+    "compact-capture-3024548873.trace":"915dac8049b9c362a33f133add084cb3beed1611f87135e440097db47fdd350c",
+    "test.json":"fadc22ce6069ca0bfa37cb827b6989312ebe57ed62441e9526a943cad339c181",
+    "pressure.jsonl":"7c5537185dc809ec7d328b541d232704b61b4fad1adbe7ea5a0a4c131e70ed6f",
+    "analysis.json":"b9e3e4871e54895256ecb834e56d353ab4be5b6c1d84f34896983c1588b9af1c",
+    "trace-events.txt":"5dbde2614d6a65e5ebf805c783394fa686bbef08b22746cb6df6cc090c2acac5",
+    "sched.pprof":"30a4fc474f367e672a36a91e2c78ef565cd7ae98faad554356e1667ff4d6ef2c",
+    "syscall.pprof":"9fa77860a6bbc40fd2133f5bfd81a380ea3c283a4b306e89556ca56ef75b2042",
+    "sync.pprof":"6f14f4b0d1a5a5408a6059cfd5c28bda15d44a3a2a01582eca14d7d00082226c",
+    "command.json":"773ca5a166f1d96e705df263f09b3562c77080ae2612b03fbf8c907b8fec5eb0",
+    "analyze.py":"7b6e6861aded051d74420b8e3bacf89fcb52225a776397cce3f3f729f31eb0db",
+    "monitor.py":"37aa013e370e0f2c40e0a50706baac9c6982a4315df312614f52bc858f2678d9",
+    "run.py":"7627ba462cfcaf4e5e305c1acbbdcfcab0a3da109059eb001beb886847603ee5",
+    "recorder-red.json":"9d2cc7befad5ff7e97afa15dd6fc76efed3818f447f308c35e584a189864fa8b",
+    "recorder-green.json":"ef04611e0b516aa2df0d3d6d3dc95a1b44a5246177e257aa6d1b92eca20d6625"
+  },
+  "pending": "Original failure remains failed. No cause-specific repair is supported. Keep PR 3855 draft; causal diagnosis, supported repair and distinguishing regression remain incomplete. Ordinary review and complete configured Linux acceptance remain dispatcher/verifier-owned. No live Claude proof required; macOS outside scope. Do not repeat completed comparisons for another green result."
+}

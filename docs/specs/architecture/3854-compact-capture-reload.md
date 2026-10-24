@@ -354,3 +354,29 @@ SHOULD FIX: check buffered write errors after `trace.Stop` joins its writer; sto
 only a successfully started recording, after child cleanup; retain artifacts on
 failure. Runtime trace contains fixture labels and process scheduling metadata;
 its private task-owned artifact is diagnostic evidence, not product telemetry.
+
+### 2026-10-24 — original concurrent selection with fixture recording
+
+Pushed `e5679bde0653701c8df4882ecc5034b6ecda0df5` passed the approved original
+selector across thread/daemon/relay once: 225/225/0/0 events (214 leaves).
+The recorder lifecycle check passed 3/3/0/0 events after its initial missing-helper
+build failure (zero executions); vet/build passed on the same Go bytes. Unique
+private recording, balanced regions and five tasks ending after joined cleanup
+are verified. No product behavior, assertions or readiness bound changed.
+
+Three replacements reached version 3 before old-query release in 54.987–71.824 ms;
+creation-to-publication syscall time was 43.715–56.031 ms, runnable time at most
+0.389 ms, synchronization at most 0.017 ms. CPU quota throttling remained zero.
+The fixture-owned recording works with concurrent packages. Actual daemon/relay
+execution overlapped thread predecessors but ended before Capture began. In the
+original failed JSON, whose hash was rechecked, the 14.41-second daemon producer
+overlapped failing success until just before its retirement checkpoint. That
+historical overlap/shared delay was not reproduced; causality remains unknown.
+
+Commands, source, cache/order/overlap, Linux pressure, phases, counts and hashes
+are retained in `internal/thread/testdata/3854-concurrent-runtime-trace.json`;
+raw evidence and the original full failure survive under
+`/work/builder-3854-concurrent-evidence-20261024`. Both Open questions, diagnosis,
+supported repair and distinguishing regression remain unresolved. Keep PR #3855
+draft and full configured Linux acceptance pending. Further diagnostic selection
+belongs to recovery assessment; no additional comparison was executed.
