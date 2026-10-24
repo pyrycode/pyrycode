@@ -33,6 +33,9 @@ func testSummaryTaskFixture(t *testing.T, entries []history.Entry) (*Store, *Fol
 	f, source := testReferenceFold(entries)
 	f.captureSet = make(map[int]struct{})
 	s, c := NewStore(nil), &publicationCapture{}
+	s.lookup = func(_ context.Context, _ conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
+		return source.Lookup(ids)
+	}
 	w := &conversationWorker{changed: make(chan struct{})}
 	s.workers[testStoreA] = w
 	feed := func(e history.Entry) {
