@@ -60,6 +60,9 @@ func testRecordCompactTrace(t *testing.T) {
 }
 
 func TestCompactTraceRecording(t *testing.T) {
+	if runtimeTrace.IsEnabled() {
+		t.Skip("runtime tracing is already owned by the caller")
+	}
 	dir := t.TempDir()
 	t.Setenv("PYRY_COMPACT_TRACE_DIR", dir)
 	for range 2 {
