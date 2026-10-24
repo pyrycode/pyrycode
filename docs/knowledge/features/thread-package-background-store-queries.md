@@ -194,6 +194,7 @@ Optional facts distinguish unknown (`nil`) from known empty/zero/false:
 
 | Fact | Captured meaning |
 | --- | --- |
+| `TaskID` | Exact computed task association for a canonical `agent` or `tool_call` creating row. Nonempty names the selected task, empty means known none at this revision, and nil means unknown. A matching authoritative creating recipe establishes known absence when it has no computed association. |
 | `ErrorSummary` | Own `failed`/`denied` status supplies a nonempty diagnostic, currently the status itself. Inactive `done`/`completed`/`finished` supplies known empty text. Other outcomes, including an active row with a success status, remain unknown. Descendant failures do not become ancestor errors. |
 | `PublicChildCount`, `HasPublicChildren` | Public direct-child count and existence; known existence is exactly count > 0. A usable public child index establishes known zero/false for a leaf. Hidden and dropped rows count; unresolved private children and claimed standalone delivery rows do not. `NoChild` describes producing-child attribution, independently of inventory. |
 | `SubtreeVersion` | Epoch-scoped freshness of the row and its public subtree, independently of source `Rev`. |
@@ -205,6 +206,25 @@ matching the [header semantics](../../protocol-mobile.md#thread-query-messages).
 `runThreadChildren` forwards these facts in bounded expansion replies, and
 production compact delivery uses them through the real Store installation.
 See [daemon compact wiring and evidence](thread-package-shadow-lifecycle-and-evidence-publication.md#background-discovery-and-publication).
+
+`childHeader.taskAssociation` reads only the immutable recipe's computed
+`task_id`, with a creating ID matching the row. Retained launch JSON can carry
+the same key without establishing ownership: parsing rendered content would
+grant that arbitrary value authority and fail on metadata-only restoration.
+A missing/mismatched creating recipe or invalid/noncomputed scalar leaves the
+fact unknown; a usable creating recipe without the scalar establishes known
+empty. `prepareChildHeader` alone has no association authority.
+
+The [scoped agent fold](thread-package-agents-and-background-work.md#identity-and-recovery)
+owns validation by conversation, recorded source/session and lifetime or legacy
+scope. `applyAgent` selects the greatest lexicographic task ID among a call's
+validated associations; headers preserve that exact string without normalization,
+truncation or a task inventory. Background flags, headlines and result prose
+cannot establish links. On replacement, explicit empty clears a prior association;
+nil remains unknown and supplies no authority to carry a prior value forward.
+Existing row identity/kind, parent/order and lifecycle metadata provide placement
+and navigation. `TaskID` establishes neither detail availability nor coverage;
+see the [wire presence rules](../../protocol-mobile.md#bounded-expansion-reads).
 
 Initial `Store.publish` initializes every public row's freshness from consumed
 publication progress. Checkpoint restoration seeds public prefix rows without
@@ -287,7 +307,15 @@ changes, unchanged sibling branches and retained captures, alongside the
 independent public membership/count oracle.
 
 `publicationCapture.capture` prepares headline/outcome evidence from the already
-rendered affected public rows, including reference-backed outcomes. Initial
+rendered affected public rows, including reference-backed outcomes, then enriches
+their headers with the matching fold recipe's task association. On cold resume,
+`Store.initialPublicationIndex` also reconstructs the association for **every**
+restored public prefix row from validated recipes, including rows absent from
+the suffix's affected set. Preparing only affected rows would lose associations
+after a complete checkpoint load. This step needs no body rendering or history
+lookup; full replay and unload/reload use the same authority. `childHeader.apply`
+allocates detached string pointers so mutations or subsequent reassociation
+cannot alter an earlier capture or another caller's summary. Initial
 `O(N log N)` index preparation establishes counts using child-tree ranks.
 Incremental header maintenance follows affected rows and old/new ancestor paths,
 refreshing counts by rank without rediscovering all public rows or enumerating
@@ -309,6 +337,14 @@ separately checks affected-row/ancestor index maintenance.
 `TestChildHeaderFacts` checks normalization, optional facts and detached values;
 `TestChildHeaderReferenceOutcomes` proves reference-backed errors without read-time
 hydration, and `TestChildHeaderUnknownFreshness` checks the numeric boundary.
+`TestSummaryTaskLifecycle` compares late links, deterministic selection,
+reassociation and terminal metadata with complete folded rows, including retained
+captures and compact change/live inputs. `TestSummaryTaskScope` rejects unusable
+or foreign evidence and isolates reused identities. `TestSummaryTaskResume`
+checks full replay, both checkpoint cuts and unload/reload with root/child
+association and lifecycle assertions while trapping closed-history reads.
+`TestSummaryTaskFacts` checks unknown authority and detached optional values;
+`TestSummaryTaskShell` rejects forged launch/result association evidence.
 See the
 [Store verification guidance](thread-package-background-store-verification.md#store-verification)
 for independent membership oracles and capture barriers.
@@ -333,7 +369,10 @@ children and claimed standalone delivery rows are absent. A root whose own
 `Kind` is `tool_call` or `agent` never returns its `Item`; it returns a
 detached `ChildSummary` instead, built the same way as `ChildPage`'s headers
 (bounded `Headline`/known-empty `ErrorSummary`, `DetailOmitted: true`, no
-`Content`, body or descendant identities). Every other root returns its full,
+`Content`, body or descendant identities, plus exact optional `TaskID` from the
+same prepared recipe evidence). Initial/older roots and compact catch-up/live
+headers preserve this fact through `threadSummaryFrom` and `daemonThreadSummary`;
+bounded child replies use the former too. Every other root returns its full,
 unchanged `Item`. Ordered selection, bounds and ties use the same algorithm as
 `NewestWindow`/`HistoryPage`, but count only roots with nonzero `Order`:
 `CompactNewestWindow`'s exclusive upper bound is the captured `Version + 1`;

@@ -369,7 +369,7 @@ func daemonThreadItem(i thread.Item) protocol.ThreadItem {
 // daemonThreadSummary copies every header fact, including unknown (nil) ones.
 func daemonThreadSummary(h thread.ChildSummary) protocol.ThreadSummary {
 	return protocol.ThreadSummary{ID: h.ID, Kind: h.Kind, Order: h.Order, Rev: h.Rev, EndedOrder: h.EndedOrder, Session: h.Session, Agent: h.Agent, NoChild: h.NoChild, Turn: h.Turn, Parent: h.Parent, Status: h.Status, Active: h.Active, Shown: h.Shown, Headline: h.Headline, Subtype: h.Subtype, DetailOmitted: true,
-		ErrorSummary: h.ErrorSummary, PublicChildCount: h.PublicChildCount, HasPublicChildren: h.HasPublicChildren, SubtreeVersion: h.SubtreeVersion}
+		TaskID: h.TaskID, ErrorSummary: h.ErrorSummary, PublicChildCount: h.PublicChildCount, HasPublicChildren: h.HasPublicChildren, SubtreeVersion: h.SubtreeVersion}
 }
 
 func daemonThreadUpdates(conv, epoch string, c thread.Change) []any {

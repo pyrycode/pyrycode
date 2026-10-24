@@ -237,7 +237,7 @@ func threadItemFrom(i thread.Item) protocol.ThreadItem {
 // threadSummaryFrom copies every header fact, including unknown (nil) ones.
 func threadSummaryFrom(row thread.ChildSummary) protocol.ThreadSummary {
 	return protocol.ThreadSummary{ID: row.ID, Kind: row.Kind, Order: row.Order, Rev: row.Rev, EndedOrder: row.EndedOrder, Session: row.Session, Agent: row.Agent, NoChild: row.NoChild, Turn: row.Turn, Parent: row.Parent, Status: row.Status, Active: row.Active, Shown: row.Shown, Headline: row.Headline, Subtype: row.Subtype, DetailOmitted: true,
-		ErrorSummary: row.ErrorSummary, PublicChildCount: row.PublicChildCount, HasPublicChildren: row.HasPublicChildren, SubtreeVersion: row.SubtreeVersion}
+		TaskID: row.TaskID, ErrorSummary: row.ErrorSummary, PublicChildCount: row.PublicChildCount, HasPublicChildren: row.HasPublicChildren, SubtreeVersion: row.SubtreeVersion}
 }
 
 // runCompactThreadQuery answers a compact query with the complete reply's bounds
