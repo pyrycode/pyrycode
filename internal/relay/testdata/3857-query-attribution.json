@@ -1,0 +1,177 @@
+{
+  "ticket": 3857,
+  "kind": "controlled-reproduction-attribution",
+  "core_diagnostic_source": "e5e0ace803e1ed70d8948ceb9ce7d75ad2e58f6a",
+  "production_base": "64ef0e0fba71a723b7fdc97141cfc144f6355664",
+  "mobile_source": "fde2ca234d278361c0f477f90eb1227149ee7b75",
+  "daemon_sha256": "fd3d503551caab8e21d903ef25162d5396d048f940f7879727cb793362e65a5b",
+  "relay_sha256": "17e24131cfd3f5a0bc48f972021db17925347311e3dcdf362f2aa8cfe48fc710",
+  "native_counts": {
+    "executed": 2,
+    "passed": 1,
+    "failed": 1,
+    "skipped": 0
+  },
+  "native_manifest_sha256": "a1cb7b779d840de7c65e26dcd98d932f1b2456389b8cbfa79c6163ab67fe9696",
+  "native_manifest_entries_verified": 27,
+  "installed_byte_readback": false,
+  "correlation": {
+    "connections_in_diagnostic": 1,
+    "peer_alias": "producer-1",
+    "query_id": 3,
+    "last_completed_query": 2,
+    "last_completed_checkpoint": 2,
+    "captured_checkpoint": null,
+    "sealing_or_delivery_success": false
+  },
+  "events": [
+    {
+      "time": "2026-10-24T13:36:44.435+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "237",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "false"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "238",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "238",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "240",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "237",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "240",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "242",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.live_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "242",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "238",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.436+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "238",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.437+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "240",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.437+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "240",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.437+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "242",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    },
+    {
+      "time": "2026-10-24T13:36:44.438+03:00",
+      "event": "local.thread_query.gate_cancel",
+      "query_id": "3",
+      "request_version": "2",
+      "update_version": "242",
+      "request_same_epoch": "true",
+      "captured": "false",
+      "already_cancelled": "true"
+    }
+  ],
+  "conclusion": "The controlled reproduction observes uncovered same-epoch live updates cancelling admitted complete query 3 before reply selection. Its requested checkpoint is 2. No selected or completed query checkpoint is earned. The correlated retryable refusal is correct under the existing protocol. A consumer must discard uncertified partial state and retry from its last completed checkpoint within its existing overall deadline. Returning from the post operation or flushing producer pushes does not prove hosted handling has settled. No Core production defect or repair is established.",
+  "limits": [
+    "This is a new controlled reproduction with local observation-only Core logging. It is not a newly proved exact instruction path for the original uninstrumented historical run.",
+    "The original 2/1/1/0 failure and missing separate authentication JSON remain recorded.",
+    "Raw phone, daemon, control and relay logs and APKs remain private on the Mac. Only enumerated payload-free boundary facts are exported.",
+    "Mobile implementation and native acceptance remain owned by Mobile 2494 under its separate authorisation. Core completion does not certify Mobile acceptance."
+  ],
+  "diagnostic_patch_sha256": "5906eb40a47b83cf6aec4df3e59c9868e8bb85a252fba707e671e467168e6c49"
+}
