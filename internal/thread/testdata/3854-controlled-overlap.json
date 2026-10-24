@@ -1,0 +1,1018 @@
+{
+  "measured_source": "b23d9d641e49b1e62354a07573e04a535f08f5fd",
+  "base": "6814e25f7741709d070b97b2a9bae97ed301a30d",
+  "evidence_root": "/work/manual-3854-overlap-evidence-20261024",
+  "command": {
+    "command": [
+      "go",
+      "test",
+      "-timeout=30m",
+      "-race",
+      "-json",
+      "-count=1",
+      "-run",
+      "^(TestChildHeaderFacts|TestChildHeaderFreshness|TestChildHeaderReferenceOutcomes|TestChildHeaderInitialProgress|TestChildHeaderUnknownFreshness|TestCompactSelection|TestCompactIncremental|TestCompactPublicMembership|TestCompactPreparationWork|TestCompactBoundedWork|TestCompactLifecycle|TestCompactCapture|TestDaemonThreadCompactInstallation|TestDaemonThreadCompactNegotiation|TestDaemonSummaryTaskProducer)$",
+      "./internal/thread",
+      "./cmd/pyry"
+    ],
+    "revision": "b23d9d641e49b1e62354a07573e04a535f08f5fd",
+    "start_ns": 1792837577552407162,
+    "environment": {
+      "TMPDIR": "/work/manual-3854-overlap-tmp-20261024",
+      "PYRY_COMPACT_TRACE_DIR": "/work/manual-3854-overlap-evidence-20261024",
+      "PYRY_COMPACT_OVERLAP_SOCKET": "/work/manual-3854-overlap-evidence-20261024/overlap.sock"
+    },
+    "coordination": [
+      {
+        "role": "capture",
+        "arrival_ns": 1792837599815824062
+      },
+      {
+        "role": "producer",
+        "arrival_ns": 1792837620718653239
+      },
+      {
+        "role": "producer",
+        "release_ns": 1792837620718666673
+      },
+      {
+        "role": "capture",
+        "release_ns": 1792837620718675015
+      }
+    ],
+    "exit_code": 0,
+    "end_ns": 1792837622961578293
+  },
+  "counts": {
+    "executed": 45,
+    "passed": 45,
+    "failed": 0,
+    "skipped": 0,
+    "leaf_executed": 40
+  },
+  "analysis": {
+    "packages": {
+      "github.com/pyrycode/pyrycode/internal/thread": {
+        "interval": [
+          "2026-10-24T10:26:31.434170786Z",
+          "2026-10-24T10:27:02.330263182Z"
+        ],
+        "counts": {
+          "run": 39,
+          "pass": 39
+        },
+        "leaf_counts": {
+          "run": 35,
+          "pass": 35
+        },
+        "top_level_order": [
+          "TestChildHeaderFacts",
+          "TestChildHeaderFreshness",
+          "TestChildHeaderReferenceOutcomes",
+          "TestChildHeaderInitialProgress",
+          "TestChildHeaderUnknownFreshness",
+          "TestCompactSelection",
+          "TestCompactIncremental",
+          "TestCompactPublicMembership",
+          "TestCompactPreparationWork",
+          "TestCompactBoundedWork",
+          "TestCompactLifecycle",
+          "TestCompactCapture"
+        ]
+      },
+      "github.com/pyrycode/pyrycode/cmd/pyry": {
+        "interval": [
+          "2026-10-24T10:27:00.624817551Z",
+          "2026-10-24T10:27:02.904201511Z"
+        ],
+        "counts": {
+          "run": 6,
+          "pass": 6
+        },
+        "leaf_counts": {
+          "run": 5,
+          "pass": 5
+        },
+        "top_level_order": [
+          "TestDaemonThreadCompactInstallation",
+          "TestDaemonThreadCompactNegotiation",
+          "TestDaemonSummaryTaskProducer"
+        ]
+      }
+    },
+    "test_interval": [
+      "2026-10-24T10:26:31.434170786Z",
+      "2026-10-24T10:27:02.904201511Z"
+    ],
+    "all_execution_pressure": {
+      "sample_interval_UTC": [
+        "2026-10-24T10:26:31.418604+00:00",
+        "2026-10-24T10:27:02.968063+00:00"
+      ],
+      "cpu_stat_delta": {
+        "usage_usec": 52846246,
+        "user_usec": 50492238,
+        "system_usec": 2354008,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 316,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "600000 100000",
+      "pressure_total_delta_us": {
+        "/proc/pressure/cpu": {
+          "some": 4919069,
+          "full": 0
+        },
+        "/proc/pressure/io": {
+          "some": 2006642,
+          "full": 1003515
+        },
+        "/sys/fs/cgroup/cpu.pressure": {
+          "some": 1594468,
+          "full": 677324
+        },
+        "/sys/fs/cgroup/io.pressure": {
+          "some": 40618,
+          "full": 33623
+        }
+      },
+      "loadavg_start_end": [
+        "2.81 3.87 5.31 14/2531 510598",
+        "5.08 4.34 5.42 4/2486 510681"
+      ]
+    },
+    "capture_pressure": {
+      "sample_interval_UTC": [
+        "2026-10-24T10:26:39.732126+00:00",
+        "2026-10-24T10:27:01.351143+00:00"
+      ],
+      "cpu_stat_delta": {
+        "usage_usec": 32358468,
+        "user_usec": 30907803,
+        "system_usec": 1450665,
+        "nice_usec": 0,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 216,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "600000 100000",
+      "pressure_total_delta_us": {
+        "/proc/pressure/cpu": {
+          "some": 2569699,
+          "full": 0
+        },
+        "/proc/pressure/io": {
+          "some": 871606,
+          "full": 573640
+        },
+        "/sys/fs/cgroup/cpu.pressure": {
+          "some": 770719,
+          "full": 344853
+        },
+        "/sys/fs/cgroup/io.pressure": {
+          "some": 29926,
+          "full": 24982
+        }
+      },
+      "loadavg_start_end": [
+        "4.15 4.12 5.38 13/2530 510623",
+        "4.91 4.30 5.41 12/2503 510675"
+      ]
+    },
+    "reloads": [
+      {
+        "outcome": "TestCompactCapture/success",
+        "worker": "0xc001a11930",
+        "goroutine": 88,
+        "interval_UTC": [
+          "2026-10-24T10:27:00.752671+00:00",
+          "2026-10-24T10:27:00.777153+00:00"
+        ],
+        "package_lifetime_overlap_ms": {
+          "github.com/pyrycode/pyrycode/internal/thread": 24.48128,
+          "github.com/pyrycode/pyrycode/cmd/pyry": 24.48128
+        },
+        "readiness_ms": 24.409728,
+        "worker_to_publish_ms": 22.79008,
+        "worker_states_ms": {
+          "Runnable": 0.178816,
+          "Running": 9.423936,
+          "Syscall": 13.153856,
+          "Waiting/sync": 0.007808,
+          "Runnable/preempted": 0.025664
+        },
+        "held_query_states_ms": {
+          "Running": 0.432576,
+          "Waiting/chan receive": 1971.343616,
+          "Waiting": 18994.607808,
+          "Runnable": 0.014592,
+          "Syscall": 0.072128
+        },
+        "phases": [
+          {
+            "phase": "history-bound",
+            "ms": 0.535552,
+            "states_ms": {
+              "Running": 0.445888,
+              "Syscall": 0.089664
+            }
+          },
+          {
+            "phase": "resume-validation",
+            "ms": 3.696576,
+            "states_ms": {
+              "Running": 3.465984,
+              "Syscall": 0.230592
+            }
+          },
+          {
+            "phase": "checkpoint-read",
+            "ms": 2.855616,
+            "states_ms": {
+              "Running": 2.70784,
+              "Syscall": 0.147776
+            }
+          },
+          {
+            "phase": "checkpoint-import",
+            "ms": 0.091648,
+            "states_ms": {
+              "Running": 0.091648
+            }
+          },
+          {
+            "phase": "lookup/[3]",
+            "ms": 0.45568,
+            "states_ms": {
+              "Running": 0.372864,
+              "Syscall": 0.082816
+            }
+          },
+          {
+            "phase": "cache-write/thread-certificate.json",
+            "ms": 5.166144,
+            "states_ms": {
+              "Running": 0.5904,
+              "Syscall": 4.48096,
+              "Waiting/sync": 0.007808,
+              "Runnable": 0.086976
+            }
+          },
+          {
+            "phase": "cache-file-sync/thread-certificate.json",
+            "ms": 2.345152,
+            "states_ms": {
+              "Running": 0.039808,
+              "Syscall": 2.305344
+            }
+          },
+          {
+            "phase": "replace",
+            "ms": 0.188224,
+            "states_ms": {
+              "Running": 0.047616,
+              "Waiting/sync": 0.004544,
+              "Runnable": 0.054976,
+              "Syscall": 0.081088
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 1.966656,
+            "states_ms": {
+              "Running": 0.09568,
+              "Syscall": 1.870976
+            }
+          },
+          {
+            "phase": "checkpoint/state-write",
+            "ms": 0.04256,
+            "states_ms": {
+              "Running": 0.025664,
+              "Syscall": 0.016896
+            }
+          },
+          {
+            "phase": "checkpoint/state-sync",
+            "ms": 2.144576,
+            "states_ms": {
+              "Running": 0.030912,
+              "Syscall": 2.113664
+            }
+          },
+          {
+            "phase": "checkpoint/state-close",
+            "ms": 0.032128,
+            "states_ms": {
+              "Running": 0.02752,
+              "Syscall": 0.004608
+            }
+          },
+          {
+            "phase": "checkpoint/state-rename",
+            "ms": 0.212288,
+            "states_ms": {
+              "Running": 0.1312,
+              "Syscall": 0.081088
+            }
+          },
+          {
+            "phase": "replace",
+            "ms": 0.077824,
+            "states_ms": {
+              "Running": 0.024576,
+              "Syscall": 0.053248
+            }
+          },
+          {
+            "phase": "checkpoint/state-directory",
+            "ms": 1.97568,
+            "states_ms": {
+              "Running": 0.140736,
+              "Syscall": 1.834944
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 1.857024,
+            "states_ms": {
+              "Running": 0.04608,
+              "Syscall": 1.810944
+            }
+          },
+          {
+            "phase": "checkpoint/resume-truncate",
+            "ms": 0.204544,
+            "states_ms": {
+              "Running": 0.13696,
+              "Syscall": 0.067584
+            }
+          },
+          {
+            "phase": "checkpoint/resume-sync",
+            "ms": 1.909632,
+            "states_ms": {
+              "Running": 0.040576,
+              "Syscall": 1.869056
+            }
+          },
+          {
+            "phase": "checkpoint/resume-close",
+            "ms": 0.038336,
+            "states_ms": {
+              "Running": 0.035072,
+              "Syscall": 0.003264
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 1.934848,
+            "states_ms": {
+              "Running": 0.071232,
+              "Syscall": 1.863488,
+              "Runnable": 0.000128
+            }
+          },
+          {
+            "phase": "forward",
+            "ms": 0.03072,
+            "states_ms": {
+              "Running": 0.03072
+            }
+          },
+          {
+            "phase": "restored-publication",
+            "ms": 0.334464,
+            "states_ms": {
+              "Running": 0.3088,
+              "Runnable/preempted": 0.025664
+            }
+          },
+          {
+            "phase": "capture",
+            "ms": 0.035328,
+            "states_ms": {
+              "Running": 0.035328
+            }
+          },
+          {
+            "phase": "publish",
+            "ms": 0.043008,
+            "states_ms": {
+              "Running": 0.043008
+            }
+          }
+        ],
+        "pressure": {
+          "sample_interval_UTC": [
+            "2026-10-24T10:27:00.744768+00:00",
+            "2026-10-24T10:27:00.845731+00:00"
+          ],
+          "cpu_stat_delta": {
+            "usage_usec": 197022,
+            "user_usec": 170660,
+            "system_usec": 26363,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 1,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "cpu_max": "600000 100000",
+          "pressure_total_delta_us": {
+            "/proc/pressure/cpu": {
+              "some": 9522,
+              "full": 0
+            },
+            "/proc/pressure/io": {
+              "some": 6680,
+              "full": 4094
+            },
+            "/sys/fs/cgroup/cpu.pressure": {
+              "some": 4394,
+              "full": 1926
+            },
+            "/sys/fs/cgroup/io.pressure": {
+              "some": 612,
+              "full": 579
+            }
+          },
+          "loadavg_start_end": [
+            "4.91 4.30 5.41 15/2508 510675",
+            "4.91 4.30 5.41 12/2501 510675"
+          ]
+        }
+      },
+      {
+        "outcome": "TestCompactCapture/failure",
+        "worker": "0xc00029fba0",
+        "goroutine": 60,
+        "interval_UTC": [
+          "2026-10-24T10:27:00.881931+00:00",
+          "2026-10-24T10:27:00.908579+00:00"
+        ],
+        "package_lifetime_overlap_ms": {
+          "github.com/pyrycode/pyrycode/internal/thread": 26.648064,
+          "github.com/pyrycode/pyrycode/cmd/pyry": 26.648064
+        },
+        "readiness_ms": 26.565184,
+        "worker_to_publish_ms": 24.96704,
+        "worker_states_ms": {
+          "Runnable": 0.186432,
+          "Running": 9.906496,
+          "Waiting/sync": 0.011392,
+          "Syscall": 14.86272
+        },
+        "held_query_states_ms": {
+          "Running": 0.06528,
+          "Waiting/chan receive": 53.71264,
+          "Runnable": 0.028992
+        },
+        "phases": [
+          {
+            "phase": "history-bound",
+            "ms": 0.537152,
+            "states_ms": {
+              "Running": 0.401216,
+              "Waiting/sync": 0.009024,
+              "Runnable": 0.042624,
+              "Syscall": 0.084288
+            }
+          },
+          {
+            "phase": "resume-validation",
+            "ms": 3.231488,
+            "states_ms": {
+              "Running": 3.015744,
+              "Syscall": 0.215744
+            }
+          },
+          {
+            "phase": "checkpoint-read",
+            "ms": 2.483264,
+            "states_ms": {
+              "Running": 2.34464,
+              "Syscall": 0.138624
+            }
+          },
+          {
+            "phase": "checkpoint-import",
+            "ms": 0.082368,
+            "states_ms": {
+              "Running": 0.082368
+            }
+          },
+          {
+            "phase": "lookup/[3]",
+            "ms": 0.40736,
+            "states_ms": {
+              "Running": 0.33024,
+              "Syscall": 0.07712
+            }
+          },
+          {
+            "phase": "cache-write/thread-certificate.json",
+            "ms": 4.732736,
+            "states_ms": {
+              "Running": 0.549504,
+              "Syscall": 4.183232
+            }
+          },
+          {
+            "phase": "cache-file-sync/thread-certificate.json",
+            "ms": 2.06048,
+            "states_ms": {
+              "Running": 0.045952,
+              "Syscall": 2.014528
+            }
+          },
+          {
+            "phase": "replace",
+            "ms": 0.111552,
+            "states_ms": {
+              "Running": 0.035648,
+              "Syscall": 0.075904
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 1.951616,
+            "states_ms": {
+              "Running": 0.06848,
+              "Syscall": 1.883136
+            }
+          },
+          {
+            "phase": "checkpoint/state-write",
+            "ms": 0.065088,
+            "states_ms": {
+              "Running": 0.041088,
+              "Syscall": 0.024
+            }
+          },
+          {
+            "phase": "checkpoint/state-sync",
+            "ms": 2.600128,
+            "states_ms": {
+              "Running": 0.051712,
+              "Syscall": 2.548416
+            }
+          },
+          {
+            "phase": "checkpoint/state-close",
+            "ms": 0.046016,
+            "states_ms": {
+              "Running": 0.040128,
+              "Syscall": 0.005888
+            }
+          },
+          {
+            "phase": "checkpoint/state-rename",
+            "ms": 0.330688,
+            "states_ms": {
+              "Running": 0.195072,
+              "Syscall": 0.135616
+            }
+          },
+          {
+            "phase": "replace",
+            "ms": 0.132544,
+            "states_ms": {
+              "Running": 0.036416,
+              "Syscall": 0.096128
+            }
+          },
+          {
+            "phase": "checkpoint/state-directory",
+            "ms": 3.44896,
+            "states_ms": {
+              "Running": 0.210624,
+              "Syscall": 3.176832,
+              "Runnable": 0.059136,
+              "Waiting/sync": 0.002368
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 3.22016,
+            "states_ms": {
+              "Running": 0.076352,
+              "Syscall": 3.14368,
+              "Runnable": 0.000128
+            }
+          },
+          {
+            "phase": "checkpoint/resume-truncate",
+            "ms": 0.195008,
+            "states_ms": {
+              "Running": 0.130944,
+              "Syscall": 0.064064
+            }
+          },
+          {
+            "phase": "checkpoint/resume-sync",
+            "ms": 2.287104,
+            "states_ms": {
+              "Running": 0.053056,
+              "Syscall": 2.234048
+            }
+          },
+          {
+            "phase": "checkpoint/resume-close",
+            "ms": 0.04736,
+            "states_ms": {
+              "Running": 0.042176,
+              "Syscall": 0.005184
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 1.696,
+            "states_ms": {
+              "Running": 0.077568,
+              "Syscall": 1.618432
+            }
+          },
+          {
+            "phase": "forward",
+            "ms": 0.027072,
+            "states_ms": {
+              "Running": 0.027072
+            }
+          },
+          {
+            "phase": "restored-publication",
+            "ms": 0.269888,
+            "states_ms": {
+              "Running": 0.269888
+            }
+          },
+          {
+            "phase": "capture",
+            "ms": 0.035968,
+            "states_ms": {
+              "Running": 0.035968
+            }
+          },
+          {
+            "phase": "publish",
+            "ms": 0.040256,
+            "states_ms": {
+              "Running": 0.040256
+            }
+          }
+        ],
+        "pressure": {
+          "sample_interval_UTC": [
+            "2026-10-24T10:27:00.845731+00:00",
+            "2026-10-24T10:27:00.946729+00:00"
+          ],
+          "cpu_stat_delta": {
+            "usage_usec": 167168,
+            "user_usec": 148058,
+            "system_usec": 19110,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 1,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "cpu_max": "600000 100000",
+          "pressure_total_delta_us": {
+            "/proc/pressure/cpu": {
+              "some": 7963,
+              "full": 0
+            },
+            "/proc/pressure/io": {
+              "some": 6487,
+              "full": 3469
+            },
+            "/sys/fs/cgroup/cpu.pressure": {
+              "some": 2324,
+              "full": 1067
+            },
+            "/sys/fs/cgroup/io.pressure": {
+              "some": 424,
+              "full": 404
+            }
+          },
+          "loadavg_start_end": [
+            "4.91 4.30 5.41 12/2501 510675",
+            "4.91 4.30 5.41 11/2500 510675"
+          ]
+        }
+      },
+      {
+        "outcome": "TestCompactCapture/cancel",
+        "worker": "0xc0002f1e10",
+        "goroutine": 89,
+        "interval_UTC": [
+          "2026-10-24T10:27:01.024970+00:00",
+          "2026-10-24T10:27:01.053155+00:00"
+        ],
+        "package_lifetime_overlap_ms": {
+          "github.com/pyrycode/pyrycode/internal/thread": 28.1856,
+          "github.com/pyrycode/pyrycode/cmd/pyry": 28.1856
+        },
+        "readiness_ms": 28.100096,
+        "worker_to_publish_ms": 26.68672,
+        "worker_states_ms": {
+          "Runnable": 0.10592,
+          "Running": 9.110912,
+          "Waiting/sync": 0.046848,
+          "Syscall": 17.402048,
+          "Runnable/preempted": 0.020992
+        },
+        "held_query_states_ms": {
+          "Running": 0.102656,
+          "Waiting/chan receive": 60.392768,
+          "Runnable": 0.016896
+        },
+        "phases": [
+          {
+            "phase": "history-bound",
+            "ms": 0.515328,
+            "states_ms": {
+              "Running": 0.372864,
+              "Waiting/sync": 0.039488,
+              "Runnable": 0.020672,
+              "Syscall": 0.0816,
+              "Runnable/preempted": 0.000704
+            }
+          },
+          {
+            "phase": "resume-validation",
+            "ms": 2.314688,
+            "states_ms": {
+              "Running": 2.150848,
+              "Syscall": 0.16384
+            }
+          },
+          {
+            "phase": "checkpoint-read",
+            "ms": 1.824064,
+            "states_ms": {
+              "Running": 1.71296,
+              "Syscall": 0.111104
+            }
+          },
+          {
+            "phase": "checkpoint-import",
+            "ms": 0.062592,
+            "states_ms": {
+              "Running": 0.062592
+            }
+          },
+          {
+            "phase": "lookup/[3]",
+            "ms": 0.273792,
+            "states_ms": {
+              "Running": 0.221056,
+              "Syscall": 0.052736
+            }
+          },
+          {
+            "phase": "cache-write/thread-certificate.json",
+            "ms": 7.295232,
+            "states_ms": {
+              "Running": 0.51776,
+              "Syscall": 6.777472
+            }
+          },
+          {
+            "phase": "cache-file-sync/thread-certificate.json",
+            "ms": 4.2224,
+            "states_ms": {
+              "Running": 0.038912,
+              "Syscall": 4.183488
+            }
+          },
+          {
+            "phase": "replace",
+            "ms": 0.112896,
+            "states_ms": {
+              "Running": 0.039552,
+              "Syscall": 0.073344
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 2.345984,
+            "states_ms": {
+              "Running": 0.0704,
+              "Syscall": 2.275584
+            }
+          },
+          {
+            "phase": "checkpoint/state-write",
+            "ms": 0.073472,
+            "states_ms": {
+              "Running": 0.051712,
+              "Syscall": 0.02176
+            }
+          },
+          {
+            "phase": "checkpoint/state-sync",
+            "ms": 2.688768,
+            "states_ms": {
+              "Running": 0.060352,
+              "Syscall": 2.628416
+            }
+          },
+          {
+            "phase": "checkpoint/state-close",
+            "ms": 0.046208,
+            "states_ms": {
+              "Running": 0.039808,
+              "Syscall": 0.0064
+            }
+          },
+          {
+            "phase": "checkpoint/state-rename",
+            "ms": 0.361152,
+            "states_ms": {
+              "Running": 0.2096,
+              "Syscall": 0.151552
+            }
+          },
+          {
+            "phase": "replace",
+            "ms": 0.12352,
+            "states_ms": {
+              "Running": 0.04096,
+              "Syscall": 0.08256
+            }
+          },
+          {
+            "phase": "checkpoint/state-directory",
+            "ms": 2.208384,
+            "states_ms": {
+              "Running": 0.227136,
+              "Syscall": 1.981248
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 2.0112,
+            "states_ms": {
+              "Running": 0.071424,
+              "Syscall": 1.939776
+            }
+          },
+          {
+            "phase": "checkpoint/resume-truncate",
+            "ms": 0.20192,
+            "states_ms": {
+              "Running": 0.134848,
+              "Syscall": 0.067072
+            }
+          },
+          {
+            "phase": "checkpoint/resume-sync",
+            "ms": 1.90848,
+            "states_ms": {
+              "Running": 0.046464,
+              "Syscall": 1.862016
+            }
+          },
+          {
+            "phase": "checkpoint/resume-close",
+            "ms": 0.048128,
+            "states_ms": {
+              "Running": 0.043008,
+              "Syscall": 0.00512
+            }
+          },
+          {
+            "phase": "directory-sync",
+            "ms": 3.1824,
+            "states_ms": {
+              "Running": 0.081728,
+              "Syscall": 3.100672
+            }
+          },
+          {
+            "phase": "forward",
+            "ms": 0.08384,
+            "states_ms": {
+              "Running": 0.0416,
+              "Waiting/sync": 0.00736,
+              "Runnable": 0.03488
+            }
+          },
+          {
+            "phase": "restored-publication",
+            "ms": 0.270272,
+            "states_ms": {
+              "Running": 0.270272
+            }
+          },
+          {
+            "phase": "capture",
+            "ms": 0.029184,
+            "states_ms": {
+              "Running": 0.029184
+            }
+          },
+          {
+            "phase": "publish",
+            "ms": 0.036608,
+            "states_ms": {
+              "Running": 0.036608
+            }
+          }
+        ],
+        "pressure": {
+          "sample_interval_UTC": [
+            "2026-10-24T10:27:00.946729+00:00",
+            "2026-10-24T10:27:01.149323+00:00"
+          ],
+          "cpu_stat_delta": {
+            "usage_usec": 343460,
+            "user_usec": 302227,
+            "system_usec": 41233,
+            "nice_usec": 0,
+            "core_sched.force_idle_usec": 0,
+            "nr_periods": 2,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "nr_bursts": 0,
+            "burst_usec": 0
+          },
+          "cpu_max": "600000 100000",
+          "pressure_total_delta_us": {
+            "/proc/pressure/cpu": {
+              "some": 39775,
+              "full": 0
+            },
+            "/proc/pressure/io": {
+              "some": 11676,
+              "full": 5763
+            },
+            "/sys/fs/cgroup/cpu.pressure": {
+              "some": 19464,
+              "full": 8481
+            },
+            "/sys/fs/cgroup/io.pressure": {
+              "some": 1198,
+              "full": 1061
+            }
+          },
+          "loadavg_start_end": [
+            "4.91 4.30 5.41 11/2500 510675",
+            "4.91 4.30 5.41 7/2502 510675"
+          ]
+        }
+      }
+    ],
+    "regions_balanced": true,
+    "tasks_ended_after_regions": true,
+    "trace_wall_anchor": " N=1 Trace=7845696713109248 Mono=7845696713109216 Wall=2026-10-24T10:26:39.774212551Z",
+    "limitations": "Running is scheduled wall time, not measured CPU. Syscall includes kernel and OS scheduling delay. Nested phases must not be summed. Package lifetime includes final race-detector waiting; use role release and producer preparation log for actual overlap. Healthy intervals cannot attribute the historical timeout."
+  },
+  "overlap": {
+    "producer_release_utc": "2026-10-24T10:27:00.718681941Z",
+    "capture_release_utc": "2026-10-24T10:27:00.718720430Z",
+    "producer_preparation_ms": 894.356422,
+    "basis": "Producer preparation begins immediately after the rendezvous and ends at its preparation log. All three reload intervals are inside this real work interval; package lifetime alone is not used as proof."
+  },
+  "original_failure": {
+    "source": "8cb3fc0c8f86825ac176bdef8b50e3669130185a",
+    "artifact": "original-compatibility.json",
+    "sha256": "8c33f2a9d6140e12319cc356b7323fb861d390efbf631394af5126770f7219eb",
+    "status": "retained failed, not reproduced, historical cause unknown"
+  },
+  "conclusion": "Controlled overlap passes with all five capture contracts intact and readiness 24.410\u201328.100ms. The recorder separates old held query waiting from replacement work and publication. No causal production defect or production repair is established. The prior historical run lacks phase evidence, so its cause remains unknown. Complete configured acceptance remains dispatcher-owned.",
+  "artifacts": {
+    "syscall.pprof": "d4538832335a065d9a61f7a9fac004a8820fed4f06dc9d4e09e0a47f7ae04981",
+    "sync-top.txt": "89e39b242e67db87de0c9c827c6ca3f215558889cf4d1f504ebba572a9187c78",
+    "original-compatibility.json": "8c33f2a9d6140e12319cc356b7323fb861d390efbf631394af5126770f7219eb",
+    "sched-top.txt": "04711c14e2818b670efe3c95f05a95b983c0d49aadd7bac131a2e9e7711fc24b",
+    "test.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "test.json": "64d3f1a47266ca5511e8352064020b1a394489818adc437454525aeb708a2490",
+    "command.json": "40bb96c550c376ddd67b0788f0a63f91b065529a6c2fdca81219bb56a51aea67",
+    "syscall-top.txt": "b8900afc952fe88bfb3111d84ad4c039843272203042430ae2614ae7ab4930aa",
+    "trace-decoder-note.txt": "3ceea1d42ee5ee14c42646e12d3b06d6681e8572eeca4add4db827e03f1e89af",
+    "pressure.jsonl": "a4cf9ab7ffd52372c5106fed882ad12a3d5bcba8e841fad43fc2b35c3b1c0dbe",
+    "sched.pprof": "944cbdf79f7fe563ecc0bbd9a5a432a613ecd9d9c4f80379f3b2bb458efddb71",
+    "stop-monitor": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "run.py": "0eb6e28b3c112ebbdb4dab13abf7371c0a723c06e1a693c708107ebca888eee2",
+    "trace-events.txt": "0fa067aa6141b91bc7def4b7937ad58605cb69551107a8be451fbb5cfb9cd99c",
+    "analyze.py": "579c5e17d79a16813ff84e2157052adf52afffcdbad161a333c8f9a31f69a493",
+    "compact-capture-4086594003.trace": "03ffb1b5643b760a8913bf11d4ed46859908a03ff1740ac8c44781cda49251d3",
+    "analysis.json": "d2963c4e46911583e86937d2b46d47646bde4ebbfb8db65b5aab2b1a44efe38e",
+    "sync.pprof": "aeb08e2224ad1502c0b5c283cbe9ec98f95f0e4b2b9410b759fde4a003e6adfa",
+    "monitor.py": "37aa013e370e0f2c40e0a50706baac9c6982a4315df312614f52bc858f2678d9"
+  }
+}

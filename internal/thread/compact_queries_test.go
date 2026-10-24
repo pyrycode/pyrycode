@@ -377,20 +377,22 @@ func TestCompactLifecycle(t *testing.T) {
 }
 
 func TestCompactCapture(t *testing.T) {
+	testRecordCompactTrace(t)
 	for _, outcome := range []string{"success", "failure", "cancel", "current-failure", "current-cancel"} {
 		t.Run(outcome, func(t *testing.T) {
 			s, h := testThreadStore(t)
+			trace := testTraceCompactStore(t, s)
 			testStoreAppend(t, h, testStoreA, testMain(0, "tool_use", `,"tool_use_id":"root","name":"Agent"`))
 			testStoreAppend(t, h, testStoreA, testMessage(0))
 			if e := s.Load(context.Background(), testStoreA); e != nil {
 				t.Fatal(e)
 			}
-			snap := testStoreWait(t, s, testStoreA, StateUsable, 2)
+			snap := trace.wait(t, s, testStoreA, 2)
 			testStoreAppend(t, h, testStoreB, testMessage(0))
 			if e := s.Load(context.Background(), testStoreB); e != nil {
 				t.Fatal(e)
 			}
-			unrelated := testStoreWait(t, s, testStoreB, StateUsable, 1)
+			unrelated := trace.wait(t, s, testStoreB, 1)
 			want := testCompactOracle(t, s, snap.Items, 0, 2, true)
 			lookup := s.lookup
 			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -400,8 +402,11 @@ func TestCompactCapture(t *testing.T) {
 			type requestKey struct{}
 			s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
 				if ctx.Value(requestKey{}) != nil && first.CompareAndSwap(false, true) {
+					defer trace.begin("held-query")()
+					trace.mark("query held")
 					close(entered)
 					<-release
+					trace.mark("query released")
 					if strings.HasSuffix(outcome, "failure") {
 						return nil, errors.New("private source path")
 					}
@@ -413,21 +418,35 @@ func TestCompactCapture(t *testing.T) {
 			var p CompactQueryResult
 			var err error
 			go func() { defer close(done); p, err = s.CompactNewestWindow(ctx, testStoreA, 2) }()
+			defer func() {
+				releaseOnce.Do(func() { close(release) })
+				cancel()
+				<-done
+			}()
 			testStoreSignal(t, entered)
 			if got := s.Snapshot(testStoreA); !reflect.DeepEqual(got, snap) {
 				t.Fatal("concurrent complete read", got)
 			}
 			testStoreAppend(t, h, testStoreA, testMessage(0))
-			testStoreWait(t, s, testStoreA, StateUsable, 3)
+			trace.wait(t, s, testStoreA, 3)
 			if !strings.HasPrefix(outcome, "current-") {
-				if e := s.Unload(testStoreA); e != nil {
+				if outcome == "success" {
+					testCompactOverlap(t, "capture")
+				}
+				finished := trace.begin("unload")
+				e := s.Unload(testStoreA)
+				finished()
+				if e != nil {
 					t.Fatal(e)
 				}
-				if e := s.Load(context.Background(), testStoreA); e != nil {
+				finished = trace.begin("reload-admission")
+				e = s.Load(context.Background(), testStoreA)
+				finished()
+				if e != nil {
 					t.Fatal(e)
 				}
 			}
-			replacement := testStoreWait(t, s, testStoreA, StateUsable, 3)
+			replacement := trace.wait(t, s, testStoreA, 3)
 			if strings.HasSuffix(outcome, "cancel") {
 				cancel()
 			}

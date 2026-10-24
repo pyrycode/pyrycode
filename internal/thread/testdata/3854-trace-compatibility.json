@@ -1,0 +1,138 @@
+{
+  "measured_source": "b9f84f5ab1d5da65e13048761bc6875bedd31517",
+  "prior_review_candidate": "db53d128f13b45eeaf5345b8d005d9b750e398e6",
+  "independent_review_url": "https://github.com/pyrycode/pyrycode/pull/3855#issuecomment-6383560511",
+  "commands": [
+    {
+      "tag": "recorder-after",
+      "source": "b9f84f5ab1d5da65e13048761bc6875bedd31517",
+      "command": [
+        "python3",
+        "scripts/test-admission.py",
+        "--",
+        "go",
+        "test",
+        "-timeout=5m",
+        "-race",
+        "-json",
+        "-count=1",
+        "-run",
+        "^TestCompactTraceRecording$",
+        "./internal/thread"
+      ],
+      "exit_code": 0
+    },
+    {
+      "tag": "external-trace-after",
+      "source": "b9f84f5ab1d5da65e13048761bc6875bedd31517",
+      "command": [
+        "python3",
+        "scripts/test-admission.py",
+        "--",
+        "go",
+        "test",
+        "-timeout=5m",
+        "-race",
+        "-json",
+        "-count=1",
+        "-run",
+        "^(TestCompactTraceRecording|TestCompactCapture)$",
+        "-trace=/work/manual-3854-overlap-evidence-20261024/external-trace-after.trace",
+        "./internal/thread"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "results": {
+    "external-trace-before": {
+      "counts": {
+        "run": 2,
+        "fail": 2
+      },
+      "skipped_tests": [],
+      "package_results": [
+        {
+          "Time": "2026-10-24T10:46:08.199442665Z",
+          "Action": "fail",
+          "Package": "github.com/pyrycode/pyrycode/internal/thread",
+          "Elapsed": 0.018
+        }
+      ]
+    },
+    "recorder-after": {
+      "counts": {
+        "run": 3,
+        "pass": 3
+      },
+      "skipped_tests": [],
+      "package_results": [
+        {
+          "Time": "2026-10-24T11:19:13.616289462Z",
+          "Action": "pass",
+          "Package": "github.com/pyrycode/pyrycode/internal/thread",
+          "Elapsed": 1.023
+        }
+      ]
+    },
+    "external-trace-after": {
+      "counts": {
+        "run": 7,
+        "skip": 1,
+        "pass": 6
+      },
+      "skipped_tests": [
+        "TestCompactTraceRecording"
+      ],
+      "package_results": [
+        {
+          "Time": "2026-10-24T11:19:23.049880353Z",
+          "Action": "pass",
+          "Package": "github.com/pyrycode/pyrycode/internal/thread",
+          "Elapsed": 6.291
+        }
+      ]
+    }
+  },
+  "prior_configured_gates": {
+    "commit": "db53d128f13b45eeaf5345b8d005d9b750e398e6",
+    "all_ten_passed": true,
+    "passed_at": "2026-10-24T11:14:10.063Z",
+    "retained_root": "/work/manual-3854-overlap-evidence-20261024/verified-db53d128-gates",
+    "artifacts": {
+      "verifier-gate_#3854_9.log": "180e1615e1c824baaba9bd35efb8c73f7c047dec0132f54f0066d384aa67202d",
+      "verifier-gate_#3854_2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_4.stderr.log": "cd48916030a08f05b95d82f15663b9126e7387ca81216411d57ec4f0919bbaa3",
+      "verifier-gate_#3854_1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_10.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_8.log": "02e12300f2ebaa48c22ccaba6537fe19f5cc7c76d9e24fabef0315055824b516",
+      "verifier-gate_#3854_5.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_6.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_3.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_8.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_7.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_4.log": "ee125fc1fd982d383e6f29b3837664f9b34c2fea38dec6146f97a1b13f6f9f27",
+      "verifier-gate_#3854_10.log": "780feca9e27d98a3424ab887f90be751187ac52f610140c83bbf9da7a8ab6934",
+      "verifier-gate_#3854_1.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_6.log": "0992efad0a4d93cbe9dbef548b74b2efd341a203e7ac0697b40edc2bcca8d1cf",
+      "verifier-gate_#3854_2.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_7.log": "c8e9928c03a1c6d4b7dee7e24a234475d71225f9162769d960e05fdfd483f661",
+      "verifier-gate_#3854.prefix.json": "1b53ed18a022aa8ee6273d555f96fa59f2fb6979c8684530e64925ab0b987579",
+      "verifier-gate_#3854_9.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verifier-gate_#3854_3.log": "685d158f951e3eb11749d2e519a64eba4f57dcc93cd562eaee2cc9457f72846e",
+      "verifier-gate_#3854_5.log": "964d1b8c93d8aefa70be77dc776bbd9bc5d0f43b932186abaad8b020ec248820",
+      "verifier-gate_#3854.pass.json": "c6bc0113a3b8c521b5f98fca66693fe7c24272e46411c6c4ec9835997031d785"
+    }
+  },
+  "artifacts": {
+    "external-trace-before.jsonl": "db2cda387f973ac0b8b6f398d3935aa3d955a9c05ab78318c2c2173d401395b6",
+    "external-trace-before.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "external-trace-before.trace": "223f0e115c63d92f061ec95a525455e62bba8ab22e585b5a9ebfbf871738066e",
+    "recorder-after.jsonl": "3711dd8dcd546425e085d5d57db20bc8f0489036b56110812ef995b8119548ee",
+    "recorder-after.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "external-trace-after.jsonl": "e133f9463c818b814ddb651b49c4414bc36a126974c0670fc9e3b69fe2f6b632",
+    "external-trace-after.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "external-trace-after.trace": "80f86d1e92fcf04a7b801edfb445898d7d0d964883b928e72633b32d08911380",
+    "trace-compatibility-commands.json": "a8a4234cad89406ef6c72e8ff657f828b27ae96e2747327a7cc58c2b841a3923"
+  },
+  "conclusion": "Independent SHOULD FIX reproduced before correction. Normal recorder ownership checks pass three named events. Under caller-owned tracing only the recorder isolation self-test skips explicitly; all five capture outcomes execute and pass. No production source, capture assertion, deadline or controlled-overlap operation changes. The previous ten-gate pass belongs to db53d128 and is not relabelled as a pass for this changed candidate. Fresh normal review and applicable required checks remain pending."
+}
