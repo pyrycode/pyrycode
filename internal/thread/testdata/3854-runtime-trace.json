@@ -35,5 +35,12 @@
   "limitations": "Running is scheduled wall time, not CPU accounting. Syscall includes kernel and OS scheduling delay; nested phases must not be summed. No timeout occurred, so no new failure stacks exist. Historical load/filesystem/stacks are unknown. This healthy trace cannot identify the original cause or justify a fixture/persistence/scheduler repair.",
   "checks": "go vet ./... and go build -o /tmp/builder-3854-runtime/pyry ./cmd/pyry passed at source_revision; empty vet.log/build.log and test.stderr retained",
   "acceptance": "Diagnosis, supported repair and distinguishing regression remain unresolved; PR 3855 stays draft. Original five-second bound and all assertions unchanged. Full configured acceptance remains dispatcher-owned; macOS outside scope; no live Claude proof needed.",
-  "next_assessment": "Not submitted; proposed traced original concurrent composition retained in /tmp/builder-3854-runtime/next-investigation.json. No additional diagnostic execution authorised."
+  "next_assessment": {
+    "revision": "83e2e335fdb0ce77ed061087e5eb8f42ae29bebb",
+    "source_relationship": "Only plan and this evidence manifest differ from measured cfe2367d; no Go source changes",
+    "request": "next-investigation.json; sha256 140b65ff11d14792315f7e1bda24f2558ce3b60a29367487195380414191654f",
+    "receipt": "next-investigation-receipt.json; sha256 aafa6f1f94cd7c71d2717f9d6b8f7b438c317395955fa928eb1458b01de87440",
+    "response": {"status":"assessment-queued", "id":"39590fee57a9e4a5a83b72d153c4e5081954989995b64c98e4845005917e4064", "executed":0},
+    "scope": "Assess traced original concurrent thread/daemon/relay composition; request/receipt retained in artifacts_directory. Assessment starts no diagnostic and grants no additional execution."
+  }
 }

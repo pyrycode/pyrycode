@@ -320,3 +320,10 @@ This separates observed healthy phases; syscall time still includes kernel/OS
 scheduling. No original timeout, causal repair or distinguishing regression was
 established. Both Open questions remain unresolved. Keep PR #3855 draft and
 the original failure failed; further diagnostics require recovery assessment.
+
+At pushed evidence revision `83e2e335fdb0ce77ed061087e5eb8f42ae29bebb`, the
+normal task client queued assessment
+`39590fee57a9e4a5a83b72d153c4e5081954989995b64c98e4845005917e4064`
+for a traced original concurrent composition. It executed zero tests and grants
+no new diagnostic permission. Request/receipt hashes are retained in the trace
+manifest; no Go source differs from the measured source. This ticket is unbuilt.
