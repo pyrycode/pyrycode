@@ -255,12 +255,34 @@ retains its cursor, disk reads and delivery behavior.
 **Completion must fence live admission.** One generation-specific query token
 owns each connection's unfinished catch-up, page, tool-body or child read; all share
 the slot.
-`cancelThreadQuery` cancels it when a live item update for that conversation is
-admitted; `threadQueryGate` catches already queued updates immediately before sealing. No extra live buffer is
-introduced. For complete queries, cancellation checking and capture watermark
-installation at the separate success marker share `hostedMu`; checking them
-separately could let a live patch cross the completion cut and be overwritten
-by older full items.
+`cancelThreadQuery` cancels it when an uncovered live item update of the same
+projection for that conversation is admitted; `threadQueryGate` catches already
+queued updates immediately before sealing. No extra live buffer is introduced.
+
+A selected reply in the complete projection and a completed join are distinct
+boundaries.
+Under `hostedMu`, `threadQueryGate` rechecks cancellation and records the reply's
+epoch/version in `threadQuery.captured` from its first selected `thread_items`
+envelope, including a fragmented first row. `coversLive` recognizes unsolicited
+complete-view updates for that conversation and epoch at or below the selected
+version. `cancelThreadQuery` does not cancel for those updates, and Run's gate
+withholds them before sealing. A delayed publication may already be
+represented by the query snapshot; cancelling its active encrypted prefix would
+retire a healthy connection. Newer-version or different-epoch updates still
+cancel the complete query, and ambiguous active-send cancellation still retires
+the generation. Cancellation before reply selection retains the existing refusal.
+
+The selected checkpoint belongs only to that query and inbox generation; it
+does not write `threadJoins` or certify client recovery. Cancellation checking
+and completed-join installation at the separate query-success marker share
+`hostedMu`; checking them separately could let a live patch cross the completion
+cut and be overwritten by older full items. `threadQueryGate` decodes only the
+shared epoch/version/projection/query-final fields, independently of
+`continuation`'s numeric page or object assembly shape. Decoding every reply as
+`ThreadItemsPayload` would reject fragmented rows and bypass both the locked
+cancellation recheck and selected checkpoint. Fragment completion alone never
+completes a join; see [query reply decoding](protocol-package-thread-messages.md#query-replies-and-coverage).
+
 Matching-epoch updates at or below the captured version are withheld, including
 fragments. Later updates retain source order, even when distinct patches share
 one consumed version; the capture watermark is not advanced for each patch.
@@ -272,6 +294,14 @@ carry a join into a reused connection ID. The catch-up and page variants of
 `TestThreadCatchUpJoinedLive` exercise these cuts; `TestThreadPageSharedAdmission`
 pins cross-query slot contention and the join cap. Both requested-scope tests
 pair gap-producing thread and legacy handshakes with named requests.
+
+`TestThreadCatchUpCoveredLiveDuringDelivery` holds a selected nonfinal encrypted
+reply and injects older/equal, newer and different-epoch live progress. With both
+ordinary and fragmented first rows, covered updates must preserve exact
+authenticated retained text, the correlated final marker and a trailing
+sentinel with consecutive sender IDs. Uncovered progress must retire the held
+send without publishing it. Small rows alone would miss the continuation-decoding
+bypass.
 
 Expansion finals take a separate `threadQueryGate` branch: cancellation checking
 and release of that query share `hostedMu`, without writing `threadJoins`. Expansion
