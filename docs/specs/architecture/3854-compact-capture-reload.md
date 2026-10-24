@@ -276,3 +276,30 @@ questions, causal diagnosis, supported repair and distinguishing regression
 remain unresolved. Preserve draft PR #3855 and all prior work. Recovery must
 select the next bounded diagnostic; ordinary review and dispatcher-owned
 complete acceptance remain pending. This ticket is not built.
+
+### 2026-10-24 — prospective runtime-trace diagnosis
+
+Recovery selected one Linux race execution of PreparationWork, BoundedWork,
+Lifecycle and all Capture outcomes, in declaration order with fresh histories
+and durable TMPDIR under `/work`. Preserve all previous evidence; do not repeat
+the completed comparisons. This remains the same unresolved reload defect.
+
+Extend only `testCompactTrace` and the capture fixture: attach a runtime trace
+task per outcome, regions to existing phase observations (including worker
+identity), and events/regions to held-query and reload-admission boundaries.
+Regions begin/end on the same goroutine; Store shutdown precedes task end.
+Retain the execution trace, scheduler/syscall/synchronization profiles, interval
+Linux CPU throttling/pressure observations, source revision, order and counts.
+Existing timeout stack capture, query release/join and five-second bound stay.
+Trace evidence must separate runnable delay, synchronization and syscall time;
+a non-reproduction still cannot establish the historical cause or a repair.
+
+Security re-review: PASS for test-only annotation. No trust-boundary, secret,
+crypto, subprocess, network, file-admission or error-contract change. Trace
+labels carry fixture IDs, worker identities and phase names only. SHOULD FIX:
+end regions on their originating goroutine and end tasks after joined cleanup;
+keep diagnostic locks separate from Store locks. No new goroutines or exports.
+No overlap found on the two fixture files. The bounded addition and retained
+work remain below 800 written lines, with zero exports/migrations/reject branches
+and the original three acceptance criteria. Any supported repair needs another
+prospective design revision. Full acceptance remains dispatcher-owned.
