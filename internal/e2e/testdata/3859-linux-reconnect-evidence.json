@@ -1,0 +1,254 @@
+{
+  "ticket": 3859,
+  "platform": "Linux",
+  "eventCountsMeaning": "Only named Go JSON events are counted. Plain package and static/build logs do not enumerate tests; their zero event counts are not an executed-test claim.",
+  "fullModuleAcceptance": "pending dispatcher/verifier",
+  "historicalFailure": {
+    "revision": "6536abd938",
+    "log": "/work/Projects/pyrycode-agents/logs/verifier-gate_#3857_9.log.failure-1792842366465.log",
+    "sha256": "c15a28c7d17405edeb7837be617bc68c81b1bac526f6068476cedeb2d7b3fed4",
+    "sequence": [
+      "11:44:29.424Z producer phone disconnected",
+      "11:44:29.425Z binary generation 1 pumps stopped and registration removed",
+      "11:44:29.426Z fakephone dial expected HTTP 101 but received 503"
+    ],
+    "sameTreeRerun": {
+      "log": "/work/Projects/pyrycode-agents/logs/2026-10-24T11-46-06-574Z_verifier-gate-rerun_#3857.log",
+      "sha256": "b3b0983a5dc25d602f8e61ae992a112ee9fd6e75d5eee8315d3a91d33332853f",
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "runs": [
+    {
+      "revision": "plan plus uncommitted tests",
+      "outcome": "not admitted",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -count=20 -run '^TestRelayV2_AgentContentRetiredReconnect$' -json ./internal/e2e",
+      "note": "Sandbox could not reach managed context; zero tests admitted. Escalated through normal approval.",
+      "log": "/tmp/builder-3859/baseline.json",
+      "sha256": "367bc8f47e51fab1dbb589ec3e040e3393d0a12d3686e9b03783ea0756c196ca",
+      "events": {
+        "run": 0,
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "plan plus uncommitted tests",
+      "outcome": "expected build failure",
+      "command": "go test -c -o /tmp/builder-3859/reconnect-red.test ./internal/e2e/internal/fakerelay",
+      "note": "Server.ReconnectBinary undefined before implementation; zero executed.",
+      "log": "/tmp/builder-3859/regression-red-build.log",
+      "sha256": "184591377ff4911838b1063835388214958c395e36a52e5bb56e5a9dbb2be342",
+      "events": {
+        "run": 0,
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "plan plus uncommitted tests",
+      "outcome": "expected static failure",
+      "command": "go vet ./internal/e2e/internal/fakerelay",
+      "note": "Server.ReconnectBinary undefined before implementation.",
+      "log": "/tmp/builder-3859/regression-red-vet.log",
+      "sha256": "07aa248519a99d859c856e85e777bf51b1aed0fa29bde93a54465cd1daa20c25",
+      "events": {
+        "run": 0,
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "64ef0e0fba71a723b7fdc97141cfc144f6355664",
+      "outcome": "failed baseline",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -count=20 -run '^TestRelayV2_AgentContentRetiredReconnect$' -json ./internal/e2e",
+      "note": "The additional catch-up failure has no error-code diagnostic. Do not equate it with the historical HTTP 503; it did not recur in the later direct-dial overlay run.",
+      "log": "/tmp/builder-3859/baseline-admitted.json",
+      "sha256": "21c4bd22f732a1513cefb20c5a72dd946cd78f5265d75fdc6de66301c40b977b",
+      "events": {
+        "run": 20,
+        "pass": 19,
+        "fail": 1,
+        "skip": 0
+      },
+      "failedAttempts": [
+        {
+          "test": "TestRelayV2_AgentContentRetiredReconnect",
+          "output": [
+            "=== RUN   TestRelayV2_AgentContentRetiredReconnect",
+            "time=2026-10-24T12:13:57.630Z level=DEBUG msg=\"fakerelay: binary connected\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 generation=1",
+            "time=2026-10-24T12:13:57.653Z level=DEBUG msg=\"fakerelay: phone connected\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 conn_id=c-1",
+            "    relay_v2_agent_content_retired_test.go:59: interactive handshake: noise_init sent; awaiting noise_resp",
+            "    relay_v2_agent_content_retired_test.go:59: interactive handshake: response frame received",
+            "time=2026-10-24T12:13:57.686Z level=DEBUG msg=\"fakerelay: phone disconnected\" conn_id=c-1",
+            "time=2026-10-24T12:13:57.686Z level=DEBUG msg=\"fakerelay: phone connected\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 conn_id=c-2",
+            "    relay_v2_agent_content_retired_test.go:77: interactive handshake: noise_init sent; awaiting noise_resp",
+            "    relay_v2_agent_content_retired_test.go:77: interactive handshake: response frame received",
+            "time=2026-10-24T12:13:57.703Z level=DEBUG msg=\"fakerelay: phone disconnected\" conn_id=c-2",
+            "time=2026-10-24T12:13:57.703Z level=DEBUG msg=\"fakerelay: phone connected\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 conn_id=c-3",
+            "    relay_v2_agent_content_retired_test.go:77: interactive handshake: noise_init sent; awaiting noise_resp",
+            "    relay_v2_agent_content_retired_test.go:77: interactive handshake: response frame received",
+            "    relay_v2_agent_content_retired_test.go:101: explicit catch-up failed",
+            "time=2026-10-24T12:13:57.722Z level=DEBUG msg=\"fakerelay: phone disconnected\" conn_id=c-3",
+            "time=2026-10-24T12:13:57.722Z level=DEBUG msg=\"fakerelay: binary pumps stopped\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 generation=1",
+            "time=2026-10-24T12:13:57.722Z level=DEBUG msg=\"fakerelay: binary deregistered\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 generation=1",
+            "time=2026-10-24T12:13:57.722Z level=DEBUG msg=\"fakerelay: binary disconnected\" server_id=116fba73-83eb-40fa-aa0e-7d1579c9e756 generation=1",
+            "--- FAIL: TestRelayV2_AgentContentRetiredReconnect (0.17s)"
+          ]
+        }
+      ]
+    },
+    {
+      "revision": "862aef3363bdedecc908e48a39f6bb0caec15aca",
+      "outcome": "passed package",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -run '^TestReconnectBinary' ./internal/e2e/internal/fakerelay",
+      "note": "Requested before implementation, but admitted afterward. Plain output does not enumerate tests; counted proof is regression-green.json.",
+      "log": "/tmp/builder-3859/regression-red.log",
+      "sha256": "2a59198643ef6933e025762fe80219d2ebf0c10d8e36854b3af565dc2b67e2d6",
+      "events": {
+        "run": 0,
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "862aef3363bdedecc908e48a39f6bb0caec15aca",
+      "outcome": "failed diagnostic setup",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -run '^TestPeerCloseAcceptedDeliveryRetiresTransport$' -count=1 -json ./internal/relay",
+      "note": "Minimal harness handshake uses admission-only delivery; corrected setup enters the acknowledged lane explicitly.",
+      "log": "/tmp/builder-3859/cause.json",
+      "sha256": "08ec0b96805a40b18bf419abd02f363dc976242d17c1df1047cdeddfc4ab76d1",
+      "events": {
+        "run": 1,
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "failedAttempts": [
+        {
+          "test": "TestPeerCloseAcceptedDeliveryRetiresTransport",
+          "output": [
+            "=== RUN   TestPeerCloseAcceptedDeliveryRetiresTransport",
+            "    v2session_peer_close_transport_test.go:27: handshake delivery did not finish",
+            "--- FAIL: TestPeerCloseAcceptedDeliveryRetiresTransport (3.01s)"
+          ]
+        }
+      ]
+    },
+    {
+      "revision": "862aef3363bdedecc908e48a39f6bb0caec15aca",
+      "outcome": "passed",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -count=20 -run '^TestRelayV2_AgentContentRetiredReconnect$' -json ./internal/e2e",
+      "note": "Twenty uncached executions; both capability modes, retained roster, retired-content rejection and explicit catch-up remain asserted.",
+      "log": "/tmp/builder-3859/repaired-reconnect.json",
+      "sha256": "f65f1acfc406987b4e3ce7a39acf61764a538d64ef44a7cb9453d249ed5da027",
+      "events": {
+        "run": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "399260acb21b8423bf45bb9123a63ddcf1783e1f",
+      "outcome": "passed",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -run '^TestPeerCloseAcceptedDeliveryRetiresTransport$' -json ./internal/relay",
+      "note": "Held accepted encrypted output plus peer close retires the binary socket.",
+      "log": "/tmp/builder-3859/cause-corrected.json",
+      "sha256": "3164e9a3cc6b16a7fae7a04da847e51ea8a8d972060a4a147d3fb6bb971f5d35",
+      "events": {
+        "run": 1,
+        "pass": 1,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "399260acb21b8423bf45bb9123a63ddcf1783e1f",
+      "outcome": "passed",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -run '^TestReconnectBinary' -json ./internal/e2e/internal/fakerelay",
+      "note": "Five Go test events: four leaf cases and their parent.",
+      "log": "/tmp/builder-3859/regression-green.json",
+      "sha256": "7a25310f1a81a09c65513281ac7a9a859264cfad1df01ff607d608a85235e7b5",
+      "events": {
+        "run": 5,
+        "pass": 5,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "399260acb21b8423bf45bb9123a63ddcf1783e1f",
+      "outcome": "expected mutation failure",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -overlay /tmp/builder-3859/membership-only.json -count=1 -run '^TestReconnectBinaryRetiringRegistration$' -json ./internal/e2e/internal/fakerelay",
+      "note": "Overlay removes current != old from readiness. Held stale registration is incorrectly accepted; regression fails deterministically.",
+      "log": "/tmp/builder-3859/membership-only-result.json",
+      "sha256": "1077296bc8458e3a9db8915070f0ad9de4e835ef37f914b55cde18b005e27512",
+      "events": {
+        "run": 1,
+        "pass": 0,
+        "fail": 1,
+        "skip": 0
+      },
+      "failedAttempts": [
+        {
+          "test": "TestReconnectBinaryRetiringRegistration",
+          "output": [
+            "=== RUN   TestReconnectBinaryRetiringRegistration",
+            "    reconnect_test.go:69: retiring registration satisfied reconnect",
+            "--- FAIL: TestReconnectBinaryRetiringRegistration (0.00s)"
+          ]
+        }
+      ]
+    },
+    {
+      "revision": "399260acb21b8423bf45bb9123a63ddcf1783e1f",
+      "outcome": "passed diagnostic repetition",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -tags e2e -race -overlay /tmp/builder-3859/direct-dial.json -count=20 -run '^TestRelayV2_AgentContentRetiredReconnect$' -json ./internal/e2e",
+      "note": "Overlay removes only the reconnect barrier and retains diagnostics. This nondeterministic pass is not the controlled regression or evidence that the old fixture was reliable.",
+      "log": "/tmp/builder-3859/direct-dial-result.json",
+      "sha256": "bc832045c35f954fe29a7c33183e0f7606c7f2890bf50e6426cdb3ed3b115fad",
+      "events": {
+        "run": 20,
+        "pass": 20,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "399260acb21b8423bf45bb9123a63ddcf1783e1f",
+      "outcome": "passed",
+      "command": "go vet ./...",
+      "note": "Final static check; initial vet also passed at 862aef33.",
+      "log": "/tmp/builder-3859/vet-final.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "events": {
+        "run": 0,
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      }
+    },
+    {
+      "revision": "862aef3363bdedecc908e48a39f6bb0caec15aca",
+      "outcome": "passed",
+      "command": "go build -o /tmp/builder-3859/pyry ./cmd/pyry",
+      "note": "Subsequent changes touch tests and plan only.",
+      "log": "/tmp/builder-3859/build.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "events": {
+        "run": 0,
+        "pass": 0,
+        "fail": 0,
+        "skip": 0
+      }
+    }
+  ]
+}

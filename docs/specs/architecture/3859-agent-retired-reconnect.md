@@ -113,3 +113,22 @@ unit and fake-daemon acceptance remain pending for the dispatcher on Linux.
   delivery lane on a peer without hosted-app capability, then closes the peer
   while that exact write is accepted. The production cancellation contract and
   fixture-repair design are unchanged. Preserve the failed setup log as evidence.
+- 2026-10-24: The open causal question is resolved by
+  `TestPeerCloseAcceptedDeliveryRetiresTransport`: holding an accepted encrypted
+  control reply, then processing peer close, cancels delivery and retires the
+  binary socket. `TestReconnectBinaryRetiringRegistration` independently observes
+  HTTP 503 in the registration gap, then routes current-phone traffic through
+  successive replacements. Removing the different-registration guard makes it
+  fail with `retiring registration satisfied reconnect`.
+- Linux evidence is committed in
+  `internal/e2e/testdata/3859-linux-reconnect-evidence.json`: exact revisions,
+  commands, counts, log digests and all failed test attempts. Candidate reconnect
+  checks passed 20/20 at `862aef33`; the corrected cause check and five barrier test
+  events passed at `399260ac`. Vet and build passed. Full-module acceptance remains
+  pending for the verifier. Total written work remains below 800 lines, with one
+  exported method and one consumer.
+- The isolated baseline additionally failed once during explicit catch-up
+  (19/20 passed), without recording an error code. A later 20-run direct-dial
+  overlay with diagnostics passed; that failure remains unclassified and retained,
+  and is not evidence of the historical HTTP 503 cause. The repair makes no claim
+  to fix a separate catch-up defect. No assertion is skipped or retried.
