@@ -223,3 +223,31 @@ The final admitted race check of `./internal/thread/...` finished in 586.955 s:
 `4c09ab74`; only these spec/evidence records changed. Command, raw JSON hash and
 skip reasons are retained with the comparisons. This package pass does not
 resolve the original failure or complete dispatcher-owned acceptance.
+
+### 2026-10-24 — manual request-format correction
+
+The managed deeper-request failure has a reproduced validation defect. Its
+`narrowerInsufficient` explanation is 2017 characters; `validateInvestigation`
+permits at most 2000. The same installed validator rejects the original and
+accepts a 1967-character explanation after removing one redundant sentence
+about the earlier assessment. Revision, failed test, retained evidence and all
+selectors are unchanged. No permission or test-selection policy was relaxed.
+
+The original rejected request and a concise copy are retained under
+`/work/Projects/pyrycode-agents/logs/evidence/manual-3854-client-format-20261024`.
+The same-scope request is committed as
+`internal/thread/testdata/3854-next-investigation.json`. It names the already
+pushed evidence revision `590d577230677a419e217a1beb353b9509fcd2dc`; Go source
+remains the measured `4c09ab74`. Before submitting, the next admitted builder
+should confirm that source relationship and use its own normal task client.
+A completed worker's credentials must not be reused. The concise copy has not
+been submitted or accepted, and has executed zero tests. Any further diagnostic
+still needs recovery assessment and normal test admission.
+
+This is manual author validation of request shape. It is not independent
+review, a causal reload diagnosis or a reliability fix. Keep the rejected
+request and original timeout failed. Existing five-second readiness, captured
+state, isolation, cancellation, security and required review/checks remain.
+Do not repeat the completed durable comparisons merely to obtain another green
+run. The ticket's numeric written-line and production-file estimates can be
+removed because they do not describe a user outcome or establish diagnosis.
