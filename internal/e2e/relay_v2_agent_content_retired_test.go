@@ -70,10 +70,16 @@ func TestRelayV2_AgentContentRetiredReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, caps := range [][]string{{protocol.CapabilityInteractive}, {protocol.CapabilityInteractive, protocol.CapabilityThread}} {
+		// Peer teardown can cancel accepted ciphertext and retire the binary
+		// socket. Cross that transport lifetime explicitly before reconnecting.
+		if !fr.ReconnectBinary(ctx, serverID) {
+			t.Fatalf("binary reconnect did not complete: %v\n%s", ctx.Err(), h.Stderr.String())
+		}
 		phone, err := fakephone.Dial(ctx, fr.URL(), serverID, paired.Token, "reconnect")
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("reconnect dial: %v\n%s", err, h.Stderr.String())
 		}
+		t.Cleanup(func() { _ = phone.Close() })
 		send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pub, paired.Token, caps...)
 		seal, next := sealedConnDriver(t, phone, "reconnect", send, recv)
 		request := uint64(10 + i)
@@ -98,7 +104,9 @@ func TestRelayV2_AgentContentRetiredReconnect(t *testing.T) {
 			for {
 				env, ok := next(deadline)
 				if !ok || env.Type == protocol.TypeError {
-					t.Fatal("explicit catch-up failed")
+					var p protocol.ErrorPayload
+					_ = json.Unmarshal(env.Payload, &p)
+					t.Fatalf("explicit catch-up failed: type=%q code=%q\n%s", env.Type, p.Code, h.Stderr.String())
 				}
 				if env.Type != protocol.TypeThreadItems || env.InReplyTo == nil || *env.InReplyTo != request {
 					continue
