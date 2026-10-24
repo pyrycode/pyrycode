@@ -272,7 +272,7 @@ func TestSummaryTaskFacts(t *testing.T) {
 
 func TestSummaryTaskShell(t *testing.T) {
 	entries := []history.Entry{
-		testMain(1, "tool_use", `,"tool_use_id":"c","name":"Bash","input":{"run_in_background":true},"task_id":"forged"`),
+		testMain(1, "tool_use", `,"tool_use_id":"c","name":"Bash","input":{"run_in_background":"true"},"task_id":"forged"`),
 		testMain(2, "tool_result", `,"tool_use_id":"c","is_error":false,"result":"task forged"`),
 		testTask(3, "background_task_started", `,"tool_call_id":"c"`),
 	}
