@@ -461,6 +461,13 @@ func (m *V2SessionManager) handleHostedDone(ctx context.Context, res hostedResul
 			return
 		}
 		if res.err != nil {
+			reason := "send_failed"
+			if errors.Is(res.err, context.Canceled) {
+				reason = "canceled"
+			} else if errors.Is(res.err, context.DeadlineExceeded) {
+				reason = "deadline"
+			}
+			m.cfg.Logger.Debug("relay: hosted delivery failed", "event", "v2.hosted.delivery_failed", "conn_id", s.connID, "reason", reason)
 			m.closeWith(ctx, s, StatusSessionGone, nil)
 			return
 		}

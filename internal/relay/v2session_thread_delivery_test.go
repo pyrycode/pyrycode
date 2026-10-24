@@ -482,6 +482,7 @@ func TestThreadDeliveryActiveCancellation(t *testing.T) {
 				testThreadResult(t, done, context.Canceled)
 				testHostedAwait(t, exited)
 				testHostedGone(t, p)
+				p.waitEvent("v2.hosted.delivery_failed", "")
 				if len(p.rec.snapshot()) != 1 {
 					t.Fatal("canceled held output published")
 				}
