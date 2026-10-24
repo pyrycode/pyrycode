@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -23,6 +24,63 @@ type testCompactTrace struct {
 	mu     sync.Mutex
 	start  time.Time
 	events []string
+}
+
+// testRecordCompactTrace keeps recording alive through all child cleanups.
+func testRecordCompactTrace(t *testing.T) {
+	t.Helper()
+	dir := os.Getenv("PYRY_COMPACT_TRACE_DIR")
+	if dir == "" {
+		return
+	}
+	file, err := os.CreateTemp(dir, "compact-capture-*.trace")
+	if err != nil {
+		t.Fatal("create compact recording:", err)
+	}
+	writer := bufio.NewWriter(file)
+	if err := runtimeTrace.Start(writer); err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			t.Error("close unstarted compact recording:", closeErr)
+		}
+		t.Fatal("start compact recording:", err)
+	}
+	t.Logf("compact recording started path=%s time=%s", file.Name(), time.Now().UTC().Format(time.RFC3339Nano))
+	t.Cleanup(func() {
+		runtimeTrace.Stop()
+		if err := writer.Flush(); err != nil {
+			t.Error("write compact recording:", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Error("close compact recording:", err)
+		}
+		t.Logf("compact recording stopped path=%s time=%s", file.Name(), time.Now().UTC().Format(time.RFC3339Nano))
+	})
+}
+
+func TestCompactTraceRecording(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PYRY_COMPACT_TRACE_DIR", dir)
+	for range 2 {
+		t.Run("record", func(t *testing.T) {
+			testRecordCompactTrace(t)
+			if !runtimeTrace.IsEnabled() {
+				t.Fatal("runtime recording did not start")
+			}
+		})
+		if runtimeTrace.IsEnabled() {
+			t.Fatal("runtime recording survived cleanup")
+		}
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 2 {
+		t.Fatal("recordings must have unique paths", files, err)
+	}
+	for _, file := range files {
+		info, err := file.Info()
+		if err != nil || info.Size() <= 16 || info.Mode().Perm() != 0600 {
+			t.Fatal("incomplete or non-private recording", info, err)
+		}
+	}
 }
 
 func testTraceCompactStore(t *testing.T, s *Store) *testCompactTrace {

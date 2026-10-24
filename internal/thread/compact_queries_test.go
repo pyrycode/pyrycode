@@ -377,6 +377,7 @@ func TestCompactLifecycle(t *testing.T) {
 }
 
 func TestCompactCapture(t *testing.T) {
+	testRecordCompactTrace(t)
 	for _, outcome := range []string{"success", "failure", "cancel", "current-failure", "current-cancel"} {
 		t.Run(outcome, func(t *testing.T) {
 			s, h := testThreadStore(t)
