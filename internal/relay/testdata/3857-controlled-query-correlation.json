@@ -1,0 +1,211 @@
+{
+  "alias_domain": "synthetic-linux-proof-at-bc790d0f44a0e5943bd1ece6ecacd5d5bc63fafc",
+  "command": {
+    "source": "bc790d0f44a0e5943bd1ece6ecacd5d5bc63fafc",
+    "command": [
+      "python3",
+      "scripts/test-admission.py",
+      "--",
+      "go",
+      "test",
+      "-timeout=5m",
+      "-race",
+      "-json",
+      "-count=1",
+      "-run",
+      "^TestProducerQueryRefusalCorrelation$",
+      "./internal/relay"
+    ],
+    "artifact_root": "/work/manual-3857-content-free-evidence-20261024/correlation-final-runtime",
+    "exit_code": 0
+  },
+  "named_counts": {
+    "run": 1,
+    "pass": 1
+  },
+  "events": [
+    {
+      "sequence": 1,
+      "stage": "baseline_final_received",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 2,
+      "requested_checkpoint": 0,
+      "selected_checkpoint": 2,
+      "completed_checkpoint": 2,
+      "query_is_current": false,
+      "query_context_done": true,
+      "inbox_retired": false,
+      "facts": {
+        "final": true,
+        "in_reply_to": 2,
+        "wire_type": "thread_items"
+      }
+    },
+    {
+      "sequence": 2,
+      "stage": "query_admitted",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 3,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": null,
+      "completed_checkpoint": 2,
+      "query_is_current": true,
+      "query_context_done": false,
+      "inbox_retired": false
+    },
+    {
+      "sequence": 3,
+      "stage": "producer_enqueue_acknowledged",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 3,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": null,
+      "completed_checkpoint": 2,
+      "query_is_current": true,
+      "query_context_done": true,
+      "inbox_retired": false,
+      "facts": {
+        "live_version": 237
+      }
+    },
+    {
+      "sequence": 4,
+      "stage": "usable_provider_completed",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 3,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": null,
+      "completed_checkpoint": 2,
+      "query_is_current": false,
+      "query_context_done": true,
+      "inbox_retired": false,
+      "facts": {
+        "provider_error": false,
+        "provider_usable": true,
+        "provider_version": 240
+      }
+    },
+    {
+      "sequence": 5,
+      "stage": "terminal_refusal_received",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 3,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": null,
+      "completed_checkpoint": 2,
+      "query_is_current": false,
+      "query_context_done": true,
+      "inbox_retired": false,
+      "facts": {
+        "code": "thread.query_failed",
+        "in_reply_to": 3,
+        "retryable": true,
+        "wire_fields": 3,
+        "wire_type": "error"
+      }
+    },
+    {
+      "sequence": 6,
+      "stage": "live_frame_received",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 3,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": null,
+      "completed_checkpoint": 2,
+      "query_is_current": false,
+      "query_context_done": true,
+      "inbox_retired": false,
+      "facts": {
+        "live_version": 237,
+        "wire_type": "thread_text_append"
+      }
+    },
+    {
+      "sequence": 7,
+      "stage": "refusal_did_not_complete",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 3,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": null,
+      "completed_checkpoint": 2,
+      "query_is_current": false,
+      "query_context_done": true,
+      "inbox_retired": false
+    },
+    {
+      "sequence": 8,
+      "stage": "fresh_final_received",
+      "peer": "producer-1",
+      "inbox_generation": "inbox-1",
+      "conversation": "conversation-1",
+      "projection": "complete",
+      "query_id": 4,
+      "requested_checkpoint": 2,
+      "selected_checkpoint": 240,
+      "completed_checkpoint": 240,
+      "query_is_current": false,
+      "query_context_done": true,
+      "inbox_retired": false,
+      "facts": {
+        "final": true,
+        "in_reply_to": 4,
+        "wire_type": "thread_items"
+      }
+    }
+  ],
+  "artifacts": {
+    "correlation-final-command.json": "d20d578bc362ad75aa814772eb07622b0eb1578ac423423a08cde97ad7456936",
+    "correlation-final.jsonl": "ab1150dab0ec0b87fa097e58b688eb199a605d8fc98fac5eedcc3d1ebc057149",
+    "correlation-final.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "correlation-final-runtime/query-correlation-2424421321.json": "ea79a6d39e7f3fb1bbbb9443c47d9cfdfb24244b1e57748de25df429bde53443"
+  },
+  "artifact_root": "/work/manual-3857-content-free-evidence-20261024",
+  "causal_discrimination": {
+    "admission": "Current query token, inbox pointer, conversation and complete projection are checked before the intervention.",
+    "provider": "Held provider returns a usable version-240 snapshot and no error after its specific query context is cancelled. The inbox context remains alive.",
+    "selection": "No query-3 checkpoint is selected. No data/reset/completion frame may replace its refusal.",
+    "delivery": "The real Noise peer authenticates the exact query-3 retryable content-free terminal error with three payload fields.",
+    "checkpoint": "Completed checkpoint stays 2 after refusal. A distinct query-4 token from 2 completes at 240 on the same unretired inbox.",
+    "hosted_handling": "Producer Push returns before wire observations. Both the live row and refusal are consumed before the fresh query. Flush alone is not used as a handling fence."
+  },
+  "failed_fixture_attempts": [
+    {
+      "source": "a32da665c362df443a5b9640493e19ff57c8fa13",
+      "executed": 1,
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "artifact": "correlation-test.jsonl"
+    },
+    {
+      "source": "29a9aabb3295829db3e82c54035e2a08d7e5c752",
+      "executed": 1,
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "artifact": "correlation-debug.jsonl"
+    }
+  ],
+  "failure_reason": "The initial fixture had an invalid continuation/lower-bound pairing. The existing codec correctly refused it. Both failures remain retained; no production guard was weakened."
+}

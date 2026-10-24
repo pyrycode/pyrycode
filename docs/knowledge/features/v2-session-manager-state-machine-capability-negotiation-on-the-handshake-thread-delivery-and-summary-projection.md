@@ -265,6 +265,19 @@ the slot.
 projection for that conversation is admitted; `threadQueryGate` catches already
 queued updates immediately before sealing. No extra live buffer is introduced.
 
+Post return does not establish asynchronous publication completion. Producer
+enqueue completion, hosted handling, reply selection and successful query
+completion are separate boundaries. A producer must acknowledge enqueue before
+an ordered-output barrier can fence its publication; a barrier that overtakes
+the producer proves nothing about that work. `FlushPushes` alone does not
+acknowledge hosted handling, as the compact-query proof below demonstrates.
+Admission creates a query token, and a usable provider return supplies a
+snapshot; neither establishes a selected reply. `runThreadQuery` refuses a
+cancelled query even if its error-free provider result includes the live update.
+Only a selected complete reply can use `coversLive` to protect already-covered
+publications. A terminal `thread.query_failed` alone cannot distinguish admission
+rejection, provider failure, live cancellation or a reply-delivery failure.
+
 A selected reply in the complete projection and a completed join are distinct
 boundaries.
 Under `hostedMu`, `threadQueryGate` rechecks cancellation and records the reply's
@@ -309,6 +322,25 @@ sentinel with consecutive sender IDs. Uncovered progress must retire the held
 send without publishing it. Small rows alone would miss the continuation-decoding
 bypass.
 
+[`TestProducerQueryRefusalCorrelation`](../../../internal/relay/v2session_query_correlation_test.go)
+proves the complementary cut before selection through an authenticated hosted
+peer. Query 2 completes checkpoint 2; query 3 requests 2 and enters a held
+provider with a live context and no selected checkpoint. A same-conversation,
+complete-view live publication at version 237 cancels query 3. Producer enqueue
+is acknowledged; the cancelled provider still returns a usable, error-free
+version-240 snapshot containing that live state. The peer authenticates query 3's
+exact correlated retryable refusal and the unsolicited live frame, in either order;
+query 3 emits no data, reset or final certificate. Its selected checkpoint stays
+absent and the completed checkpoint stays 2. After both frames are handled,
+distinct query 4 resumes from 2 and completes at 240 on the same unretired inbox.
+Query/inbox pointers, conversation and projection are checked under `hostedMu`
+before assigning fixed run-local aliases: matching query numbers or wire errors
+across separate runs would not prove ownership or causality. The
+[retained correlation trace](../../../internal/relay/testdata/3857-controlled-query-correlation.json)
+binds all eight observations to measured source `bc790d0f` and a normally
+admitted Linux race run: 1 executed, 1 passed, 0 failed, 0 skipped. See the
+[proof and evidence chain](../../specs/architecture/3857-producer-query-attribution.md#replacement-result-and-evidence-chain).
+
 Expansion finals take a separate `threadQueryGate` branch: cancellation checking
 and release of that query share `hostedMu`, without writing `threadJoins`. Expansion
 completion cannot advance full-thread coverage, replace an existing join or
@@ -324,14 +356,51 @@ providers and cancellation remain independent across connections.
 `TestThreadChildrenInterrupted` extend these boundaries to child/body/complete
 contention, held providers, connection reuse and failed/withheld final delivery.
 
-A racing complete query may fail explicitly; retry from the last completed checkpoint.
-Only fully assembled batches followed by the separate successful marker advance
-that checkpoint. A terminal refusal can arrive before already queued live
-updates; correlate retry replies by `in_reply_to` while continuing to handle
-unsolicited live frames. A wire test that reads the next frame as its retry
-reply can mistake a late live update for query output. `TestDaemonThreadQueriesJoin`
-awaits both the refusal and queued updates before retry, then reconstructs full
-states through subsequent real publisher changes.
+A racing complete query may fail explicitly. Discard its incomplete assembly;
+a terminal refusal earns no checkpoint. Observe hosted handling of the admitted
+publication before issuing a fresh query from the last completed checkpoint,
+within the original overall deadline. Only fully assembled batches followed by
+the separate successful marker advance that checkpoint. A terminal refusal can
+arrive before already queued live updates; correlate fresh replies by
+`in_reply_to` while continuing to handle unsolicited live frames. A wire test
+that reads the next frame as its fresh reply can mistake a late live update for
+query output. `TestDaemonThreadQueriesJoin` awaits both the refusal and queued
+updates before retry, then reconstructs full states through subsequent real
+publisher changes. This obligation preserves truthful refusal and generation
+isolation without hiding failure or extending the wait.
+
+The [original Mobile #2494 failure](https://github.com/pyrycode/pyrycode-mobile/pull/2531)
+at tested source `7b755c27` and the separately
+[controlled native reproduction](../../../internal/relay/testdata/3857-query-attribution.json)
+at Mobile source `fde2ca23` each retain 2 executed, 1 passed, 1 failed, 0 skipped.
+The original used daemon base `64ef0e0f` without embedded VCS identity; the
+controlled run used diagnostic source `e5e0ace8`. Controlled native observations
+corroborate preselection cancellation but lack a recorded inbox token, directly observed
+conversation alias and terminal-packet timestamp/delivery-return branch.
+Observer `owned=false`/`retired=true` at timeout does not measure Core inbox
+retirement; the later passing ping used a distinct connection. Additional
+provider/delivery cuts and the original occurrence's exclusive cause remain
+unresolved. The separately named original authentication JSON remains missing;
+private native logs, XML and executables were not independently reauthenticated
+on Linux, and installed APK byte readback is not claimed. The
+[native metadata receipts](../../../internal/relay/testdata/3857-native-metadata/authentication.json)
+and [manifest reconciliation](../../../internal/relay/testdata/3857-native-metadata/relationship.json)
+preserve the controlled run's identities without retroactively instrumenting
+either native failure. No Core production defect is demonstrated. Consumer
+correction and pending native/independent acceptance remain with
+[Mobile #2494](https://github.com/pyrycode/pyrycode-mobile/issues/2494),
+[PR #2531](https://github.com/pyrycode/pyrycode-mobile/pull/2531) and its
+[consumer continuation](https://github.com/pyrycode/pyrycode-mobile/pull/2535).
+macOS execution is outside this Linux Core ticket's verification scope.
+
+The [replacement record](../../specs/architecture/3857-producer-query-attribution.md)
+retains the original planning chronology as MISSED and both invalid-certificate
+fixture attempts as failed (each 1 executed, 0 passed, 1 failed, 0 skipped).
+The [accepted verifier review](https://github.com/pyrycode/pyrycode/pull/3858#issuecomment-6384847663)
+separately records current Linux acceptance and the original integration
+failures with accepted named reruns, tracked in Core #3859 and #3862. Those
+dispositions preserve the failed sightings; the focused contract pass does not
+replace configured acceptance or certify Mobile recovery.
 
 **Await hosted handling before retrying after a push (#3731).** `FlushPushes`
 acknowledges push-queue progress: `drainOnce` closes its marker when popped,

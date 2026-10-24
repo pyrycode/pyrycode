@@ -1,0 +1,91 @@
+{
+  "ticket": 3854,
+  "outcome": "NOT REPRODUCED: diagnosis and cause-specific repair remain incomplete",
+  "revision": "4c09ab74fe0415b3c7cb6c6cfb53a5cf6d0a32cf",
+  "accepted_producer_ancestor": "ea1dcb1fce648fc80b2cf8962f15a718477e2fa8",
+  "original_failure": "3854-original-reload-failure.jsonl; original provenance and full-file hash in 3854-investigation.json",
+  "environment": {
+    "kernel": "Linux 7.0.0-28-generic x86_64 GNU/Linux",
+    "runtime": "go1.26.9 linux/amd64 GOMAXPROCS=6; GOFLAGS empty",
+    "TMPDIR": "/work/builder-3854-tmp",
+    "actual_fixture_example": "/work/builder-3854-tmp/TestCompactCapturesuccess1112221591/001/conversations/11111111-1111-4111-8111-111111111111/history",
+    "statfs_type": "0xef53",
+    "actual_mount": "/dev/mapper/ubuntu--vg-ubuntu--lv /work ext4 rw,relatime 0 0",
+    "volatile_sync": false,
+    "cold_state": "fresh history and Store per outcome; loaded history caches remain real; no page-cache reset",
+    "build_cache": "thread compilation warm after alone; first combined run compiled daemon/relay race binaries; subsequent combined runs warm",
+    "observations": "fixture-local phase wall times, conversation and worker identities, Status before Snapshot, start/end loadavg, CPU/I/O pressure and process I/O; no payloads",
+    "worker_labels": "worker is the Store mapping at phase entry; it identifies reload/retirement work, not an old request's captured owner after replacement. Held-request entry and release are separate events.",
+    "timeout_stacks": "none generated: no current timeout; original run did not capture stacks"
+  },
+  "invocation_prefix": "TMPDIR=/work/builder-3854-tmp python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=10 -run",
+  "selectors": {
+    "alone": "^TestCompactCapture$",
+    "sequence": "^(TestCompactPreparationWork|TestCompactBoundedWork|TestCompactLifecycle|TestCompactCapture)$",
+    "combined": "^(TestCompactPreparationWork|TestCompactBoundedWork|TestCompactLifecycle|TestCompactCapture|TestDaemonThreadCompactInstallation|TestDaemonThreadCompactNegotiation|TestDaemonSummaryTaskProducer|TestThreadChildrenPages|TestThreadChildrenAdmission|TestThreadChildrenProviderScope|TestThreadChildrenRefusals|TestThreadCompactNegotiation|TestThreadCompactRefusals|TestThreadCompactReplies|TestThreadCompactJoins)$",
+    "original": "^(TestChildHeaderFacts|TestChildHeaderFreshness|TestChildHeaderReferenceOutcomes|TestChildHeaderInitialProgress|TestChildHeaderUnknownFreshness|TestCompactSelection|TestCompactIncremental|TestCompactPublicMembership|TestCompactPreparationWork|TestCompactBoundedWork|TestCompactLifecycle|TestCompactCapture|TestSummaryTaskFacts|TestSummaryTaskShell|TestDaemonThreadCompactInstallation|TestDaemonThreadCompactNegotiation|TestDaemonSummaryTaskProducer|TestThreadChildrenPages|TestThreadChildrenAdmission|TestThreadChildrenProviderScope|TestThreadChildrenRefusals|TestThreadCompactNegotiation|TestThreadCompactRefusals|TestThreadCompactReplies|TestThreadCompactJoins)$"
+  },
+  "packages": {
+    "thread": ["./internal/thread"],
+    "combined": ["./internal/thread", "./cmd/pyry", "./internal/relay"]
+  },
+  "units": "counts are executed/passed/failed/skipped Go test/subtest events; duration ranges are milliseconds; load is one-minute loadavg",
+  "runs": [
+    {"name":"durable-alone", "selector":"alone", "packages":"thread", "counts":[60,60,0,0], "reload_count":30, "reload_ms":[43.883907,103.693582], "load":[6.88,7.04], "sha256":"b755b5b861a088ab3b7a51fe8e9448f1a5332ae3468720aab7fe7f9fa193481b"},
+    {"name":"durable-sequence", "selector":"sequence", "packages":"thread", "counts":[90,90,0,0], "reload_count":30, "reload_ms":[43.942833,125.786876], "load":[5.38,10.93], "sha256":"e05d9704f96770adbd5b7705ff56b362406e8c0a8856481434e388f3da57e7d0"},
+    {"name":"durable-concurrent", "selector":"combined", "packages":"combined", "counts":[1930,1930,0,0], "reload_count":30, "reload_ms":[46.147747,110.221236], "load":[10.36,11.00], "sha256":"a1d460216970742d932bd593d74e85ad642e5e07b9af5834f9078dcdc876c713"},
+    {"name":"durable-warm-concurrent", "selector":"combined", "packages":"combined", "counts":[1930,1930,0,0], "reload_count":30, "reload_ms":[43.721409,141.578317], "load":[8.71,11.01], "sha256":"d20524900425b1d7d21dfafcc9351d39f29c18524ef44d69556b53abb713fe7f"},
+    {"name":"durable-original-selection", "selector":"original", "packages":"combined", "counts":[2250,2250,0,0], "reload_count":30, "reload_ms":[47.503794,302.808391], "load":[8.39,10.81], "sha256":"43d40f149ba566aa6ae80e1447d1532e618e3c2cf10575256ed00233c09b8c09"}
+  ],
+  "ordering": {
+    "sequence": "PreparationWork -> BoundedWork -> Lifecycle -> Capture, per repetition, no shuffle",
+    "original_thread": "ChildHeaderFacts -> ChildHeaderFreshness -> ChildHeaderReferenceOutcomes -> ChildHeaderInitialProgress -> ChildHeaderUnknownFreshness -> CompactSelection -> CompactIncremental -> CompactPublicMembership -> CompactPreparationWork -> CompactBoundedWork -> CompactLifecycle -> CompactCapture -> SummaryTaskFacts -> SummaryTaskShell",
+    "first_combined_test_intervals_UTC": {"thread":["07:22:54.847599166","07:24:29.798992654"], "daemon":["07:23:41.335176546","07:23:57.781041335"], "relay":["07:23:41.305431256","07:24:22.601479286"]},
+    "warm_combined_test_intervals_UTC": {"thread":["07:24:59.827166609","07:26:29.917234644"], "daemon":["07:25:01.30963755","07:25:17.320276111"], "relay":["07:25:01.290703347","07:25:41.145320062"]},
+    "original_selection_test_intervals_UTC": {"thread":["07:26:59.851233158","07:28:44.698013226"], "daemon":["07:27:01.140177749","07:27:16.988603238"], "relay":["07:27:01.11214199","07:27:36.924380153"]},
+    "date": "2026-10-24; package execution overlapped only during these intervals, not throughout every repetition"
+  },
+  "phase_range_format": "[completed samples, minimum ms, maximum ms]; whole fixture including initial workers, retirement and shutdown; nested phases must not be summed",
+  "original_selection_phases": {
+    "resume-validation": [130,0.096580,6.327105],
+    "checkpoint-import": [60,0.038568,0.200713],
+    "cache-file-sync/thread-certificate.json": [250,4.445026,274.333126],
+    "restored-publication": [130,0.004618,0.372138],
+    "publish": [180,0.012625,0.510727],
+    "snapshot": [6865,0.004313,3.235325]
+  },
+  "interpretation": {
+    "replacement_identity_and_barrier": "all 150 actual reloads used a distinct worker and completed before query release; all five outcomes retained exact assertions over 50 repetitions each",
+    "readiness_vs_rendering": "147/150 reloads sampled usable Status before Snapshot capture; wait completion followed that sample by 0.412316-4.833031 ms. In three reloads publication advanced between Status sampling and Snapshot capture; Snapshot still returned usable version 3. Polling and deadline unchanged.",
+    "slowest_reload": "302.808391 ms in cancel: resume validation 2.757093 ms, scalar cache write 175.134399 ms including file Sync 101.929075 ms and directory sync 68.837011 ms; later directory syncs 21.360027 and 21.088157 ms; publication 0.049147 ms",
+    "limits": "Healthy measured reloads show persistence cost well below five seconds, no held-query synchronization stall, and fast import/publication/rendering. Phase wall times include scheduling. They cannot attribute the original uninstrumented rebuilding/version-zero timeout or distinguish its historical disk latency from machine scheduling delay.",
+    "repair": "none selected; no deadline increases, added sleeps/retries, skipped subcases or weakened assertions",
+    "remaining": "reproduce or establish a controlled causal diagnosis, apply the supported repair with a distinguishing regression, then ordinary review and dispatcher-owned complete acceptance"
+  },
+  "retention": {
+    "raw_JSON": "/tmp/builder-3854/<run name>.json; hashes above; matching .stderr files empty; all commands exited zero",
+    "analysis": "/tmp/builder-3854/recovery-analysis.json; includes per-reload worker identities and phase observations",
+    "static_checks": "go vet ./... and go build -o /tmp/builder-3854/recovery-pyry ./cmd/pyry passed at the candidate; recovery-vet.log and recovery-build.log empty",
+    "complete_acceptance": "pending dispatcher; no live Claude proof required; macOS outside verification scope"
+  },
+  "touched_package_check": {
+    "Go_source_revision": "4c09ab74fe0415b3c7cb6c6cfb53a5cf6d0a32cf",
+    "tree_note": "only spec/evidence records changed during execution; no subsequent Go changes",
+    "command": "TMPDIR=/work/builder-3854-tmp python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=1 ./internal/thread/...",
+    "path": "/tmp/builder-3854/recovery-thread.json",
+    "sha256": "e900950996481dced56dac01128351cdabca710fdc494805b9083e483c4cc55e",
+    "counts": [2209,2207,0,2],
+    "seconds": 586.955,
+    "skips": {"TestCheckpointResumeCorpus":"complete restoration sweep: run make test-exhaustive", "TestReferenceDiskHeap":"run separately with -args -measure-thread-heap"},
+    "exit_code": 0,
+    "limitation": "package verification, not a diagnosis or complete configured acceptance"
+  },
+  "further_diagnostic_request": {
+    "revision": "590d577230677a419e217a1beb353b9509fcd2dc",
+    "path": "/tmp/builder-3854/recovery-investigation-request.json",
+    "requested": "bounded native syscall/scheduler observations with the original selectors; no complete suite",
+    "outcome": "client rejected: Task request unavailable or outside this admitted ticket",
+    "executed": 0,
+    "assessment_id": null
+  }
+}
