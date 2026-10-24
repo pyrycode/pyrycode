@@ -303,3 +303,20 @@ No overlap found on the two fixture files. The bounded addition and retained
 work remain below 800 written lines, with zero exports/migrations/reject branches
 and the original three acceptance criteria. Any supported repair needs another
 prospective design revision. Full acceptance remains dispatcher-owned.
+
+### 2026-10-24 — bounded trace result, original cause still unresolved
+
+Pushed source `cfe2367d533e13d9ffe9d7bd95967e089364507a` passed the selected
+Linux race sequence once: 9/9/0/0 events, 8 leaves. Fresh ext4 histories,
+runtime/order, counts, commands, artifact hashes and analysis are retained in
+`internal/thread/testdata/3854-runtime-trace.json`; raw trace, profiles, pressure
+samples and analysis scripts survive under `/work/builder-3854-runtime-evidence`.
+All three replacements became usable version 3 while the old query stayed held,
+in 46.685–49.075 ms. Worker creation-to-publication includes 38.289–40.318 ms
+Syscall, at most 0.455 ms Runnable and 0.006 ms synchronization wait. The shared
+cgroup had zero throttled periods during the bracketed execution interval.
+Trace regions balance, and tasks end after shutdown. Vet/build passed.
+This separates observed healthy phases; syscall time still includes kernel/OS
+scheduling. No original timeout, causal repair or distinguishing regression was
+established. Both Open questions remain unresolved. Keep PR #3855 draft and
+the original failure failed; further diagnostics require recovery assessment.
