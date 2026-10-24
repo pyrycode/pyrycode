@@ -70,6 +70,11 @@ func TestChannelPost_E2E_DisconnectedWakeAndHistory(t *testing.T) {
 	seedPromotedBoundConversation(t, home, convID, name, initial)
 	h := StartStreamInteractiveWithRelay(t, home, initial, relayURL)
 	t.Cleanup(func() { h.Stop(t) })
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("daemon diagnostics:\n%s", h.Stderr.String())
+		}
+	})
 	serverID := readPersistedServerID(t, home)
 	waitBinaryHello(t, fr, serverID)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
