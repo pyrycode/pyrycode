@@ -1879,6 +1879,36 @@ explicitly requested child summaries: optional facts stay absent when unknown;
 known zero/false/empty remains explicit. Public child counts exclude private
 children, and `no_child` remains attribution rather than an inventory fact.
 
+For canonical `agent` and `tool_call` headers, optional `task_id` preserves the
+fold's authoritative association to the creating row. A nonempty string is the
+exact selected task identity; `""` is known no association at this revision;
+omission is unknown, including older producers. Apply these as replacement
+facts: explicit empty clears a prior association, and an omitted fact leaves
+the replacement unknown rather than carrying an older association forward as
+current evidence. The same fact travels through initial/older roots, compact
+catch-up/live replacements and bounded direct-child summaries. It comes only
+from validated computed fold evidence within the conversation, recorded
+provenance/session and producer lifetime or legacy scope. When several tasks
+link to one call, the greatest lexicographic task ID selected by `applyAgent`
+wins; this scalar is no task inventory. See the
+[full presence and authority rules](#bounded-expansion-reads).
+
+Use row `id`, `kind`, `parent`, `order`, `status`, `active` and `ended_order`
+for navigation, placement and lifecycle. Association establishes neither body
+availability nor query/expansion coverage, and requires no closed-body fetch.
+Published summary reads use prepared metadata without rendering tool/agent
+bodies, looking up their history or enumerating unopened descendants. Existing
+row/byte/privacy limits, capability/projection fences and separate completion
+markers still apply.
+
+The independently accepted Linux producer is
+[`ea1dcb1fce648fc80b2cf8962f15a718477e2fa8`](https://github.com/pyrycode/pyrycode/commit/ea1dcb1fce648fc80b2cf8962f15a718477e2fa8)
+([implementation contract](https://github.com/pyrycode/pyrycode/blob/ea1dcb1fce648fc80b2cf8962f15a718477e2fa8/docs/specs/architecture/3851-summary-task-associations.md),
+[Core PR #3853](https://github.com/pyrycode/pyrycode/pull/3853)).
+[Mobile #2431](https://github.com/pyrycode/pyrycode-mobile/issues/2431) owns
+consumption and final integration; Core acceptance claims no Mobile integration,
+default activation, service rollout or consumer-pin change.
+
 Every compact data batch, assembly part, success marker, live replacement,
 progress frame and reset MUST repeat `projection: "compact-v1"`,
 `conversation_id` and nonempty `epoch`. Query envelopes retain `in_reply_to`.
@@ -2248,8 +2278,8 @@ Missing either expansion provider or any required capability withholds expansion
 existing `thread` negotiation remains independent. Installed authenticated
 synthetic-history tests exercise these reads and partial-provider negotiation.
 Complete history/live delivery remains the default. The separate
-[compact projection](#compact-projection-declared) is declared only (#3559),
-with production installation and client adoption pending. Expansion support
+[compact projection](#compact-projection-declared) is production-installed
+(#3563); client adoption remains downstream. Expansion support
 does not negotiate compact delivery or select a view.
 
 Both reads share complete queries' temporary daemon demand: cold or idle
@@ -2348,10 +2378,34 @@ the [full item's](#full-thread-item) metadata with these presence rules:
 | `no_child` | Boolean attribution fact, omitted when false; true means positively no producing child. |
 | `headline` | Required plain single-line text, not interpreted markup. |
 | `detail_omitted` | Required boolean, always true. |
+| `task_id` | Optional exact string for canonical `agent`/`tool_call` association. Nonempty identifies the authoritatively selected task for this creating row; explicit `""` means known no association at the captured revision; omission means unknown. |
 | `error_summary` | Optional plain single-line string, at most 200 Unicode code points including ellipsis; absent means unknown, explicit `""` means known no error. |
 | `public_child_count` | Optional nonnegative integer below 2^53; public direct children only. Known count requires `has_public_children == (count > 0)`. |
 | `has_public_children` | Optional boolean; may be known without a count. Absent is unknown; false is known no public direct children. |
 | `subtree_version` | Optional nonnegative integer below 2^53, including known zero; epoch-scoped nested-public-change freshness independent of source `rev`. |
+
+`task_id` comes only from the fold's computed association scalar in the matching
+creating recipe. `agentWork` validates task-to-call ownership within this
+conversation, recorded source/provenance and session, and producer lifetime or
+legacy scope. Reused call/task strings across those scopes cannot associate
+rows. Absent, truncated or dropped identity evidence cannot establish a link.
+`applyAgent` visits associated task IDs in lexicographic order and retains the
+greatest as the scalar when several tasks link to one call. The summary copies
+that selection without a task inventory, link/report payload or content.
+Headline text, a background flag, launch-result prose and arbitrary retained
+launch JSON cannot supply association authority.
+
+Preserve task strings exactly, including whitespace and Unicode: do not trim,
+normalize, truncate or parse them as numbers. Existing envelope/row bounds and
+numeric identity/order/revision validation below 2^53 remain unchanged. A
+replacement's nonempty value replaces the previous association, explicit empty
+clears it, and omission leaves it unknown, never known empty or proof that an
+older association still holds. Late linking, reassociation and terminal updates
+retain the canonical row's revision/lifecycle and existing freshness rules.
+The row's identity/kind, parent/order, status/activity and ending order control
+navigation, placement and lifecycle without demanding closed details. Neither
+an association nor its absence proves detail availability or any coverage;
+query and expansion completion remain separate.
 
 `NewThreadSummary` derives `headline` from the item summary, collapsing runs of
 Unicode whitespace/control characters to one space and trimming leading/trailing
@@ -2361,9 +2415,14 @@ headline uses the kind-based fallback described in the [compact contract](#compa
 `ThreadSummary.MarshalJSON` applies the same text bounds to supplied headlines
 and error summaries without inspecting content. Summary IDs, orders and revisions
 also remain integers below 2^53. Producers own numeric and count/existence
-validation. The optional facts are declared DTO fields; installed Store derivation
-of compact freshness/count/error facts follows separately. Missing facts never
-prove no children, no error or fresh cached detail.
+validation. `NewThreadSummary` leaves `task_id` unknown even if arbitrary item
+content contains that key; it has no authoritative association metadata.
+Installed Store preparation supplies association, freshness/count/error facts
+to both query and live translators without request-time body/history reads.
+Full replay, validated metadata-only checkpoint resume and unload/reload retain
+the same associations; prior captures and returned optional values stay detached.
+Missing facts never prove no association, no children, no error or fresh cached
+detail.
 
 Child `limit` defaults to **50** when omitted/zero, clamps positive values to
 **256**, and rejects negative, null, fractional, wrong-type or out-of-uint64-range

@@ -115,6 +115,21 @@ negotiation requires both providers, existing thread readiness and client
 detail; its bounded headline and metadata cannot stand in for a full item.
 An available empty body is distinct from omitted detail or a refused read.
 
+`ThreadSummary.TaskID` is an optional exact association string: nil is unknown,
+empty is known none, and nonempty identifies the fold-selected task for this
+creating row. `NewThreadSummary` deliberately leaves it unknown: arbitrary
+`ThreadItem.Content` can contain a forged `task_id` and is no authority to infer
+one. Only prepared Store facts supply it through the query/live translators;
+see [association preparation and checkpoint reconstruction](thread-package-background-store-queries.md#revision-scoped-direct-child-summaries).
+Unlike headline/error text, task identity must never be normalized or truncated.
+A replacement with empty clears association; omission leaves it unknown rather
+than certifying an older value. `TestSummaryTaskUnknown` pins the constructor
+boundary, while relay `TestSummaryTaskWire` and daemon `TestDaemonSummaryTaskLive`
+check encoded unknown/empty/exact facts without content or task-report payloads.
+`TestDaemonSummaryTaskProducer` exercises actual encoded initial/older roots and
+direct-child replies from the installed producer. The association grants neither
+detail access nor coverage; existing row metadata owns placement and lifecycle.
+
 The separate [compact projection contract](../../protocol-mobile.md#compact-projection-declared)
 is production-active (#3563): the daemon installs both compact queries on the
 publisher Store, with readiness requiring complete query/live wiring and both

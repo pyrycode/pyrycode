@@ -94,11 +94,35 @@ authority and checkpoint persistence without a schema migration.
 
 ## Documentation handoff
 
-Pending documentation stage:
+Satisfied:
 
-- `docs/protocol-mobile.md`, “Bounded expansion reads” (`ThreadSummary` presence table) and “Compact projection (declared)”: optional `task_id`, canonical evidence/deterministic selection, conversation/provenance/session/lifetime ownership, unknown versus known-empty replacement, exact strings and existing numeric bounds. Association proves neither detail availability nor coverage; existing row metadata controls placement/lifecycle without closed-body demand.
-- `docs/knowledge/features/thread-package-background-store-queries.md`: association preparation and checkpoint reconstruction alongside direct-child/compact headers.
-- Record independently accepted producer revision and contract link for Mobile #2431; Mobile implementation/integration remains its own acceptance.
+- [Bounded expansion reads](../../protocol-mobile.md#bounded-expansion-reads) and [Compact projection](../../protocol-mobile.md#compact-projection-declared) specify optional `task_id`, canonical evidence/deterministic selection, conversation/provenance/session/lifetime ownership, unknown versus known-empty replacement, exact strings and existing numeric bounds. Association proves neither detail availability nor coverage; existing row metadata controls placement/lifecycle without closed-body demand.
+- [Direct-child and compact headers](../../knowledge/features/thread-package-background-store-queries.md#revision-scoped-direct-child-summaries) describe association preparation, metadata-only checkpoint reconstruction and the retained regressions. The [protocol overview](../../knowledge/features/protocol-package-thread-messages.md#query-replies-and-coverage) records why generic construction cannot infer authority from content.
+- The compact contract publishes independently accepted producer revision [`ea1dcb1fce648fc80b2cf8962f15a718477e2fa8`](https://github.com/pyrycode/pyrycode/commit/ea1dcb1fce648fc80b2cf8962f15a718477e2fa8) and this [implementation contract at that revision](https://github.com/pyrycode/pyrycode/blob/ea1dcb1fce648fc80b2cf8962f15a718477e2fa8/docs/specs/architecture/3851-summary-task-associations.md) for [Mobile #2431](https://github.com/pyrycode/pyrycode-mobile/issues/2431). Mobile consumption and final integration remain owned there, with no rollout, default activation or consumer-pin change claimed.
+
+### Accepted producer evidence
+
+The independent verifier accepted the Linux producer revision above in
+[PR #3853](https://github.com/pyrycode/pyrycode/pull/3853). Counts below are
+executed/passed/failed/skipped test and subtest events, including parents.
+
+| Selection | Counts |
+| --- | --- |
+| Builder focused race checks: all nine new association regressions and 22 existing named header, compact, direct-child, capability and projection checks across thread/protocol/relay/daemon | 254/254/0/0 |
+| Module race tests | 30,819/30,792/0/27 |
+| Exhaustive restoration proof | 202/202/0/0; 201 cuts, 50,101 immediate/suffix comparisons |
+| Fake-daemon race integration, original run | 2,330/2,327/1/2 |
+| Dispatcher same-tree rerun of `TestE2E_IdleEviction_DefersWhileStreamTurnOpen` | 1/1/0/0 |
+
+The dispatcher accepted the intermittent failure's named rerun; the original
+failure remains failed, with no reliability repair claimed. Citation/docs guards,
+vet, tool tests (30/30/0/0), staticcheck, substrate guard and build passed. The
+retained base `TestSummaryTaskResume` failed 4/0/4/0 for missing association;
+the later passing producer regression proves the change. Historical fixture
+failures and the reload timeout tracked in #3854 remain recorded in the PR.
+No new association regression skipped. macOS is outside this Linux ticket's
+verification scope; live Claude execution and Mobile integration were not run
+or claimed.
 
 ## Security review
 
