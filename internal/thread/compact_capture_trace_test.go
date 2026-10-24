@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -25,47 +26,70 @@ type testCompactTrace struct {
 func testTraceCompactStore(t *testing.T, s *Store) *testCompactTrace {
 	t.Helper()
 	x := &testCompactTrace{start: time.Now()}
+	dir, err := s.history.EnsureLogDir(testStoreA)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var fs syscall.Statfs_t
-	if err := syscall.Statfs(os.TempDir(), &fs); err != nil {
+	if err := syscall.Statfs(dir, &fs); err != nil {
 		t.Fatal("stat fixture filesystem:", err)
 	}
-	t.Logf("runtime=%s os=%s arch=%s procs=%d temp=%s filesystem=%#x", runtime.Version(), runtime.GOOS, runtime.GOARCH, runtime.GOMAXPROCS(0), os.TempDir(), fs.Type)
-	if runtime.GOOS == "linux" {
-		if raw, err := os.ReadFile("/proc/loadavg"); err == nil {
-			t.Logf("loadavg=%s", strings.TrimSpace(string(raw)))
-		}
-		if raw, err := os.ReadFile("/proc/mounts"); err == nil {
-			for _, line := range strings.Split(string(raw), "\n") {
-				fields := strings.Fields(line)
-				if len(fields) >= 4 && fields[1] == "/" {
-					t.Logf("root-filesystem=%s volatile-sync=%t", fields[2], strings.Contains(","+fields[3]+",", ",fsync=volatile,"))
+	t.Logf("runtime=%s os=%s arch=%s procs=%d fixture=%s temp=%s filesystem=%#x", runtime.Version(), runtime.GOOS, runtime.GOARCH, runtime.GOMAXPROCS(0), dir, os.TempDir(), fs.Type)
+	environment := func() {
+		if runtime.GOOS == "linux" {
+			for _, name := range []string{"/proc/loadavg", "/proc/pressure/cpu", "/proc/pressure/io", "/proc/self/io"} {
+				if raw, err := os.ReadFile(name); err == nil {
+					t.Logf("%s=%s", name, strings.TrimSpace(string(raw)))
 				}
+			}
+			if raw, err := os.ReadFile("/proc/mounts"); err == nil {
+				mount := ""
+				mountLine := ""
+				for _, line := range strings.Split(string(raw), "\n") {
+					fields := strings.Fields(line)
+					if len(fields) >= 4 && (fields[1] == "/" || dir == fields[1] || strings.HasPrefix(dir, fields[1]+"/")) && len(fields[1]) > len(mount) {
+						mount, mountLine = fields[1], line
+					}
+				}
+				t.Logf("fixture-mount=%s", mountLine)
 			}
 		}
 	}
-	t.Cleanup(func() { x.dump(t) })
+	environment()
+	t.Cleanup(func() { _ = s.Shutdown(); environment(); x.dump(t) })
+	s.phase = func(id conversations.ConversationID, phase string) func() {
+		s.mu.Lock()
+		worker := s.workers[id]
+		s.mu.Unlock()
+		label := fmt.Sprintf("conversation=%s worker=%p %s", id, worker, phase)
+		if phase == "snapshot" {
+			status := s.Status(id)
+			x.mark(fmt.Sprintf("%s readiness=%d/%d", label, status.State, status.Version))
+		}
+		return x.begin(label)
+	}
 	s.checkpointStep = func(stage string, action func() error) error {
 		defer x.begin("checkpoint/" + stage)()
 		return action()
 	}
 	lookup := s.lookup
 	s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
-		defer x.begin(fmt.Sprintf("lookup/%s/%v", id, ids))()
+		defer s.observePhase(id, fmt.Sprintf("lookup/%v", ids))()
 		return lookup(ctx, id, ids)
 	}
 	replace := s.replace
 	s.replace = func(src, dst string) error {
-		defer x.begin("replace")()
+		defer s.observePhase(conversations.ConversationID(filepath.Base(filepath.Dir(filepath.Dir(dst)))), "replace")()
 		return replace(src, dst)
 	}
 	syncDir := s.syncDir
 	s.syncDir = func(dir string) error {
-		defer x.begin("directory-sync")()
+		defer s.observePhase(conversations.ConversationID(filepath.Base(filepath.Dir(dir))), "directory-sync")()
 		return syncDir(dir)
 	}
 	forward := s.forward
 	s.forward = func(id conversations.ConversationID) (storeReader, error) {
-		defer x.begin("forward/" + string(id))()
+		defer s.observePhase(id, "forward")()
 		return forward(id)
 	}
 	return x

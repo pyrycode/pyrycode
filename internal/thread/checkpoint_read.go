@@ -66,6 +66,7 @@ func checkpointIndexLeaf(name string) bool {
 // fold/source access and validates history evidence before using the result.
 // Both clean and dirty checkpoints can restore continuation state.
 func (s *Store) readCheckpoint(id conversations.ConversationID, source HistorySource) (*Fold, checkpointFileState, error) {
+	defer s.observePhase(id, "checkpoint-read")()
 	var d checkpointFileState
 	if err := s.readCacheFile(id, checkpointStateName, &d); err != nil {
 		return nil, checkpointFileState{}, err
@@ -92,7 +93,9 @@ func (s *Store) readCheckpoint(id conversations.ConversationID, source HistorySo
 	if err != nil {
 		return nil, checkpointFileState{}, err
 	}
+	finished := s.observePhase(id, "checkpoint-import")
 	restored, err := ImportCheckpoint(string(id), source, d.Fold, rows)
+	finished()
 	if err != nil {
 		return nil, checkpointFileState{}, err
 	}

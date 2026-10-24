@@ -189,6 +189,7 @@ func (s *Store) readCacheFile(id conversations.ConversationID, name string, dst 
 }
 
 func (s *Store) writeCacheFile(id conversations.ConversationID, name string, value any) error {
+	defer s.observePhase(id, "cache-write/"+name)()
 	if !conversations.ValidID(string(id)) || !cacheLeaf(name) {
 		return ErrPersistence
 	}
@@ -220,7 +221,13 @@ func (s *Store) writeCacheFile(id conversations.ConversationID, name string, val
 		}
 	}()
 	defer f.Close() // also closes on an encode/sync failure
-	if f.Chmod(0o600) != nil || json.NewEncoder(f).Encode(value) != nil || f.Sync() != nil || f.Close() != nil {
+	if f.Chmod(0o600) != nil || json.NewEncoder(f).Encode(value) != nil {
+		return ErrPersistence
+	}
+	finished := s.observePhase(id, "cache-file-sync/"+name)
+	err = f.Sync()
+	finished()
+	if err != nil || f.Close() != nil {
 		return ErrPersistence
 	}
 	// Recheck containment and the destination immediately before replacement.
