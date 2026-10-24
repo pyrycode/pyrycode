@@ -430,6 +430,9 @@ func TestCompactCapture(t *testing.T) {
 			testStoreAppend(t, h, testStoreA, testMessage(0))
 			trace.wait(t, s, testStoreA, 3)
 			if !strings.HasPrefix(outcome, "current-") {
+				if outcome == "success" {
+					testCompactOverlap(t, "capture")
+				}
 				finished := trace.begin("unload")
 				e := s.Unload(testStoreA)
 				finished()

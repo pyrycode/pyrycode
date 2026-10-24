@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -195,4 +197,37 @@ func (x *testCompactTrace) dump(t *testing.T) {
 	for _, event := range x.events {
 		t.Log("compact trace:", event)
 	}
+}
+
+// testCompactOverlap aligns real fixture work only in an explicitly requested diagnostic.
+func testCompactOverlap(t *testing.T, role string) {
+	t.Helper()
+	address := os.Getenv("PYRY_COMPACT_OVERLAP_SOCKET")
+	if address == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "unix", address)
+	if err != nil {
+		t.Fatal("connect overlap rendezvous:", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Error("close overlap rendezvous:", err)
+		}
+	}()
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		t.Fatal("bound overlap rendezvous:", err)
+	}
+	if _, err := io.WriteString(conn, role+"\n"); err != nil {
+		t.Fatal("announce overlap participant:", err)
+	}
+	var release [1]byte
+	if _, err := io.ReadFull(conn, release[:]); err != nil || release[0] != 1 {
+		t.Fatal("release overlap rendezvous:", err, release)
+	}
+	t.Logf("overlap released role=%s time=%s", role, time.Now().UTC().Format(time.RFC3339Nano))
 }
