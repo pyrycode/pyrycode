@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted 2026-10-08 by the owner. Not yet implemented. The design was worked out outside this repository, together with a catalogue of every edge case found in past bugs. This record is the complete in-repo statement of it, so implementation tickets cite this file rather than those notes.
+Accepted 2026-10-08 by the owner. Daemon thread delivery and compatibility retirement are implemented: #3718 retired replaced content publication, #3719 retired event replay, #3740 made thread negotiation mandatory, and #3741 removed non-thread delivery/projection and recovery branches. The context below preserves the original rationale; it describes the pre-thread system. App migration history remains separate from this daemon contract. This record is the complete in-repo statement of the design, originally worked out with a catalogue of past edge cases.
 
 ## Context
 
@@ -97,20 +97,27 @@ Each carries the conversation, epoch and new version.
 
 ### Compatibility
 
-A new capability string, `thread`, is negotiated in the handshake as ADR 037 describes. A connection with it gets items and live state, and stops getting the content events items replace: text deltas, tool events, turn ends, session changes, user message pushes, task events, queue state, banners, compaction marks, refusals and unrecognized output. A connection without it gets today's stream unchanged, and the new log entry types are filtered out of its history pages and replay, since old mobile builds treat unknown entries as read-mark barriers. New meaning gets a new kind or field, never a new meaning for an old field (#2576). A field is present or absent, never empty with another meaning. Apps keep unknown kinds by id and draw their summary if shown. A folding rule change bumps the epoch.
+Every admitted app session negotiates `thread` through the authoritative handshake intersection described in ADR 037. Authentication/static-key privacy rejection takes precedence, then existing client-version checks, then omitted thread (`client.update_required`/4412) or advertised-but-ungrantable thread (`protocol.unsupported`/4421), all before binding, redemption, workspace disclosure or opening. See the [handshake contract](../../protocol-mobile.md#handshake).
+
+The original unchanged-stream path for apps without thread was a migration measure: old mobile builds treated unknown history entries as read-mark barriers. That daemon path is now removed. Replaced unsolicited content stays suppressed, event replay/resync and raw history recovery are retired, and durable source history still feeds the fold. Apps explicitly catch up each open conversation by epoch/version and use older pages; only a separate successful final marker certifies a query.
+
+Complete-thread queries, pages and eligible updates require no `interactive` grant. Supplied live state, prompts and controls retain interactive gates; expansion requires interactive and expansion readiness, and compact retains its expansion/interactive/readiness prerequisites and projection-aware joins. Missing optional grants never select legacy delivery. Pushes, correlated replies and continuations preserve supplied session attribution and clear flags; supplied live-state clears also preserve source conversation identity. Summary projection uses authoritative `last_shown_version`, including present zero and omission when unavailable, without discarding unrelated fields.
+
+New meaning gets a new kind or field, never a new meaning for an old field (#2576). A field is present or absent, never empty with another meaning. Apps keep unknown kinds by id and draw their summary if shown. A folding rule change bumps the epoch.
 
 ## The six approved decisions
 
 1. **Storage.** Items are folded from the existing history log. There is no separate item log. The log stays the one durable record and gains entry types for the facts it lacks. Folded items live in a store beside the log as a cache, and losing it costs a refold, never correctness. A separate durable item log would avoid refolds, but it doubles storage and can drift from the log. The proposed [ADR 045](045-thread-index-over-history.md) refines this cache into a small index over history with resumable checkpoints.
 2. **Queued messages after a restart.** The queue stays in memory. On start the daemon marks every waiting message that was lost as not delivered, visibly in the thread. A durable queue waits until losing messages is observed in practice.
 3. **Agents with no report.** An agent that drops off Claude's task list without a finish report gets status gone, meaning the outcome is unknown. This reverses the rule that absence from the list never means an end. Claude does not always refresh its list (#2525), so an agent with neither a report nor a refresh still stays running until its session ends.
-4. **Old event stream.** Apps keep their old path for one release after the daemon release that ships `thread`. After that an app connected to a daemon without the capability asks the operator to update it. The daemon keeps the old stream for apps without the capability until cleanup raises the minimum app version.
+4. **Old event stream.** The original migration allowed apps to keep their old path for one release after the daemon shipped `thread`, then ask the operator to update a daemon without it. The daemon originally retained the old stream pending cleanup. That daemon transition is complete (#3718/#3719/#3740/#3741): thread is required for admission independently of configured app-version minimums, and non-thread delivery and recovery branches are removed. This record does not assert that either app has deleted its older-daemon code.
 5. **Dividers.** Dividers for idle sleep and daemon restart are written with `shown` false. The deliberate operator reset divider is shown. Clear, agent switch, recovery and workspace change are shown too.
 6. **Prompts.** An open permission or question prompt stays live state, re-sent on reconnect, and is never a saved item. Once answered, the thread keeps a saved record of the answer, folded from a history entry like everything else.
 
 ## Consequences
 
-- One fold serves both apps, so a folding bug hits both at once and is fixed once. Three codebases change, and each app runs two paths for a while.
+- One fold serves both apps, so a folding bug hits both at once and is fixed once. Three codebases change. The original two-path migration explains the staged rollout; the daemon now has one admitted content route.
+- A thread-only client can read complete content without receiving interactive supplied state or controls. Admission, publication recipient selection and final sealing must use the same complete-content eligibility; coupling any one to interactive silently excludes otherwise valid clients. There is no non-thread fallback or metadata-stripping projection.
 - The daemon gains a store, a fold and memory per conversation, which must be dropped on delete and on idle, as #1502 taught. Refolds need a forward reader over the log, and the first open after a rule change waits for one.
 - Every new message type needs a measured size budget and a test, because a message over the cap vanishes whole (#2428). Catch-up adds connect traffic through a relay whose 16-frame outbox has overflowed before (pyrycode-mobile#1051).
 - A failed history write still loses that change. A machine crash can lose the log's end, and the new epoch makes apps reload.
@@ -120,14 +127,14 @@ A new capability string, `thread`, is negotiated in the handshake as ADR 037 des
 
 ## Migration order
 
-Mobile switches first.
+The original sequence put mobile first. Steps 1–5 record the staged design, not evidence that every app migration is complete. Daemon cleanup is implemented as described in step 6.
 
 1. **Daemon, invisible.** Session tags on log entries and live events. The missing facts in the log, hidden from old apps. Sub-agent events stop opening turns, which fixes pyrycode-mobile#1951 for today's apps too.
 2. **Daemon, shadow.** The fold and store run on live traffic and old logs without sending anything. Invariants are checked against what the apps draw for real conversations, using recorded real output.
 3. **Daemon, protocol.** The capability, the update messages, catch-up, pages, the last shown version and session tags on live state.
 4. **Mobile.** A new thread layer behind the capability. Dogfood it, then delete the old path after one release.
 5. **Desktop.** The same.
-6. **Daemon cleanup.** Raise the minimum app version. Stop the replaced events, the content replay buffer, resync and raw history pages. The log stays.
+6. **Daemon cleanup — complete.** Replaced content publication (#3718), event replay/ring storage (#3719), and raw history pages (#3715) are retired. #3740 requires negotiated thread after authentication and version policy, rather than relying on a raised numeric app-version minimum; #3741 removes the remaining non-thread projection, forwarding and connect-recovery branches. Supplied current-state recovery remains interactive-gated, complete content remains independent of interactive, and the source log stays. See [current delivery](../../protocol-mobile.md#daemon-thread-updates-v2-supplied-delivery-contract).
 
 Quick app fixes for pyrycode-mobile#1947, pyrycode-mobile#1948 and pyrycode-mobile#1949 go ahead meanwhile. The agent-switch handoff note (#2673) should read items, so there is one definition of an exchange.
 
