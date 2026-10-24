@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -31,6 +32,14 @@ func TestHostedAppProcess(t *testing.T) {
 		return
 	}
 	child := exec.Command("/bin/sleep", "99999")
+	// The cleanup regression deliberately models a retained admission capability.
+	if os.Getenv("PYRY_HOSTED_LOCK_PROOF") == "1" {
+		fd, err := strconv.Atoi(os.Getenv("PYRY_TEST_ADMISSION_FD"))
+		if err != nil {
+			os.Exit(5)
+		}
+		child.ExtraFiles = []*os.File{os.NewFile(uintptr(fd), "isolated-admission")}
+	}
 	if child.Start() != nil {
 		os.Exit(2)
 	}
