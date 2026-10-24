@@ -15,6 +15,7 @@
     "cold_state": "fresh history and Store per outcome; loaded history caches remain real; no page-cache reset",
     "build_cache": "thread compilation warm after alone; first combined run compiled daemon/relay race binaries; subsequent combined runs warm",
     "observations": "fixture-local phase wall times, conversation and worker identities, Status before Snapshot, start/end loadavg, CPU/I/O pressure and process I/O; no payloads",
+    "worker_labels": "worker is the Store mapping at phase entry; it identifies reload/retirement work, not an old request's captured owner after replacement. Held-request entry and release are separate events.",
     "timeout_stacks": "none generated: no current timeout; original run did not capture stacks"
   },
   "invocation_prefix": "TMPDIR=/work/builder-3854-tmp python3 scripts/test-admission.py -- go test -timeout=30m -race -json -count=10 -run",
@@ -66,5 +67,13 @@
     "analysis": "/tmp/builder-3854/recovery-analysis.json; includes per-reload worker identities and phase observations",
     "static_checks": "go vet ./... and go build -o /tmp/builder-3854/recovery-pyry ./cmd/pyry passed at the candidate; recovery-vet.log and recovery-build.log empty",
     "complete_acceptance": "pending dispatcher; no live Claude proof required; macOS outside verification scope"
+  },
+  "further_diagnostic_request": {
+    "revision": "590d577230677a419e217a1beb353b9509fcd2dc",
+    "path": "/tmp/builder-3854/recovery-investigation-request.json",
+    "requested": "bounded native syscall/scheduler observations with the original selectors; no complete suite",
+    "outcome": "client rejected: Task request unavailable or outside this admitted ticket",
+    "executed": 0,
+    "assessment_id": null
   }
 }

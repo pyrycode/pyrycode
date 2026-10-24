@@ -208,3 +208,11 @@ so neither persistence nor scheduling is established as the original cause.
 No cause-specific repair or distinguishing regression is claimed. Both original
 Open questions remain unresolved. Vet and build passed at the diagnostic source.
 Keep PR #3855 draft and complete acceptance pending; do not mark this ticket built.
+
+The deeper native syscall/scheduler diagnostic request at pushed evidence revision
+`590d577230677a419e217a1beb353b9509fcd2dc` was rejected by the managed client:
+`Task request unavailable or outside this admitted ticket`. It scheduled no work
+and has no assessment ID; do not treat it as queued. The request is preserved at
+`/tmp/builder-3854/recovery-investigation-request.json`. No alternate route or
+retry was attempted. The earlier `a7c382d7` assessment produced this recovery
+brief, not diagnostic execution. Current role work remains incomplete.
