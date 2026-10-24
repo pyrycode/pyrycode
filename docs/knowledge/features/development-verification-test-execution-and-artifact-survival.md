@@ -26,6 +26,73 @@ Before accepting a baseline comparison as attribution, compare suite composition
 fixture state. Re-running one failing reader on the base without its fixture-producing
 sibling is not the same experiment. Check for an existing issue before filing another.
 
+### Diagnosing compact capture reload
+
+Package concurrency does not prove that the suspect operations overlapped.
+In #3854's initial concurrent recording, daemon/relay execution overlapped thread
+predecessors but ended before `TestCompactCapture`. The
+[capture diagnostic fixture](thread-package-background-store-verification.md#compact-capture-reload-diagnostics)
+instead uses a rendezvous to release capture retirement and real daemon producer
+preparation together, before the unchanged five-second readiness measurement. Retain
+role release times and the producer preparation interval, not just process
+lifetimes. Separate held-query channel waiting from replacement worker work,
+`Status` readiness from rendered `Snapshot`, and setup from measured reload.
+
+The [controlled-overlap manifest](../../../internal/thread/testdata/3854-controlled-overlap.json)
+pins source `b23d9d641e49b1e62354a07573e04a535f08f5fd`, exact selection,
+declaration order, command, environment and artifact hashes. One admitted Linux
+race execution passed 45/45/0/0 executed/passed/failed/skipped named events,
+representing 40 leaves, including all five capture outcomes. Thread predecessors
+include compact preparation, bounded work and lifecycle; daemon checks include
+compact installation, negotiation and summary-task production. All three worker
+replacement intervals fall inside the producer's 894.356 ms preparation interval
+after release. Replacements reached usable version 3 in 24.410–28.100 ms while
+their old queries remained held. Neither retries, sleeps nor weakened assertions
+produced these passes.
+
+Fixtures were fresh per outcome on durable ext4 under `/work` (`rw,relatime`),
+with Go 1.26.9, Linux/amd64 and GOMAXPROCS 6. Build caches were not reset;
+OS page caches were uncontrolled. Earlier `/tmp` measurements used an
+overlay with `fsync=volatile` and cannot establish durable sync latency. Record
+the filesystem of the actual fixture directory rather than assuming a TMPDIR
+path establishes mount behavior. Across the controlled execution, load averages
+changed from 2.81/3.87/5.31 to 5.08/4.34/5.42; pressure samples include CPU/I/O
+waiting but no cgroup CPU quota throttling.
+
+Replacement creation-to-publication took 22.790–26.687 ms, including
+13.154–17.402 ms in Syscall, at most 0.205 ms runnable/preempted and 0.047 ms
+synchronization waiting. Resume validation took 2.315–3.697 ms, checkpoint
+import 0.063–0.092 ms and publication 0.037–0.043 ms. Runtime regions balance
+and all five tasks end after joined cleanup. Nested phase durations overlap;
+do not sum them. Running is scheduled wall time rather than measured CPU,
+and Syscall includes kernel and OS scheduling delay. Raw JSON, trace,
+scheduler/syscall/synchronization profiles, coordinator and pressure sampler
+are retained with hashes under `/work/manual-3854-overlap-evidence-20261024/`.
+
+The original source `8cb3fc0c8f86825ac176bdef8b50e3669130185a` remains failed:
+225/222/3/0 named events, including the capture parent, its success child and
+the separate summary-shell fixture failure. `TestCompactCapture/success` spent
+14.41 seconds and expired with rebuilding/version zero after its five-second
+reload wait. The [committed excerpt](../../../internal/thread/testdata/3854-original-reload-failure.jsonl)
+and manifest retain the complete JSON's SHA-256
+`8c33f2a9d6140e12319cc356b7323fb861d390efbf631394af5126770f7219eb`.
+No original phase trace, blocked stacks or contemporaneous filesystem/pressure
+record exists. Healthy controlled overlap establishes current bounded behavior;
+it identifies neither the historical cause nor a production reliability repair.
+Retained rejected/queued investigation requests are historical evidence, not
+executable directions, diagnostic executions or acceptance results.
+
+The [recorder compatibility evidence](../../../internal/thread/testdata/3854-trace-compatibility.json)
+preserves the earlier external-trace failure (2/0/2/0 events). At correction
+source `b9f84f5ab1d5da65e13048761bc6875bedd31517`, ordinary recorder checks
+passed 3/3/0/0; caller-owned tracing produced 7/6/0/1. Only the recorder isolation
+self-test skips when the caller owns tracing; all five capture outcomes pass.
+The [accepted independent verifier](https://github.com/pyrycode/pyrycode/pull/3855#issuecomment-6384979525)
+approved `e5073dc635f73f6c637b54df03c869e6a4f0e9ec` with all ten configured
+Linux checks complete, separately from the focused overlap proof. Earlier failed
+integration/comparison logs remain failed historical evidence. macOS is outside
+this Linux ticket's verification scope; no live Claude proof is required.
+
 ### Diagnosing recorded lifecycle output timing
 
 Measure work between forwarded frames before changing a replay deadline. In the
