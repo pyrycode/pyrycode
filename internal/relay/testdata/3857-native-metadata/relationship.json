@@ -1,0 +1,9 @@
+{
+  "initial_manifest_sha256": "151be688822aeecd4a231b956ff78ed52c43898d2099b01665baa976dd7235e2",
+  "current_manifest_sha256": "a1cb7b779d840de7c65e26dcd98d932f1b2456389b8cbfa79c6163ab67fe9696",
+  "changed_artifacts": [
+    "result.json"
+  ],
+  "initial_manifest_method": "Reconstructed from the recorded empty case-list summary using its original serializer; the complete known initial digest matched exactly. No original raw file was altered.",
+  "only_change": "Derived result.json gained the two XML case identities and pass/fail booleans. Aggregate outcome remains 2 executed, 1 passed, 1 failed, 0 skipped. All raw artifact hashes are identical."
+}
