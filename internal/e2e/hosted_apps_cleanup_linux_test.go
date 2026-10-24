@@ -118,15 +118,22 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 				Process hostedProcess
 				Home    string
 			}
-			hostedWait(t, func() bool {
+			for {
 				select {
 				case <-done:
 					t.Fatalf("owner exited before receipt: %v\n%s", ownerErr, log.String())
 				default:
 				}
 				b, e := os.ReadFile(filepath.Join(root, "receipt"))
-				return e == nil && json.Unmarshal(b, &receipt) == nil
-			})
+				if e == nil && json.Unmarshal(b, &receipt) == nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("owner receipt deadline", ctx.Err())
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 			// Handles are captured while the nested owner is alive; emergency cleanup
 			// cannot target a later process that reuses one of these PIDs.
 			var handles []*os.Process
@@ -150,10 +157,21 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, pid := range []int{receipt.Process.PID, receipt.Process.Descendant} {
-					fd, e := os.Stat(fmt.Sprintf("/proc/%d/fd/3", pid))
-					if e != nil || !os.SameFile(lock, fd) {
-						t.Fatalf("pid=%d did not retain isolated lock: %v", pid, e)
+					fds, e := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+					if e != nil {
+						t.Fatal(e)
 					}
+					var held []string
+					for _, fd := range fds {
+						info, e := os.Stat(fmt.Sprintf("/proc/%d/fd/%s", pid, fd.Name()))
+						if e == nil && os.SameFile(lock, info) {
+							held = append(held, fd.Name())
+						}
+					}
+					if len(held) == 0 {
+						t.Fatalf("pid=%d did not retain isolated lock", pid)
+					}
+					t.Logf("pid=%d isolated lock descriptors=%v inode=%d", pid, held, lock.Sys().(*syscall.Stat_t).Ino)
 				}
 			}
 			<-done
