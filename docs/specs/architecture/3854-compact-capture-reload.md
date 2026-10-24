@@ -1,0 +1,103 @@
+# Compact capture reload investigation
+
+## Files read
+
+- `internal/thread/compact_queries_test.go` → `TestCompactCapture`: five outcomes hold a context-tagged old query across publication and worker replacement.
+- `internal/thread/store_test.go` → `testStoreWait`, `testThreadStore`: five-second polling bound and joined store cleanup.
+- `internal/thread/store.go` → `Store.run`, `Store.publish`, `Store.Unload`: recovery, publication admission and worker identity checks.
+- `internal/thread/store_resume.go` → `Store.resumeCheckpoint`, `checkpointWriter.reconcileResume`: saved-state validation and resumed index reconciliation.
+- `internal/thread/store_checkpoint.go` → `Store.dirtyCheckpoint`, `workerCheckpoint.commit`: dirty recovery and clean retirement.
+- `internal/thread/checkpoint_write.go` → `checkpointWriter.run`, `checkpointWriter.replaceState`: existing phase hooks around durable operations.
+- `internal/thread/cache.go` → `Store.writeCacheFile`: scalar file sync precedes replacement and directory sync.
+- `docs/knowledge/features/thread-package.md`, background-store and cache-and-epochs topics: checkpoint validation precedes usability; snapshots may render history outside the mutex.
+- `docs/knowledge/features/development-verification-test-execution-and-artifact-survival.md`: retain actual failed evidence; a focused pass cannot attribute historical contention.
+
+## Context
+
+At `8cb3fc0c8f86825ac176bdef8b50e3669130185a`, Linux
+`TestCompactCapture/success` remained rebuilding at version zero five seconds
+after reload. Its first retirement checkpoint appeared 7.59 seconds after entry;
+the next subcase also took 3.66 seconds. Neither establishes the blocked phase.
+The original `/tmp/builder-3851/compatibility.json` and downloaded builder bundle
+`fcfc22aeb09dc922275c269e24fa6802d8b6d7e8fd33a298307ad4f1f8027690`
+remain failed evidence. Original JSON SHA-256:
+`8c33f2a9d6140e12319cc356b7323fb861d390efbf631394af5126770f7219eb`.
+
+One deliverable: bounded usable reload preserving the held query's captured
+state, with a measured diagnosis and its regression. No decision record yet.
+Initial sketch and this plan fit approximately 350 written lines, zero exported
+types, zero consumer migrations, three acceptance criteria and no new reject
+branches. Reassess if the measured cause requires more.
+
+Branch overlap: #3851 adds task association in `initialPublicationIndex`; it
+does not change the capture fixture or recovery control flow. Build through it.
+
+## Design
+
+First add fixture-local observation using existing lookup, reader, checkpoint
+and filesystem hooks. Record elapsed operation/phase times without payloads,
+capture worker stacks on failure, and retain Linux load/context alongside JSON.
+Preserve real checkpoint/history operations and the five-second readiness bound.
+Compare capture alone with its compact preparation/bounded-work predecessors.
+Use fresh histories per subcase; build caches may be warm and OS page-cache state
+is uncontrolled. A wider diagnostic, if necessary, requires recovery assessment.
+
+Do not select a synchronization or persistence repair from a green repetition.
+Once observations establish a cause, record the exact cause-specific contract
+and controlled regression in Revisions before implementing the repair.
+Retain the original five outcomes and detached result assertions.
+
+## Concurrency model
+
+Store workers and their tail forwarders retain existing cancellation/join paths.
+The fixture holds only the context-tagged compact request outside Store locks.
+Diagnostic state uses a separate mutex; hook configuration precedes worker start.
+Failure cleanup releases the request barrier, cancels and joins the query before
+store shutdown. No diagnostic background goroutines are needed.
+
+## State transitions and identity reuse
+
+| Event | Race coverage |
+| --- | --- |
+| Old query held while version 2 advances to 3 | `TestCompactCapture` (all outcomes) |
+| Unload and reload the same conversation while old query is held | `TestCompactCapture/success`, `/failure`, `/cancel` |
+| Old failure after replacement must not withdraw new worker | `TestCompactCapture/failure` |
+| Current failure withdraws current publication | `TestCompactCapture/current-failure` |
+| Cancellation returns no partial result | `TestCompactCapture/cancel`, `/current-cancel` |
+| Unrelated conversation survives all transitions | `TestCompactCapture` (all outcomes) |
+
+## Error handling
+
+Keep source failures generic and atomic. Diagnostics identify operations and
+timings, never raw errors, payloads or credentials. A timeout must still fail;
+cleanup releases held test work. Do not add retries, sleeps or relaxed bounds.
+
+## Testing strategy
+
+Baseline: admitted Linux `-race -json -count=10 -run '^TestCompactCapture$'`
+at `368e1580653d29140beb5887a874b45a1a0f4656`, with retained JSON in
+`/tmp/builder-3854/baseline-admitted.json`. Then measure instrumented capture and
+the named compact predecessors. A controlled before/after check must distinguish
+the eventual repair. Run affected thread race checks, `go vet ./...` and
+`go build ./cmd/pyry`; complete acceptance remains dispatcher-owned.
+
+## Open questions
+
+- Which phase accounts for the timeout: history/checkpoint I/O, publication,
+  fixture synchronization or scheduler/load delay? Unresolved before diagnosis.
+- Does the original predecessor sequence reproduce it without unrelated packages?
+
+## Security review
+
+**Verdict:** PASS for observation; review any production repair before implementing.
+
+**Findings:**
+
+- Trust boundaries/files: observation preserves `readCheckpoint`, checksum validation, contained no-follow file admission and durable dirty marking; no input becomes newly trusted.
+- Tokens/cryptography: no changes to epoch generation or certificate evidence. Diagnostics exclude tokens and content.
+- Subprocesses/network: no product subprocess or network behavior changes; checks use managed admission.
+- I/O/errors/logs: SHOULD FIX: record phase names/timings and failure stacks only in fixture output; do not expose raw source errors or payloads.
+- Concurrency: SHOULD FIX: release, cancel and join the test query on every exit. Configure hooks before workers; serialize diagnostic records separately from Store locks.
+- Threat model: local test-only observations add no remote authority; any later recovery repair requires renewed adversarial review.
+
+**Reviewer:** builder self-review. **Date:** 2026-10-24.
