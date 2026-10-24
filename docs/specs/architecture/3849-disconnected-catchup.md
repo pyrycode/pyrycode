@@ -64,3 +64,7 @@ Retain Linux race JSON, exact source revisions and executed/passed/failed/skippe
 
 **Reviewer:** builder (self-review)
 **Date:** 2026-10-24
+
+## Revisions
+
+- 2026-10-24, prospective diagnostic refinement: failure-only E2E stderr retention reproduced an EOF at the same returning-phone boundary, with binary transport generation replacement. Add a fixed `v2.hosted.delivery_failed` event in `handleHostedDone`, classifying cancellation, deadline or other send failure without raw error text, plus a controlled assertion on that existing failure path. This distinguishes query cancellation from missing-session rejection without changing close behavior. Security review: PASS; only fixed event/reason and connection identity are logged. The QMD search confirms wake completion and source retention are separate from thread publication.
