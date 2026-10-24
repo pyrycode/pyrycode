@@ -114,7 +114,7 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
 	}
 	limit, err := protocol.NormalizeThreadQueryLimit(limit)
 	providerMissing := body && m.cfg.ThreadToolBody == nil || children && m.cfg.ThreadChildren == nil || !expanding && (page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil)
-	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.liveWithheld(s, *p.Conversation) || !s.thread || !s.interactive || expanding && !s.threadExpansion || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
+	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.threadConversationWithheld(s, *p.Conversation) || expanding && (!s.threadExpansion || !s.interactive) || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
 		fail()
 		return
 	}

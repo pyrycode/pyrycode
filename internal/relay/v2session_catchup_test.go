@@ -165,7 +165,7 @@ func TestThreadCatchUpAdmission(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("invalid request reached provider")
 	}
-	for _, gate := range []string{"interactive", "codex", "missing"} {
+	for _, gate := range []string{"membership", "codex", "missing"} {
 		t.Run(gate, func(t *testing.T) {
 			p := testCatchUpPeer(t, nil, func(c *V2SessionConfig) {
 				c.ThreadCatchUp = func(context.Context, protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
@@ -177,15 +177,10 @@ func TestThreadCatchUpAdmission(t *testing.T) {
 					c.CodexConversation = func(string) bool { return true }
 				case "missing":
 					c.ThreadCatchUp = nil
-				case "interactive":
-					c.ThreadReady = func() bool { return true }
+				case "membership":
+					c.KnownConversation = nil
 				}
 			})
-			if gate == "interactive" {
-				q := &testHostedPeer{t: t, mgr: p.mgr, frames: p.frames, rec: p.rec, conn: "noninteractive", pub: p.pub, events: p.events}
-				q.open([]string{protocol.CapabilityThread})
-				p = q
-			}
 			testCatchUpRequest(p, 40, 20)
 			testCatchUpError(t, p, 40)
 		})

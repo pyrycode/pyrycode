@@ -57,7 +57,7 @@ changes a join; only a catch-up/page final does. While a join is compact,
 `threadQueryGate` withholds an unsolicited complete live item update for that
 conversation before sealing instead of cancelling the in-flight compact query;
 a complete live update still cancels only an in-flight *complete*
-re-initialization. See [thread query messages](../../../protocol-mobile.md#thread-query-messages).
+re-initialization. See [thread query messages](../../protocol-mobile.md#thread-query-messages).
 
 **Compact live delivery reuses the same join and never advances it (#3574).**
 `DeliverThread` admits `thread_compact_update` through `threadContent` on the
@@ -97,14 +97,16 @@ recipient's expansion flag. Upstream checks
 at `forwardEnvelope` and `forwardAppReply` cannot authorize a later queued send:
 `hostedDeliver` rechecks the selected unsealed thread-content head immediately
 before Noise sealing. The connection must still be open/authenticated, currently
-paired, thread-capable and interactive; its payload must name a currently
-registered conversation and pass the existing Codex/`multi_agent` gate. Removal
+paired and thread-capable; complete content does not require interactive. Its
+payload must name a currently registered conversation and pass the existing Codex/`multi_agent` gate. Removal
 or eligibility loss while queued withholds content without spending a sender ID
 or Noise nonce. Withheld heads release lane capacity and do not strand permitted
-output. Missing conversation identity fails closed. Neither `thread` alone nor
-`in_reply_to` grants interactive or multi-agent access. Unaffected legacy caller
-and provider signatures and reply behavior remain unchanged. Unsolicited content
-replaced by the thread is suppressed on live and connect-reconcile paths.
+output. Missing conversation identity fails closed. Expansion additionally
+requires interactive; compact retains its negotiated prerequisites and join
+fence. Neither `thread` nor `in_reply_to` grants interactive or multi-agent
+access. Pushes, correlated replies and continuations retain supplied session
+attribution and clear flags without a non-thread stripping branch. Unsolicited
+content replaced by the thread is suppressed on live and connect-reconcile paths.
 `hello.last_event_id` is ignored and event replay/resync is retired for every
 connection (#3738); raw `request_history` is also retired (#3715). Supplied
 current live-state reconciliation continues for admitted thread sessions. Supplied
@@ -139,8 +141,8 @@ for withholding, failure, retirement and cancellation outcomes, and
 for capacity and detached input.
 
 [`admitThreadQuery`](../../../internal/relay/v2session_catchup.go) validates field
-presence/types, canonical conversation ID, current pairing, `thread`/interactive
-capability, `KnownConversation` and the Codex/`multi_agent` gate before invoking
+presence/types, canonical conversation ID, current pairing, negotiated `thread`,
+`KnownConversation` and the Codex/`multi_agent` gate before invoking
 `ThreadCatchUp` or `ThreadPage`. Normalize limits even for nonzero catch-up: the
 backend ignoring its window limit does not authorize a negative wire limit.
 Apps must explicitly request catch-up for each open conversation; handshake
@@ -159,8 +161,8 @@ and requests over 36,000 entries are covered by `TestDaemonThreadQueriesReadines
 `TestDaemonThreadQueriesBounded`. See the
 [wire query contract](../../protocol-mobile.md#thread-query-messages).
 
-Both expansion reads also require `thread_expansion`, a nonempty string epoch
-and nonzero unsigned 64-bit item ID/expected revision. Body admission refuses
+Both expansion reads also require `interactive`, `thread_expansion`, a nonempty
+string epoch and nonzero unsigned 64-bit item ID/expected revision. Body admission refuses
 any cursor key, including null. `ThreadToolBody` must enforce public ownership in
 the named conversation and honor cancellation. `runThreadToolBody` rejects nonusable/error
 results and passes the captured identity, kind and content to
@@ -243,14 +245,18 @@ types keep their existing fallback. `TestThreadPageAdmission`,
 IDs through the authenticated wire, because direct admission tests would miss
 this bypass.
 
-**A refusal must preserve the legacy delivery path.** An Outbound-only peer has
+**A refusal must remain deliverable.** An Outbound-only fixture has
 no cancellable ordered sender. Initializing a lane merely to deny an unnegotiated
 query would close it before its owed correlated error. `admitThreadQuery`
 uses Run-owned `forwardEnvelope` when no lane exists; accepted sequences require
 the cancellable ordered sender. `TestThreadCatchUpLegacyRefusal` and
-`TestThreadPageLegacyRefusal` pin that split; the
-[legacy raw-history path](../../protocol-mobile.md#conversation-history-v2)
-retains its cursor, disk reads and delivery behavior.
+`TestThreadPageLegacyRefusal` pin that split. These low-level refusal proofs
+provide no compatibility admission or content route;
+[raw history requests](../../protocol-mobile.md#conversation-history-v2) are retired.
+Likewise, keep content gates scoped to content: a blanket no-thread output drop
+would hide the owed content-free refusal in synthetic admission tests.
+`KnownConversation` callbacks can change synthetic eligibility; test the thread
+flag after membership resolution so late changes are observed before provider work.
 
 **Completion must fence live admission.** One generation-specific query token
 owns each connection's unfinished catch-up, page, tool-body or child read; all share
@@ -293,7 +299,7 @@ carry a join into a reused connection ID. The catch-up and page variants of
 `TestThreadCatchUpLiveRace`, `TestThreadCatchUpInterrupted` and
 `TestThreadCatchUpJoinedLive` exercise these cuts; `TestThreadPageSharedAdmission`
 pins cross-query slot contention and the join cap. Both requested-scope tests
-pair gap-producing thread and legacy handshakes with named requests.
+pair gap-producing admitted thread handshakes with named requests.
 
 `TestThreadCatchUpCoveredLiveDuringDelivery` holds a selected nonfinal encrypted
 reply and injects older/equal, newer and different-epoch live progress. With both
@@ -364,7 +370,8 @@ including a supplied stored session binding. Rebuilding the row through that
 DTO would silently discard those fields and introduce absent zero/null fields.
 `agentTaggedForConn` and `threadSummary` therefore use `replaceObjectField` to
 edit only the projected fields, preserving unrelated encoded values and
-presence. Fresh payload bytes isolate each connection from shared pushes; unchanged legacy replies retain their original bytes.
+presence. Fresh payload bytes isolate each connection from shared pushes;
+unchanged replies retain their original bytes.
 
 `ThreadLastShownVersion` is the only authority for every `conversations` row
 and every pushed or replied `conversation_updated`. Usable zero emits numeric
@@ -373,11 +380,10 @@ Item revisions and partial recovery cannot substitute for that reading. Thread
 unread is `last_shown_version > read_up_to` only with present evidence; absence
 means unknown. Stored binding and durable read mark keep their meanings and
 presence. Lists retain eligible rows without legacy history scans; the retired
-`latest_entry_id` field supplies no fallback. Non-thread delivery
-strips the reading and envelope session metadata and omits clear frames in
-retained low-level projection paths; mandatory admission now makes those paths
-unreachable to a no-thread app. `TestV2Session_ThreadSummaries` checks distinct
-readings, zero/unavailable and unrelated field presence, including the combination
+`latest_entry_id` field supplies no fallback. `threadSummary` always consults
+the authoritative provider; `threadProjected` has no per-session compatibility
+branch, and neither it nor `threadReply` strips supplied attribution or clears.
+`TestV2Session_ThreadSummaries` checks distinct readings, zero/unavailable and unrelated field presence, including the combination
 with agent tagging. `TestV2Session_ThreadDelivery` covers item denial even in
 handler replies. `TestV2Session_LastEventIDIgnored` checks that obsolete hello
 cursors produce no replay/resync and cannot suppress later updates for either
@@ -444,8 +450,20 @@ retaining source history; hello must not query items. See the
 [hosted-admission quarantine](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery).
 
 `ActiveThreadConns(ctx, conversation)` enumerates on Run using delivery's
-shared conversation/interactive/agent gates, excluding latched queues. Ordinary
-`ActiveConns` keeps its existing enumeration. The publisher refreshes prior
+shared `threadConversationWithheld` conversation/thread/agent gates, excluding
+latched queues. Reusing interactive `liveWithheld` here would silently omit
+thread-only recipients even when query admission and final sealing allow them.
+`TestThreadCompleteCapabilities` checks genuinely negotiated thread-only and
+thread+interactive complete catch-up, older pages, correlated final markers,
+publication recipients and attributed updates without optional expansion/compact.
+`TestRelayV2_ClientFeaturesSpawnSnapshot` also exercises both capability sets
+after a cold conversation's first completed post; an interactive-only fixture
+cannot expose this coupling. Authenticated attributed-output fixtures must
+decrypt with the supplied CipherState and assert tags/clears directly: the hosted
+discovery reader rejects top-level session fields and would fail on correct
+thread output.
+
+Ordinary `ActiveConns` keeps its existing enumeration. The publisher refreshes prior
 consumer tracking from eligible peers and records successful enqueues. Recording
 every negotiated peer would let a Codex gap retire a basic connection that
 never received the affected items. `TestDaemonThreadGapPreservesAgentIneligiblePeer`

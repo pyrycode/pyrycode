@@ -129,7 +129,6 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 			}}
 			sess, _ := driveToOpenCaps(t, cfg, frames, rec, pub, initPriv, v2TestToken, caps)
 			t.Cleanup(sess.stop)
-			isThread := slices.Contains(caps, "thread")
 			assertRow := func(raw json.RawMessage, id string) {
 				var row map[string]json.RawMessage
 				if err := json.Unmarshal(raw, &row); err != nil {
@@ -137,7 +136,7 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 				}
 				want, usable := cfg.ThreadLastShownVersion(id)
 				got, exists := row["last_shown_version"]
-				if exists != (isThread && usable) {
+				if exists != usable {
 					t.Fatalf("%s reading presence: %s", id, raw)
 				}
 				if exists {
@@ -167,14 +166,14 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			raw := threadPlain(t, waitForEnvelopes(t, rec, 2)[1], sess.initRecv)
-			if !isThread && string(raw) != `{"id":7,"type":"conversation_updated","ts":"2026-10-10T00:00:00Z","payload":`+legacy+`}` {
-				t.Fatalf("legacy bytes: %s", raw)
-			}
 			var got protocol.Envelope
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatal(err)
 			}
 			assertRow(got.Payload, "zero")
+			if string(got.SessionID) != string(pushed.SessionID) {
+				t.Fatal("summary session attribution changed")
+			}
 			if string(pushed.Payload) != supplied {
 				t.Fatal("shared payload mutated")
 			}
@@ -192,9 +191,6 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 					t.Fatalf("reply correlation: %s", raw)
 				}
 				if i == 0 {
-					if !isThread && string(got.Payload) != `{"conversations":[`+legacy+`,{"id":"other","read_up_to":4},{"id":"unavailable"}],"extra":null}` {
-						t.Fatalf("legacy list bytes: %s", got.Payload)
-					}
 					var p struct {
 						Conversations []json.RawMessage `json:"conversations"`
 					}
@@ -206,9 +202,6 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 					}
 				} else if i == 1 {
 					assertRow(got.Payload, "zero")
-					if !isThread && string(got.Payload) != legacy {
-						t.Fatalf("legacy reply bytes %s", got.Payload)
-					}
 				} else {
 					assertRow(got.Payload, "unavailable")
 				}
@@ -221,7 +214,7 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 	t.Parallel()
 	replaced := []string{"assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end", "session_transition", "message", "background_task_started", "background_task_updated", "background_task_roster", "banner", "compaction_boundary", "model_refusal_fallback", "model_refusal_no_fallback", "unrecognized_message"}
 	progress := []string{"turn_state", "tool_progress", "background_task_progress", "thinking_progress", "api_retry", "compacting"}
-	for _, caps := range [][]string{{"thread"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
+	for _, caps := range [][]string{{"thread"}, threadCaps, {"thread", "multi_agent"}, {"interactive", "thread", "multi_agent"}} {
 		t.Run(strings.Join(caps, "-"), func(t *testing.T) {
 			priv, pub := genV2Keypair(t)
 			initPriv, _ := genV2Keypair(t)
@@ -230,7 +223,8 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 			cfg := threadConfig(t, frames, rec, priv)
 			cfg.Handlers = map[string]dispatch.Handler{protocol.TypeListConversations: func(ctx context.Context, c *dispatch.Conn, ask protocol.Envelope) error {
 				for _, typ := range []string{protocol.TypeThreadItemAdded, protocol.TypeThreadItemChanged, protocol.TypeThreadTextAppend} {
-					if err := c.Reply(ctx, ask, typ, json.RawMessage(`{"conversation_id":"conv-codex","continuation":{"index":0,"final":true},"data":"secret"}`)); err != nil {
+					if err := c.Send(ctx, protocol.Envelope{ID: c.NextID(), Type: typ, InReplyTo: &ask.ID, SessionID: json.RawMessage(`"reply-session"`), SessionStateCleared: true,
+						Payload: json.RawMessage(`{"conversation_id":"conv-codex","continuation":{"index":0,"final":true},"data":"secret"}`)}); err != nil {
 						return err
 					}
 				}
@@ -238,7 +232,6 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 			}}
 			sess, _ := driveToOpenCaps(t, cfg, frames, rec, pub, initPriv, v2TestToken, caps)
 			t.Cleanup(sess.stop)
-			isThread := slices.Contains(caps, "thread")
 			interactive := slices.Contains(caps, "interactive")
 			multi := slices.Contains(caps, "multi_agent")
 			var sent, want []protocol.Envelope
@@ -269,19 +262,13 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 				item := strings.HasPrefix(env.Type, "thread_")
 				deliver := true
 				if item {
-					deliver = isThread && interactive && pushedConversationID(env) != "" && (multi || pushedConversationID(env) != "conv-codex")
-				} else if isThread && env.InReplyTo == nil && slices.Contains(replaced, env.Type) {
+					deliver = pushedConversationID(env) != "" && (multi || pushedConversationID(env) != "conv-codex")
+				} else if env.InReplyTo == nil && slices.Contains(replaced, env.Type) {
 					deliver = false
-				} else if isThread && liveStateFamily(env.Type) && (!interactive || pushedConversationID(env) == "") {
-					deliver = false
-				} else if !isThread && env.SessionStateCleared {
+				} else if liveStateFamily(env.Type) && (!interactive || pushedConversationID(env) == "") {
 					deliver = false
 				}
 				if deliver {
-					if !isThread {
-						env.SessionID = nil
-						env.SessionStateCleared = false
-					}
 					want = append(want, env)
 				}
 			}
@@ -303,15 +290,15 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 			before := len(rec.snapshot())
 			frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{ID: 100, Type: protocol.TypeListConversations, Payload: json.RawMessage(`{}`)})
 			n := 1
-			if isThread && interactive && multi {
+			if multi {
 				n = 4
 			}
 			envs := waitForEnvelopes(t, rec, before+n)
 			if n == 4 {
 				for i, typ := range []string{"thread_item_added", "thread_item_changed", "thread_text_append"} {
 					item := decryptAppFrame(t, envs[before+i], sess.initRecv)
-					if item.Type != typ {
-						t.Fatal(item.Type)
+					if item.Type != typ || item.InReplyTo == nil || *item.InReplyTo != 100 || string(item.SessionID) != `"reply-session"` || !item.SessionStateCleared {
+						t.Fatalf("correlated continuation attribution: %+v", item)
 					}
 				}
 			}
@@ -349,6 +336,12 @@ func TestV2Session_ThreadContentWithheld(t *testing.T) {
 
 func TestV2Session_ThreadContinuations(t *testing.T) {
 	t.Parallel()
+	for _, caps := range [][]string{{protocol.CapabilityThread}, threadCaps} {
+		t.Run(strings.Join(caps, "-"), func(t *testing.T) { testThreadContinuations(t, caps) })
+	}
+}
+
+func testThreadContinuations(t *testing.T, caps []string) {
 	for _, count := range []int{2900, 9000} {
 		text := strings.Repeat("\x00\"\\<&", count)
 		content, err := json.Marshal(map[string]string{"text": text})
@@ -366,7 +359,7 @@ func TestV2Session_ThreadContinuations(t *testing.T) {
 				initPriv, _ := genV2Keypair(t)
 				frames := make(chan protocol.RoutingEnvelope, 2)
 				rec := &v2Recorder{}
-				sess, _ := driveToOpenCaps(t, threadConfig(t, frames, rec, priv), frames, rec, pub, initPriv, v2TestToken, threadCaps)
+				sess, _ := driveToOpenCaps(t, threadConfig(t, frames, rec, priv), frames, rec, pub, initPriv, v2TestToken, caps)
 				t.Cleanup(sess.stop)
 				base := protocol.Envelope{ID: 1, SessionID: json.RawMessage(`"fixed-session"`)}
 				parts, err := protocol.EncodeThreadUpdate(base, update)
@@ -411,7 +404,7 @@ func TestV2Session_ThreadContinuations(t *testing.T) {
 					if err := json.Unmarshal(env.Payload, &part); err != nil {
 						t.Fatal(err)
 					}
-					if string(env.SessionID) != string(base.SessionID) {
+					if string(env.SessionID) != string(base.SessionID) || !env.SessionStateCleared {
 						t.Fatal("session identity changed")
 					}
 					if part.Continuation == nil {
