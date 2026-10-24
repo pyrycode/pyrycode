@@ -1,0 +1,4 @@
+{"Time":"2026-10-24T04:19:53.999963019Z","Action":"run","Package":"github.com/pyrycode/pyrycode/internal/e2e","Test":"TestRecordedClaude"}
+{"Time":"2026-10-24T04:19:54.01294364Z","Action":"run","Package":"github.com/pyrycode/pyrycode/internal/e2e","Test":"TestRecordedClaude/two-turn"}
+{"Time":"2026-10-24T04:19:55.570529223Z","Action":"pass","Package":"github.com/pyrycode/pyrycode/internal/e2e","Test":"TestRecordedClaude/two-turn","Elapsed":1.56}
+{"Time":"2026-10-24T04:19:55.570642799Z","Action":"pass","Package":"github.com/pyrycode/pyrycode/internal/e2e","Test":"TestRecordedClaude","Elapsed":1.57}

@@ -1,0 +1,131 @@
+{
+  "ticket": 3844,
+  "platform": "Linux x86_64",
+  "counting": "Named Go test events, including parents/subtests; executed excludes skipped. Package outcome events excluded.",
+  "productionRevision": "8f8ac13d649918d70f1dbc276b923273a75e1396",
+  "finalTestRevision": "4dd8fbef10ed3791c089f986e13dc4dc99d99c06",
+  "preRepairProductionRevision": "556f9e8277b75e2a1d86b4bc24edf28129201f43",
+  "preRepairRegressionCommit": "d2a1c0eace69ee25ece7a6e60bc3b812962c0476",
+  "cause": "Idle retirement advanced beyond the successful publisher cursor. Before retirement Changes proved continuity; after clean same-epoch reload the older range was absent. Neither row withdrawal nor an unusable capture was required.",
+  "schedules": [
+    {
+      "schedule": "coalesced",
+      "published": 6,
+      "sourceBeforeRetirement": 13,
+      "beforeRetirementCursor": 6,
+      "afterRetirementCursor": 13,
+      "reload": 14
+    },
+    {
+      "schedule": "separated",
+      "published": 6,
+      "sourceBeforeRetirement": 12,
+      "beforeRetirementCursor": 6,
+      "afterRetirementCursor": 12,
+      "reload": 13
+    }
+  ],
+  "originalFailure": {
+    "ticket": 3740,
+    "source": "f1276c1f02a0f68d19ba59cb10d15ea343676699",
+    "fixturePlan": "fbbd7798",
+    "runId": "f72f3e6724365c25c0de5df295acf7f214c27e67adc4f6c79f7e0060b9983511",
+    "digest": "8d41fa7d02c4f7934095243014e565487b0c55aaf74de4897506d0be60f9063c",
+    "retrieved": "/tmp/builder-3844/original-failure",
+    "outcome": "Historical two-turn failure remains failed; original complete counts are not inferred from later passes."
+  },
+  "runs": [
+    {
+      "name": "pre-repair regression",
+      "revision": "556f9e8277b75e2a1d86b4bc24edf28129201f43",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^TestDaemonThreadRepeatedTurnRetirement$' ./cmd/pyry",
+      "executed": 3,
+      "passed": 0,
+      "failed": 3,
+      "skipped": 0,
+      "log": "/tmp/builder-3844/before.jsonl",
+      "sha256": "10e5222f3c118b640c2aea2e5c1e51eef85d44ea1ce311b848f5125caf71c481",
+      "retained": "before.jsonl"
+    },
+    {
+      "name": "initial affected daemon package",
+      "revision": "8f8ac13d649918d70f1dbc276b923273a75e1396",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./cmd/pyry",
+      "executed": 16841,
+      "passed": 16838,
+      "failed": 3,
+      "skipped": 4,
+      "log": "/tmp/builder-3844/candidate-cmd.jsonl",
+      "sha256": "1593e521b5664d34ada511eab9b50d5d11f1979d2f30f41861d0ac0cc8fefe83",
+      "retained": "oracle-before.jsonl",
+      "note": "Only the new repeated-turn regression failed: its live-row oracle rejected the existing conversation_updated metadata frame despite proven continuity. Corrected in 4c9265b3; named rerun below is final proof. This failed package result remains failed."
+    },
+    {
+      "name": "affected thread package",
+      "revision": "4dd8fbef10ed3791c089f986e13dc4dc99d99c06",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json ./internal/thread",
+      "executed": 2190,
+      "passed": 2190,
+      "failed": 0,
+      "skipped": 2,
+      "log": "/tmp/builder-3844/candidate-thread.jsonl",
+      "sha256": "4ac66cd85c3975aa7b976cce985b625065792f423e997cdadf47e34342a435ac"
+    },
+    {
+      "name": "final daemon controls",
+      "revision": "4dd8fbef10ed3791c089f986e13dc4dc99d99c06",
+      "command": "python3 scripts/test-admission.py -- go test -timeout=30m -race -count=1 -json -run '^(TestDaemonThreadRepeatedTurnRetirement|TestAcceptedDeliveryLiveRefusal|TestDaemonThreadIdleAppendKeepsConnections|TestDaemonThreadGapReasons|TestDaemonThreadIdleCommit|TestDaemonThreadContinuity)$' ./cmd/pyry",
+      "executed": 16,
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0,
+      "log": "/tmp/builder-3844/final-daemon-focused.jsonl",
+      "sha256": "a48c3ed87f183b30105d5d4e684750218ddbecc56d4a17cff1ce0c71d8b505c0",
+      "retained": "after.jsonl"
+    },
+    {
+      "name": "final offline recording",
+      "revision": "4dd8fbef10ed3791c089f986e13dc4dc99d99c06",
+      "command": "PYRY_CLAUDE_TAPE_SCENARIOS='[\"two-turn\"]' python3 scripts/test-admission.py -- go test -timeout=30m -race -tags e2e -count=1 -json -run '^TestRecordedClaude$' ./internal/e2e",
+      "executed": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "log": "/tmp/builder-3844/final-recorded.jsonl",
+      "sha256": "f29f0864728ad572badd228d290a79ff56b556013b696eb1b1a36562c49955cb",
+      "retained": "recorded.jsonl"
+    }
+  ],
+  "staticChecks": [
+    {
+      "command": "go vet ./...",
+      "revision": "8f8ac13d649918d70f1dbc276b923273a75e1396",
+      "exitCode": 0,
+      "log": "/tmp/builder-3844/vet.log"
+    },
+    {
+      "command": "go build -o /tmp/builder-3844/pyry ./cmd/pyry",
+      "revision": "8f8ac13d649918d70f1dbc276b923273a75e1396",
+      "exitCode": 0,
+      "log": "/tmp/builder-3844/build.log"
+    }
+  ],
+  "skips": {
+    "daemon": [
+      "TestRunAgentRun_RealClaude: explicit provider opt-in",
+      "TestDaemonThreadMetadataReadiness: test-slow",
+      "TestMemoryPathsCaseInsensitive: case-sensitive filesystem",
+      "TestPushWakeFeedbackExpiryIntegration: test-slow"
+    ],
+    "thread": [
+      "TestCheckpointResumeCorpus: make test-exhaustive",
+      "TestReferenceDiskHeap: -args -measure-thread-heap"
+    ]
+  },
+  "notes": [
+    "Source and tests were committed before final focused execution. Later commits retain evidence only; production is unchanged after productionRevision.",
+    "The original regression was uncommitted during its failing run under plan-only head 6a1a749d; its exact source is retained by preRepairRegressionCommit.",
+    "Initial selector setup failures/refusals remain under /tmp/builder-3844/initial-recorded*.json and after-focused.jsonl; they establish no acceptance. The corrected JSON two-turn selector also passed before repair, demonstrating intermittency.",
+    "Full configured acceptance is pending with the dispatcher/verifier. No live Claude credentials were used. Other operating systems are outside this ticket's verification scope."
+  ]
+}
