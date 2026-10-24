@@ -108,22 +108,39 @@ only source content entries: count `turn_state`, prompts and progress on the
 live reader or an assertion can silently miss them.
 
 Match conversation, producing session, turn and parent lane when selecting text
-and terminal source facts. A reused turn/message/tool ID alone cannot identify
-work across sessions. A question's pre-answer prose and post-answer continuation
-need separate watermarks without losing the active turn identity. Keep actual
-acknowledgements, recipient isolation, live phase ordering and physical
-process/FIFO/file checks alongside source content. `TestSourceTurnIdentity`,
-`TestQuestionBoundaryIsolation` and `TestSourceObserverTerminalOrdering` protect
-these boundaries; they do not turn history evidence into app delivery proof.
+and terminal facts. Capture command time before the history watermark and send.
+`commandSource`, shared by `SourceSince` and `ObserveSource`, admits main content
+only when its real `main_turn_opened.occurred_at` falls within that command
+window, narrowed by the first actual acceptance when present. Append order and
+queue acceptance alone cannot establish execution: a predecessor's opening,
+content and end may all be appended after the successor was accepted. Keep
+subagent facts and unsupported-content alarms visible. Synthetic history must
+supply actual fixture openings and explicit producing sessions too.
+
+`sourceTurn.idle` requires a real received terminal with a nonempty session
+matching the selected source producer and timestamp at or after its execution
+opening. Omitted, null, empty, malformed and foreign sessions cannot certify
+completion. Delivery may precede source text/end append: retain the actual idle
+and reevaluate it on every poll or observation, before consumer payload filters.
+A watched conversation's running state or `turn_state` clear invalidates it;
+unrelated clears preserve it. Never fabricate a terminal from history or tag an
+unowned runtime envelope from source data. `TestConsumerIdleBeforeHistory` and
+`TestSourceDelayedPredecessorOpening` exercise consumers and delayed append.
+
+A parked question or permission continuation keeps the original valid opening:
+`QuestionBoundary` excludes earlier prose while retaining that execution anchor.
+Starting a new-send window after the modal would hide the continuation. Keep
+acknowledgements, dismissal attribution, isolation and physical process/FIFO/file
+checks alongside source content. See [owned completion](e2e-realclaude.md#reconnect-receiver-ownership).
 
 Normal completion may fold without a visible `turn_end` item or an update at
-its history version. `queuePlacementReader` therefore pairs attributed source
-ends with actual running-to-idle evidence after the pre-command watermark and a
-correlated successful final catch-up covering each end. Supplied live timestamps
-are captured before drain-time history appends; comparing idle time to the later
-append time rejects genuine completion. Retain live receive order and supplied
-session identity instead; predecessor idle and repeated source snapshots cannot
-complete another turn.
+its history version. `queuePlacementReader` pairs attributed source ends with
+actual running-to-idle evidence and correlated successful final catch-up covering
+each end. It owns a fixed private source window from before the first queued
+send; subsequent sends refresh the ordinary observer without hiding the queue's
+predecessor. `TestQueueSourceWindowSurvivesQueuedSend` protects that distinction.
+Supplied live timestamps precede drain-time history append, so compare idle to
+the producer's execution opening, never the later append clock.
 
 A source end alone must not start the ordinary two-turn queue's completion query
 while its successor is publishing: live updates can cancel catch-up and retire
@@ -157,9 +174,22 @@ until the CLI has returned silent queue acceptance, then checks the recorded
 outcome/error fields. This proves [acceptance semantics](control-plane.md#conversation-post-a-user-message-by-id-conversationpost)
 independently of the later model result.
 
-`fakephone.Client.ReceiveBytes` closes its WebSocket on timeout. An absence
-window on that connection therefore cannot also serve later live assertions.
-For a file-gated turn, send a supported correlated request and consume frames
+Supported handshake helpers advertise and verify `thread` with real readiness,
+then finish named-conversation catch-up before live-content expectations.
+`JoinConversations` correlates the query, verifies fragment indexes, offsets,
+length and SHA-256, and waits for the separate successful coverage marker. Interleaved
+snapshot/live envelopes stay decrypted and ordered on the phone through
+`DeferEnvelopes`/`TakeDeferred`; later receivers consume them before another
+decryption. Dropping setup observations can lose the only prompt or clear.
+
+`fakephone.Client.PollBytes` retains one raw read on the connection across short
+polls and successive consumers; `ReceiveBytes` inherits it. Keeping that read
+inside a disposable consumer closure allows the next consumer to start a second
+WebSocket read and corrupt framing. Decrypt serially on the test goroutine, and
+close/join the pending read at teardown. Without a pending poll, an ordinary
+`ReceiveBytes` timeout still closes the WebSocket, so an absence window cannot
+also serve later live assertions. For a file-gated turn, send a supported
+correlated request and consume frames
 through its reply while checking for forbidden post output. A
 `list_conversations` reply supplies that observation barrier while keeping the
 phone usable after the fake-Claude file gate is released.
@@ -614,6 +644,14 @@ that frame in `nextEnv` from the start rather than decode it only inside its
 own loop. `TestRelayV2_StreamSendMessageDrainsTurn` (#2610, above) collects
 ack and drain milestones in one loop; sequential milestone loops also work
 when their single reader retains every awaited observation.
+
+Supplied prompt-family clears are metadata-only `{}` envelopes, not fresh
+question/modal batches. Consume preserved setup observations first and recognize
+`SessionStateCleared` before decoding payload or counting surfaces. A child-exit
+late-answer fixture must receive and validate the actual parked permission
+before ending its isolated owner; immediate exit can overtake the surface before
+wire delivery. Then require the origin's dismissal, a distinct synchronized
+replacement child and refusal to deliver the old answer to it.
 
 `TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` and
 `TestRelayV2_StreamInterruptStopsRunningTurn` follow the latter pattern

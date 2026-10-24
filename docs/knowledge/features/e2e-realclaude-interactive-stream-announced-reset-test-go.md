@@ -7,19 +7,21 @@
   used to assert — that a live claude prints a `conversation_reset` line for that input — can no
   longer happen on this path. This case asserts what the daemon actually runs instead, in one
   live round trip: a per-run fact is planted with the predecessor, `/clear` is sent as ordinary
-  `send_message` text, and the client is asserted to see, in order, `resetting{wrapping_up,
-  pending}`, `resetting{restarting, written}`, one `session_transition{reason:"clear"}` (only
-  ordered after the `restarting` edge — see below), then `resetting{active:false}`. A turn sent
-  after the window closes must recall the planted fact from the successor's first reply, proving
-  the handoff note composed by `refreshSystemPromptForRotation` during rotation actually reached
-  the new child's appended system prompt. Zero production files touched.
+  `send_message` text. `resetWindow` requires actual active progress, exactly one
+  owned retained rotation and an actual successor `resetting` family clear at or
+  after rotation. Every active envelope must name the conversation and predecessor
+  session, carry a valid phase/handoff token and have a timestamp no later than
+  rotation. Missing, null, malformed or foreign ownership fails. Supplied
+  current-state delivery may coalesce intermediate singleton revisions; neither
+  exactly two active frames nor a legacy inactive payload is required. Initial
+  or old-owner clears cannot establish completion. Repeated clears cannot replace
+  missing progress or a unique rotation; duplicate rotations still fail. See the [wire reset contract](../../protocol-mobile.md#resetting).
 
-  The `session_transition` is asserted only to follow the `restarting` edge, not to precede or
-  follow the falling `resetting{active:false}` edge: the three `resetting` edges are pushed
-  synchronously on `resetThenRotate`'s own goroutine, but the transition reaches the client via
-  `sessionTransitionEmitterV2.Enqueue`, a non-blocking send drained on a separate goroutine, so it
-  can race the falling edge. That race is accommodated in the assertion, not removed — making the
-  emitter synchronous would undo #659's non-blocking hand-off to buy a tidier test.
+  A turn after the settled reset must recall the fact from the successor's first
+  reply, proving the handoff note composed by `refreshSystemPromptForRotation`
+  reached the new child's appended system prompt. The source rotation is observed
+  independently of actual encrypted progress/clear delivery. Stored note and prompt
+  checks remain separate from the model's reply.
 
   **Lessons that outlive this ticket:**
   - **A content assertion downstream of a reset needs a turn-id exclusion set; a liveness
@@ -79,8 +81,9 @@
     arrives — never gated on a terminal frame of the `/clear` turn itself, which under the
     daemon-run reset never produces a turn to close.
   - **A "returns the first X" drain can't be retrofitted into a counting one.** (Also carried
-    from #2138.) Counting — three ordered `resetting` edges, one transition, zero
-    `unrecognized_message` — has to happen inside the one primitive every frame passes through
+    from #2138.) Collecting active readings, successor clears, one retained
+    rotation and zero `unrecognized_message` has to happen inside the one primitive
+    every frame passes through
     (`resetWindow.next`), because the Noise receive-nonce discipline forces a single reader for
     the whole window; a second concurrent reader desyncs the `CipherState` and the failure
     surfaces as an unrelated decrypt error many frames later.
@@ -92,9 +95,9 @@ predecessor's conversation. If the older seeded note or a post-restart user
 message supplies it, a stale handoff can pass. `TestInteractiveStreamDormantResetAfterRestart`
 plants an exact release tag before shutdown, seeds an older note lacking it,
 then sends `new_session` as the first action on the target after restart.
-After authentication, written reset edges, the newly stored note containing
-the tag, and its inclusion in the successor's actual appended system prompt
-are mandatory evidence; absence fails rather than skips. The case runs in
+After authentication, owned active progress and successor clearance, the newly
+stored note containing the tag, and its inclusion in the successor's actual
+appended system prompt are mandatory evidence; absence fails rather than skips. The case runs in
 ordinary `make e2e-realclaude` without another opt-in flag.
 
 **A fresh usable note does not prove preservation of an arbitrary planted

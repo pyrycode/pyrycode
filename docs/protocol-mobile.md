@@ -261,7 +261,33 @@ The handshake completes in **one round-trip** (one message from each side). The 
 
 **Authentication.** Noise_IK gives the initiator (phone) cryptographic assurance that it is talking to the holder of the binary's static private key — no second binary can impersonate the real one even if the relay is compromised, because the relay never holds the binary's static private key. The binary, in turn, learns the phone's device-static public key from message 1 but uses the **device-token** (sent inside the encrypted `hello` early-payload, as in v1) for authorisation. The token-validation step is unchanged from v1 — only its transport changed (token now travels encrypted, not via the `token` field on the routing envelope; see [Routing envelope](#routing-envelope)).
 
-**Token-validation gating.** Implementations MUST treat token validation as a precondition for application dispatch: any `noise_msg` received between handshake completion and successful token validation MUST be rejected (sealed `error` with `auth.invalid_token`, then `4401` close). In particular, the per-conn-id state machine MUST distinguish a `handshakeComplete` substate (CipherStates exist, token not yet validated) from `open` (validated), and the application handler chain in `internal/relay/handlers/` MUST NOT be reached from `handshakeComplete`.
+**Admission gating.** CipherStates alone do not admit an app. After token and
+static-key authentication, the daemon applies existing client-version policy,
+then requires `thread` in the authoritative negotiated set. Only after those
+checks may it atomically bind an unbound token to the install's static key,
+construct `workspace_root`, redeem the pairing, persist the client version or
+open the session. The per-connection state machine distinguishes
+`handshakeComplete` (CipherStates exist; admission incomplete) from `open`;
+application dispatch and content delivery MUST NOT start before `open`.
+
+An authenticated, version-accepted hello omitting `thread` receives nonretryable
+`client.update_required` and close `4412`. Advertising `thread` when the daemon
+cannot grant it (including absent/false `ThreadReady`) receives nonretryable
+`protocol.unsupported` and close `4421`. Unknown capability strings satisfy
+neither check. Each refusal sends `noise_resp` with `hello_ack` correlated to
+the hello first, then one routing envelope containing the correlated sealed
+`error` inside `noise_msg` and the exact close code. The rejected ack omits
+`workspace_root`; it grants no session authority even if it echoes other
+capabilities. If error sealing fails, the close still follows `noise_resp`.
+There is no fallback admission or compatibility switch.
+
+Unknown/expired tokens and mismatched static keys retain indistinguishable
+`auth.invalid_token`/`4401` precedence regardless of thread advertisement or
+readiness. Existing version refusals, including their minimum-version payloads,
+precede thread refusals. Rejection leaves static-key binding, redemption deadline
+and stored client version unchanged; ordinary authentication `LastSeenAt`
+bookkeeping remains. New rejection logs use fixed reasons, without token, token
+hash, static key or remote-authored hello values.
 
 **Failure modes.**
 
@@ -3245,10 +3271,19 @@ Sent in the `noise_init` early-data payload. The `payload.token` field carries t
     "client_version": "pyrycode-mobile/0.1.0",
     "client_features": "Conversation list and interactive chat",
     "protocol_versions": ["v2"],
+    "capabilities": ["interactive", "thread"],
     "last_seen_ts": "2026-05-08T08:14:02Z"
   }
 }
 ```
+
+Every supported app hello must advertise `thread` and receive it in the
+negotiated `hello_ack`. Authentication and existing version checks run before
+the mandatory thread verdict; missing advertisement is `client.update_required`/
+`4412`, while advertised but unavailable support is `protocol.unsupported`/`4421`.
+See [Handshake](#handshake) for refusal ordering and admission side effects.
+`interactive`, `thread_expansion`, `thread_compact` and other feature capabilities
+remain optional, with their own value-specific gates.
 
 `client_features` (optional string, added within v2 by #2897) is the client's
 untrusted, self-reported plain-text feature description. It defaults to an empty
@@ -3259,7 +3294,7 @@ handshake rejection. It is unrelated to negotiated `capabilities` and does not
 advertise or grant a negotiated capability. No protocol-version bump or capability
 negotiation is required to include it in a spawn prompt.
 
-After successful token authentication, the daemon retains the description verbatim
+After successful session admission, the daemon retains the description verbatim
 through an inclusive **1024-byte** cap. Longer values become empty without rejecting
 the handshake; unauthenticated connections expose no description, and re-key keeps
 the authenticated report. Only the bounded description string is retained, never
@@ -3347,7 +3382,7 @@ surface.
     "protocol_version": "v2",
     "server_id": "8f7e...",
     "conn_id": "c-7f3a...",
-    "capabilities": ["interactive"],
+    "capabilities": ["interactive", "thread"],
     "workspace_root": "/Users/alice/pyry-workspace"
   }
 }
@@ -3384,9 +3419,10 @@ which creates `<startup-base>/default` through the existing channel creator.
 The Noise responder also sends a decryptable `hello_ack` before delivering the
 encrypted rejection to a peer whose device token is invalid, expired or
 revoked, whose static key fails install binding, or whose client version is
-refused. Every such acknowledgement omits `workspace_root`, including when an
-absolute base was supplied. Selection occurs only after token validation,
-client-version admission and atomic static-key binding: Noise authentication
+refused, or whose mandatory thread check fails. Every such acknowledgement
+omits `workspace_root`, including when an absolute base was supplied. Selection
+occurs only after token/static-key authentication, client-version admission,
+mandatory thread admission and atomic static-key binding: Noise authentication
 and encryption do not replace admission for daemon-host metadata. The value
 is never written to daemon logs or unencrypted routing fields.
 
@@ -3396,11 +3432,18 @@ is never written to daemon logs or unencrypted routing fields.
 
 **Still live: build detection — 2026-09-02 (#2020).** The amendment above retires *old-app interop* as a requirement, and that stands: no future work should keep a code path alive for a phone build that no longer exists. It does not retire the field's other use. Daemon and app ship together but are *installed* separately, so a machine can be running a daemon that predates a wire feature the client already implements, and `pyry --version` reports a commit sha that carries no ordering. A capability string is what closes that gap: the client advertises the string, and a daemon too old to know it drops it in the intersection below — so its absence from the `hello_ack` is a positive, checkable stale-daemon signal rather than an inference. Prefer one string per user-facing wire feature over an orderable version number; a string survives cherry-picks and backports, and it says what is supported rather than when it was built. A cross-repo wire feature is expected to add one, and a feature that ships without one leaves its clients unable to tell which daemon they are talking to.
 
-Both `hello` and `hello_ack` carry an optional `capabilities: []string` field (omitempty — absent, not `null`, when empty, so a v1 phone's `hello` stays byte-identical). The phone advertises the features it understands in its `hello`; the daemon echoes the features *it* supports in `hello_ack`.
+Both `hello` and `hello_ack` serialize `capabilities: []string` with `omitempty`
+(absent, not `null`, when empty). The wire decoder accepts an omitted field, but
+session admission requires an advertised and negotiated `thread` (#3740). The
+phone advertises the features it understands; the daemon echoes its authoritative
+grants. All other capabilities remain optional. In particular, `thread` never
+implies `interactive`, expansion, compact projection or `multi_agent`; their
+existing value-specific gates and readiness requirements still apply. Rekey
+preserves the admitted grants.
 
 | Field | Type | On | Meaning |
 |---|---|---|---|
-| `capabilities` | `[]string` (omitempty) | `hello` (phone → binary) | Features the phone understands, e.g. `["interactive"]`. |
+| `capabilities` | `[]string` (omitempty) | `hello` (phone → binary) | Features the phone understands; supported sessions include `thread`, e.g. `["interactive", "thread"]`. |
 | `capabilities` | `[]string` (omitempty) | `hello_ack` (binary → phone) | Features the daemon supports and has agreed to. |
 
 Defined capability strings:
@@ -3420,8 +3463,12 @@ Defined capability strings:
 
 `thread` requires daemon-supplied readiness confirming installation of both
 bounded query providers, live publication, authoritative watermark lookup and
-session-state reconciliation providers. Absent or false readiness disables
-support, regardless of the client's claims. Duplicate advertisements produce
+session-state reconciliation providers. Absent or false readiness withholds
+the grant and refuses an otherwise authenticated, version-accepted advertisement
+with `protocol.unsupported`/`4421`. Omitting `thread` instead receives
+`client.update_required`/`4412`, with no `min_client_version`. Neither refusal
+binds, redeems, persists the client version or constructs workspace metadata.
+Duplicate advertisements produce
 one echo; unsupported values
 grant nothing. The decision is recorded only on successful authenticated
 admission, survives rekey and is exposed as `ActiveConn.Thread` in open-connection
@@ -3443,10 +3490,10 @@ event-ring replay and raw `resync` are retired for every connection (#3738). Han
 items: each open conversation requires explicit catch-up, with completion only
 after all batches assemble and the separate successful final marker arrives.
 Nonusable views fail explicitly; an unfinished query racing live publication
-may fail and must be retried from the last completed checkpoint. Peers without `thread` receive no content recovery through an event cursor or
-raw history; supported prompt/current-state reconciliation remains available.
-The [envelope session metadata](#message-envelope) is omitted from non-thread
-delivery; existing payload session fields retain their meanings. Summary
+may fail and must be retried from the last completed checkpoint. A peer without
+negotiated `thread` is refused before opening; neither an event cursor nor raw
+history supplies fallback admission or content recovery. Existing payload session
+fields retain their meanings alongside [envelope session metadata](#message-envelope). Summary
 projection and replaced-content filtering follow the
 [supplied delivery contract](#daemon-thread-updates-v2-supplied-delivery-contract).
 
@@ -4165,35 +4212,53 @@ in these fields actuates retry, backoff, teardown or routing.
 
 #### `resetting`
 
-Supplied thread readings follow the [session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract),
-including envelope session tags and `{}` family clears before fresh state.
+`resetting` reports daemon-owned progress while a conversation reset writes a
+handoff note and rotates the session. It requires negotiated `interactive` in
+an admitted thread session and follows the
+[session-scoped live-state contract](#session-scoped-live-state-v2-supplied-delivery-contract).
+It is a current singleton reading, not a replayable turn-stream event; it does
+not open, close or alter a turn.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation running the reset. |
-| `active` | bool | Rising edge (`true`) or falling edge (`false`, clear the indicator). Unlike every other status peer's strict edge pair, one reset emits **two** rising frames before the single falling one — see below. |
-| `phase` | string | **Closed set:** `wrapping_up` or `restarting` while `active` is `true`; `""` once the reset is over. Meaningless while `active` is `false`. |
-| `handoff` | string | **Closed set:** `pending`, `written` or `skipped` while `active` is `true`; `""` once the reset is over. Meaningless while `active` is `false`. |
+| `active` | bool | Whether reset progress is active. A supplied family clear uses `{}` with `session_state_cleared: true` instead of this payload. |
+| `phase` | string | Closed set: `wrapping_up` or `restarting` while active; empty when inactive. |
+| `handoff` | string | Closed set: `pending`, `written` or `skipped` while active; empty when inactive. |
 
-`resetting` (#2453) reports a conversation reset: the daemon runs a wrap-up turn that writes a handoff note for the successor, then kills and respawns `claude` under a new session id. Without this frame a client sees neither phase — the screen simply pauses for however long both take. It has the status-peer shape [`api_retry`](#api_retry) and [`compacting`](#compacting) share — binary → phone, gated on the negotiated `interactive` capability, and emitting it never opens, closes, or alters a turn — but its **source is not a stream-json detector reading `claude`'s own output**, unlike every status peer before it: it is the wire form of the daemon's own reset routine. It is therefore **not** a `turnevent` variant and not one of the twenty-three turn-stream events counted at the top of this section — [`slash_command_list`](#slash_command_list) already draws that same distinction, for the same reason.
+The reset routine produces `wrapping_up`/`pending`, then `restarting` with
+`written` or `skipped`, and finally inactive state on success or error. Repeated
+active state with a changed phase describes the same reset. `skipped` is an
+explicit outcome: the wrap-up produced no usable note, failed or did not run.
+The note's contents never cross this frame; `written` alone proves neither the
+successor's composed prompt nor its recall of the note.
 
-**One reset emits two `active: true` frames before a single `active: false`, and that is where this frame departs from every status peer's strict edge pair.** The sequence is:
+**Production order is not a promise to deliver every edge.** Supplied delivery
+suppresses overtaken singleton revisions and earlier generations. Rotation
+initializes the successor generation with a family clear; an initial or
+old-owner clear cannot prove reset completion. Repeated clears cannot substitute
+for active progress or a unique rotation. A connected reset proof combines actual
+active progress, exactly one owned retained rotation
+and an actual `resetting` family clear naming that rotation's conversation and
+successor session, timestamped at or after rotation. Active envelopes must carry
+matching conversation and predecessor-session metadata, and their timestamps
+must not follow rotation. Every observed phase and handoff value must be valid;
+a delivered `wrapping_up` cannot follow `restarting`. Intermediate phases may
+coalesce, so clients must not wait for exactly two active readings or a legacy
+`active:false` frame. Clear the indicator from the supplied successor clear.
 
-```
-active:true  phase:wrapping_up  handoff:pending
-active:true  phase:restarting   handoff:written | skipped
-active:false phase:""           handoff:""
-```
+`resettingEmitterV2` records progress through a reserved `daemonLiveOperation`
+before asynchronous work. Starting the first producer for a cold placeholder of
+the same session preserves that pending operation. Replacing a producer,
+changing sessions or restarting stopped ownership still advances generation
+and fences stale results; recapturing or retagging old work cannot restore it.
+See [control reservation and first-producer ownership](knowledge/features/streamsup-package-draining-turnevents-into-the-interactive-emitter-daemon-retained-live-state.md#control-and-on-demand-readings).
 
-A repeated `active: true` carrying a new `phase` is a **phase change**, not a second reset — a client that opens a fresh indicator on the second rising edge draws two resets where one happened.
-
-**`phase` and `handoff` are meaningful only while `active` is `true`.** A falling edge carries both as the empty string rather than omitting them, this section's standing no-`omitempty` rule: the key is always on the wire and its zero value is the statement. `handoff` resolves once, on the `wrapping_up` → `restarting` transition — `pending` throughout the wrap-up turn, then `written` or `skipped` depending on whether that turn actually produced a note. `skipped` is a **reported outcome, not a missing value**: it covers every daemon-side reason a note was not made — the wrap-up turn produced nothing usable, it failed, or it was not run at all — and all of them mean the same thing to a client, that the successor starts without one.
-
-**Every rising sequence ends in a falling edge, on success and on every error path.** A wrap-up turn that fails, produces nothing usable, or never runs still reaches `restarting` with `handoff: skipped`, and the respawn — whether it succeeds or not — still closes with `active: false`. A client may rely on the falling edge always arriving and needs no timeout of its own to clear the indicator.
-
-**Nothing on this frame is `claude`-authored.** `conversation_id` is the daemon's own routing key, `active` is a bool it computes, and `phase`/`handoff` are tokens it selects from named constants — a class difference from [`compacting`](#compacting) next door, whose `compact_result`/`compact_error` carry `claude`'s own unsanitized prose under [§ Security model](#security-model)'s threat 1. The handoff note's own content never crosses this wire: `handoff` reports only *whether* a note was made, never the note itself, so no render-as-inert-text rule is owed here. The `restarting` phase also does not name the new session id — read the addressable identity through [`session_settings`](#session_settings); the retained transition feeds the canonical session divider.
-
-**Producer:** `resettingEmitterV2` (#2478) emits all three edges from `activeSessionStarter.resetThenRotate` (`cmd/pyry/main.go`), synchronously off the reset-tail goroutine rather than through a `Run` hand-off — the two other v2 status producers buffer onto one because their callers are under a MUST-NOT-BLOCK contract, and this one's caller is not, so a drop-on-full send would risk the one thing this frame cannot lose: the falling edge. #2456 still owns routing a client's `/clear` into the reset routine.
+All payload values are daemon-authored. The `restarting` reading does not name
+the successor: use the retained session rotation and current
+[`session_settings`](#session_settings). Reset tests separately verify the
+successor's fresh prompt and actual recall, or preservation of the old note
+when wrap-up is skipped; progress and clears cannot substitute for that proof.
 
 #### `banner`
 
@@ -8011,8 +8076,9 @@ version `1`, app `release_version` and transport `v2` are distinct.
 The [counted #3440 evidence](hosted-apps.md#implementation-and-validation-ownership)
 records **13 executed, 13 passed, 0 failed, 0 skipped** focused fake-relay tests
 and subtests, with a race-built daemon supplied through `PYRY_E2E_BIN` and a
-synthetic `node` reporting `v24.15.0`. A paired client offering only
-`hosted_apps_v1` lists/fetches without an active channel. The proof covers exact
+synthetic `node` reporting `v24.15.0`. That historical client offered only
+`hosted_apps_v1`; current supported fixtures also offer and verify required
+`thread`, still without requiring `interactive` or an active channel. The proof covers exact
 asset/API bytes and digest, opaque queries, metadata-only HTTP 204, request
 rejections, credit/cancellation alongside a fake-Claude channel and request-ID
 reuse after both partial-read and committed-write disconnects. Each reconnect
@@ -8504,7 +8570,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `read_mark.unavailable` | yes | A [`mark_conversation_read`](#marking-a-conversation-read) advance could not be persisted (#2780): the registry save failed, so the daemon reverted the in-memory mark before replying and pushed nothing. The message is static and names no path. Retry the same request once the registry can save again — it is not treated as a no-op, because the held mark was already rolled back. |
 | `noise.handshake_failed` | no | Reported only to local logs — wire-level handshake failure closes the WS with `4426` and no AEAD-sealed envelope can be sent. Included here for completeness. |
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
-| `protocol.unsupported` | no | A well-formed frame asking for something this daemon will not do for this client — contrast `protocol.malformed`, which means the frame itself is bad. A [`create_conversation`](#create_conversation) naming `agent: "codex"` from a client that did not negotiate [`multi_agent`](#capability-negotiation-v2), or naming any value outside `"claude"` / `"codex"`, is refused with this code before `conversations.NewID` or the mint runs — no session, no registry entry, no conversation row (#2647). One code covers both causes so a client's handling is one branch; the two static messages distinguishing them for a human are never echoed with the requested value, which is client-controlled text and appears in neither the reply nor the daemon's log line. |
+| `protocol.unsupported` | no | An authenticated, version-accepted hello advertising ungrantable `thread` receives this code with close `4421` (#3740). Also a well-formed frame asking for something this daemon will not do for this client — contrast `protocol.malformed`, which means the frame itself is bad. A [`create_conversation`](#create_conversation) naming `agent: "codex"` from a client that did not negotiate [`multi_agent`](#capability-negotiation-v2), or naming any value outside `"claude"` / `"codex"`, is refused with this code before `conversations.NewID` or the mint runs — no session, no registry entry, no conversation row (#2647). One code covers both causes so a client's handling is one branch; the two static messages distinguishing them for a human are never echoed with the requested value, which is client-controlled text and appears in neither the reply nor the daemon's log line. |
 | `protocol.malformed` | no | The active [`set_conversation_pinned`](#set_conversation_pinned) handler (#3538) rejects malformed JSON/types and missing/null or non-boolean `pinned` before mutation; empty/unknown IDs instead return `conversation.not_found`. Among the existing malformed-request cases, an [`mcp_status_request`](#asking-for-mcp-status-on-demand) whose payload cannot decode to its one-field shape is rejected before conversation membership or the resolver is consulted (#2381). An [`mcp_reconnect`](#actuating-mcp-servers-on-demand) or [`mcp_toggle`](#actuating-mcp-servers-on-demand) whose payload cannot decode is rejected the same way, before membership or the actuation seam (#2419). Its message is static and neither the decoder error nor remote-authored values are returned or logged. A [`set_session_settings`](#set_session_settings) carrying a well-shaped non-empty model that is absent from a **complete** retained published vocabulary for the session's own agent is likewise rejected with the static message `requested model is not offered` (#2281, per-agent #2629). A well-shaped non-empty `effort` not advertised by the model the session will run — or by that session's agent-scoped fallback set when that model has no vocabulary entry (#2666) — is rejected the same way with the static message `malformed set_session_settings request`, the same reply the pre-#2629 closed effort set gave (#2629). |
 | `conversation.not_found` | no | For [`set_conversation_pinned`](#set_conversation_pinned), a valid `pinned` boolean with a missing/null/empty or unknown conversation ID, or a row deleted before stored read-back; no supplied ID is echoed. Among its existing uses, an [`mcp_status_request`](#asking-for-mcp-status-on-demand) whose decoded `conversation_id` names no hosted conversation (#2381); an [`mcp_reconnect`](#actuating-mcp-servers-on-demand) or [`mcp_toggle`](#actuating-mcp-servers-on-demand) with the same shape of `conversation_id` is rejected identically, before the actuation seam is consulted (#2419). Neither the resolver nor the seam is consulted, and the static reply does not echo the id. Permanent for the request as sent; re-list conversations or correct the id rather than retrying unchanged. |
 | `session.not_found` | no | The `set_session_settings` target `session_id` names no session this daemon has any record of — live or persisted-dormant — **or** names a dormant one while the frame carries `yolo` or `permission_mode` (#845, dormant write #2463). The two causes are merged deliberately: no client has been observed mis-reading the code, and the user-visible outcome is identical either way — the menu snaps back. |
@@ -8526,7 +8592,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`pairing.unavailable`** | **yes** | A [`mint_pairing`](#mint_pairing) the host could not complete (#2127): a busy `devices.json` lock, a registry that could not be read or written, or a refusing CSPRNG. **The three causes are merged deliberately** — each can clear without the client changing anything, the repair is identical, and distinguishing them would publish facts about the machine rather than about the request. The underlying error formats an absolute host path and **never reaches the wire**; the message is static. |
 | **`history.unavailable`** | yes, after a backoff | `mark_conversation_read` cannot obtain authoritative shown-thread evidence, including an unwired provider or unavailable reading, even for a no-op. Known zero is valid authority. The refusal changes no in-memory or durable mark and announces nothing. Lists retain every otherwise eligible row with unavailable shown evidence omitted; they do not return this error for missing history or shown evidence. The read message is static and names no content or storage path. |
 | **`new_session.workspace_refused`** | **no** | A [`new_session`](#new-session-v2) rotation whose conversation had a `change_workspace`-recorded workspace (#1475) that re-confinement refused at the spawn site — deleted, or re-pointed outside `$HOME` since it was recorded (#2443). **The rotation still completed**; only the successor's directory did not move, and this is the one condition under which the otherwise-silent `new_session` sends any reply at all — every inert arm, an accepted workspace, and `installSpawnDir`'s distinct later failure stay silent. Non-retryable: the same stored workspace fails identically until the operator repairs the folder or re-points it with `change_workspace`, which a retry does not accomplish (`workspace.not_found`'s reasoning). Carries the rotated conversation's id in `ErrorPayload.conversation_id`, since a bare frame names none of its own and `in_reply_to` alone cannot say which conversation the daemon rotated. The message is static and names neither the folder nor any other filesystem detail. |
-| **`client.update_required`** | **no** | The app build named by `hello.client_version` is older than this host's minimum for that app (#2578), or — once this build sets any minimum — the version could not be parsed at all. Non-retryable: the same build fails identically, and only an app update repairs it. The minimum travels in `ErrorPayload.min_client_version`, omitted when the version was unparsable (the daemon cannot tell which app's minimum would apply) or when this build sets no minimum for that app. See [Compatibility](#compatibility). |
+| **`client.update_required`** | **no** | The hello omits required `thread` (#3740), or the app build named by `hello.client_version` is older than this host's minimum for that app (#2578), or — once this build sets any minimum — the version could not be parsed at all. Non-retryable: the same build fails identically, and only an app update repairs it. The minimum travels in `ErrorPayload.min_client_version`, omitted for missing-thread refusal or when the version was unparsable (the daemon cannot tell which app's minimum would apply). See [Compatibility](#compatibility). |
 
 WS close codes used at the transport layer:
 
@@ -8539,10 +8605,10 @@ WS close codes used at the transport layer:
 | **`4408`** | **Idle-session timeout (no inbound frame within the idle window; encrypted session swept)** | binary (forwarded by relay); v2-new |
 | `4409` | Server-id already claimed | relay (to a binary) |
 | **`4410`** | **`noise_msg` on a conn id the daemon holds no session for (restart, idle sweep, byte-ceiling teardown or producer-gap teardown all reduce to this); retryable** | binary (forwarded by relay); v2-new |
-| **`4412`** | **App build older than this host's minimum for it** | binary (forwarded by relay); v2-new |
+| **`4412`** | **Required `thread` omitted, or app version rejected** | binary (forwarded by relay); v2-new |
 | **`4413`** | **Push-queue byte ceiling exceeded (session torn down to free retained payload bytes)** | binary (forwarded by relay); v2-new |
 | **`4414`** | **Producer handoff/continuity gap (reconnect and reconcile transient state and thread items)** | binary (forwarded by relay); v2-new |
-| `4421` | Protocol mismatch (unknown `type`, bad `v`, malformed envelope) | either |
+| `4421` | Protocol mismatch (including advertised but ungrantable `thread`, unknown `type`, bad `v`, malformed envelope) | either |
 | **`4426`** | **Noise handshake failure** | either; v2-new |
 | **`4429`** | **Per-server phone cap hit (too many phones for this server-id)** | relay |
 
@@ -8550,7 +8616,7 @@ WS close codes used at the transport layer:
 
 `4410` is sent by the binary (forwarded by the relay) when a `noise_msg` arrives on a conn id the daemon holds no `V2Session` for. The manager creates a bare, cipherstate-less session for any unrecognised conn id, so this frame can be neither decrypted nor answered with a sealed error — the close code is the only signal available. It echoes HTTP 410 (Gone). Four causes reduce to the same thing here, because closing a session always deletes its conn id from the manager's session map first: a daemon restart, the `4408` idle sweep above, the `4413` byte-ceiling teardown and the `4414` producer-gap teardown below — in every case, the client still holds Noise cipher state for a session the daemon has already dropped. A client's normal `noise_init` re-handshake on the next connect attempt is exactly the daemon's expected recovery path, so treating `4410` as fatal would strand an otherwise-healthy client. Recovery starts with a fresh Noise handshake, as for `4408`, `4413` and `4414`; thread connections also need explicit catch-up as described below.
 
-`4412` is sent when a `hello`'s app build is older than this host's minimum for that app (#2578). It echoes HTTP 412 (Precondition Failed) under the same 44xx←HTTP convention as the other v2-new codes above — the minimum app version is a precondition the `hello` failed. (426, Upgrade Required, would be the literal match, but 4426 is already `StatusHandshakeFailure`.) It follows the sealed `client.update_required` error in the same routing envelope, the same shape `4401` uses for a bad token, so the client reads the error — and the minimum version it carries — before the close. See [Compatibility](#compatibility).
+`4412` is sent when a `hello` omits required `thread` (#3740), or its app build is older than this host's minimum for that app (#2578). Missing-thread refusal carries no minimum version. It echoes HTTP 412 (Precondition Failed) under the same 44xx←HTTP convention as the other v2-new codes above — the minimum app version is a precondition the `hello` failed. (426, Upgrade Required, would be the literal match, but 4426 is already `StatusHandshakeFailure`.) It follows the sealed `client.update_required` error in the same routing envelope, the same shape `4401` uses for a bad token, so the client reads the error — and the minimum version it carries — before the close. See [Compatibility](#compatibility).
 
 `4413` is sent by the binary (forwarded by the relay) when one session's server→phone push queue exceeds its retained-payload-byte ceiling and the daemon tears that session down rather than hold the bytes until the idle sweep. It echoes HTTP 413 (Content Too Large). Two things can reach the ceiling: a multi-minute relay outage during a live turn, where the daemon keeps producing never-droppable control events such as `turn_state` that nothing can drain; and a single `request_debug_bundle` whose archive is large enough that its `debug_bundle_chunk` stream alone crosses the ceiling. It is strictly per-session — one conn hitting it never affects another. No `error` envelope accompanies it: the ceiling is typically reached precisely because the transport is down, so sealing one would burn a Noise send-nonce on a frame that cannot arrive and gap the phone's receive nonce. **A phone whose transport was down therefore never sees the `4413` close frame at all** — it learns on its next inbound frame, which lands on a session the daemon no longer has and is closed with `4410` above; this is the same property `4408` has, and it fires under the same conditions. Recovery is a fresh Noise handshake and transient-state reconciliation. Supported legacy prompts and current-state snapshots reconcile; no connection receives event-ring replay or raw `resync`, and `last_event_id` is ignored. Thread connections require explicit catch-up for each open conversation from its last completed epoch/version, loading the newest window after `thread_reset`. A debug bundle is not replayed — the operator re-requests it after reconnecting, and an archive large enough to trip the ceiling will trip it again.
 
@@ -8727,13 +8793,22 @@ path in ADR 042 is superseded for every connection. `last_event_id` is no longer
 a declared hello field and is ignored as an unknown key, regardless of its valid
 JSON value; the daemon emits neither event-ring replay nor raw `resync`. Sending
 the key does not reject an otherwise accepted hello or suppress future updates.
-This does not make thread negotiation mandatory: supported legacy prompts and
-current-state snapshots still reconcile, but clients relying on an event cursor
-must use explicit per-open-conversation epoch/version catch-up, newest-window
-recovery after `thread_reset`, and older pages. Source history remains durable;
+Thread negotiation is now independently mandatory (#3740): after authentication
+and existing version checks, a missing advertisement receives sealed
+`client.update_required`/`4412`; an advertised but ungrantable capability receives
+sealed `protocol.unsupported`/`4421`. Both are nonretryable, precede binding,
+redemption, client-version persistence and workspace disclosure, and follow the
+[Handshake](#handshake) response/error ordering. Authentication refusal remains
+indistinguishable `auth.invalid_token`/`4401` regardless of capability claims.
+Optional capabilities keep their existing gates. Admitted clients use explicit
+per-open-conversation epoch/version catch-up, newest-window recovery after
+`thread_reset`, and older pages. Source history remains durable;
 generic `event_id` is not a content or read-mark checkpoint. Ring storage/wiring
 is removed (#3739); [integrated acceptance](knowledge/features/v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md#integrated-acceptance)
-records #3719's verdict and pending checks.
+records #3719's verdict and pending checks. Final compatibility-retirement and
+ADR reconciliation remain with #3741. Legacy-path descriptions elsewhere in this
+spec describe retained implementation branches, not permission for a no-thread
+app to open a session.
 
 **Superseded premise — 2026-09-24 (#2576).** The Versioning and Capability negotiation sections above, and ADR 025's 2026-06-22 amendment and ADR 037, were written for a single operator who updates the app and the daemon together, with no old-app install base to protect. That premise held only as long as this tool was self-hosted. Once other people install the apps from app stores, app updates lag behind the operator's own hosted daemons: the relay and every hosted daemon update at once, app releases trickle out over app-store review and staged rollout, and one app can be connected — sequentially or through several accounts — to daemons running different versions. This section states the rule that now governs every wire change, and defines the rejection a daemon sends an app build it no longer supports.
 
@@ -8756,10 +8831,10 @@ projections are active in the daemon (#3538), including command-package updates.
 
 Each daemon release carries its own minimum supported version per app, as a build constant (`relay.MinMobileClientVersion`, `relay.MinDesktopClientVersion`; #2578) — not something an operator sets. Once a release's build carries a minimum for an app, a daemon running that release rejects a `hello` from an older build of that app with a sealed `client.update_required` error carrying the minimum, followed by WS close `4412`. It is one mechanism with two wire artefacts, in the same order the existing `auth.invalid_token`/`4401` rejection uses: the routing envelope carries the sealed error first, so the client reads *why* before the connection actually closes.
 
-- **No minimum in this build, no rejection.** A daemon whose release carries no minimum for a given app rejects no client of that app, whatever `client_version` says. A daemon whose release carries no minimum at all rejects nobody — which is every daemon's state as of this writing (`relay.MinMobileClientVersion` and `relay.MinDesktopClientVersion` are both empty), and stays so until a later release sets one. Because the minimum ships with the release rather than with an operator action, a staged rollout can leave different hosts enforcing different minimums, or none, at the same time — that is expected.
-- **An app-less or unparsable `client_version`, once *any* minimum is set, is rejected.** `min_client_version` is **omitted** on that rejection, because the daemon cannot tell which app's minimum would have applied. Every build that predates the `<app>/<MAJOR>.<MINOR>.<PATCH>` format (see the [`hello`](#hello-v2-specific-note) note) sends free text like `"1.0"` or `"0.1.0"` — exactly the builds a minimum exists to retire. A well-formed version naming an app with **no minimum set** is accepted, not rejected. **Operational consequence:** set the first minimum for an app only in a release that ships after that app has a release in the new format — setting one earlier would reject every existing install of that app outright.
+- **No minimum in this build, no version rejection.** A daemon with no minimum for an app does not reject that app on its reported version. Both `relay.MinMobileClientVersion` and `relay.MinDesktopClientVersion` are empty in this build. Authentication and mandatory thread admission still apply; a missing `thread` advertisement receives `client.update_required`/`4412` even with no minimum configured, and omits `min_client_version`. Because the minimum ships with the release rather than with an operator action, a staged rollout can leave different hosts enforcing different minimums, or none, at the same time — that is expected.
+- **An app-less or unparsable `client_version`, once *any* minimum is set, is rejected.** `min_client_version` is **omitted** on that rejection, because the daemon cannot tell which app's minimum would have applied. Every build that predates the `<app>/<MAJOR>.<MINOR>.<PATCH>` format (see the [`hello`](#hello-v2-specific-note) note) sends free text like `"1.0"` or `"0.1.0"` — exactly the builds a minimum exists to retire. A well-formed version naming an app with **no minimum set** passes version policy; authentication and thread admission still apply. **Operational consequence:** set the first minimum for an app only in a release that ships after that app has a release in the new format — setting one earlier would reject every existing install of that app outright.
 - **The rejection is terminal for that host only.** A client that receives `client.update_required` or close `4412` stops automatically re-dialling *that* daemon — no backoff loop — and shows an "update the app" state for it, naming the minimum version when the daemon supplied one. Every other host the client is connected to is unaffected. A manual retry is allowed, and the client connects normally again once the app itself is updated. A build older than #2576 does not recognise `4412` and treats it as a generic close; each of its automatic re-dials costs the daemon one handshake and one rejection. The relay's per-server phone cap (`4429`) is not a rate limit and does not bound this (#2576 decision 8) — what bounds the loop is that old build's own reconnect backoff on a generic close, at the same cost a revoked device's `4401` re-dial loop already pays: one IK `ReadInit`, one `Validate` and one `WriteResp`. `4412` opens no new amplification path.
-- **This is a compatibility guard, not a security control.** A client can claim any `client_version`, including a well-formed version of an app with no minimum set, and the daemon accepts it (see above). The guard's job is to retire *honest* old builds — including one carrying a known client-side bug — because the honest client reports its own real version. Keeping out a hostile peer is the device token's job, unchanged by this section; the version check runs only after the token has already been validated, so an unauthenticated peer learns nothing about a host's version policy from which rejection it receives.
+- **This is a compatibility guard, not a security control.** A client can claim any `client_version`, including a well-formed version of an app with no minimum set, and pass version policy (see above); authentication and mandatory thread admission still apply. The guard's job is to retire *honest* old builds — including one carrying a known client-side bug — because the honest client reports its own real version. Keeping out a hostile peer is the device token's job, unchanged by this section; the version check runs only after the token has already been validated, so an unauthenticated peer learns nothing about a host's version policy from which rejection it receives.
 
 See [§ Error codes](#error-codes) for `client.update_required`'s row and close `4412`'s row and paragraph, and [Application message types](#application-message-types) for the `error` row documenting the optional `min_client_version` field.
 
@@ -8867,21 +8942,31 @@ phone -> relay -> binary:
     frame: {
       v: 2, type: "noise_init",
       data: "<base64 IK message 1 bytes — includes phone's ephemeral, phone's static (encrypted),
-              and early-data payload containing the hello envelope with token + last_seen_ts>"
+              and early-data payload containing hello id:1 with token, client_version,
+              capabilities:['interactive','thread'] and optional last_seen_ts>"
     }
   }
 
 # Binary runs Noise_IK responder step 1: reads IK message 1, extracts phone's static key
-# and the hello early-data. Validates the device-token from the hello payload. Token valid.
-# Binary writes IK message 2 with hello_ack as early-data:
+# and hello early-data. Validate token/static key, then client-version policy,
+# then require a negotiated thread grant. Only now atomically bind the install
+# and select workspace_root. Missing thread: sealed client.update_required/4412;
+# advertised but ungrantable: sealed protocol.unsupported/4421. Authentication
+# always takes precedence with indistinguishable auth.invalid_token/4401.
+# Refusals send correlated hello_ack without workspace_root in noise_resp first,
+# then one routing envelope with the correlated nonretryable sealed error + close.
+# Binary writes IK message 2 with hello_ack as early-data on the admitted path:
 binary -> relay -> phone:
   phone receives: {
     v: 2, type: "noise_resp",
     data: "<base64 IK message 2 bytes — includes binary's ephemeral and early-data payload
-            containing the hello_ack envelope>"
+            containing hello_ack in_reply_to:1, capabilities:['interactive','thread'],
+            and workspace_root when available>"
   }
 
-# Both sides now hold paired CipherStates. Phone starts re-key timer (1 hour).
+# Binary sends noise_resp, persists new binding/redemption/client version, opens
+# the session. Both sides hold CipherStates. Phone starts re-key timer (1 hour).
+# Noise completion by itself does not certify session admission.
 
 # Phone asks for conversations (AEAD-sealed):
 phone -> relay -> binary:
@@ -8895,11 +8980,19 @@ binary -> relay -> phone:
     data: "<base64 ciphertext of {id:2, type:'conversations', in_reply_to:2, payload:{...}}>"
   }
 
-# Phone sends a message:
-phone -> relay -> binary: noise_msg containing {id:3, type:"send_message", payload:{...}}
-binary -> relay -> phone: noise_msg containing {id:3, type:"ack", in_reply_to:3, payload:{}}
+# Before expecting content, phone joins the named conversation:
+phone -> relay -> binary: noise_msg containing {id:3, type:"thread_catch_up",
+  payload:{conversation_id:"<canonical id from conversations>", epoch:"", version:0}}
+binary -> relay -> phone: correlated thread_items batches (or assembly parts)
+# Phone assembles every batch, then consumes the separate successful final
+# coverage marker before considering catch-up complete. Handle interleaved live
+# readings in wire order. interactive/expansion/compact remain optional grants.
 
-# Claude responds; binary emits noise_msg with the assistant message envelope.
+# Phone sends a message on that conversation:
+phone -> relay -> binary: noise_msg containing {id:4, type:"send_message", payload:{...}}
+binary -> relay -> phone: noise_msg containing {id:4, type:"ack", in_reply_to:4, payload:{}}
+
+# Claude responds; binary publishes thread item updates plus current live state.
 
 # 1 hour in, phone's timer fires:
 phone -> relay -> binary: { v: 2, type: "noise_init", data: "<fresh IK message 1>" }

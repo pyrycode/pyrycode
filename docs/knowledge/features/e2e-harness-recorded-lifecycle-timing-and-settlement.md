@@ -66,6 +66,18 @@ real teardown; changed/partial/missing input, foreign/missing actions and failed
 terminal checks remain rejection controls. This is offline replay proof; see the
 [rotation contract](../../testing/daemon-recordings.md#session-rotation-and-native-transcript-snapshots).
 
+A recorded foreground scenario can also trigger the daemon's normal reply
+suggestion fallback. Do not misclassify it as a second foreground invocation or
+silently permit arbitrary extra launches. `recordedSubagentWorkerInvocation`
+recognizes only the complete fixed fallback argv; the replay requires its
+foreground claim, bounded safe exchange JSON, one private PID/parent and input
+size/hash receipt, and the matching daemon-owned completed Wait/exit after
+shutdown. It declines that ancillary worker with empty output and exit 1 without
+running a provider. Unknown argv, duplicates, invalid input and unmatched ownership
+still fail. `TestRecordedSubagentWorkerPolicy` and `TestRecordedSubagentWorkerWait`
+cover these separate boundaries; offline process accounting supplies no new
+live-provider evidence.
+
 The readiness origin is established after startup validation; a causal
 user/input epoch is recorded after capture forwarding or strict replay matching
 and its input observer, before completion observation and `OnInput` witness work.
