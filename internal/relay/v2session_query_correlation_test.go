@@ -59,7 +59,7 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 	var p *testHostedPeer
 	usable := func(version, from uint64) thread.QueryResult {
 		return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: version, FromVersion: from,
-			LowerOrder: 1, UpperOrder: 1,
+			LowerOrder: 1, UpperOrder: 2, Continuation: 1,
 			Items: []thread.Item{{ID: 1, Kind: "assistant_message", Order: 1, Rev: 2, Content: json.RawMessage(`{"text":"fixture"}`)}},
 		}
 	}
@@ -99,7 +99,11 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 			var items protocol.ThreadItemsPayload
 			if env.Type != protocol.TypeThreadItems || env.InReplyTo == nil || *env.InReplyTo != id || json.Unmarshal(env.Payload, &items) != nil || items.ConversationID != catchUpConversation || items.Projection != "" || items.Epoch != "epoch" || items.Version != version {
 				var failure protocol.ErrorPayload
-				_ = json.Unmarshal(env.Payload, &failure)
+				if env.Type == protocol.TypeError {
+					if err := json.Unmarshal(env.Payload, &failure); err != nil {
+						t.Fatal("decode fixture refusal:", err)
+					}
+				}
 				t.Fatalf("fixture reply: type=%s correlated=%t version=%d conversation=%t epoch=%t projection=%q error=%s", env.Type, env.InReplyTo != nil && *env.InReplyTo == id, items.Version, items.ConversationID == catchUpConversation, items.Epoch == "epoch", items.Projection, failure.Code)
 			}
 			if index == 0 {
@@ -119,7 +123,7 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 	testCatchUpRequest(p, 2, 0)
 	receive(2, 2, nil)
 	first := <-queries
-	if first == nil {
+	if first == nil || first.inbox == nil {
 		t.Fatal("baseline query was not admitted")
 	}
 	generation := first.inbox

@@ -35,3 +35,7 @@ Verdict: PASS for this planned test/evidence replacement. This is an author desi
 Run the new named Linux race proof once through normal test admission and authenticate its runtime correlation events. Reuse valid retained unmodified guard evidence; do not rerun a complete suite as author. Current configured acceptance remains with the normal verifier. Its original integration failure was TestRelayV2_AgentContentRetiredReconnect, tracked as 3859, and its named rerun passed. This remains a failed sighting with an accepted flaky disposition.
 
 At Documentation, fold the demonstrated cut into the existing thread-delivery topic's Completion must fence live admission section. Distinguish admission, producer enqueue, hosted handling, selection, terminal refusal and successful final-marker completion. Preserve the original planning miss, original native failure, controlled native failure and pending Mobile independent acceptance.
+
+## Implementation revisions
+
+The first two one-test proof runs at a32da665 and 29a9aabb each executed one named case and failed before baseline completion. They remain retained failures. The initial fixture had continuation zero with lower bound one, so the existing protocol correctly rejected its invalid page certificate. The replacement uses a valid half-open range [1,2) and matching continuation one. No protocol check or deadline changes. The extra assertion metadata identifies this fixture failure without emitting payload content.
