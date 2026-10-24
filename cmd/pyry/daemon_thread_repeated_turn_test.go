@@ -27,6 +27,14 @@ func TestDaemonThreadRepeatedTurnRetirement(t *testing.T) {
 			sends := testSendHistory(h)
 			var hold atomic.Bool
 			foldEntered, foldRelease := make(chan struct{}, 1), make(chan struct{})
+			defer func() {
+				hold.Store(false)
+				select {
+				case <-foldRelease:
+				default:
+					close(foldRelease)
+				}
+			}()
 			store := thread.NewStore(h, func(ctx context.Context, _ conversations.ConversationID) error {
 				if hold.Load() {
 					select {
