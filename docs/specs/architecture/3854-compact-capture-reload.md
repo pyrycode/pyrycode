@@ -142,3 +142,37 @@ selection; it executed zero tests. Draft PR #3855 preserves the work. Both Open
 questions, diagnosis, repair and its controlled regression remain unresolved.
 No production change or reliability acceptance is claimed. Complete acceptance
 remains dispatcher-owned; macOS is outside this Linux ticket's verification scope.
+
+### 2026-10-24 — bounded recovery comparison plan
+
+Recovery starts at `b3bd1ac5c7c2aac5dd4ee6c355f899f5b6b63e0b`, which contains
+accepted producer `ea1dcb1fce648fc80b2cf8962f15a718477e2fa8` through main.
+No overlapping feature branch changes the diagnostic files. Keep the original
+failure and draft PR #3855. This remains one defect and its regression, with
+approximately 600 total written lines including preserved work, zero exports,
+zero consumer migrations, three criteria and no added rejection branches.
+
+Add an optional package-private phase observer in `Store`, configured before
+workers start, with begin/end observations outside Store locks. Observe history
+bound probing, checkpoint read/import and validation, scalar/state cache writes
+including the actual file Sync, restored-index preparation, capture and publish.
+The fixture labels each observation with conversation and worker identity.
+Its readiness observer records Status separately from the existing Snapshot
+polling, without changing the five-second bound or rendering assertions.
+Observe the actual fixture directory's mount, runtime, pressure and load.
+
+Run admitted Linux race comparisons at a pushed exact revision, with fresh
+histories under task-owned ext4 `/work/builder-3854-tmp` (not volatile `/tmp`):
+capture alone; compact preparation/bounded-work/lifecycle preceding capture;
+then only that sequence plus the daemon/relay selectors in the retained request.
+Build caches are warm after compilation; OS page caches remain uncontrolled.
+No cache dropping or synthetic stress is planned. Retain JSON, counts, hashes,
+ordering and timeout stacks. A green comparison still leaves attribution open.
+
+Security re-review: PASS for observation only. `readCheckpoint` admission,
+checksum validation, no-follow containment, write ordering and errors remain
+unchanged. Hooks receive no content or credentials, run outside Store locks,
+and add no goroutines/network/subprocess authority or crypto changes. SHOULD
+FIX: identify workers under the Store lock then release it before recording;
+serialize diagnostic state independently, and join Store shutdown before dumping.
+Any cause-specific repair still needs evidence and a prospective revision.
