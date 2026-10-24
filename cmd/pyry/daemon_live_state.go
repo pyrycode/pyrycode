@@ -95,12 +95,14 @@ func (o *daemonLiveState) capture(sid string, incarnation uint64, p history.Sess
 		bound.provenance = p
 		return bound
 	}
+	// A cold control can reserve before the first producer exists. Starting that
+	// same session preserves its operations; replacing a producer invalidates them.
 	c := o.conversations[conv]
 	if c == nil {
 		c = o.newConversationLocked(conv, sid)
 	} else if incarnation < c.incarnation {
 		return daemonLiveSource{}
-	} else if (activation && (c.session != sid || c.incarnation != incarnation || c.stopped)) || (c.stopped && p.Kind != "") {
+	} else if (activation && (c.session != sid || (c.incarnation != 0 && c.incarnation != incarnation) || c.stopped)) || (c.stopped && p.Kind != "") {
 		o.advanceLocked(conv, c, sid, p)
 	}
 	src := daemonLiveSource{ConversationID: conv, SessionGeneration: c.generation, provenance: p, producer: key}

@@ -27,6 +27,9 @@ func AwaitWitnessQuestionControl(t *testing.T, next Next, want string, budget ti
 	for time.Now().Before(deadline) {
 		env := next(deadline)
 		alarm(t, env)
+		if env.SessionStateCleared {
+			continue
+		}
 		if err := CheckWitnessQuestionControl(env, parked); err != nil {
 			t.Fatal(err)
 		}

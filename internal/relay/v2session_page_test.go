@@ -92,12 +92,10 @@ func TestThreadPageAdmission(t *testing.T) {
 		p.request(uint64(40+i), protocol.TypeThreadPage, payload)
 		testCatchUpError(t, p, uint64(40+i))
 	}
-	for _, gate := range []string{"thread", "interactive", "codex", "missing", "revoked"} {
+	for _, gate := range []string{"interactive", "codex", "missing", "revoked"} {
 		t.Run(gate, func(t *testing.T) {
 			p := testPagePeer(t, provider, func(c *V2SessionConfig) {
 				switch gate {
-				case "thread":
-					c.ThreadReady = func() bool { return false }
 				case "codex":
 					c.CodexConversation = func(string) bool { return true }
 				case "missing":

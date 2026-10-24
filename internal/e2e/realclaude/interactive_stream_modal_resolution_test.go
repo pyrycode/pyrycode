@@ -114,7 +114,7 @@ func TestInteractiveStreamStdioAlwaysAllowIsSessionScoped(t *testing.T) {
 		validation, outcome := writePermissionOfferDiagnostic(t, permissionOfferDiagnosticPath, h.home, h.workdir, claudeVersion(), source, shown.AlwaysAllow)
 		t.Fatalf("first permission modal did not offer always-allow rules: validation=%s outcome=%s diagnostic=%s", validation, outcome, permissionOfferDiagnosticPath)
 	}
-	continuationSource := scenario.SourceSince(t, h.home, convID)
+	continuationSource, _ := scenario.QuestionBoundary(t, scenario.SourceSnapshot(t, h.home), convID)
 	sealEnvelope(t, h.phone, h.initSend, protocol.Envelope{
 		ID:   3,
 		Type: protocol.TypeModalAnswer,

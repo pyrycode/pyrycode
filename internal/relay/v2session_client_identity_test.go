@@ -35,6 +35,7 @@ func buildHelloIdentityEarlyData(t *testing.T, token, deviceName, clientVersion 
 		ClientFeatures:   description,
 		ProtocolVersions: []string{"v2"},
 		Token:            token,
+		Capabilities:     []string{protocol.CapabilityThread},
 	})
 	if err != nil {
 		t.Fatalf("marshal hello payload: %v", err)

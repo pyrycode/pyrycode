@@ -44,6 +44,100 @@ func TestSourceTurnIdentity(t *testing.T) {
 	}
 }
 
+func TestSourceTurnSupportedIdle(t *testing.T) {
+	start := time.Now().UTC()
+	for _, tc := range []struct {
+		name        string
+		session     json.RawMessage
+		idle        time.Time
+		clear, want bool
+	}{
+		{"before-history-end", json.RawMessage(`"owner"`), start.Add(time.Second), false, true},
+		{"predecessor", json.RawMessage(`"old"`), start.Add(time.Second), false, false},
+		{"previous-turn", json.RawMessage(`"owner"`), start.Add(-time.Second), false, false},
+		{"queued-predecessor-after-acceptance", json.RawMessage(`"owner"`), start.Add(500 * time.Millisecond), false, false},
+		{"clear", json.RawMessage(`"owner"`), start.Add(time.Second), true, false},
+		{"omitted-session", nil, start.Add(3 * time.Second), false, false},
+		{"null-session", json.RawMessage(`null`), start.Add(3 * time.Second), false, false},
+		{"empty-session", json.RawMessage(`""`), start.Add(3 * time.Second), false, false},
+		{"malformed-session", json.RawMessage(`{`), start.Add(3 * time.Second), false, false},
+		{"nonstring-session", json.RawMessage(`42`), start.Add(3 * time.Second), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var turn sourceTurn
+			turn.feed(t, "conv", []history.Entry{{ID: 1, Type: "send_accepted", TS: start, Payload: json.RawMessage(`{"conversation_id":"conv"}`)}})
+			opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "turn", "occurred_at": start.Add(750 * time.Millisecond)})
+			turn.feed(t, "conv", []history.Entry{{ID: 2, Type: "main_turn_opened", TS: start.Add(2 * time.Second), Payload: opened, Session: &history.SessionProvenance{Kind: "claude", SessionID: "owner"}}})
+			for i, kind := range []string{protocol.TypeAssistantDelta, protocol.TypeTurnEnd} {
+				raw, _ := json.Marshal(map[string]string{"conversation_id": "conv", "turn_id": "turn", "text": "reply"})
+				turn.feed(t, "conv", []history.Entry{{ID: uint64(i + 3), Type: kind, TS: start.Add(time.Duration(i+2) * time.Second), Payload: raw, Session: &history.SessionProvenance{Kind: "claude", SessionID: "owner"}}})
+			}
+			env := protocol.Envelope{Type: protocol.TypeTurnState, SessionID: tc.session, ConversationID: json.RawMessage(`"conv"`), TS: tc.idle, SessionStateCleared: tc.clear, Payload: json.RawMessage(`{"conversation_id":"conv","state":"idle"}`)}
+			if got := turn.idle(t, env, "conv"); got != tc.want {
+				t.Fatalf("idle=%t want=%t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSourceIdleBeforeHistoryAppend(t *testing.T) {
+	start := time.Now().UTC()
+	env := protocol.Envelope{Type: protocol.TypeTurnState, TS: start.Add(time.Second), SessionID: json.RawMessage(`"owner"`), Payload: json.RawMessage(`{"conversation_id":"conv","state":"idle"}`)}
+	opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "turn", "occurred_at": start})
+	owner := &history.SessionProvenance{Kind: "claude", SessionID: "owner"}
+	entries := []history.Entry{
+		{ID: 1, Type: "main_turn_opened", TS: start, Session: owner, Payload: opened},
+		{ID: 2, Type: protocol.TypeAssistantDelta, TS: start.Add(2 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"turn","text":"fresh"}`)},
+		{ID: 3, Type: protocol.TypeTurnEnd, TS: start.Add(3 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"turn"}`)},
+	}
+	for _, tc := range []struct {
+		name  string
+		after protocol.Envelope
+		want  bool
+	}{
+		{"retained", protocol.Envelope{}, true},
+		{"cleared", protocol.Envelope{Type: protocol.TypeTurnState, SessionStateCleared: true, ConversationID: json.RawMessage(`"conv"`)}, false},
+		{"foreign-clear", protocol.Envelope{Type: protocol.TypeTurnState, SessionStateCleared: true, ConversationID: json.RawMessage(`"other"`)}, true},
+		{"other-reading-clear", protocol.Envelope{Type: protocol.TypeThinkingProgress, SessionStateCleared: true, ConversationID: json.RawMessage(`"conv"`)}, true},
+		{"running", protocol.Envelope{Type: protocol.TypeTurnState, Payload: json.RawMessage(`{"conversation_id":"conv","state":"responding"}`)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var turn sourceTurn
+			if turn.idle(t, env, "conv") {
+				t.Fatal("idle without source completed a turn")
+			}
+			turn.idle(t, tc.after, "conv")
+			turn.feed(t, "conv", entries)
+			if got := turn.idle(t, protocol.Envelope{}, "conv"); got != tc.want {
+				t.Fatalf("received terminal retained=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSourceQueuedExecutionIdentity(t *testing.T) {
+	start := time.Now().UTC()
+	owner := &history.SessionProvenance{Kind: "claude", SessionID: "same-session"}
+	var turn sourceTurn
+	turn.feed(t, "conv", []history.Entry{
+		{ID: 1, Type: "send_accepted", TS: start, Payload: json.RawMessage(`{"conversation_id":"conv"}`)},
+		{ID: 2, Type: protocol.TypeAssistantDelta, TS: start.Add(time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"predecessor","text":"old"}`)},
+		{ID: 3, Type: protocol.TypeTurnEnd, TS: start.Add(time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"predecessor"}`)},
+	})
+	if turn.turn != "" || turn.ended || turn.text.Len() != 0 {
+		t.Fatal("queue acceptance selected the still-running predecessor")
+	}
+	opened, _ := json.Marshal(map[string]any{"conversation_id": "conv", "turn_id": "successor", "occurred_at": start.Add(2 * time.Second)})
+	turn.feed(t, "conv", []history.Entry{
+		{ID: 4, Type: "main_turn_opened", TS: start.Add(4 * time.Second), Session: owner, Payload: opened},
+		{ID: 5, Type: protocol.TypeAssistantDelta, TS: start.Add(4 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"successor","text":"fresh"}`)},
+		{ID: 6, Type: protocol.TypeTurnEnd, TS: start.Add(5 * time.Second), Session: owner, Payload: json.RawMessage(`{"conversation_id":"conv","turn_id":"successor"}`)},
+	})
+	if turn.turn != "successor" || !turn.ended || turn.text.String() != "fresh" {
+		t.Fatal("source did not retain only successor execution")
+	}
+}
+
 func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 	const conv = "37340000-0000-4000-8000-000000000001"
 	const other = "37340000-0000-4000-8000-000000000002"
@@ -56,6 +150,7 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 			kind  string
 			value any
 		}{
+			{"main_turn_opened", map[string]any{"conversation_id": id, "turn_id": "reused", "occurred_at": endTime}},
 			{protocol.TypeAssistantDelta, protocol.AssistantDeltaPayload{ConversationID: id, TurnID: "reused", Text: text}},
 			{protocol.TypeTurnEnd, protocol.TurnEndPayload{ConversationID: id, TurnID: "reused", StopReason: "end_turn"}},
 		} {
@@ -73,7 +168,11 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 	source := SourceSince(t, home, conv)
 	reads := 0
 	w := ObserveSource(t, home, Wire{
-		Send: func(string, any) uint64 { appendTurn(conv, "successor", "fresh reply"); return 42 },
+		Send: func(string, any) uint64 {
+			endTime = time.Now().UTC()
+			appendTurn(conv, "successor", "fresh reply")
+			return 42
+		},
 		Next: func(time.Time) protocol.Envelope {
 			reads++
 			ts := endTime
@@ -84,7 +183,7 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			return protocol.Envelope{Type: protocol.TypeTurnState, TS: ts, Payload: raw}
+			return protocol.Envelope{Type: protocol.TypeTurnState, TS: ts, SessionID: json.RawMessage(`"successor"`), Payload: raw}
 		},
 	})
 	w.Send(protocol.TypeSendMessage, protocol.SendMessagePayload{ConversationID: conv, MessageID: "successor"})
@@ -94,7 +193,7 @@ func TestSourceWatermarkRejectsPredecessorIdle(t *testing.T) {
 	}
 	for _, facts := range []SourceFacts{source, w.Source} {
 		entries := facts(conv)
-		if len(entries) != 2 || entries[0].ID != 3 || entries[0].Session.SessionID != "successor" {
+		if len(entries) != 3 || entries[0].ID != 4 || entries[0].Session.SessionID != "successor" {
 			t.Fatal("source watermark mixed conversations or producing sessions")
 		}
 	}

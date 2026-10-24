@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +54,73 @@ func dialMCPQueryPhone(
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, token)
-	return mcpQueryPhone{client: phone, send: send, recv: recv, source: scenario.NewSourceObserver(t, home), next: scenario.PollingReceive(t, phone, recv)}
+	next := scenario.PollingReceive(t, phone, recv)
+	consumeMCPBootstrap(t, home, next)
+	return mcpQueryPhone{client: phone, send: send, recv: recv, source: scenario.NewSourceObserver(t, home), next: next}
+}
+
+// consumeMCPBootstrap verifies the supported snapshot before counting fresh
+// request/turn observations. Generated clears remain distinct from the reading.
+func consumeMCPBootstrap(t *testing.T, home string, next scenario.Next) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		env := next(deadline)
+		if env.Type == protocol.TypeError {
+			t.Fatal("bootstrap snapshot refused")
+		}
+		if env.Type != protocol.TypeMCPStatus || env.SessionStateCleared {
+			continue
+		}
+		var got protocol.MCPStatusPayload
+		if json.Unmarshal(env.Payload, &got) != nil || got.ConversationID == "" {
+			t.Fatal("invalid bootstrap status")
+		}
+		for _, entry := range scenario.SourceSnapshot(t, home)(got.ConversationID) {
+			if entry.Type != protocol.TypeMCPStatus {
+				continue
+			}
+			var want protocol.MCPStatusPayload
+			if json.Unmarshal(entry.Payload, &want) != nil || !reflect.DeepEqual(got, want) {
+				t.Fatal("bootstrap status differs from retained source")
+			}
+			var session string
+			if entry.Session == nil || json.Unmarshal(env.SessionID, &session) != nil || session != entry.Session.SessionID {
+				t.Fatal("bootstrap source ownership lost")
+			}
+			return
+		}
+		t.Fatal("bootstrap status has no retained source")
+	}
+	t.Fatal("supported bootstrap MCP reading missing")
+}
+
+// consumeMCPReading validates public state independently of requester-only replies.
+func consumeMCPReading(t *testing.T, env protocol.Envelope, conv, session string) bool {
+	t.Helper()
+	if env.InReplyTo != nil {
+		return false
+	}
+	if env.SessionStateCleared {
+		var id string
+		if json.Unmarshal(env.ConversationID, &id) != nil || id != conv {
+			t.Fatal("MCP clear lost conversation identity")
+		}
+		return true
+	}
+	var got protocol.MCPStatusPayload
+	var owner string
+	if json.Unmarshal(env.Payload, &got) != nil || got.ConversationID != conv || got.DroppedServers != 0 || len(got.Servers) != 1 || json.Unmarshal(env.SessionID, &owner) != nil || owner != session {
+		t.Fatal("public MCP reading lost payload or source ownership")
+	}
+	initial := protocol.MCPServerStatus{Name: "pyry_mcp_test", Status: "failed", Error: "canned connection failure", Scope: "local", Version: "9.8.7-test"}
+	fresh := protocol.MCPServerStatus{Name: "pyry_mcp_fresh", Status: "connected", Scope: "project", Version: "10.0.0-fresh"}
+	pending := fresh
+	pending.Status = "pending"
+	if got.Servers[0] != initial && got.Servers[0] != fresh && got.Servers[0] != pending {
+		t.Fatal("public MCP reading differs from the controlled child")
+	}
+	return true
 }
 
 func sendMCPQueryTurn(t *testing.T, phone, observer mcpQueryPhone, requestID uint64, text string) {
@@ -83,7 +150,7 @@ func drainMCPQueryTurn(t *testing.T, phone mcpQueryPhone, text string) (statuses
 		if env.Type == protocol.TypeError {
 			t.Fatal("turn refused")
 		}
-		if env.Type == protocol.TypeMCPStatus {
+		if env.Type == protocol.TypeMCPStatus && !consumeMCPReading(t, env, mcpQueryConvID, mcpQueryInitialUUID) {
 			statuses++
 		}
 	}
@@ -166,6 +233,9 @@ func TestRelayV2_MCPStatusRequestQueriesLiveChildRequesterOnly(t *testing.T) {
 			t.Fatalf("MCP status request returned error: %s", env.Payload)
 		}
 		if env.Type != protocol.TypeMCPStatus {
+			continue
+		}
+		if consumeMCPReading(t, env, mcpQueryConvID, mcpQueryInitialUUID) {
 			continue
 		}
 		statusCountA++

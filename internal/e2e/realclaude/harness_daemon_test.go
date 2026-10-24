@@ -109,6 +109,7 @@ func driveHandshakeInteractive(t *testing.T, phone *fakephone.Client, pubKey []b
 // the first client here to advertise multi_agent).
 func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token string, caps ...string) (*noise.CipherState, *noise.CipherState) {
 	t.Helper()
+	caps = append(append([]string(nil), caps...), protocol.CapabilityThread)
 	initiator, err := noise.NewInitiator(fakephone.InstallKey(token), pubKey)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
@@ -135,7 +136,7 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	if err := json.Unmarshal(earlyAck, &ackEnv); err != nil {
 		t.Fatalf("decode hello_ack envelope: %v", err)
 	}
-	if ackEnv.Type != protocol.TypeHelloAck {
+	if ackEnv.Type != protocol.TypeHelloAck || ackEnv.InReplyTo == nil || *ackEnv.InReplyTo != 1 {
 		t.Fatalf("early-data type = %q, want %q", ackEnv.Type, protocol.TypeHelloAck)
 	}
 	var ack protocol.HelloAckPayload
@@ -147,7 +148,34 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 			t.Fatalf("daemon did not grant %s (hello_ack capabilities=%v); the turn stream would not reach this conn", c, ack.Capabilities)
 		}
 	}
+	if slices.Contains(caps, protocol.CapabilityInteractive) {
+		catchUpOpenConversations(t, phone, initSend, initRecv)
+	}
 	return initSend, initRecv
+}
+
+func catchUpOpenConversations(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState) {
+	t.Helper()
+	scenario.JoinConversations(t, threadJoinWire(t, phone, send, recv), phone.DeferEnvelopes)
+}
+
+// joinThreadConversation completes the named catch-up before a scenario expects live content.
+func joinThreadConversation(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState, conv string) {
+	t.Helper()
+	scenario.JoinConversations(t, threadJoinWire(t, phone, send, recv), phone.DeferEnvelopes, conv)
+}
+
+func threadJoinWire(t *testing.T, phone *fakephone.Client, send, recv *noise.CipherState) scenario.Wire {
+	t.Helper()
+	request := uint64(3740000)
+	return scenario.Wire{
+		Send: func(kind string, payload any) uint64 {
+			request++
+			sealEnvelope(t, phone, send, protocol.Envelope{ID: request, Type: kind, TS: time.Now().UTC(), Payload: mustJSON(t, payload)})
+			return request
+		},
+		Next: scenario.Receive(t, phone, recv),
+	}
 }
 
 func buildHelloEarly(t *testing.T, token string, caps []string) []byte {

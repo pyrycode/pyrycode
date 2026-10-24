@@ -25,6 +25,13 @@ func Receive(t *testing.T, phone Receiver, cs *noise.CipherState) Next {
 	t.Helper()
 	return func(deadline time.Time) protocol.Envelope {
 		t.Helper()
+		if saved, ok := phone.(interface {
+			TakeDeferred() (protocol.Envelope, bool)
+		}); ok {
+			if env, found := saved.TakeDeferred(); found {
+				return env
+			}
+		}
 		for time.Now().Before(deadline) {
 			raw, err := phone.ReceiveBytes(time.Until(deadline))
 			if errors.Is(err, fakephone.ErrReceiveTimeout) {
@@ -92,20 +99,36 @@ func PollingReceiveWithStop(t *testing.T, phone interface {
 	}
 	t.Cleanup(stop)
 	return func(deadline time.Time) protocol.Envelope {
-		for time.Now().Before(deadline) {
-			if pending == nil {
-				pending = make(chan result, 1)
-				ch := pending
-				go func() { raw, err := phone.ReceiveBytes(30 * time.Minute); ch <- result{raw, err} }()
+		if saved, ok := phone.(interface {
+			TakeDeferred() (protocol.Envelope, bool)
+		}); ok {
+			if env, found := saved.TakeDeferred(); found {
+				return env
 			}
-			timer := time.NewTimer(time.Until(deadline))
+		}
+		for time.Now().Before(deadline) {
 			var r result
-			select {
-			case r = <-pending:
-				pending = nil
-				timer.Stop()
-			case <-timer.C:
-				return protocol.Envelope{}
+			if owner, ok := phone.(interface {
+				PollBytes(time.Duration) ([]byte, error)
+			}); ok {
+				r.raw, r.err = owner.PollBytes(time.Until(deadline))
+				if errors.Is(r.err, fakephone.ErrReceiveTimeout) {
+					return protocol.Envelope{}
+				}
+			} else {
+				if pending == nil {
+					pending = make(chan result, 1)
+					ch := pending
+					go func() { raw, err := phone.ReceiveBytes(30 * time.Minute); ch <- result{raw, err} }()
+				}
+				timer := time.NewTimer(time.Until(deadline))
+				select {
+				case r = <-pending:
+					pending = nil
+					timer.Stop()
+				case <-timer.C:
+					return protocol.Envelope{}
+				}
 			}
 			if r.err != nil {
 				t.Fatal("phone receive: ", r.err)
@@ -137,7 +160,7 @@ func PollingReceiveWithStop(t *testing.T, phone interface {
 
 const WarnRateLimitStatus = "allowed_warning"
 
-// CompletedTurn requires attributed nonempty text followed by terminal idle.
+// CompletedTurn requires attributed nonempty source text and actual terminal idle.
 // Provider wording and chunk counts are unconstrained; parser gaps and unknown
 // rate-limit statuses remain global alarms, including on foreign conversations.
 func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration, rejectModal bool, sources ...SourceFacts) string {
@@ -157,6 +180,10 @@ func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 		}
 		env := next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, sources, convID))
+		idle := turn.idle(t, env, convID)
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeModalShown:
 			if rejectModal {
@@ -201,21 +228,8 @@ func CompletedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 				p.Status, p.LimitType, p.ResetsAt, p.TruncatedFields, p.ConversationID)
 		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd:
 			t.Fatal("retired interactive content delivered on the wire")
-		case protocol.TypeTurnState:
-			var st protocol.TurnStatePayload
-			if err := json.Unmarshal(env.Payload, &st); err != nil {
-				t.Fatalf("decode turn_state payload: %v", err)
-			}
-			if st.State != "idle" || st.ConversationID != convID {
-				continue // the leading responding state precedes the delta
-			}
-			if strings.TrimSpace(turn.text.String()) == "" || !turn.idle(t, env, convID) {
-				// A prior cancelled turn can leave its terminal idle queued after
-				// drainForCancelledTurnEnd returns at turn_end. Without a delta,
-				// this idle cannot be attributed to the turn being drained.
-				continue
-			}
-			// M2: after matching nonempty text, terminal idle closes the turn.
+		}
+		if idle && strings.TrimSpace(turn.text.String()) != "" {
 			t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
 			return turn.text.String()
 		}

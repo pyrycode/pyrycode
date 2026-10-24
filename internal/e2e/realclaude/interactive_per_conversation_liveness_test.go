@@ -57,7 +57,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"os"
@@ -277,6 +276,7 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend,
 		t.Fatalf("conversation_created (req %d) has empty id", reqID)
 	}
 	daemonRecordingRegisterConversation(t, p.ID)
+	joinThreadConversation(t, phone, initSend, initRecv, p.ID)
 	return p.ID
 }
 
@@ -320,49 +320,26 @@ func sealEnvelope(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, 
 	sendNoiseMsg(t, phone, ct)
 }
 
-// drainForReply reads binary→phone frames in receive order — every noise_msg MUST
-// be decrypted in order to keep the receive nonce in sync — and returns the first
-// envelope of wantType whose InReplyTo matches reqID. Interleaved acks / turn_state
-// / earlier replies are decrypted and skipped; a non-noise_msg control frame (e.g.
-// rekey) is skipped WITHOUT decrypting so it does not advance the nonce. The mirror
-// of drainForAssistantReply, correlating a request/reply pair instead of a delta.
+// drainForReply returns the exact correlated reply and restores interleaved
+// observations in receive order. The shared receiver consumes saved envelopes
+// before decrypting new ciphertext, preserving both snapshots and nonce order.
 func drainForReply(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, wantType string, reqID uint64, timeout time.Duration) protocol.Envelope {
 	t.Helper()
+	var saved []protocol.Envelope
+	defer func() { phone.DeferEnvelopes(saved) }()
+	next := scenario.Receive(t, phone, cs)
 	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			t.Fatalf("no %s reply to request %d within %s", wantType, reqID, timeout)
 		}
-		raw, err := phone.ReceiveBytes(remaining)
-		if err != nil {
-			if errors.Is(err, fakephone.ErrReceiveTimeout) {
-				t.Fatalf("no %s reply to request %d within %s", wantType, reqID, timeout)
-			}
-			t.Fatalf("phone receive (awaiting %s): %v", wantType, err)
-		}
-		var inner protocol.InnerFrameV2
-		if err := json.Unmarshal(raw, &inner); err != nil {
-			t.Fatalf("decode inner frame: %v", err)
-		}
-		if inner.Type != protocol.TypeNoiseMsg {
-			continue // non-noise_msg control frame does not advance the receive nonce
-		}
-		cipher, err := base64.StdEncoding.DecodeString(inner.Data)
-		if err != nil {
-			t.Fatalf("decode inner data: %v", err)
-		}
-		plain, err := cs.Decrypt(cipher)
-		if err != nil {
-			t.Fatalf("phone decrypt (receive-nonce desync?): %v", err)
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(plain, &env); err != nil {
-			t.Fatalf("decode envelope: %v", err)
-		}
+		env := next(deadline)
 		if env.Type == wantType && env.InReplyTo != nil && *env.InReplyTo == reqID {
 			return env
 		}
-		// ack / turn_state / an earlier reply — keep draining in order.
+		if env.Type != "" {
+			saved = append(saved, env)
+		}
 	}
 }

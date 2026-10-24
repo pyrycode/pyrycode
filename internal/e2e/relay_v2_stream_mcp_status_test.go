@@ -71,12 +71,13 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, pairing.Token)
+	poll := scenario.PollingReceive(t, phone, recv)
+	consumeMCPBootstrap(t, home, poll)
 
 	first := waitForRunnerStatus(t, h, 20*time.Second, "first child running",
 		func(s *control.StatusPayload) bool { return s.Phase == "running" && s.ChildPID != 0 })
 	var statuses []protocol.MCPStatusPayload
 	source := scenario.NewSourceObserver(t, home)
-	poll := scenario.PollingReceive(t, phone, recv)
 	drainTurn := func(text string, reqID uint64) bool {
 		t.Helper()
 		source.Watch(mcpStatusConvID)
@@ -97,6 +98,9 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 			env, ok := source.Next(poll, deadline)
 			if !ok {
 				t.Fatalf("turn %d did not finish; echo=%v statuses=%d", reqID, sawEcho, len(statuses))
+			}
+			if env.SessionStateCleared {
+				continue
 			}
 			switch env.Type {
 			case protocol.TypeError:
@@ -137,7 +141,7 @@ func TestRelayV2_StreamMCPStatusReachesConnectedPhone(t *testing.T) {
 		if env.Type == protocol.TypeError {
 			t.Fatalf("unexpected error envelope after replacement: %s", env.Payload)
 		}
-		if env.Type != protocol.TypeMCPStatus {
+		if env.Type != protocol.TypeMCPStatus || env.SessionStateCleared {
 			continue
 		}
 		var status protocol.MCPStatusPayload

@@ -97,7 +97,7 @@ func liveDrain(t *testing.T, mgr *V2SessionManager, rec *v2Recorder, recv *noise
 
 func TestLiveStateWire(t *testing.T) {
 	t.Parallel()
-	for _, caps := range [][]string{threadCaps, {"interactive"}} {
+	for _, caps := range [][]string{threadCaps} {
 		for _, tag := range []string{"", "null", `"source-session"`} {
 			t.Run(strings.Join(caps, "-")+tag, func(t *testing.T) {
 				m, _, rec, recv := liveFixture(t, caps, nil)
@@ -253,7 +253,7 @@ func TestLiveStateOrdering(t *testing.T) {
 
 func TestLiveStateConnect(t *testing.T) {
 	t.Parallel()
-	for _, caps := range [][]string{threadCaps, {"interactive"}} {
+	for _, caps := range [][]string{threadCaps} {
 		calls := 0
 		m, _, rec, recv := liveFixture(t, caps, func(c *V2SessionConfig) {
 			c.RunningTurnPhases = func() []protocol.TurnStatePayload { calls++; return nil }
@@ -469,7 +469,7 @@ func TestLiveStateClearFailure(t *testing.T) {
 
 func TestLiveStateReplies(t *testing.T) {
 	t.Parallel()
-	for _, caps := range [][]string{threadCaps, {"interactive"}, {"thread"}} {
+	for _, caps := range [][]string{threadCaps, {"thread"}} {
 		m, s, rec, recv := liveFixture(t, caps, nil)
 		for _, conv := range []string{gateClaudeConv, gateCodexConv} {
 			r := liveReading("context_usage", conv, "", `"origin"`, 1, 1)

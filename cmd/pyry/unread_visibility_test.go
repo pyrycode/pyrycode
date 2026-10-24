@@ -89,7 +89,7 @@ func TestUnreadThreadHiddenTails(t *testing.T) {
 				t.Fatalf("list reply: %s %+v", gotPeer, env)
 			}
 			row := rows.Conversations[0]
-			if row.ReadUpTo != held || (row.LastShownVersion != nil) != (peer == "phone" && present) {
+			if row.ReadUpTo != held || (row.LastShownVersion != nil) != present {
 				t.Fatalf("route %s: %+v", peer, row)
 			}
 			if row.LastShownVersion != nil && (*row.LastShownVersion != want || (*row.LastShownVersion > row.ReadUpTo) != (want > held)) {

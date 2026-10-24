@@ -50,19 +50,11 @@ package realclaude
 // and proves that it did, deterministically, before it spends a wrap-up: see the
 // constants' doc for the mechanism and assertPerSessionPrompt for the guard.
 //
-// THE ORDERING DECISION. The three `resetting` edges are asserted in order: they are
-// pushed synchronously from resetThenRotate's own goroutine, and V2SessionManager.Push
-// appends to a per-conn FIFO, so their order on the wire is the order they were
-// emitted. The transition is asserted only to arrive AFTER the `restarting` edge, and
-// nothing here asserts an order between the transition and the falling edge. That is
-// measured, not conceded: Pool.notifyTransition calls its observer synchronously, but
-// that observer is sessionTransitionEmitterV2.Enqueue — a non-blocking send into a
-// buffer whose fan-out happens later on the emitter's own Run goroutine. So
-// `restarting` before the transition holds structurally (its Push returns before
-// startFreshRunner can enqueue anything) while the falling edge, pushed the moment
-// startFreshRunner returns, races that queue's drain. Do not make the emitter
-// synchronous to buy a tidier assertion: the non-blocking hand-off is #659's
-// requirement, and a falling edge arriving first costs a client nothing.
+// THREAD DELIVERY. Reset progress is current state, not a replayable edge log.
+// The supplied live-state contract suppresses overtaken revisions and clears each
+// new generation. Require delivered progress, one retained rotation and an actual
+// successor clear. Validate observed phases without demanding every transient
+// revision. The successor's recall below independently proves the fresh handoff.
 //
 // THE TURN-ID EXCLUSION REVERSES THIS FILE'S OWN EARLIER DECISION, deliberately. The
 // version of this case that asserted only liveness after the reset documented having
@@ -232,6 +224,14 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	seedBoundConversation(t, home, clearConvID, clearSessUUID, workdir)
 
 	d := spawnBootstrapDaemon(t, home, workdir, claudeBin, relayURL)
+	t.Cleanup(func() {
+		if t.Failed() {
+			log := d.stderr.String()
+			t.Logf("thread continuity diagnostic: baseline_required=%t producer_gap_retired=%t",
+				strings.Contains(log, "event=daemon.thread.gap reason=baseline_required"),
+				strings.Contains(log, "event=v2.push.producer_gap.teardown"))
+		}
+	})
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -305,43 +305,9 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 	// AC 1: three live reset edges and the retained rotation record.
 	w.awaitReset(t, phone, initRecv, clearReqID, clearResetWindowBudget)
 
-	assertResetEdge(t, "the first rising edge", w.edges[0], protocol.ResettingPayload{
-		ConversationID: clearConvID,
-		Active:         true,
-		Phase:          protocol.ResetPhaseWrappingUp,
-		Handoff:        protocol.ResetHandoffPending,
-	})
-	if w.edges[1].Handoff == protocol.ResetHandoffSkipped {
-		t.Fatalf("the reset reported handoff=%q on its phase change: the wrap-up turn produced no note the "+
-			"successor could be given, so the second half of this case has nothing to prove. `written` is "+
-			"claude's outcome to produce, not the daemon's — conversationReset.wrapUp reports skipped on a "+
-			"reply storeNote judges unusable (it asks sessions.FencedHandoffNote), on a wrap-up that misses "+
-			"wrapUpDeadline, and on an idle wait that never settles. Read the daemon log's reset.wrapup.* "+
-			"record to tell those apart and route the finding; do NOT relax this assertion to accept the "+
-			"token. #2486 owns the skipped proof.", w.edges[1].Handoff)
-	}
-	assertResetEdge(t, "the phase change", w.edges[1], protocol.ResettingPayload{
-		ConversationID: clearConvID,
-		Active:         true,
-		Phase:          protocol.ResetPhaseRestarting,
-		Handoff:        protocol.ResetHandoffWritten,
-	})
-	assertResetEdge(t, "the falling edge", w.edges[2], protocol.ResettingPayload{
-		ConversationID: clearConvID,
-		Active:         false,
-		Phase:          "",
-		Handoff:        "",
-	})
-
-	// The retained rotation must be recorded after both rising live reset edges.
-	// Their daemon timestamps prove this independently of source polling time.
+	w.assertProgress(t, clearConvID, protocol.ResetHandoffWritten)
+	w.assertClear(t, clearConvID)
 	tr := w.transitions[0]
-	if tr.edgesBefore < 2 {
-		t.Errorf("the retained session_transition was recorded after %d resetting edge(s), want it after at least "+
-			"the two rising ones: the rotation that fires the transition runs BELOW the `restarting` edge on "+
-			"resetThenRotate's own goroutine, so an earlier arrival means the edges are no longer emitted from "+
-			"there", tr.edgesBefore)
-	}
 	if tr.payload.Reason != "clear" {
 		t.Errorf("session_transition reason = %q, want %q", tr.payload.Reason, "clear")
 	}
@@ -358,19 +324,8 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 			"Pool.RotateForNewSession did not mint the successor's id the way the registry records it",
 			tr.payload.NewSessionID, idBefore)
 	}
-	// THE CAPTURE, and the whole of it is daemon-authored: the three edges carry
-	// tokens selected from protocol's two closed sets, and the transition carries ids
-	// the daemon assigned. It goes in the gate's log, and from there into a ticket
-	// comment — never to disk. Nothing claude wrote is in this line.
-	t.Logf("CAPTURE (#2485): a live client /clear ran the daemon's reset — "+
-		"resetting{active=%v phase=%q handoff=%q} → resetting{active=%v phase=%q handoff=%q} → "+
-		"retained_session_transition{reason=%q, previous_session_id=%q, new_session_id=%q, conversation_id=%q, "+
-		"occurred_at=%s} (after %d edges) → resetting{active=%v phase=%q handoff=%q}",
-		w.edges[0].Active, w.edges[0].Phase, w.edges[0].Handoff,
-		w.edges[1].Active, w.edges[1].Phase, w.edges[1].Handoff,
-		tr.payload.Reason, tr.payload.PreviousSessionID, tr.payload.NewSessionID,
-		tr.payload.ConversationID, tr.payload.OccurredAt.Format(time.RFC3339Nano), tr.edgesBefore,
-		w.edges[2].Active, w.edges[2].Phase, w.edges[2].Handoff)
+	t.Logf("CAPTURE (#2485): reset progress=%+v, retained rotation=%+v, successor clears=%d",
+		w.edges, tr.payload, len(w.clears))
 
 	// --- AC 2: the note reached the successor ----------------------------------
 	// The snapshot is taken BEFORE the send and names every turn THIS WINDOW has seen.
@@ -429,24 +384,15 @@ func TestInteractiveStreamClearRunsDaemonReset(t *testing.T) {
 			"and whose label is empty, so no compose could ever have happened. The note's bytes are not "+
 			"observable from a client BY DESIGN — do not reach for the note file to tell the two readings "+
 			"apart. Planted %q; reply was %q",
-			w.edges[1].Handoff, clearSessionPromptsDir, promptPath, token, reply)
+			protocol.ResetHandoffWritten, clearSessionPromptsDir, promptPath, token, reply)
 	}
 	t.Logf("AC 2: the successor's first reply (%d bytes) carried the planted fact, which this test never "+
 		"repeated to it — the handoff note crossed the rotation (send_message #%d)", len(reply), recallReqID)
 
-	// --- The window-wide counts, over every frame rather than the survivors -----
-	// The window ran from the /clear send to the recall turn's terminal frame and
-	// every frame in it passed through resetWindow.next, so these counts are over all
-	// of them rather than over whatever a later read had not already discarded. One
-	// reset emits exactly two rising edges and one falling edge, and #2137 retired the
-	// rotation watcher that was the second transition writer — so both counts are
-	// structural, and this is what would catch a second writer being reintroduced or
-	// one `/clear` starting two resets.
-	if len(w.edges) != 3 {
-		t.Errorf("the client saw %d resetting frames across the whole window, want exactly 3 "+
-			"(wrapping_up, restarting, falling): %+v — a repeated active:true carrying a new phase is a phase "+
-			"change, not a second reset, so a fourth frame means something started one", len(w.edges), w.edges)
-	}
+	// Current-state revisions may coalesce progress and clear each generation.
+	// The durable rotation, rather than transient frame count, detects a second reset.
+	w.assertProgress(t, clearConvID, protocol.ResetHandoffWritten)
+	w.assertClear(t, clearConvID)
 	if len(w.transitions) != 1 {
 		t.Errorf("the source retained %d session_transition records across the whole window, want exactly 1: %+v — "+
 			"more than 1 means something re-keyed a second time for the same reset",
@@ -541,7 +487,9 @@ type resetWindow struct {
 	sourceConv  string
 	sourceMark  uint64
 	edgeTimes   []time.Time
+	edgeFrames  []protocol.Envelope
 	edges       []protocol.ResettingPayload
+	clears      []protocol.Envelope
 	transitions []windowTransition
 	// turnIDs names every turn the client has seen a delta for. Its only consumer is
 	// the recall drain's exclusion set — see the header for why that set exists here
@@ -633,12 +581,23 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 				w.acked[*env.InReplyTo] = struct{}{}
 			}
 		case protocol.TypeResetting:
+			if env.SessionStateCleared {
+				var id string
+				if json.Unmarshal(env.ConversationID, &id) != nil {
+					t.Fatal("reset clear has invalid conversation metadata")
+				}
+				if id == w.sourceConv {
+					w.clears = append(w.clears, env)
+				}
+				continue
+			}
 			var p protocol.ResettingPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode resetting payload: %v", err)
 			}
 			w.edges = append(w.edges, p)
 			w.edgeTimes = append(w.edgeTimes, env.TS)
+			w.edgeFrames = append(w.edgeFrames, env)
 		case protocol.TypeAssistantDelta, protocol.TypeToolUse, protocol.TypeToolResult, protocol.TypeToolDenied, protocol.TypeTurnEnd, protocol.TypeSessionTransition, protocol.TypeModelRefusalFallback, protocol.TypeModelRefusalNoFallback, protocol.TypeCompactionBoundary, protocol.TypeUnrecognizedMessage:
 			t.Fatal("retired raw content reached the reset window")
 		}
@@ -654,25 +613,76 @@ func (w *resetWindow) next(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 	}
 }
 
-// awaitReset joins the three actual live resetting edges with the retained
-// transition record. Their daemon timestamps preserve the phase-before-rotation proof.
+// resetSettled requires an actual successor clear, never an initial or old-owner
+// clear. Current singleton revisions may overtake intermediate progress phases.
+func (w *resetWindow) resetSettled() bool {
+	if len(w.transitions) != 1 || len(w.edges) == 0 {
+		return false
+	}
+	tr := w.transitions[0].payload
+	for _, clear := range w.clears {
+		var conv, session string
+		if clear.SessionStateCleared && json.Unmarshal(clear.ConversationID, &conv) == nil && conv == tr.ConversationID &&
+			json.Unmarshal(clear.SessionID, &session) == nil && session == tr.NewSessionID && !clear.TS.Before(tr.OccurredAt) {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitReset joins actual live progress and successor clearance with the retained
+// rotation. Neither a source-only result nor a combined frame count can finish it.
 func (w *resetWindow) awaitReset(t *testing.T, phone *fakephone.Client, cs *noise.CipherState,
 	clearReqID uint64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	for len(w.edges) < 3 || len(w.transitions) < 1 {
+	for !w.resetSettled() {
 		if _, ok := w.next(t, phone, cs, deadline); !ok {
 			_, acked := w.acked[clearReqID]
-			t.Fatalf("the reset did not complete for the client within %s of the /clear send: %d of 3 resetting "+
-				"edges and %d of 1 session_transition arrived (the /clear frame was acked: %v). The readings, "+
-				"and only the last is a bug in the daemon's reset itself: (a) the /clear was never intercepted "+
-				"— isClearCommand matches the first token case-sensitively, and an unacked frame means it did "+
-				"not reach the handler at all; (b) the reset was refused inert — a named conversation whose "+
-				"runner reports no live child, a reset already in progress, or an unwired resetter, all of "+
-				"which log a v2.new_session.* or send_message.clear_* record and emit no edge; (c) the wrap-up "+
-				"outran wrapUpDeadline, which this budget is sized to clear; (d) the emitter stopped reaching "+
-				"interactive conns. Edges so far: %+v",
-				timeout, len(w.edges), len(w.transitions), acked, w.edges)
+			t.Fatalf("reset did not deliver progress, one rotation and a successor clear within %s: active=%+v clears=%d transitions=%d acked=%v",
+				timeout, w.edges, len(w.clears), len(w.transitions), acked)
+		}
+	}
+}
+
+func (w *resetWindow) assertClear(t *testing.T, conv string) {
+	t.Helper()
+	if !w.resetSettled() || w.transitions[0].payload.ConversationID != conv {
+		t.Fatalf("reset lacks its owned successor clear: active=%d clears=%d transitions=%d", len(w.edges), len(w.clears), len(w.transitions))
+	}
+}
+
+// Every delivered active phase remains truthful, even when later state overtakes
+// a phase before delivery. Handoff content is independently proved by the caller.
+func (w *resetWindow) assertProgress(t *testing.T, conv, handoff string) {
+	t.Helper()
+	if len(w.edges) == 0 || len(w.transitions) != 1 || len(w.edgeFrames) != len(w.edges) {
+		t.Fatal("reset lacks observed progress or a unique rotation")
+	}
+	restarting := false
+	for i, edge := range w.edges {
+		var conversation, session string
+		frame := w.edgeFrames[i]
+		predecessor := w.transitions[0].payload.PreviousSessionID
+		if json.Unmarshal(frame.ConversationID, &conversation) != nil || conversation != conv ||
+			json.Unmarshal(frame.SessionID, &session) != nil || session == "" || predecessor == "" || session != predecessor {
+			t.Fatal("active reset progress lacks predecessor ownership")
+		}
+		if edge.ConversationID != conv || !edge.Active || w.edgeTimes[i].After(w.transitions[0].payload.OccurredAt) {
+			t.Fatalf("reset progress has wrong ownership or ordering: %+v", edge)
+		}
+		switch edge.Phase {
+		case protocol.ResetPhaseWrappingUp:
+			if restarting || edge.Handoff != protocol.ResetHandoffPending {
+				t.Fatalf("invalid wrapping-up progress: %+v", edge)
+			}
+		case protocol.ResetPhaseRestarting:
+			if edge.Handoff != handoff {
+				t.Fatalf("invalid restarting outcome: %+v, want %q", edge, handoff)
+			}
+			restarting = true
+		default:
+			t.Fatalf("invalid reset phase: %+v", edge)
 		}
 	}
 }

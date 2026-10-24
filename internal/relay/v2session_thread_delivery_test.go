@@ -491,7 +491,7 @@ func TestThreadDeliveryActiveCancellation(t *testing.T) {
 }
 
 func TestThreadDeliveryCapabilityGates(t *testing.T) {
-	for _, caps := range [][]string{nil, {protocol.CapabilityThread}, {protocol.CapabilityInteractive}} {
+	for _, caps := range [][]string{{protocol.CapabilityThread}} {
 		p := testHostedStartCaps(t, &testAppDiscovery{}, caps, func(c *V2SessionConfig) {
 			c.ThreadReady = func() bool { return true }
 			c.KnownConversation = func(string) bool { return true }

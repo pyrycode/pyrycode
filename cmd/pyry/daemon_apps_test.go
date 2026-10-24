@@ -130,7 +130,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 			paired := &devices.Registry{}
 			paired.Add(devices.Device{TokenHash: devices.HashToken("apps-token"), Name: "phone", PairedAt: time.Now().UTC()})
 			w := &switchWire{t: t, frames: make(chan protocol.RoutingEnvelope, 16), out: make(chan protocol.RoutingEnvelope, 128), phones: map[string]switchPhone{}, pub: key.PublicKey().Bytes()}
-			cfg := relay.V2SessionConfig{Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: host, Logger: discardLogger()}
+			cfg := relay.V2SessionConfig{Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: host, Logger: discardLogger(), ThreadReady: func() bool { return true }}
 			cfg.OutboundContext = func(ctx context.Context, e protocol.RoutingEnvelope) error {
 				select {
 				case w.out <- e:
@@ -194,7 +194,7 @@ func TestDaemonAppsComposition(t *testing.T) {
 				}
 				return b
 			}
-			hello := protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: "apps-token", Capabilities: []string{protocol.CapabilityHostedAppsV1}}
+			hello := protocol.HelloClientPayload{Role: "client", DeviceName: "phone", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: "apps-token", Capabilities: []string{protocol.CapabilityHostedAppsV1, protocol.CapabilityThread}}
 			data, err := init.WriteInit(marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: marshal(hello)}))
 			if err != nil {
 				t.Fatal(err)

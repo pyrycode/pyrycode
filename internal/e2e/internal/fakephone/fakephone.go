@@ -11,11 +11,10 @@
 //
 // # Surface
 //
-// One Client type, four methods (Dial, Send, Receive, Close) and two
-// sentinel errors (ErrReceiveTimeout, ErrClosed). The harness is
-// synchronous: each method blocks on its own I/O. No reconnect, no
-// ping pump, no hello/hello_ack handling — those are envelope-sequencing
-// concerns owned by the consumer test.
+// Client provides synchronous socket I/O and retains decrypted observations
+// consumed during setup. Consumers own reconnect, Noise negotiation and
+// application-envelope sequencing. ErrReceiveTimeout and ErrClosed distinguish
+// receive deadlines from explicit client shutdown.
 //
 // # Concurrency
 //
@@ -54,10 +53,40 @@ var (
 type Client struct {
 	conn *websocket.Conn
 
+	readMu  sync.Mutex
+	pending chan readResult
+
 	mu              sync.Mutex
 	closed          bool
 	lastCloseStatus websocket.StatusCode
 	lastCloseSet    bool
+	deferred        []protocol.Envelope
+}
+
+type readResult struct {
+	data []byte
+	err  error
+}
+
+// DeferEnvelopes restores already decrypted observations ahead of unread wire
+// frames. Callers must retain their original order; no Noise nonce is replayed.
+func (c *Client) DeferEnvelopes(envs []protocol.Envelope) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deferred = append(append([]protocol.Envelope(nil), envs...), c.deferred...)
+}
+
+// TakeDeferred returns the oldest saved observation, if any.
+func (c *Client) TakeDeferred() (protocol.Envelope, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.deferred) == 0 {
+		return protocol.Envelope{}, false
+	}
+	e := c.deferred[0]
+	c.deferred[0] = protocol.Envelope{}
+	c.deferred = c.deferred[1:]
+	return e, true
 }
 
 // Dial opens /v1/client at baseURL with the three required headers set
@@ -111,7 +140,8 @@ func (c *Client) SendBytes(data []byte) error {
 
 // Receive reads one WS text frame and unmarshals it into a
 // protocol.Envelope. On deadline expiry returns ErrReceiveTimeout;
-// note that coder/websocket closes the underlying connection when the
+// unless inheriting an outstanding PollBytes read. Otherwise coder/websocket
+// closes the underlying connection when the
 // Read context is canceled, so a timed-out Client cannot be reused.
 // After Close, returns ErrClosed.
 func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
@@ -131,6 +161,50 @@ func (c *Client) Receive(timeout time.Duration) (protocol.Envelope, error) {
 // wire shape inside RoutingEnvelope.Frame is an InnerFrameV2 rather than
 // a protocol.Envelope.
 func (c *Client) ReceiveBytes(timeout time.Duration) ([]byte, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.pending != nil {
+		return c.pollLocked(timeout)
+	}
+	return c.readBytes(timeout)
+}
+
+// PollBytes retains one read across short observation deadlines and successive
+// consumers. The timeout bounds this observation, without canceling the socket.
+// Close joins the read before returning. Call readers serially.
+func (c *Client) PollBytes(timeout time.Duration) ([]byte, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	return c.pollLocked(timeout)
+}
+
+func (c *Client) pollLocked(timeout time.Duration) ([]byte, error) {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return nil, ErrClosed
+	}
+	if c.pending == nil {
+		c.pending = make(chan readResult, 1)
+		ch := c.pending
+		go func() {
+			data, err := c.readBytes(30 * time.Minute)
+			ch <- readResult{data, err}
+		}()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-c.pending:
+		c.pending = nil
+		return r.data, r.err
+	case <-timer.C:
+		return nil, ErrReceiveTimeout
+	}
+}
+
+func (c *Client) readBytes(timeout time.Duration) ([]byte, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -189,5 +263,11 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 
 	_ = c.conn.Close(websocket.StatusNormalClosure, "phone closing")
+	c.readMu.Lock()
+	if c.pending != nil {
+		<-c.pending
+		c.pending = nil
+	}
+	c.readMu.Unlock()
 	return nil
 }

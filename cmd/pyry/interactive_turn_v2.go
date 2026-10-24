@@ -924,7 +924,7 @@ func (e *interactiveTurnEmitterV2) startTurnIfNeeded(ctx context.Context, convID
 	e.inTurn = true
 	e.turnConvID = convID
 	if e.runtimeFacts {
-		e.recordRuntimeFact(ctx, historyTurnOpened, runtimeHistoryFact{ConversationID: convID, TurnID: e.turnID, OccurredAt: time.Now().UTC()})
+		e.recordTurnOpened(ctx, convID)
 	}
 	e.suggestions.turnStarted(convID, e.liveSource)
 	return true

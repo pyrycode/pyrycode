@@ -61,9 +61,6 @@ func TestDaemonThreadListShownAuthority(t *testing.T) {
 				t.Fatalf("row identity/retired evidence: %s", env.Payload)
 			}
 			wantShown := []string{"1", "0", ""}[i]
-			if peer == "legacy" {
-				wantShown = ""
-			}
 			if string(row["last_shown_version"]) != wantShown || string(row["read_up_to"]) != []string{"0", "9", "7"}[i] {
 				t.Fatalf("shown/read evidence: %s", env.Payload)
 			}

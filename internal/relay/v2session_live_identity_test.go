@@ -299,20 +299,8 @@ func TestLiveStateConversationIdentityDetached(t *testing.T) {
 	}
 }
 
-func TestLiveStateRoutingLegacyBytes(t *testing.T) {
+func TestLiveStateRoutingNonThreadRejected(t *testing.T) {
 	t.Parallel()
-	for _, identity := range []string{"", `"source"`} {
-		m, _, rec, recv := liveFixture(t, []string{"interactive"}, nil)
-		r := liveReading("turn_state", "source", "", "", 1, 1)
-		want, _ := json.Marshal(r.Envelope)
-		r.Envelope = liveIdentityEnvelope(t, r.Envelope, identity)
-		if err := m.PushLiveState(t.Context(), v2TestConnID, r); err != nil {
-			t.Fatal(err)
-		}
-		m.drainOnce(t.Context())
-		got := threadPlain(t, rec.snapshot()[1], recv)
-		if !bytes.Equal(got, want) {
-			t.Fatal("legacy envelope bytes changed")
-		}
-	}
+	out := runHelloFromCaps(t, V2SessionConfig{ThreadReady: func() bool { return true }}, v2TestInstallPriv, v2TestToken, "v2-test", []string{protocol.CapabilityInteractive})
+	assertThreadRefused(t, out, protocol.CodeClientUpdateRequired, 4412)
 }

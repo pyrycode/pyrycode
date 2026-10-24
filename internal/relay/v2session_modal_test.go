@@ -104,7 +104,7 @@ func openModalConn(t *testing.T, mgr *V2SessionManager, frames chan protocol.Rou
 	if err != nil {
 		t.Fatalf("NewInitiator(%s): %v", connID, err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, v2TestToken, caps))
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, v2TestToken, supportedCaps(caps)))
 	if err != nil {
 		t.Fatalf("WriteInit(%s): %v", connID, err)
 	}

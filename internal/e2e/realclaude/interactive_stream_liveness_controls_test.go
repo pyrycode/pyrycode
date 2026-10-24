@@ -59,7 +59,7 @@ func TestCompletedTurnDrainControls(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{
 		"single", "multiple", "empty", "whitespace", "foreign_delta", "foreign_idle",
-		"missing_idle", "queued_idle", "queued_idle_then_close", "foreign_then_valid",
+		"missing_idle", "omitted_session", "foreign_session", "null_session", "queued_idle", "queued_idle_then_close", "foreign_then_valid",
 		"whitespace_then_idle_then_text", "unrecognized", "rate_limited", "rate_warning",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -71,6 +71,7 @@ func TestCompletedTurnDrainControls(t *testing.T) {
 			wantFailure := map[string]string{
 				"empty": "M1: never", "whitespace": "M1: never", "foreign_delta": "M1: never",
 				"foreign_idle": "M2:", "missing_idle": "M2:", "queued_idle": "M2:",
+				"omitted_session": "M2:", "foreign_session": "M2:", "null_session": "M2:",
 				"whitespace_then_idle_then_text": "M1: never",
 				"unrecognized":                   "a NORMAL turn produced an unrecognized_message",
 				"rate_limited":                   "UNRECOGNISED rate_limited",
@@ -99,7 +100,7 @@ func TestCompletedTurnDrainHelperProcess(t *testing.T) {
 			protocol.AssistantDeltaPayload{ConversationID: conv, TurnID: "turn", Text: text})}
 	}
 	idle := func(conv string) protocol.Envelope {
-		return protocol.Envelope{Type: protocol.TypeTurnState, Payload: mustJSON(t,
+		return protocol.Envelope{Type: protocol.TypeTurnState, SessionID: json.RawMessage(`"fixture"`), Payload: mustJSON(t,
 			protocol.TurnStatePayload{ConversationID: conv, State: "idle"})}
 	}
 	d, end := delta(streamConvID, "hello"), idle(streamConvID)
@@ -118,6 +119,9 @@ func TestCompletedTurnDrainHelperProcess(t *testing.T) {
 		frames = []protocol.Envelope{d, idle("foreign")}
 	case "missing_idle":
 		frames = []protocol.Envelope{d}
+	case "omitted_session", "foreign_session", "null_session":
+		end.SessionID = map[string]json.RawMessage{"omitted_session": nil, "foreign_session": json.RawMessage(`"foreign"`), "null_session": json.RawMessage(`null`)}[name]
+		frames = []protocol.Envelope{d, end}
 	case "queued_idle":
 		frames = []protocol.Envelope{end, d}
 	case "queued_idle_then_close":

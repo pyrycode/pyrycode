@@ -329,13 +329,13 @@ func testDaemonThreadQueriesRecovery(t *testing.T, tweak func(*relay.V2SessionCo
 	})
 	w.open("phone", false, protocol.CapabilityThread)
 	t.Logf("phone handshake completed: %v", time.Since(started))
-	w.open("legacy", false)
+	w.rejectCapabilities("legacy", []string{protocol.CapabilityInteractive}, protocol.CodeClientUpdateRequired, 4412)
 	admissionCtx, cancelAdmission := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancelAdmission()
-	if len(mgr.ActiveConns(admissionCtx)) != 2 {
-		t.Fatal("query peers not admitted")
+	if len(mgr.ActiveConns(admissionCtx)) != 1 {
+		t.Fatal("supported query peer not admitted or rejected peer opened")
 	}
-	t.Logf("both peers admitted: %v", time.Since(started))
+	t.Logf("supported peer admitted, legacy peer refused: %v", time.Since(started))
 	request := protocol.ThreadCatchUpPayload{ConversationID: testConvID, Epoch: saved.Epoch, Version: 5, Limit: 1}
 	testDaemonThreadRequest(t, w, "phone", 40, protocol.TypeThreadCatchUp, request)
 	got, typ := testDaemonThreadReply(t, w, 40)
@@ -589,7 +589,7 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 	cursor := testDaemonThreadCursor(s)
 	s.publisher.publish(t.Context(), testConvID, cursor)
 	w.open("phone", false, protocol.CapabilityThread)
-	w.open("legacy", false)
+	w.rejectCapabilities("legacy", []string{protocol.CapabilityInteractive}, protocol.CodeClientUpdateRequired, 4412)
 	request := protocol.ThreadCatchUpPayload{ConversationID: testConvID, Limit: 1}
 	testDaemonThreadRequest(t, w, "phone", 100, protocol.TypeThreadCatchUp, request)
 	initial, typ := testDaemonThreadReply(t, w, 100)
@@ -702,16 +702,18 @@ func TestDaemonThreadQueriesJoin(t *testing.T) {
 		t.Fatal("live fragments advanced query checkpoint")
 	}
 	legacy := protocol.Envelope{Type: protocol.TypeAssistantDelta, TS: time.Now().UTC(), Payload: mustQueryJSON(t, protocol.AssistantDeltaPayload{ConversationID: testConvID, TurnID: "t", Text: " third"})}
-	for _, peer := range []string{"phone", "legacy"} {
-		if err := mgr.Push(t.Context(), peer, legacy); err != nil {
-			t.Fatal(err)
-		}
+	if err := mgr.Push(t.Context(), "phone", legacy); err != nil {
+		t.Fatal(err)
 	}
 	if err := mgr.FlushPushes(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	marker := protocol.Envelope{Type: protocol.TypeError, Payload: json.RawMessage(`{}`)}
+	if err := mgr.Push(t.Context(), "phone", marker); err != nil {
+		t.Fatal(err)
+	}
 	peer, e := w.read()
-	if peer != "legacy" || e.Type != protocol.TypeAssistantDelta {
-		t.Fatal("simultaneous legacy stream changed")
+	if peer != "phone" || e.Type != protocol.TypeError {
+		t.Fatal("retired content reached an admitted or rejected peer")
 	}
 }

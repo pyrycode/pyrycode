@@ -178,7 +178,7 @@ func (p *testHostedTransport) hello(caps []string) *noise.Initiator {
 	if err != nil {
 		p.t.Fatal(err)
 	}
-	msg, err := init.WriteInit(buildHelloEarlyDataCaps(p.t, v2TestToken, caps))
+	msg, err := init.WriteInit(buildHelloEarlyDataCaps(p.t, v2TestToken, supportedCaps(caps)))
 	if err != nil {
 		p.t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func (p *testHostedTransport) push() {
 	p.t.Helper()
 	ctx, cancel := context.WithTimeout(p.t.Context(), 3*time.Second)
 	defer cancel()
-	if err := p.mgr.Push(ctx, v2TestConnID, protocol.Envelope{ID: 2, Type: protocol.TypeMessage, TS: time.Now().UTC(), Payload: json.RawMessage(`{"text":"legacy"}`)}); err != nil {
+	if err := p.mgr.Push(ctx, v2TestConnID, protocol.Envelope{ID: 2, Type: protocol.TypeWorkspaceUpdated, TS: time.Now().UTC(), Payload: json.RawMessage(`{"text":"legacy"}`)}); err != nil {
 		p.t.Fatal(err)
 	}
 	if err := p.mgr.FlushPushes(ctx); err != nil {
@@ -254,7 +254,7 @@ func TestHostedDiscoveryRealTransportOrdering(t *testing.T) {
 				}
 			}
 			e := decryptAppFrame(t, p.next(), recv)
-			if e.Type != protocol.TypeMessage || e.ID != 2 {
+			if e.Type != protocol.TypeWorkspaceUpdated || e.ID != 2 {
 				t.Fatalf("first application frame: %+v", e)
 			}
 			if !initial {
@@ -276,6 +276,17 @@ func TestHostedDiscoveryRealTransportRetirement(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			p := testHostedRealTransport(t, false)
+			// Stage one ordinary frame with Send's admission-only contract so the
+			// later acknowledged delivery waits behind it in the real send pump.
+			sender := p.mgr.cfg.OutboundContext
+			first := true
+			p.mgr.cfg.OutboundContext = func(ctx context.Context, e protocol.RoutingEnvelope) error {
+				if first {
+					first = false
+					return p.conn.Send(e)
+				}
+				return sender(ctx, e)
+			}
 			init := p.hello(nil)
 			_, send, recv, err := init.ReadResp(decodeRespFrame(t, p.next()))
 			if err != nil {
@@ -318,7 +329,7 @@ func TestHostedDiscoveryRealTransportRetirement(t *testing.T) {
 			if err := p.conn.SendContext(ctx, protocol.RoutingEnvelope{ConnID: "barrier"}); err != nil {
 				t.Fatal(err)
 			}
-			if e := decryptAppFrame(t, p.next(), recv); e.Type != protocol.TypeMessage {
+			if e := decryptAppFrame(t, p.next(), recv); e.Type != protocol.TypeWorkspaceUpdated {
 				t.Fatalf("legacy output: %+v", e)
 			}
 			if e := p.next(); e.ConnID != "barrier" {

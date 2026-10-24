@@ -101,20 +101,10 @@ func TestInteractiveStreamDormantResetAfterRestart(t *testing.T) {
 		Payload: mustJSON(t, protocol.NewSessionPayload{ConversationID: clearConvID}),
 	})
 	w.awaitReset(t, phone2, recv2, 29052, clearResetWindowBudget)
-	assertResetEdge(t, "wrapping up", w.edges[0], protocol.ResettingPayload{
-		ConversationID: clearConvID, Active: true,
-		Phase: protocol.ResetPhaseWrappingUp, Handoff: protocol.ResetHandoffPending,
-	})
-	assertResetEdge(t, "restarting with a fresh note", w.edges[1], protocol.ResettingPayload{
-		ConversationID: clearConvID, Active: true,
-		Phase: protocol.ResetPhaseRestarting, Handoff: protocol.ResetHandoffWritten,
-	})
-	assertResetEdge(t, "inactive", w.edges[2], protocol.ResettingPayload{ConversationID: clearConvID})
-	if len(w.edges) != 3 || len(w.transitions) != 1 {
-		t.Fatalf("reset produced %d edges and %d transitions", len(w.edges), len(w.transitions))
-	}
+	w.assertProgress(t, clearConvID, protocol.ResetHandoffWritten)
+	w.assertClear(t, clearConvID)
 	tr := w.transitions[0]
-	if tr.edgesBefore < 2 || tr.payload.ConversationID != clearConvID ||
+	if tr.payload.ConversationID != clearConvID ||
 		tr.payload.PreviousSessionID != clearSessUUID || tr.payload.NewSessionID == clearSessUUID ||
 		!uuidStemPattern.MatchString(tr.payload.NewSessionID) || tr.payload.Reason != "clear" {
 		t.Fatalf("invalid dormant reset transition: %+v", tr)

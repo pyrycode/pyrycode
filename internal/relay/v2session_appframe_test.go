@@ -390,8 +390,8 @@ func TestV2Session_SlowHandler_PushStillDrains(t *testing.T) {
 		t.Fatalf("Push to %s: %v", connA, err)
 	}
 	msgs := waitForConnNoiseMsg(t, rec, connA, 1)
-	if inner := decryptAppFrame(t, msgs[0], aRecv); inner.Type != protocol.TypeMessage {
-		t.Errorf("conn A push Type = %q, want %q", inner.Type, protocol.TypeMessage)
+	if inner := decryptAppFrame(t, msgs[0], aRecv); inner.Type != protocol.TypeWorkspaceUpdated {
+		t.Errorf("conn A push Type = %q, want %q", inner.Type, protocol.TypeWorkspaceUpdated)
 	}
 }
 

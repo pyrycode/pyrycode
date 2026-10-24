@@ -260,7 +260,7 @@ func inlineReplyHandshake(t *testing.T, frames chan protocol.RoutingEnvelope, re
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	hello := buildHelloEarlyDataCaps(t, v2TestToken, row.caps)
+	hello := buildHelloEarlyDataCaps(t, v2TestToken, supportedCaps(row.caps))
 	initMsg, err := initiator.WriteInit(hello)
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)

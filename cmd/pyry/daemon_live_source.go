@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"slices"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -12,6 +13,7 @@ import (
 
 type liveSourceTurn struct {
 	main       string
+	openedAt   time.Time
 	lanes      map[string]string
 	launchers  map[string]string
 	tools      map[string]string
@@ -25,6 +27,7 @@ type liveSourceTurn struct {
 type liveStreamCapture struct {
 	source                       daemonLiveSource
 	mainTurnID, parentID, laneID string
+	openedAt                     time.Time
 	updates                      []daemonLiveReading
 }
 
@@ -101,11 +104,13 @@ func (o *daemonLiveState) acceptEventLocked(src daemonLiveSource, ev turnevent.E
 	}
 	if !child && opensMain && t.main == "" {
 		t.main = mintLiveTurn()
+		t.openedAt = time.Now().UTC()
 	}
 	if !child {
 		scope = t.main
 	}
 	cap.mainTurnID = t.main
+	cap.openedAt = t.openedAt
 	if toolID != "" && scope != "" {
 		t.tools[toolID] = scope
 		t.childTools[toolID] = child

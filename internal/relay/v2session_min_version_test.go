@@ -42,6 +42,15 @@ func runVersionHello(t *testing.T, cfg V2SessionConfig, token, clientVersion str
 // initPriv, for tests that tell installs apart (#2734).
 func runHelloFrom(t *testing.T, cfg V2SessionConfig, initPriv []byte, token, clientVersion string) versionOutcome {
 	t.Helper()
+	if cfg.ThreadReady == nil {
+		cfg.ThreadReady = func() bool { return true }
+	}
+	return runHelloFromCaps(t, cfg, initPriv, token, clientVersion, []string{protocol.CapabilityThread})
+}
+
+// runHelloFromCaps preserves exact capability and readiness inputs for admission refusals.
+func runHelloFromCaps(t *testing.T, cfg V2SessionConfig, initPriv []byte, token, clientVersion string, caps []string) versionOutcome {
+	t.Helper()
 	respPriv, respPub := genV2Keypair(t)
 	frames := make(chan protocol.RoutingEnvelope)
 	rec := &v2Recorder{}
@@ -55,14 +64,31 @@ func runHelloFrom(t *testing.T, cfg V2SessionConfig, initPriv []byte, token, cli
 	if cfg.Logger == nil {
 		cfg.Logger = silentLogger()
 	}
-	mgr, stop := startManager(t, cfg)
+	mgr, stop := startManagerExact(t, cfg)
 	t.Cleanup(stop)
 
 	initiator, err := noise.NewInitiator(initPriv, respPub)
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloIdentityEarlyData(t, token, v2TestDevName, clientVersion))
+	var hello protocol.Envelope
+	if err := json.Unmarshal(buildHelloEarlyDataCaps(t, token, caps), &hello); err != nil {
+		t.Fatal(err)
+	}
+	var payload protocol.HelloClientPayload
+	if err := json.Unmarshal(hello.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload.ClientVersion = clientVersion
+	hello.Payload, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initMsg, err := initiator.WriteInit(raw)
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -72,6 +98,11 @@ func runHelloFrom(t *testing.T, cfg V2SessionConfig, initPriv []byte, token, cli
 	defer cancel()
 	var out versionOutcome
 	out.open = len(mgr.ActiveConns(ctx)) == 1
+	if !out.open {
+		if err := mgr.Push(ctx, v2TestConnID, protocol.Envelope{Type: protocol.TypeThreadItemAdded, Payload: json.RawMessage(`{}`)}); err != ErrConnNotFound {
+			t.Fatalf("rejected connection retained a content route: %v", err)
+		}
+	}
 	out.envs = rec.snapshot()
 	if len(out.envs) == 0 {
 		t.Fatal("no envelope sent; want at least noise_resp")

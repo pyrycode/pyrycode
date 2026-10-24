@@ -38,6 +38,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -605,7 +606,7 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHello(t, token))
+	initMsg, err := initiator.WriteInit(buildHello(t, token, protocol.CapabilityThread))
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -619,9 +620,14 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 	if err != nil {
 		t.Fatalf("decode noise_resp data: %v", err)
 	}
-	_, initSend, initRecv, err := initiator.ReadResp(respRaw)
+	earlyAck, initSend, initRecv, err := initiator.ReadResp(respRaw)
 	if err != nil {
 		t.Fatalf("initiator.ReadResp: %v", err)
+	}
+	var ackEnv protocol.Envelope
+	var ack protocol.HelloAckPayload
+	if json.Unmarshal(earlyAck, &ackEnv) != nil || ackEnv.Type != protocol.TypeHelloAck || json.Unmarshal(ackEnv.Payload, &ack) != nil || !slices.Contains(ack.Capabilities, protocol.CapabilityThread) {
+		t.Fatal("thread capability not acknowledged")
 	}
 	return initSend, initRecv
 }
@@ -629,6 +635,7 @@ func driveHandshake(t *testing.T, phone *fakephone.Client, pubKey []byte, token 
 // buildHello marshals the phone's early-data hello with optional capabilities.
 func buildHello(t *testing.T, token string, capabilities ...string) []byte {
 	t.Helper()
+	capabilities = append(append([]string(nil), capabilities...), protocol.CapabilityThread)
 	payload, err := json.Marshal(protocol.HelloClientPayload{
 		Role:             "client",
 		DeviceName:       "liverelay-e2e-phone",

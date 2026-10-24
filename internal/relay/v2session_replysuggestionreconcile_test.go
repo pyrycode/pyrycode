@@ -43,6 +43,9 @@ func (c *suggestionConn) next(t *testing.T, rec *v2Recorder) []suggestionFrame {
 	var out []suggestionFrame
 	for _, env := range msgs[c.seen:] {
 		inner := decryptAppFrame(t, env, c.recv)
+		if inner.SessionStateCleared {
+			continue
+		}
 		if inner.Type != protocol.TypeReplySuggestion {
 			t.Fatalf("conn %q: noise_msg Type = %q, want %q", c.id, inner.Type, protocol.TypeReplySuggestion)
 		}
@@ -74,7 +77,7 @@ func pushSuggestion(t *testing.T, mgr *V2SessionManager, connID string, p protoc
 		return
 	}
 	env := protocol.Envelope{ID: 1, Type: protocol.TypeReplySuggestion, TS: time.Now().UTC(), Payload: payload}
-	if err := mgr.Push(context.Background(), connID, env); err != nil {
+	if err := mgr.PushLiveState(context.Background(), connID, LiveState{Envelope: env, ConversationID: p.ConversationID, SessionGeneration: 1, Revision: p.Revision}); err != nil {
 		t.Errorf("Push(%s): %v", connID, err)
 	}
 }
@@ -127,7 +130,7 @@ func TestV2Session_ReplySuggestionReconcile_Delivery(t *testing.T) {
 			respPriv, respPub := genV2Keypair(t)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 				Frames:           frames,
 				Outbound:         rec.outbound,
 				StaticPriv:       respPriv,
@@ -139,7 +142,7 @@ func TestV2Session_ReplySuggestionReconcile_Delivery(t *testing.T) {
 			t.Cleanup(stop)
 
 			_, aRecv := openModalConn(t, mgr, frames, rec, respPub, "c-v2-A", []string{protocol.CapabilityInteractive})
-			waitForEnvelopes(t, rec, 1+len(tt.payloads))
+			waitForEnvelopes(t, rec, testSnapshotCount(tt.payloads))
 
 			a := &suggestionConn{id: "c-v2-A", recv: aRecv}
 			wantSuggestions(t, a.id, a.next(t, rec), tt.payloads)
@@ -180,7 +183,7 @@ func TestV2Session_ReplySuggestionReconcile_NoFrame(t *testing.T) {
 			respPriv, respPub := genV2Keypair(t)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 				Frames:           frames,
 				Outbound:         rec.outbound,
 				StaticPriv:       respPriv,
@@ -198,7 +201,7 @@ func TestV2Session_ReplySuggestionReconcile_NoFrame(t *testing.T) {
 			if tt.controlConn {
 				_, ctlRecv := openModalConn(t, mgr, frames, rec, respPub, "c-v2-CTL", []string{protocol.CapabilityInteractive})
 				ctl = &suggestionConn{id: "c-v2-CTL", recv: ctlRecv}
-				wantEnvelopes = 3 // + resp(CTL) + suggestion(CTL)
+				wantEnvelopes = 4 // + resp(CTL) + suggestion(CTL)
 			}
 			waitForEnvelopes(t, rec, wantEnvelopes)
 
@@ -235,7 +238,7 @@ func TestV2Session_ReplySuggestionReconcile_ReconnectGetsCurrentState(t *testing
 	respPriv, respPub := genV2Keypair(t)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -251,14 +254,14 @@ func TestV2Session_ReplySuggestionReconcile_ReconnectGetsCurrentState(t *testing
 	t.Cleanup(stop)
 
 	_, aRecv := openModalConn(t, mgr, frames, rec, respPub, "c-v2-A", []string{protocol.CapabilityInteractive})
-	waitForEnvelopes(t, rec, 2)
+	waitForEnvelopes(t, rec, 3)
 
 	mu.Lock()
 	state = []protocol.ReplySuggestionPayload{suggestion(conv, 2, nil)} // another device cleared it
 	mu.Unlock()
 
 	_, bRecv := openModalConn(t, mgr, frames, rec, respPub, "c-v2-B", []string{protocol.CapabilityInteractive})
-	waitForEnvelopes(t, rec, 4)
+	waitForEnvelopes(t, rec, 6)
 
 	a := &suggestionConn{id: "c-v2-A", recv: aRecv}
 	b := &suggestionConn{id: "c-v2-B", recv: bRecv}
@@ -292,7 +295,7 @@ func TestV2Session_ReplySuggestion_RevisionGuard(t *testing.T) {
 	rec := &v2Recorder{}
 	var mgr *V2SessionManager
 	calls := 0 // Run-goroutine only: the seam is called there, once per open.
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -316,12 +319,12 @@ func TestV2Session_ReplySuggestion_RevisionGuard(t *testing.T) {
 	_, aRecv := openModalConn(t, mgr, frames, rec, respPub, connA, []string{protocol.CapabilityInteractive})
 	// resp(A) + X@6 + Y@3; X@5 drains between them and is dropped, and Y@3
 	// draining last means it has already been judged.
-	waitForEnvelopes(t, rec, 3)
+	waitForEnvelopes(t, rec, 5)
 	a := &suggestionConn{id: connA, recv: aRecv}
 	wantSuggestions(t, connA, a.next(t, rec), []protocol.ReplySuggestionPayload{x6, y3})
 
 	_, bRecv := openModalConn(t, mgr, frames, rec, respPub, connB, []string{protocol.CapabilityInteractive})
-	waitForEnvelopes(t, rec, 6)
+	waitForEnvelopes(t, rec, 10)
 	b := &suggestionConn{id: connB, recv: bRecv}
 	wantSuggestions(t, connB, b.next(t, rec), []protocol.ReplySuggestionPayload{x5, y3})
 
@@ -332,7 +335,7 @@ func TestV2Session_ReplySuggestion_RevisionGuard(t *testing.T) {
 	pushSuggestion(t, mgr, connA, x5) // below A's X@6
 	pushSuggestion(t, mgr, connA, y4)
 	pushSuggestion(t, mgr, connB, x6)
-	waitForEnvelopes(t, rec, 8)
+	waitForEnvelopes(t, rec, 12)
 
 	wantSuggestions(t, connA, a.next(t, rec), []protocol.ReplySuggestionPayload{y4})
 	wantSuggestions(t, connB, b.next(t, rec), []protocol.ReplySuggestionPayload{x6})
@@ -362,7 +365,7 @@ func TestV2Session_ReplySuggestion_CodexWithheld(t *testing.T) {
 	respPriv, respPub := genV2Keypair(t)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:            frames,
 		Outbound:          rec.outbound,
 		StaticPriv:        respPriv,
@@ -378,7 +381,7 @@ func TestV2Session_ReplySuggestion_CodexWithheld(t *testing.T) {
 
 	_, oldRecv := openModalConn(t, mgr, frames, rec, respPub, connOld, gateOldCaps)
 	_, capRecv := openModalConn(t, mgr, frames, rec, respPub, connCap, gateCapableCaps)
-	waitForEnvelopes(t, rec, 5) // resp(OLD) + claude1 + resp(CAP) + codex1 + claude1
+	waitForEnvelopes(t, rec, 8) // resp(OLD) + claude1 + resp(CAP) + codex1 + claude1
 
 	// The withheld codex frame is pushed ahead of claude2, so seeing claude2 on
 	// the old conn means codex2 was judged there.
@@ -386,7 +389,7 @@ func TestV2Session_ReplySuggestion_CodexWithheld(t *testing.T) {
 		pushSuggestion(t, mgr, id, codex2)
 		pushSuggestion(t, mgr, id, claude2)
 	}
-	waitForEnvelopes(t, rec, 8)
+	waitForEnvelopes(t, rec, 11)
 
 	old := &suggestionConn{id: connOld, recv: oldRecv}
 	capable := &suggestionConn{id: connCap, recv: capRecv}
@@ -394,8 +397,8 @@ func TestV2Session_ReplySuggestion_CodexWithheld(t *testing.T) {
 	wantSuggestions(t, connCap, capable.next(t, rec), []protocol.ReplySuggestionPayload{codex1, claude1, codex2, claude2})
 
 	logs := logBuf.String()
-	if !strings.Contains(logs, "v2.push.withheld_multi_agent") {
-		t.Fatalf("log capture appears inert (no withhold line); logs = %q", logs)
+	if !strings.Contains(logs, "v2.handshake.accept") {
+		t.Fatalf("log capture appears inert (no admission line); logs = %q", logs)
 	}
 	if strings.Contains(logs, "secret") {
 		t.Errorf("a log line carries suggestion text; logs = %q", logs)

@@ -24,14 +24,16 @@ func TestPromptAnswerRelayRemainsResponsive(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			b.ctx = ctx
+			bindings := testControlBindings(t, testConvID, "asking-session")
+			b.live = bindings
 			req := permbridge.Request{ToolUseID: "tool", ToolName: "Bash", Input: json.RawMessage(`{}`), SessionID: "asking-session"}
 			if decision == "answer" || decision == "refusal" {
 				req.ToolName = questionbridge.ToolName
 				req.Input = questionInput(t, "Pick", "Header", "rewrite", "meaning")
 			}
 			pending, id, _ := testPromptSurface(t, b, bc, req, time.Minute)
-			bindings := testControlBindings(t, testConvID, "asking-session")
-			w, mgr := testDaemonRelayWire(t, bindings, relayWiring{}, nil, func(cfg *relay.V2SessionConfig) { cfg.ModalResolver = m; cfg.QuestionResolver = q }, func(_ context.Context, mgr *relay.V2SessionManager) func() { b.bcast = mgr; return func() { cancel() } })
+			w, mgr := testDaemonRelayWire(t, bindings, relayWiring{}, nil, func(cfg *relay.V2SessionConfig) { cfg.ModalResolver = m; cfg.QuestionResolver = q })
+			b.bcast = mgr
 			w.open("phone", false)
 			typ := protocol.TypeModalAnswer
 			var payload any = protocol.ModalAnswerPayload{ModalID: id, OptionID: "allow_once"}

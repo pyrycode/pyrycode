@@ -31,6 +31,7 @@ type switchWire struct {
 	privateKeys map[string][]byte
 	pub         []byte
 	pending     []protocol.RoutingEnvelope
+	manager     *relay.V2SessionManager
 }
 
 func (w *switchWire) wrap(id, typ string, data []byte) protocol.RoutingEnvelope {
@@ -75,7 +76,7 @@ func (w *switchWire) data(e protocol.RoutingEnvelope) []byte {
 }
 func (w *switchWire) open(id string, capable bool, extra ...string) {
 	w.t.Helper()
-	caps := []string{protocol.CapabilityInteractive}
+	caps := []string{protocol.CapabilityInteractive, protocol.CapabilityThread}
 	if capable {
 		caps = append(caps, protocol.CapabilityMultiAgent)
 	}
@@ -83,6 +84,27 @@ func (w *switchWire) open(id string, capable bool, extra ...string) {
 }
 
 func (w *switchWire) openCapabilities(id string, caps []string) {
+	w.t.Helper()
+	ack := w.helloCapabilities(id, caps)
+	thread := false
+	for _, capability := range ack.Capabilities {
+		thread = thread || capability == protocol.CapabilityThread
+	}
+	if !thread {
+		w.t.Fatalf("%s: thread was not granted: %+v", id, ack)
+	}
+	ctx, cancel := context.WithTimeout(w.t.Context(), 3*time.Second)
+	defer cancel()
+	for _, peer := range w.manager.ActiveConns(ctx) {
+		if peer.ConnID == id && peer.Thread {
+			return
+		}
+	}
+	w.t.Fatalf("%s: handshake did not admit a thread session", id)
+}
+
+// helloCapabilities sends the exact advertisement, including deliberate omissions.
+func (w *switchWire) helloCapabilities(id string, caps []string) protocol.HelloAckPayload {
 	w.t.Helper()
 	if w.privateKeys == nil {
 		w.privateKeys = make(map[string][]byte)
@@ -114,11 +136,57 @@ func (w *switchWire) openCapabilities(id string, caps []string) {
 		w.pending = append(w.pending, response)
 		response = w.receive()
 	}
-	_, send, recv, err := init.ReadResp(w.data(response))
+	var inner protocol.InnerFrameV2
+	if json.Unmarshal(response.Frame, &inner) != nil || inner.Type != protocol.TypeNoiseResp || response.CloseCode != 0 {
+		w.t.Fatalf("%s: expected noise_resp before admission verdict: %+v", id, response)
+	}
+	ack, send, recv, err := init.ReadResp(w.data(response))
 	if err != nil {
 		w.t.Fatal(err)
 	}
 	w.phones[id] = switchPhone{send, recv}
+	var env protocol.Envelope
+	var hello protocol.HelloAckPayload
+	if json.Unmarshal(ack, &env) != nil || env.Type != protocol.TypeHelloAck || env.InReplyTo == nil || *env.InReplyTo != 1 || json.Unmarshal(env.Payload, &hello) != nil {
+		w.t.Fatalf("%s: invalid correlated hello_ack: %s", id, ack)
+	}
+	for _, granted := range hello.Capabilities {
+		advertised := false
+		for _, capability := range caps {
+			advertised = advertised || granted == capability
+		}
+		if !advertised {
+			w.t.Fatalf("%s: granted unadvertised capability %q", id, granted)
+		}
+	}
+	if hello.WorkspaceRoot == "" {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(env.Payload, &fields) != nil || fields["workspace_root"] != nil {
+			w.t.Fatal("absent workspace root must be omitted")
+		}
+	}
+	return hello
+}
+
+func (w *switchWire) rejectCapabilities(id string, caps []string, code string, closeCode uint16) {
+	w.t.Helper()
+	ack := w.helloCapabilities(id, caps)
+	if ack.WorkspaceRoot != "" {
+		w.t.Fatal("rejected hello exposed workspace root")
+	}
+	routed := w.await()
+	peer, env := w.decode(routed)
+	var refusal protocol.ErrorPayload
+	if peer != id || routed.CloseCode != closeCode || env.Type != protocol.TypeError || env.InReplyTo == nil || *env.InReplyTo != 1 || json.Unmarshal(env.Payload, &refusal) != nil || refusal.Code != code || refusal.Retryable {
+		w.t.Fatalf("%s: invalid sealed admission refusal: close=%d %+v %+v", id, routed.CloseCode, env, refusal)
+	}
+	ctx, cancel := context.WithTimeout(w.t.Context(), 3*time.Second)
+	defer cancel()
+	for _, peer := range w.manager.ActiveConns(ctx) {
+		if peer.ConnID == id {
+			w.t.Fatal("rejected session opened")
+		}
+	}
 }
 func (w *switchWire) request(id string, p protocol.SwitchAgentPayload) {
 	w.t.Helper()
@@ -201,7 +269,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(capture, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	adapter := &relayAgentSwitcher{switcher: sw}
 	gate := gatedRelaySwitch{inner: adapter, entered: make(chan context.Context, 1), release: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
-	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()), Logger: logger, AgentSwitcher: gate, CodexConversation: codexConversation(reg, func(id string) (string, bool) {
+	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{KnownConversation: func(string) bool { return true }, ThreadReady: func() bool { return true }, Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil }, StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()), Logger: logger, AgentSwitcher: gate, CodexConversation: codexConversation(reg, func(id string) (string, bool) {
 		h, err := pool.HarnessFor(sessions.SessionID(id))
 		return h, err == nil
 	}), ConversationAgent: conversationAgent(reg, func(id string) (string, bool) {
@@ -212,6 +280,7 @@ func TestRelayAgentSwitchEncryptedFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 	sw.resetting.attach(mgr)
+	w.manager = mgr
 	// The adapter and producer hold the same late-bound emitter.
 	store := history.New(t.TempDir())
 	announce := newConversationUpdateEmitterV2(mgr, ctx, logger).announce

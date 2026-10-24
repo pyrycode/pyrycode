@@ -100,7 +100,7 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 	w.open("legacy", true, protocol.CapabilityStopBackgroundTask)
 	conns := mgr.ActiveConns(t.Context())
 	for _, c := range conns {
-		if !c.Interactive || (c.ConnID == "phone") != c.Thread {
+		if !c.Interactive || !c.Thread {
 			t.Fatal("negotiated ownership mismatch")
 		}
 	}
@@ -125,9 +125,6 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 				t.Fatalf("missing %s for %s: %v", typ, peer, err)
 			}
 			gotPeer, e := w.decode(routing)
-			if gotPeer == "legacy" && e.Type == protocol.TypeConversationUpdated {
-				t.Fatal("thread retirement changed non-thread publication")
-			}
 			if gotPeer == peer && e.Type == typ && (correlation == 0 || e.InReplyTo != nil && *e.InReplyTo == correlation) {
 				return e
 			}
@@ -162,16 +159,6 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 	source := history.SessionProvenance{Kind: "claude", SessionID: "session-" + string(a)}
 	e.HandleFor(t.Context(), string(a), turnevent.TextChunk{MessageID: "reply", Text: "pong"}, source)
 	e.HandleFor(t.Context(), string(a), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, source)
-	for {
-		frame := read("legacy", protocol.TypeTurnState, 0)
-		var phase protocol.TurnStatePayload
-		if json.Unmarshal(frame.Payload, &phase) != nil {
-			t.Fatal("invalid completion phase")
-		}
-		if phase.ConversationID == string(a) && phase.State == "idle" {
-			break
-		}
-	}
 	raw, err := h.LatestEntryID(a)
 	if err != nil {
 		t.Fatal(err)
@@ -275,10 +262,8 @@ func TestDaemonThreadOffscreenShownRecovery(t *testing.T) {
 	if rows[string(a)].LastShownVersion == nil || *rows[string(a)].LastShownVersion != shown {
 		t.Fatal("restored list lost the shown watermark")
 	}
-	for _, row := range list("legacy", 15) {
-		if row.LastShownVersion != nil {
-			t.Fatal("non-thread list gained thread metadata")
-		}
+	if row := list("legacy", 15)[string(a)]; row.LastShownVersion == nil || *row.LastShownVersion != shown {
+		t.Fatal("second supported peer lost authoritative shown metadata")
 	}
 	for _, id := range []conversations.ConversationID{a, b} {
 		row, _ := reg.Get(id)

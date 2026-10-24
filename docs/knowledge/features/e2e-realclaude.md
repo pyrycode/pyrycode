@@ -59,9 +59,14 @@ readers, bounded stream results and retained live failures.
 
 ### Reconnect receiver ownership
 
-`PollingReceive` owns one pending encrypted read across short source-poll
-deadlines. Canceling a short WebSocket read closes that connection; returning an
-empty observation must leave the read pending. `PollingReceiveWithStop` exposes
+`PollingReceive` polls through the phone-owned pending raw read across short
+source-poll deadlines. The connection retains that read across consumer changes,
+including a switch to synchronous receive; decryption remains on the single test
+goroutine. Canceling a short WebSocket read closes the connection; returning an
+empty observation must leave the read pending. A disposable closure owning the
+read can leave two consumers reading one socket and corrupt framing.
+`TestPollingReceiveConsumerHandoff` covers both consumer styles.
+`PollingReceiveWithStop` exposes
 an idempotent stop that closes and joins the old reader. Call `Next` and stop
 serially from the test goroutine.
 
@@ -76,6 +81,16 @@ leaves an old read pending and checks repeated replacement, source boundaries
 and request correlation. The modal-resolution arms exercise the repaired live
 consumer; compiling the tagged package alone would miss a closed predecessor
 reader. See [source and canonical observation](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#source-and-canonical-observation).
+
+Completion requires both owned retained history and actual delivered terminal
+state. Use a fresh pre-send `SourceSince` window per command and retain one
+`PollingReceive` closure across a multi-turn connection. `CompletedTurn` waits
+when an owned idle precedes the source append; a custom running/idle drain
+followed by an immediate history read races that append. Compare independently
+read saved text with the owned completion result when a scenario promises both.
+Tagged synthetic terminals must explicitly declare the same source session;
+adding ownership inside runtime observation would defeat the check. See
+[source windows and idle retention](e2e-harness-stream-interactive-harness-pattern-startstreamin.md#source-and-canonical-observation).
 
 ## Make target
 

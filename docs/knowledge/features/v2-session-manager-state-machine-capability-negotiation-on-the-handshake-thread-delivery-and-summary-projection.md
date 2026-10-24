@@ -2,10 +2,18 @@
 
 `ThreadReady` is a daemon-supplied attestation that both bounded query providers,
 live publication, authoritative watermark lookup and session-state
-reconciliation providers are installed. Nil/false disables `thread`;
-advertisement alone is insufficient.
-`handleNoiseInit` records `s.thread` only on authenticated admission, and rekey
-preserves it. `ActiveConn.Thread` exposes the decision for open connections.
+reconciliation providers are installed. Nil/false withholds `thread`;
+advertisement alone is insufficient. After authentication/version acceptance,
+`handleNoiseInit` refuses omitted `thread` with sealed `client.update_required`/
+4412 and advertised-but-ungrantable thread with sealed `protocol.unsupported`/
+4421. Both precede binding, workspace metadata, redemption, version persistence
+and opening; authentication and version refusals retain precedence. The
+correlated ack precedes the sealed refusal and omits workspace metadata. Every
+admitted session records `s.thread`; rekey preserves it. Optional `interactive`,
+expansion, compact and multi-agent gates remain independent. See
+[mandatory admission](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md)
+and the [wire handshake](../../protocol-mobile.md#handshake).
+`ActiveConn.Thread` exposes the decision for open connections.
 Production `startRelayV2` installs `ThreadCatchUp`, `ThreadPage` and authoritative
 `ThreadLastShownVersion` through `installDaemonThreadRelay`, after the retained
 `ThreadLiveState` and `LiveStateCurrent` providers. The queries forward directly
@@ -97,10 +105,10 @@ output. Missing conversation identity fails closed. Neither `thread` alone nor
 `in_reply_to` grants interactive or multi-agent access. Unaffected legacy caller
 and provider signatures and reply behavior remain unchanged. Unsolicited content
 replaced by the thread is suppressed on live and connect-reconcile paths.
-`handleNoiseInit` bypasses event-ring replay and `resync` entirely for thread
-connections, including a gap-producing `hello.last_event_id`; supplied current
-live-state reconciliation continues. Legacy peers retain replay/resync; raw
-`request_history` is retired for all peers (#3715). Supplied live state has independent source-conversation gates,
+`hello.last_event_id` is ignored and event replay/resync is retired for every
+connection (#3738); raw `request_history` is also retired (#3715). Supplied
+current live-state reconciliation continues for admitted thread sessions. Supplied
+live state has independent source-conversation gates,
 including for correlated replies and empty clears; see
 [supplied live-state ordering](v2-session-manager-state-machine-capability-negotiation-on-the-handshake.md#supplied-live-state-ordering).
 Suppression returns normally so a withheld head cannot strand permitted output.
@@ -336,9 +344,10 @@ unread is `last_shown_version > read_up_to` only with present evidence; absence
 means unknown. Stored binding and durable read mark keep their meanings and
 presence. Lists retain eligible rows without legacy history scans; the retired
 `latest_entry_id` field supplies no fallback. Non-thread delivery
-strips the reading and envelope session metadata and omits clear frames entirely.
-`TestV2Session_ThreadSummaries` checks distinct readings, zero/unavailable,
-legacy literal bytes and unrelated field presence, including the combination
+strips the reading and envelope session metadata and omits clear frames in
+retained low-level projection paths; mandatory admission now makes those paths
+unreachable to a no-thread app. `TestV2Session_ThreadSummaries` checks distinct
+readings, zero/unavailable and unrelated field presence, including the combination
 with agent tagging. `TestV2Session_ThreadDelivery` covers item denial even in
 handler replies. `TestV2Session_LastEventIDIgnored` checks that obsolete hello
 cursors produce no replay/resync and cannot suppress later updates for either

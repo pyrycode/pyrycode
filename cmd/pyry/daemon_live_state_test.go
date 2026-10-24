@@ -132,3 +132,39 @@ func TestDaemonLiveProducerRecovery(t *testing.T) {
 		successor = next
 	}
 }
+
+func TestDaemonLiveControlBeforeFirstProducer(t *testing.T) {
+	for _, mode := range []string{"first-producer", "replacement-producer", "changed-session"} {
+		t.Run(mode, func(t *testing.T) {
+			b := testControlBindings(t, "conv", "a")
+			_, ok, op := liveResolve(b, "conv", protocol.TypeResetting, func() (bool, bool) { return true, true })
+			if !ok {
+				t.Fatal("cold control could not reserve its conversation")
+			}
+			_, accepted := op.result(protocol.TypeResetting, protocol.ResettingPayload{ConversationID: "conv", Active: true, Phase: protocol.ResetPhaseWrappingUp, Handoff: protocol.ResetHandoffPending})
+			if !accepted {
+				t.Fatal("initial reset progress was not accepted")
+			}
+			op = op.next()
+			b.sink.beginRuntimeProducer(newStreamSessionTag("a"))
+			switch mode {
+			case "replacement-producer":
+				b.sink.beginRuntimeProducer(newStreamSessionTag("a"))
+			case "changed-session":
+				b.sink.live.transition(sessions.SessionTransition{ConversationID: "conv", PreviousID: "a", NewID: "z", NextAgent: "claude"})
+			}
+			reading, accepted := op.result(protocol.TypeResetting, protocol.ResettingPayload{ConversationID: "conv", Active: true, Phase: protocol.ResetPhaseRestarting, Handoff: protocol.ResetHandoffWritten})
+			if accepted != (mode == "first-producer") {
+				t.Fatalf("reset progress accepted=%t after %s", accepted, mode)
+			}
+			current := testLiveReadings(t, b.sink.live, "conv")[liveReadingKey{protocol.TypeResetting, ""}]
+			if accepted {
+				if current.Revision != reading.Revision || current.SessionGeneration != op.source.SessionGeneration || current.Envelope.SessionStateCleared {
+					t.Fatal("first producer did not preserve its pending reset")
+				}
+			} else if !current.Envelope.SessionStateCleared {
+				t.Fatal("stale reset replaced the current generation clear")
+			}
+		})
+	}
+}

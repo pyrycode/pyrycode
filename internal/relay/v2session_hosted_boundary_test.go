@@ -78,7 +78,7 @@ func TestHostedDiscoveryCapability(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := &testAppDiscovery{}
 			p := testHostedStartCaps(t, d, tc.caps, tc.set)
-			if slices.Contains(p.ack.Capabilities, "hosted_apps_v1") != tc.want || len(p.ack.Capabilities) > 1 {
+			if slices.Contains(p.ack.Capabilities, "hosted_apps_v1") != tc.want || len(p.ack.Capabilities) > 2 {
 				t.Fatalf("capabilities: %v", p.ack.Capabilities)
 			}
 			p.request(0, "list_apps", `{}`)
@@ -320,15 +320,19 @@ func TestHostedDiscoveryDefaultSenderIDs(t *testing.T) {
 	}
 }
 
-func TestHostedDiscoverySenderExhaustion(t *testing.T) {
+func TestHostedDiscoveryThreadSenderIgnoresProducerID(t *testing.T) {
 	p := testHostedStartCaps(t, nil, nil, func(c *V2SessionConfig) { c.HostedAppsReady, c.HostedAppsSend = nil, nil })
-	if err := p.mgr.Push(t.Context(), p.conn, protocol.Envelope{ID: hostedMaxID, Type: "message", TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}); err != nil {
+	if err := p.mgr.Push(t.Context(), p.conn, protocol.Envelope{ID: hostedMaxID, Type: "workspace_updated", TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	e, _ := p.next()
-	if e.ID != hostedMaxID {
+	if e.ID != 2 {
 		t.Fatal(e)
 	}
 	p.request(10, "list_apps", `{}`)
-	testHostedClose(t, p)
+	e, _ = p.next()
+	testHostedError(t, e, 10, protocol.CodeProtocolUnsupported)
+	if e.ID != 3 {
+		t.Fatal("producer ID exhausted the thread sender")
+	}
 }

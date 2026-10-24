@@ -87,6 +87,10 @@ func AttachmentTurn(t *testing.T, next Next, convID string, budget time.Duration
 	for time.Now().Before(deadline) {
 		env := next(pollDeadline(deadline))
 		turn.feed(t, convID, sourceFacts(t, sources, convID))
+		idle := turn.idle(t, env, convID)
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeError, protocol.TypeModalShown:
 			t.Fatal("attachment turn was refused or parked behind a modal")
@@ -97,14 +101,9 @@ func AttachmentTurn(t *testing.T, next Next, convID string, budget time.Duration
 			}
 		case protocol.TypeAssistantDelta:
 			t.Fatal("retired attachment reply delivered on wire")
-		case protocol.TypeTurnState:
-			var p protocol.TurnStatePayload
-			if json.Unmarshal(env.Payload, &p) != nil {
-				t.Fatal("invalid attachment turn state")
-			}
-			if turn.idle(t, env, convID) && strings.TrimSpace(turn.text.String()) != "" {
-				return turn.text.String()
-			}
+		}
+		if idle && strings.TrimSpace(turn.text.String()) != "" {
+			return turn.text.String()
 		}
 	}
 	t.Fatal("attachment turn lacks nonempty owned text and terminal idle")

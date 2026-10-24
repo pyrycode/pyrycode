@@ -72,7 +72,8 @@ func TestQuestionResolverV2_RelayDiagnosticRecords(t *testing.T) {
 				frames := make(chan protocol.RoutingEnvelope, 4)
 				outbound := make(chan protocol.RoutingEnvelope, 8)
 				mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
-					Frames: frames, Outbound: func(env protocol.RoutingEnvelope) error { outbound <- env; return nil },
+					ThreadReady: func() bool { return true },
+					Frames:      frames, Outbound: func(env protocol.RoutingEnvelope) error { outbound <- env; return nil },
 					StaticPriv: serverKey.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()),
 					Logger: logger, QuestionResolver: gatedResolver(f, logger),
 				})
@@ -110,7 +111,7 @@ func TestQuestionResolverV2_RelayDiagnosticRecords(t *testing.T) {
 				}
 				hello := marshal(protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: marshal(protocol.HelloClientPayload{
 					Role: "client", DeviceName: "phone", ClientVersion: "v2-test", ProtocolVersions: []string{"v2"}, Token: token,
-					Capabilities: []string{protocol.CapabilityInteractive},
+					Capabilities: []string{protocol.CapabilityInteractive, protocol.CapabilityThread},
 				})})
 				initMsg, err := initiator.WriteInit(hello)
 				if err != nil {

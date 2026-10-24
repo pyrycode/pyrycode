@@ -20,6 +20,9 @@ func AnnouncedTurn(t *testing.T, next Next, convID string, timeout time.Duration
 	)
 	checked := func(deadline time.Time) protocol.Envelope {
 		env := next(deadline)
+		if env.SessionStateCleared {
+			return env
+		}
 		switch env.Type {
 		case protocol.TypeModelAnnounced:
 			if seen {

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -22,6 +23,8 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 	var watermark uint64
 	var producingSession string
 	var turn sourceTurn
+	var entries []history.Entry
+	var nextSourcePoll time.Time
 	for {
 		live := w.Next(pollDeadline(deadline))
 		alarm(t, live)
@@ -29,7 +32,13 @@ func SubagentText(t *testing.T, w Wire, convID, prompt string, budget time.Durat
 			t.Fatalf("turn did not reach terminal idle; Agent/Task id=%q main=%v child=%v",
 				agentID, lanes[""], lanes[agentID])
 		}
-		entries := sourceFacts(t, []SourceFacts{w.Source}, convID)
+		// Observe the first source delta at its exact checkpoint. Afterwards, read
+		// the growing transcript on phase changes or bounded quiet polls; each
+		// thread fragment must not trigger another complete disk scan.
+		if !mainObserved || live.Type == protocol.TypeTurnState || (live.Type == "" && !time.Now().Before(nextSourcePoll)) {
+			entries = sourceFacts(t, []SourceFacts{w.Source}, convID)
+			nextSourcePoll = time.Now().Add(100 * time.Millisecond)
+		}
 		turn.feed(t, convID, entries)
 		for _, env := range entries {
 			if env.ID <= watermark {

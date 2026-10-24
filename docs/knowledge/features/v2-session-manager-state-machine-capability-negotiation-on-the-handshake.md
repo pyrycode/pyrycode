@@ -2,53 +2,54 @@
 
 The daemon-side **trust decision** [#607](../codebase/607.md) deferred. #607 landed the wire vocabulary (`CapabilityInteractive`, the `omitempty` `Capabilities []string` field on both `HelloClientPayload` and `HelloAckPayload`) but `handleNoiseInit` **decoded the phone's advertised capabilities and ignored them** — the `hello_ack` echoed nothing, the session recorded no capability state, and `ActiveConnIDs` returned every open conn with no capability filter. This slice closes that boundary; it is `security-sensitive` (the daemon deciding which internet-facing phones are *granted* the interactive capability) and is the enforcement half of ADR 025's deliberately split design: #607 = vocabulary (no trust), #626 = trust decision. See [`codebase/626.md`](../codebase/626.md).
 
-**The authoritative supported set + the pure intersection.** The supported set is the daemon's own constant — **never** a mirror of the phone's claims:
+**Authoritative negotiation and mandatory admission.** `negotiateCapabilities`
+intersects the advertisement with `supportedV2Capabilities` in supported-set
+order, deduplicates values and drops unknown strings. It separately grants
+`thread`, hosted apps, expansion and compact only with their supplied readiness.
+The client cannot authorize itself by advertising an unfamiliar name.
 
-```go
-var supportedV2Capabilities = []string{
-    protocol.CapabilityInteractive,
-    protocol.CapabilityQuestion,
-    protocol.CapabilityModelList,
-    protocol.CapabilityContextUsage,
-    protocol.CapabilityMultiAgent,
-    protocol.CapabilityStopBackgroundTask,
-}
+`handleNoiseInit` derives the thread refusal after `Devices.Validate` accepts
+the token/static key and existing client-version policy accepts the hello, but
+before `BindStaticKey`, workspace-root selection, redemption, client-version
+persistence or opening. Missing `thread` receives nonretryable
+`client.update_required`/4412 without a minimum-version field; advertised but
+ungrantable `thread` receives nonretryable `protocol.unsupported`/4421, including
+nil/false `ThreadReady`. Unknown/expired tokens and mismatched keys always retain
+indistinguishable `auth.invalid_token`/4401 precedence, independent of capability
+advertisement/readiness; version refusals keep their existing payloads and win
+before thread refusals. Atomic binding still decides competing installs only
+after these checks. Ordinary authentication `LastSeenAt` bookkeeping remains.
 
-// Intersect advertisements with the supported set in its order, then grant
-// thread, hosted apps and expansion only with supplied readiness. Dedup and
-// drop unknown strings; nil means no capabilities were negotiated.
-func negotiateCapabilities(advertised []string, readiness ...bool) []string {
-    var out []string
-    for _, name := range supportedV2Capabilities { // `name`, not `cap` (builtin)
-        if slices.Contains(advertised, name) { out = append(out, name) }
-    }
-    if len(readiness) > 0 && readiness[0] && slices.Contains(advertised, protocol.CapabilityThread) {
-        out = append(out, protocol.CapabilityThread)
-    }
-    if len(readiness) > 1 && readiness[1] && slices.Contains(advertised, protocol.CapabilityHostedAppsV1) {
-        out = append(out, protocol.CapabilityHostedAppsV1)
-    }
-    if len(readiness) > 2 && readiness[0] && readiness[2] && slices.Contains(advertised, protocol.CapabilityThreadExpansion) && slices.Contains(advertised, protocol.CapabilityThread) && slices.Contains(advertised, protocol.CapabilityInteractive) {
-        out = append(out, protocol.CapabilityThreadExpansion)
-    }
-    return out
-}
-```
+**Echo is distinct from admission.** The same `negotiated` slice supplies the
+ack and accepted session flags. Refusals first complete Noise with a correlated
+`hello_ack` in `noise_resp`, omitting `workspace_root`, then send one routing
+envelope containing the correlated sealed error and close. Echoed capabilities
+on a rejected ack confer no authority: the session never opens, starts dispatch
+or acquires a push route. `TestV2Session_ThreadAdmission` checks the two-envelope
+sequence, privacy and unchanged pairing admission fields in memory and on disk;
+`TestV2Session_ThreadAdmissionAuthPrecedence` and
+`TestV2Session_ThreadAdmissionVersionPrecedence` pin the earlier verdicts.
+See the [wire handshake](../../protocol-mobile.md#handshake).
 
-**Iterating the supported set (not the advertised set) is the security primitive** — "a spoofed capability can never be granted" is a structural property of the loop shape, deterministic, not a runtime guard a later refactor could bypass (Threat 1 / AC#3). A pure receiver-less function, directly table-testable for the whole negotiation matrix.
-
-**Echo + record, single source of truth.** `handleNoiseInit` computes `negotiated` with `negotiateCapabilities` and the supplied thread/hosted/expansion readiness decisions **before** the `hello_ack` literal, and adds `Capabilities: negotiated` to `HelloAckPayload`. Token validation precedes ack construction so host-only metadata can be withheld. The ack is sealed via `WriteResp` before enforcing the token verdict, so it is built for accepted and token-refused handshakes — `omitempty` keeps the key absent for a no-capability phone (v1 byte-stability, AC#5). The per-conn `interactive bool` (a new `V2Session` field beside `device`/`peerStatic`, same set-once / single-owner-goroutine discipline) is set in the token-OK tail, **between `s.device = &device` and `s.state = V2StateOpen`**, via `s.interactive = slices.Contains(negotiated, protocol.CapabilityInteractive)` — derived from the *same* `negotiated` slice the ack echoed, so the echoed capability and the recorded flag can never disagree.
-
-**Fail-closed, two independent gates.** The flag is written **only** on the token-OK branch (after `Devices.Validate`, before `V2StateOpen`); every other path leaves it at its `false` zero value (advertise-nothing / `null` / `[]` / only-unsupported → `negotiated == nil` → `false`). And `handleActiveConns` filters on `V2StateOpen` — so even if the flag were mis-set, a non-open (un-authenticated) session is never enumerated, and the negotiated flag of an un-authenticated peer is never observable. Belt-and-suspenders of different fabric — two deterministic code-level gates, the same shape #588/#589 established. Re-key (`handleRekeyInit`) preserves `s.interactive` by never touching it, like `device`/`peerStatic`.
-
-**Token-fail ack echo grants nothing.** On a token-fail handshake the `noise_resp` carries the ack (with `negotiated`) to a cryptographically-authenticated-but-unauthorized peer that is then closed at 4401 and deleted from `m.sessions`. The echo grants nothing (the session never opens, is never enumerated or pushed-to) and leaks nothing (`CapabilityInteractive` is public protocol vocabulary). Suppressing the encrypted ack on token refusal would break the pinned "state → `HandshakeComplete` before token validation" invariant for zero security gain — accepted non-issue (spec § Security review, verdict PASS).
+**Optional grants stay independent.** Accepted sessions always record
+`s.thread`, but `s.interactive` remains
+`slices.Contains(negotiated, protocol.CapabilityInteractive)`, never a nonempty-set
+check. Mandatory thread makes that distinction especially important: every open
+connection now has at least one grant, including peers without interactive access.
+Expansion, compact and multi-agent likewise retain value-specific gates;
+`handleActiveConns` enumerates only `V2StateOpen`. Rekey preserves admitted flags
+rather than renegotiating them. Positive fixtures must provide genuine readiness,
+advertise thread and check its echo; negative helpers preserve exact omissions
+and nil/false readiness. Noise completion alone cannot prove supported admission:
+held-response tests use low-level handshakes until release, then await an open
+manager snapshot. See [test boundaries](development-verification-test-execution-and-artifact-survival.md#diagnosing-reply-timeouts).
 
 **`ActiveConns`/`ActiveConn` — the capability-aware enumeration.** The downstream consumer reads the negotiated flag via the [widened snapshot funnel](#concurrency-safe-open-session-enumeration-588--activeconns-method--snapshot-funnel): `ActiveConns(ctx) []ActiveConn` returns each open conn paired with its `Interactive` flag. The #596 structured-stream fan-out (since [#699](../codebase/699.md) the **single** v2 assistant-turn delivery path — #589's coarse `message` broadcast, re-targeted to non-interactive conns in [#634](../codebase/634.md), was deleted as dead code once the 2026-06-22 ADR 025 amendment made every phone `interactive`; the `Interactive` flag survives because the structured path still gates on it) consumes this: [`#632`](../codebase/632.md)'s `interactiveTurnEmitterV2` (`cmd/pyry/interactive_turn_v2.go`) snapshots `ActiveConns`, filters `Interactive == true` (the load-bearing capability gate, `if !c.Interactive { continue }`), then `Push`es a sealed structured envelope per conn-id — the emitter is built and unit-tested, with #633 wiring it to the live producer. [`#657`](../codebase/657.md)'s `sessionTransitionEmitterV2` (`cmd/pyry/session_transition_v2.go`) is the **second** interactive-only consumer of this exact primitive: it reuses the same `interactiveBroadcaster` interface and `if !c.Interactive { continue }` gate to fan a `session_transition` envelope (a `/clear` rotation or idle/cap eviction surfaced by [#659]'s pool observer) to interactive phones — but stamps **no** `EventID` (a session boundary is not a turn-stream event, so it does not join the #647 ring) and adds no manager-side path. The former #722 queue snapshot emitter and its hand-off goroutine are retired
-for all apps (#3727). [`#1008`](../codebase/1008.md)'s `sessionErrorEmitterV2` (`cmd/pyry/session_error_v2.go`) also consumes this enumeration: it fans a `session_error` envelope (terminal `CodeSessionBlocked`, `SessionErrorPayload{ConversationID,Code,Message}` per [#1007](../codebase/1007.md)) to interactive phones whenever [#1000](../codebase/1000.md)'s `msgqueue` give-up seam (`OnGiveUp`) fires — through the same reused interface + gate, likewise `EventID`-nil (a give-up is a one-shot edge with no connect-time reconcile, unlike a replay-eligible event). It retains the hand-off-channel + dedicated-Run-goroutine shape, **without a queue reference**: the emitter holds no `Snapshot`/`*msgqueue.Queue` field, so queued (untrusted) phone text is unreachable by construction rather than by discipline. #2209's `workspaceUpdateEmitterV2` (`cmd/pyry/workspace_update_v2.go`) is the **fifth**, fanning a `workspace_updated` record to every other interactive conn once `rename_workspace` (#2207) has stored a label change — and the first of the five triggered directly from a dispatch handler rather than a pool/queue observer. That distinction is what decides whether a hand-off channel is needed, and it is not: `rename_workspace` is map-dispatched, so `dispatchAppFrame` falls through to `enqueueAppFrame` and `announce` runs synchronously on the requesting conn's own `appFrameWorker` goroutine — never on `Run`. A bare `ActiveConns` call is therefore safe despite `ActiveConns`' own doc comment reading, out of context, as though any non-`Run` goroutine needs care ("safe to call from any goroutine other than the dispatch goroutine"): the snapshot request funnels onto `Run` and `Run` is always free to service it while the handler waits. `session_error` needs its hand-off-channel-plus-dedicated-goroutine shape because its `OnGiveUp` trigger fires from a mix of goroutines that sometimes includes `Run` itself, not because calling `ActiveConns` off-`Run` is ever unsafe on its own — a future handler-triggered emitter can call it inline the way this one does. `workspaceUpdateEmitterV2` also adds a shape none of the first four needed: it excludes one conn from its own fan-out, keyed on `ActiveConn.ConnID` against the requester's `dispatch.Conn.ConnID()` (one string space, no mapping) — the requester already holds its correlated reply, but a requester with a second conn open is still pushed on that one, since exclusion is per conn and not per device. The single-`Interactive`-bool shape held while `supportedV2Capabilities` had one member (YAGNI); #2020 added a second, `CapabilityQuestion = "question"`, as the deliberate, separately-reviewed change this always required, and #2172 added a third, `CapabilityModelList = "model_list"` (detecting the pair of #2124's daemon-wide model-list fallback and #2125's `request_model_list` verb — one string covers both, since neither is separately useful without the other). Both confirm the shape still holds without a new bool. `question` and `model_list` are both **detection only**: neither grants a gate of its own, and `reconcileQuestions`, `handleRequestModelList`/`modelListFor`, and the four #632-shaped emitters above all stay gated on `interactive` alone, so a phone advertising either without `interactive` negotiates as non-interactive and gets none of them. The one property that had been a hypothetical fragility is now load-bearing and test-pinned: `s.interactive` must stay `slices.Contains(negotiated, protocol.CapabilityInteractive)`, a **value-specific** membership test, never `len(negotiated) > 0` — with more than one capability in the supported set, an emptiness check would grant interactive access to a client that advertised only the others. #2020's `question_alone_grants_no_interactive` and #2172's `model_list_alone_grants_no_interactive` subtests each assert `ActiveConns(...).Interactive == false` for their case and are, by mutation, the only rows in either handshake test table that die if `Contains` is weakened to a length check.
+for all apps (#3727). [`#1008`](../codebase/1008.md)'s `sessionErrorEmitterV2` (`cmd/pyry/session_error_v2.go`) also consumes this enumeration: it fans a `session_error` envelope (terminal `CodeSessionBlocked`, `SessionErrorPayload{ConversationID,Code,Message}` per [#1007](../codebase/1007.md)) to interactive phones whenever [#1000](../codebase/1000.md)'s `msgqueue` give-up seam (`OnGiveUp`) fires — through the same reused interface + gate, likewise `EventID`-nil (a give-up is a one-shot edge with no connect-time reconcile, unlike a replay-eligible event). It retains the hand-off-channel + dedicated-Run-goroutine shape, **without a queue reference**: the emitter holds no `Snapshot`/`*msgqueue.Queue` field, so queued (untrusted) phone text is unreachable by construction rather than by discipline. #2209's `workspaceUpdateEmitterV2` (`cmd/pyry/workspace_update_v2.go`) is the **fifth**, fanning a `workspace_updated` record to every other interactive conn once `rename_workspace` (#2207) has stored a label change — and the first of the five triggered directly from a dispatch handler rather than a pool/queue observer. That distinction is what decides whether a hand-off channel is needed, and it is not: `rename_workspace` is map-dispatched, so `dispatchAppFrame` falls through to `enqueueAppFrame` and `announce` runs synchronously on the requesting conn's own `appFrameWorker` goroutine — never on `Run`. A bare `ActiveConns` call is therefore safe despite `ActiveConns`' own doc comment reading, out of context, as though any non-`Run` goroutine needs care ("safe to call from any goroutine other than the dispatch goroutine"): the snapshot request funnels onto `Run` and `Run` is always free to service it while the handler waits. `session_error` needs its hand-off-channel-plus-dedicated-goroutine shape because its `OnGiveUp` trigger fires from a mix of goroutines that sometimes includes `Run` itself, not because calling `ActiveConns` off-`Run` is ever unsafe on its own — a future handler-triggered emitter can call it inline the way this one does. `workspaceUpdateEmitterV2` also adds a shape none of the first four needed: it excludes one conn from its own fan-out, keyed on `ActiveConn.ConnID` against the requester's `dispatch.Conn.ConnID()` (one string space, no mapping) — the requester already holds its correlated reply, but a requester with a second conn open is still pushed on that one, since exclusion is per conn and not per device. The single-`Interactive`-bool shape held while `supportedV2Capabilities` had one member (YAGNI); #2020 added a second, `CapabilityQuestion = "question"`, as the deliberate, separately-reviewed change this always required, and #2172 added a third, `CapabilityModelList = "model_list"` (detecting the pair of #2124's daemon-wide model-list fallback and #2125's `request_model_list` verb — one string covers both, since neither is separately useful without the other). Both confirm the shape still holds without a new bool. `question` and `model_list` are both **detection only**: neither grants a gate of its own, and `reconcileQuestions`, `handleRequestModelList`/`modelListFor`, and the four #632-shaped emitters above all stay gated on `interactive` alone, so a phone advertising either alongside required `thread` but without `interactive` negotiates as non-interactive and gets none of them. The one property that had been a hypothetical fragility is now load-bearing and test-pinned: `s.interactive` must stay `slices.Contains(negotiated, protocol.CapabilityInteractive)`, a **value-specific** membership test, never `len(negotiated) > 0` — with more than one capability in the supported set, an emptiness check would grant interactive access to a client that advertised only the others. #2020's `question_alone_grants_no_interactive` and #2172's `model_list_alone_grants_no_interactive` subtests each assert `ActiveConns(...).Interactive == false` for their case and are, by mutation, the only rows in either handshake test table that die if `Contains` is weakened to a length check.
 
 `CapabilityContextUsage = "context_usage"` (#2431) joined the supported set as a fourth, detection-only member the same way `question` and `model_list` did — its verb, `request_context_usage`, gates on `interactive` alone.
 
-**`CapabilityMultiAgent = "multi_agent"` (#2643) is the fifth member, and the first that is not pure detection.** Its neighbours only let a client tell which daemon build it is talking to; this one changes what the daemon sends. `V2Session` gained a second per-conn bool beside `interactive`, `multiAgent`, set in the same token-OK tail via the same value-specific `s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)` — never a length check, for the reason above. `routeAppFrame` copies it onto the per-frame `*dispatch.Conn` with `conn.SetMultiAgent(s.multiAgent)` before `Route` runs, so `internal/relay/handlers.ListConversationsWithAgents` (and #2644/#2645's handlers) read the decision as `c.MultiAgent()` without reaching back into the session — see [`dispatch-package.md`](dispatch-package.md). Re-key preserves `s.multiAgent` by never touching it, the same as `interactive` and `device`/`peerStatic`; `TestV2Session_MultiAgent_ReachesHandlerAndSurvivesRekey` pins the flag across a same-static re-key. It still grants **no** interactive access — no `interactive` gate reads it, and `multi agent alone grants no interactive` in `TestV2Session_Handshake_CapabilityNegotiation` pins that — but unlike `question`/`model_list`/`context_usage`, a client that negotiates only `multi_agent` and not `interactive` still gets a *shaped* `conversations` reply (every row carries `agent`, and Codex rows are included), because that verb's own gate is `c.MultiAgent()`, not `s.interactive`. The two flags are independent booleans on both `V2Session` and `Conn`, not one capability implying the other.
+**`CapabilityMultiAgent = "multi_agent"` (#2643) is the fifth member, and the first that is not pure detection.** Its neighbours only let a client tell which daemon build it is talking to; this one changes what the daemon sends. `V2Session` gained a second per-conn bool beside `interactive`, `multiAgent`, set in the same token-OK tail via the same value-specific `s.multiAgent = slices.Contains(negotiated, protocol.CapabilityMultiAgent)` — never a length check, for the reason above. `routeAppFrame` copies it onto the per-frame `*dispatch.Conn` with `conn.SetMultiAgent(s.multiAgent)` before `Route` runs, so `internal/relay/handlers.ListConversationsWithAgents` (and #2644/#2645's handlers) read the decision as `c.MultiAgent()` without reaching back into the session — see [`dispatch-package.md`](dispatch-package.md). Re-key preserves `s.multiAgent` by never touching it, the same as `interactive` and `device`/`peerStatic`; `TestV2Session_MultiAgent_ReachesHandlerAndSurvivesRekey` pins the flag across a same-static re-key. It still grants **no** interactive access — no `interactive` gate reads it, and `multi agent alone grants no interactive` in `TestV2Session_Handshake_CapabilityNegotiation` pins that — but unlike `question`/`model_list`/`context_usage`, a client that negotiates `thread` and `multi_agent` without `interactive` still gets a *shaped* `conversations` reply (every row carries `agent`, and Codex rows are included), because that verb's own gate is `c.MultiAgent()`, not `s.interactive`. The two flags are independent booleans on both `V2Session` and `Conn`, not one capability implying the other.
 
 **Detection must not become an actuation gate.**
 `CapabilityStopBackgroundTask = "stop_background_task"` is the sixth supported
@@ -87,20 +88,24 @@ Offered `hosted_apps_v1` is admitted only with `HostedAppsDiscovery`,
 and resource routing together. A registry or transport adapter alone proves
 neither complete hosting nor readiness. `newDaemonAppsManager` installs initialized
 storage as discovery and `OutboundContext` as `HostedAppsSend`, preserving the
-caller's complete readiness attestation. Production supplies no such attestation
-while supervision (#3122) and resource routing (#3123) are absent, so it withholds
-the capability; `TestHostedAppsProductionUnsupported` checks both `hello_ack`
-omission and `protocol.unsupported` for `list_apps` through the real daemon.
+caller's complete readiness attestation. Production also supplies its `apps.Owner`
+as both resource providers and caches `Owner.CheckRuntime` before message
+processing; readiness requires the registry, owner, cancellable delivery and a
+supported runtime. Empty inventory or stopped app health does not revoke host
+infrastructure support; per-app health still gates resource access. See
+[hosted-app wiring](../../protocol-mobile.md#hosted-apps-v2).
 Ready in-process fakes exercise wiring without an environment bypass.
-Apps require neither `interactive` nor `thread` nor
-an active channel; every request/completion/delivery also checks current paired
-membership. See the [wire gates](../../protocol-mobile.md#hosted-apps-v2).
+Hosted-app requests require neither `interactive` nor an active channel, but
+the enclosing app session must first negotiate mandatory `thread`. The hosted
+grant does not substitute for thread admission; every request/completion/delivery
+also checks current paired membership. See the [wire gates](../../protocol-mobile.md#hosted-apps-v2).
 
-An offered capability initializes the ordered output lane even when admission
-is withheld; otherwise legacy replies could reuse `hello_ack`'s sender ID before
-the first unsupported app request. A first hosted request on an existing legacy
-connection also has to preserve previously accepted transport output. Neither
-lane selection nor a capability echo authorizes discovery. See
+An offered hosted capability initializes the ordered output lane on an otherwise
+admitted thread session even when the hosted grant is withheld. Unsupported
+hosted requests still need ordered sender IDs. Retained low-level legacy lane
+paths preserve previously accepted transport output, but no-thread peers can no
+longer reach them through admission. Neither lane selection nor a capability
+echo authorizes discovery. See
 [sender IDs and delivery ordering](v2-session-manager-concurrency-hosted-discovery-and-ordered-delivery.md#hosted-discovery-and-ordered-delivery)
 and [transport admission](transport-package.md#lifecycle-and-goroutines).
 
@@ -128,8 +133,15 @@ now participates in production `ThreadReady` alongside the installed fold
 publisher and watermark provider. Negotiated thread connections receive current
 readings at connect/reconnect and source-bound live updates; these snapshots
 initialize transient state only. Thread item backfill requires explicit catch-up
-for each open conversation; production bounded catch-up/page providers and
-thread-only replay bypass are installed.
+for each open conversation. Production bounded catch-up/page providers are
+installed; event replay/resync is retired for every connection (#3738).
+
+Snapshot completion needs cursor exhaustion, not only `FlushPushes`: a finite
+`ThreadLiveState` iterator can still be enumerating when the push queue reports
+progress. Reconnect capacity fixtures retain generated clears alongside all
+readings and hold transport capacity so enumeration cannot finish early. Generated
+clears are distinct observations; decoding `{}` as a fresh menu or prompt would
+fail before exercising its actual payload or eligibility gates.
 
 Carry provenance with the originating reading through `PushLiveState` and
 `ThreadLiveState`, rather than resolving a conversation's current binding when
@@ -163,8 +175,8 @@ authority. Source-bearing dismissals preserve original prompt IDs and permission
 outcome/source and retire only that identity; they do not appear in snapshots. With
 `ThreadLiveState` installed, unsolicited legacy live frames are withheld from
 thread recipients. Otherwise an unsourced legacy dismissal could arrive before
-its source-bound counterpart and bypass conversation checks. Legacy recipients
-keep their existing frames and bytes.
+its source-bound counterpart and bypass conversation checks. Retained legacy delivery branches are not fallback admission routes; their final
+removal and integrated compatibility wording belong to #3741.
 
 `LiveStateCurrent` checks owner generation and accepted reading revision before
 unsolicited Run delivery, including captured cursors and queued pushes. Removing

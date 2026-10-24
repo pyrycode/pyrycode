@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/scenario"
 	"github.com/pyrycode/pyrycode/internal/history"
 	"os"
@@ -306,9 +307,6 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					"PYRY_FAKE_CLAUDE_STDIN_LOG=" + stdinLog,
 					"PYRY_APPROVAL_TIMEOUT=" + tc.approvalTimeout,
 				}
-				if tc.childExit {
-					env = append(env, "PYRY_FAKE_CLAUDE_STREAM_EXIT_AFTER_CAN_USE_TOOL=1")
-				}
 				h = StartStreamInteractiveWithRelayStdio(t, home, initialUUID, relayURL, env...)
 			} else {
 				h = StartStreamInteractiveWithRelay(t, home, initialUUID, relayURL,
@@ -509,6 +507,13 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			}
 
 			if tc.childExit {
+				// Establish the actual surfaced approval before ending its owner.
+				// Supplied state may retire an ask that exits before delivery.
+				origin := statusOrFatal(t, h)
+				if origin.ChildPID <= 0 {
+					t.Fatal("surfaced permission has no live origin child")
+				}
+				killChild(t, origin.ChildPID)
 				reader.phase = "child-exit-dismissal"
 				dismissDeadline := time.Now().Add(10 * time.Second)
 				if !reader.waitDismissed(dismissDeadline, shown.ModalID) {
@@ -516,6 +521,10 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				}
 
 				reader.phase = "replacement-stdin-ready"
+				waitForRunnerStatus(t, h, 10*time.Second, "a distinct replacement after permission-owner exit",
+					func(status *control.StatusPayload) bool {
+						return status.Phase == "running" && status.ChildPID > 0 && status.ChildPID != origin.ChildPID
+					})
 				replacementLog := childStdinLog(stdinLog, initialUUID)
 				childReadyDeadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(childReadyDeadline) {

@@ -85,21 +85,28 @@ func TestPublishedModelSelection_SettingsRoundTrip(t *testing.T) {
 					paired.Add(devices.Device{TokenHash: devices.HashToken(id + "-token"), Name: "test phone", PairedAt: time.Now().UTC()})
 				}
 				w := &switchWire{t: t, frames: make(chan protocol.RoutingEnvelope, 16), out: make(chan protocol.RoutingEnvelope, 128), phones: map[string]switchPhone{}, pub: key.PublicKey().Bytes()}
-				mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
+				cfg := relay.V2SessionConfig{
 					Frames: w.frames, Outbound: func(e protocol.RoutingEnvelope) error { w.out <- e; return nil },
 					StaticPriv: key.Bytes(), Devices: paired, ServerID: string(identity.NewServerID()),
 					Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 					SettingsUpdater: adapter, CapabilitiesFor: adapter.Capabilities,
 					RunConfigFor: runConfigFor(resolve, nil), ModelListFor: modelListFor(reg, pool, store),
 					KnownConversation: func(id string) bool { _, ok := reg.Get(conversations.ConversationID(id)); return ok },
-				})
+				}
+				bindings := testControlBindings(t, "X", x)
+				bindings.reg = reg
+				installDaemonLiveRelay(&cfg, relayWiring{streamSink: bindings.sink}, nil)
+				startThread := testDaemonThreadBackend(t, &cfg, bindings)
+				mgr, err := relay.NewV2SessionManager(cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
 				ctx, cancel := context.WithCancel(context.Background())
+				w.manager = mgr
+				stopThread := startThread(ctx, mgr)
 				done := make(chan struct{})
 				go func() { defer close(done); _ = mgr.Run(ctx) }()
-				t.Cleanup(func() { cancel(); <-done })
+				t.Cleanup(func() { cancel(); stopThread(); <-done })
 				w.open("phone", true)
 				requestID := uint64(10)
 				exchange := func(phone, typ string, payload any, want string) protocol.Envelope {

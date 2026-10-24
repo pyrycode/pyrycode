@@ -346,11 +346,8 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 	// Whatever the daemon sends phone-a from here on buffers unread on phone-a's socket,
 	// so the windows never interleave and this stays one goroutine.
 	//
-	// handleNoiseInit's success tail records s.interactive, creates the push queue and
-	// calls reconcileSlashCommandLists, which pushes one envelope per retained payload —
-	// and it sends noise_resp BEFORE those pushes, which is what makes phone-b's decrypt
-	// order deterministic. driveHandshakeToOpenDaemonInteractive consumed exactly that
-	// noise_resp and nothing after it, so this loop starts on a nonce that is in sequence.
+	// The supported handshake completes named catch-up while retaining interleaved
+	// snapshots. The reader drains them before decrypting new socket output.
 	_, nextEnvB := dialInteractive("phone-b", tokens[2])
 	collectDeadline := time.Now().Add(20 * time.Second)
 	for !obs.found {
@@ -364,6 +361,9 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope on phone-b: %s", string(env.Payload))
 		case protocol.TypeSlashCommandList:
+			if env.SessionStateCleared {
+				continue
+			}
 			if err := json.Unmarshal(env.Payload, &obs.list); err != nil {
 				// A decode failure at this layer IS the defect, not a miss. The raw bytes
 				// are deliberately NOT printed: they carry the whole inventory.
@@ -389,6 +389,9 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 			case protocol.TypeError:
 				t.Fatalf("unexpected error envelope on phone-b after the first list: %s", string(env.Payload))
 			case protocol.TypeSlashCommandList:
+				if env.SessionStateCleared {
+					continue
+				}
 				obs.extraOnObserver++ // counted, never decoded, never printed
 			}
 		}

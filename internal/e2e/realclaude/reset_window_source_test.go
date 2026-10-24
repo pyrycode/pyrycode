@@ -50,3 +50,47 @@ func TestResetWindowSourceTransitionOrdering(t *testing.T) {
 		t.Fatal("source polling lost ordering or duplicated the transition")
 	}
 }
+
+// Family initialization and rotation can each clear reset state. Their combined
+// count cannot replace the missing restarting phase or certify an old owner.
+func TestResetWindowCurrentStateCompletion(t *testing.T) {
+	now := time.Now().UTC()
+	transition := windowTransition{payload: protocol.SessionTransitionPayload{ConversationID: "conv", PreviousSessionID: "old", NewSessionID: "new", OccurredAt: now}}
+	clear := protocol.Envelope{Type: protocol.TypeResetting, SessionStateCleared: true, ConversationID: json.RawMessage(`"conv"`), SessionID: json.RawMessage(`"new"`), TS: now}
+	for _, name := range []string{"coalesced-phase", "duplicate-clear", "old-session", "foreign-conversation", "early-clear", "source-only", "duplicate-rotation"} {
+		t.Run(name, func(t *testing.T) {
+			w := newResetWindow()
+			w.transitions = []windowTransition{transition}
+			w.edges = []protocol.ResettingPayload{{ConversationID: "conv", Active: true, Phase: protocol.ResetPhaseWrappingUp, Handoff: protocol.ResetHandoffPending}}
+			w.edgeTimes = []time.Time{now.Add(-time.Second)}
+			w.edgeFrames = []protocol.Envelope{{Type: protocol.TypeResetting, TS: now.Add(-time.Second), ConversationID: json.RawMessage(`"conv"`), SessionID: json.RawMessage(`"old"`)}}
+			w.clears = []protocol.Envelope{clear}
+			want := false
+			switch name {
+			case "coalesced-phase":
+				want = true
+			case "duplicate-clear":
+				w.clears = append(w.clears, clear)
+				want = true
+			case "old-session":
+				w.clears[0].SessionID = json.RawMessage(`"old"`)
+			case "foreign-conversation":
+				w.clears[0].ConversationID = json.RawMessage(`"other"`)
+			case "early-clear":
+				w.clears[0].TS = now.Add(-time.Second)
+			case "source-only":
+				w.edges = nil
+				w.clears = nil
+			case "duplicate-rotation":
+				w.transitions = append(w.transitions, transition)
+			}
+			if got := w.resetSettled(); got != want {
+				t.Fatalf("settled=%v, want %v", got, want)
+			}
+			if want {
+				w.assertProgress(t, "conv", protocol.ResetHandoffWritten)
+				w.assertClear(t, "conv")
+			}
+		})
+	}
+}

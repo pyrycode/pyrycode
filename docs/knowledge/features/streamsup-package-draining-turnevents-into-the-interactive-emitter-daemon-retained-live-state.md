@@ -44,8 +44,11 @@ Same-phase successor activity reaches retention while legacy phase sends remain
 deduplicated.
 
 Reset/clear, agent switch and recovery/reactivation advance the conversation's
-generation, including same-ID activation and first output after a confirmed
-stop within the same activation. Each transition retires predecessor readings
+generation, including replacement activation with the same session ID and
+first output after a confirmed stop within the same activation. First activation
+of a cold same-session placeholder is the exception described under
+[control reservations](#control-and-on-demand-readings). Each transition retires
+predecessor readings
 and admits a clear for every scoped family before fresh readings: its existing
 envelope type, `session_state_cleared: true`, payload `{}`, successor provenance
 and positive new-generation ordering. Unknown successor provenance stays omitted;
@@ -55,8 +58,15 @@ Returning A → Z → A needs a fresh successor binding even within one activati
 generation advancement releases cached bindings without altering queued captures.
 
 **Scope and retirement follow producing work.** Admission mints main-turn and
-child-lane identities that the legacy emitter adopts. Unassociated progress and
-denial can open a main identity without changing their lifecycle-neutral busy
+child-lane identities that the legacy emitter adopts. `acceptEventLocked` also
+captures the opening instant with the main identity in `liveStreamCapture`.
+`recordTurnOpened` uses that immutable producer clock, not the later drain time,
+for `main_turn_opened.occurred_at`. A fast producer can capture terminal idle
+before history drains; stamping the opening at drain time would falsely put
+that terminal before its own execution. `TestDaemonLiveExecutionOpeningClock`
+queues two complete same-session turns before draining to expose this ordering.
+
+Unassociated progress and denial can open a main identity without changing their lifecycle-neutral busy
 classification or emitting a phase. Main completion retires thinking and main
 tool progress; child/background progress may outlive it. Completed/failed tools,
 denials and task notifications with nonempty status retire the matching progress
@@ -188,6 +198,18 @@ unavailability would discard a valid correlated answer. Reset phases advance
 their reservation only while they still own that family; bound emitters share
 the parent counter and broadcaster, since copying the counter would restart
 legacy envelope IDs.
+
+A cold reset may reserve control progress before its runtime producer exists.
+`daemonLiveState.capture` preserves that reservation when the first producer
+starts for the same placeholder session (`incarnation == 0`). Treating that start
+as replacement advances generation and silently rejects every remaining reset
+phase. A replacement producer, changed session or stopped owner still advances
+generation and invalidates the old operation; the exception never retags old
+captures. `TestDaemonLiveControlBeforeFirstProducer` checks the positive start
+and both replacement/session refusals through the real registration seam.
+Supplied singleton delivery can coalesce intermediate reset phases and emits
+successor family clears; observe current state and retained rotation rather than
+counting legacy edges. See [reset observation](e2e-realclaude-interactive-stream-announced-reset-test-go.md).
 
 `contextUsageResolver.prepare` reserves before idle deferral or querying, and
 collapsed requests reuse the original flight's reservation, including fallback.

@@ -92,6 +92,9 @@ var errSkipFrame = errors.New("non-noise_msg frame")
 // readSuggestEnvelope reads and opens one frame. A non-noise_msg control frame
 // (e.g. rekey) carries no envelope and does not advance the receive nonce.
 func readSuggestEnvelope(h *perConvHarness) (protocol.Envelope, error) {
+	if env, ok := h.phone.TakeDeferred(); ok {
+		return env, nil
+	}
 	raw, err := h.phone.ReceiveBytes(suggestReadBudget)
 	if err != nil {
 		return protocol.Envelope{}, fmt.Errorf("phone receive: %w", err)
@@ -120,6 +123,7 @@ func readSuggestEnvelope(h *perConvHarness) (protocol.Envelope, error) {
 
 // suggestWatch folds every envelope the run reads into the state it asserts on.
 type suggestWatch struct {
+	observer       *scenario.SourceObserver
 	source         scenario.SourceFacts
 	sourceID       uint64
 	terminal       time.Time
@@ -132,6 +136,10 @@ type suggestWatch struct {
 
 func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
 	t.Helper()
+	if w.observer != nil {
+		w.observer.Next(func(time.Time) protocol.Envelope { return env }, time.Now().Add(time.Second))
+		w.idle = w.observer.Ended(suggestConvID)
+	}
 	if w.source != nil {
 		for _, e := range w.source(suggestConvID) {
 			if e.ID <= w.sourceID {
@@ -165,6 +173,9 @@ func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
 		}
 	}
 
+	if env.SessionStateCleared {
+		return
+	}
 	switch env.Type {
 	case protocol.TypeError:
 		var ep protocol.ErrorPayload
@@ -179,7 +190,7 @@ func (w *suggestWatch) observe(t *testing.T, env protocol.Envelope) {
 		if err := json.Unmarshal(env.Payload, &st); err != nil {
 			t.Fatalf("decode turn_state payload: %v", err)
 		}
-		if st.State == "idle" && st.ConversationID == suggestConvID && w.sawDelta && !w.terminal.IsZero() && !env.TS.Before(w.terminal) {
+		if w.observer == nil && st.State == "idle" && st.ConversationID == suggestConvID && w.sawDelta && !w.terminal.IsZero() && !env.TS.Before(w.terminal) {
 			w.idle = true
 		}
 	case protocol.TypeReplySuggestion:
@@ -231,8 +242,16 @@ func (w *suggestWatch) pumpUntil(t *testing.T, frames <-chan suggestFrame, timeo
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	var sourcePoll <-chan time.Time
+	if w.observer != nil {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		sourcePoll = ticker.C
+	}
 	for !done() {
 		select {
+		case <-sourcePoll:
+			w.observe(t, protocol.Envelope{})
 		case f, ok := <-frames:
 			if !ok {
 				t.Fatalf("phone reader stopped")
@@ -856,10 +875,13 @@ func TestInteractiveStream_FallbackReplySuggestionSetThenClear(t *testing.T) {
 	})
 	frames := startSuggestReader(t, h)
 	w := &suggestWatch{bounded: true, source: scenario.SourceSince(t, h.home, suggestConvID)}
+	w.observer = scenario.NewSourceObserver(t, h.home)
+	w.observer.Watch(suggestConvID)
 	logSource := func() {
 		source := readSuggestSource(t, evidence)
 		t.Log(source.diagnostic(w.idle, w.setRev, w.clearRev))
 		t.Log(suggestLifecycle(h.daemon.stderr.String(), source.PID))
+		t.Logf("thread baseline gap=%t producer retirement=%t", strings.Contains(h.daemon.stderr.String(), "event=daemon.thread.gap reason=baseline_required"), strings.Contains(h.daemon.stderr.String(), "event=v2.push.producer_gap.teardown"))
 	}
 	defer logSource()
 	// Stage an unambiguous short human reply. The fallback answers a closing

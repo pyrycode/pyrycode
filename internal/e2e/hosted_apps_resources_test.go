@@ -51,9 +51,9 @@ func hostedConnect(t *testing.T, fr *fakerelay.Server, home, token, public strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	hello := protocol.HelloClientPayload{Role: "client", DeviceName: "hosted", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: token}
+	hello := protocol.HelloClientPayload{Role: "client", DeviceName: "hosted", ClientVersion: "test", ProtocolVersions: []string{"v2"}, Token: token, Capabilities: []string{protocol.CapabilityThread}}
 	if offer {
-		hello.Capabilities = []string{protocol.CapabilityHostedAppsV1}
+		hello.Capabilities = append(hello.Capabilities, protocol.CapabilityHostedAppsV1)
 	}
 	msg, err := init.WriteInit(mustJSON(t, protocol.Envelope{ID: 1, Type: protocol.TypeHello, TS: time.Now().UTC(), Payload: mustJSON(t, hello)}))
 	if err != nil {
@@ -61,6 +61,9 @@ func hostedConnect(t *testing.T, fr *fakerelay.Server, home, token, public strin
 	}
 	sendNoiseInit(t, phone, msg)
 	frame := readInnerFrame(t, phone, 3*time.Second)
+	if frame.Type != protocol.TypeNoiseResp {
+		t.Fatal("hosted handshake did not return noise_resp")
+	}
 	raw, err := base64.StdEncoding.DecodeString(frame.Data)
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +79,9 @@ func hostedConnect(t *testing.T, fr *fakerelay.Server, home, token, public strin
 	}
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		t.Fatal(err)
+	}
+	if env.Type != protocol.TypeHelloAck || env.InReplyTo == nil || *env.InReplyTo != 1 || !slices.Contains(payload.Capabilities, protocol.CapabilityThread) {
+		t.Fatal("hosted handshake did not grant correlated thread admission")
 	}
 	if slices.Contains(payload.Capabilities, protocol.CapabilityHostedAppsV1) != ready {
 		t.Fatalf("capabilities: %v", payload.Capabilities)

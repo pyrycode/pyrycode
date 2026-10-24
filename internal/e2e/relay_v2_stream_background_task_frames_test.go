@@ -220,6 +220,9 @@ func driveBackgroundTaskFramesTurn(t *testing.T) bgTaskFramesObservation {
 				len(obs.started), len(obs.updated), len(obs.progress), obs.unrecognized, obs.sawNeedle, obs.sawTurnEnd)
 			break
 		}
+		if env.SessionStateCleared {
+			continue
+		}
 		switch env.Type {
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))

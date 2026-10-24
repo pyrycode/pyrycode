@@ -130,6 +130,9 @@ func TestRelayV2_StreamReplySuggestionSetClearReconnect(t *testing.T) {
 			case protocol.TypeError:
 				t.Fatalf("%s: unexpected error envelope: %s", name, string(env.Payload))
 			case protocol.TypeReplySuggestion:
+				if env.SessionStateCleared {
+					continue
+				}
 				var p protocol.ReplySuggestionPayload
 				if err := json.Unmarshal(env.Payload, &p); err != nil {
 					t.Fatalf("%s: decode reply_suggestion: %v", name, err)

@@ -8,12 +8,13 @@
   `-pyry-wrapup-deadline=1ms` — see [`v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md`
   § *The wrap-up turn, and the reply's tense*](v2-session-manager-state-machine-inbound-new-session-sessionstarter-seam.md#the-wrap-up-turn-and-the-replys-tense-2477)
   for the flag itself — and a handoff note is seeded for the conversation before the daemon
-  starts. The case reuses #2485's `resetWindow` drain verbatim and asserts the three `resetting`
-  edges in phase order (`wrapping_up/pending` → `restarting/skipped` → `active:false`), one
-  `session_transition{reason:"clear"}` ordered after the `restarting` edge only, and that the
-  seeded note's bytes are unchanged on disk afterward. No order is asserted between the
-  transition and the falling edge, for the same structural reason as the sibling case. Zero
-  production files touched by the test itself; the flag and its clamp are the production change.
+  starts. The case reuses `resetWindow`: actual owned active progress, exactly
+  one retained `session_transition{reason:"clear"}` and an actual successor family
+  clear establish settlement. Every delivered phase is validated; `restarting`,
+  when observed, carries `handoff: skipped`. Intermediate singleton revisions may
+  coalesce. The seeded note's bytes must remain unchanged on disk. See the
+  [current-state reset proof](e2e-realclaude-interactive-stream-announced-reset-test-go.md)
+  and [wire contract](../../protocol-mobile.md#resetting).
 
   **Lessons that outlive this ticket:**
   - **A ticket can ask for an override of a documented invariant without either side noticing.**
@@ -36,8 +37,8 @@
   - **A drain that returns as soon as its target counts are met needs its own settle period to
     make a window-wide negative count non-vacuous.** #2485's file keeps reading past its
     `awaitReset` return because a later recall turn is still coming; this case drops that half, so
-    asserting "exactly 3 `resetting` frames, exactly 1 transition" immediately after `awaitReset`
-    would just restate what the drain already waited for. Reading the window for a short quiet
+    checking the settled reset immediately after `awaitReset` would not detect a
+    later duplicate rotation or invalid progress reading. Reading the window for a short quiet
     period first is what actually exercises those negatives, and it also routes the killed
     wrap-up turn's tail and the fresh child's first frames through `resetWindow.next`'s standing
     negatives instead of leaving them unread.

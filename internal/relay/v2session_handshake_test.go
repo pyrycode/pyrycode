@@ -759,14 +759,9 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 
 			// (a) the ack echoes exactly the negotiated intersection.
 			ack := decodeHelloAck(t, earlyAck)
-			if !slices.Equal(ack.Capabilities, tc.wantAck) {
-				t.Errorf("hello_ack Capabilities = %v, want %v", ack.Capabilities, tc.wantAck)
-			}
-			// (b) a no-grant negotiation drops the key entirely — not an empty
-			// array. The substring can only occur in the payload's capabilities
-			// key, so its absence in the whole ack envelope is the byte check.
-			if len(tc.wantAck) == 0 && bytes.Contains(earlyAck, []byte("capabilities")) {
-				t.Errorf("no-grant hello_ack carries a capabilities key: %s", earlyAck)
+			want := supportedCaps(tc.wantAck)
+			if !slices.Equal(ack.Capabilities, want) {
+				t.Errorf("hello_ack Capabilities = %v, want %v", ack.Capabilities, want)
 			}
 
 			// (c) the per-conn negotiated flag matches the echo.

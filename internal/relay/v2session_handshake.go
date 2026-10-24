@@ -270,6 +270,22 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	if tokenResult == devices.ValidateAccepted {
 		versionReject = m.checkClientVersion(helloPayload.ClientVersion)
 	}
+	// Thread is the required content route. Judge it after authentication and
+	// version policy, and before binding or constructing host-only metadata.
+	threadRejectCode, threadRejectMessage, threadRejectReason := "", "", ""
+	threadRejectStatus := StatusClientUpdateRequired
+	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
+		if !slices.Contains(helloPayload.Capabilities, protocol.CapabilityThread) {
+			threadRejectCode = protocol.CodeClientUpdateRequired
+			threadRejectMessage = MsgClientUpdateRequired
+			threadRejectReason = "thread_required"
+		} else if !slices.Contains(negotiated, protocol.CapabilityThread) {
+			threadRejectCode = protocol.CodeProtocolUnsupported
+			threadRejectMessage = "thread capability unavailable"
+			threadRejectReason = "thread_unavailable"
+			threadRejectStatus = StatusProtocolMismatch
+		}
+	}
 	// Bind the pairing to this install's static key once every other admission
 	// check has passed (#2734), so a connection refused at 4412 binds nothing.
 	// BindStaticKey decides atomically: of two installs racing on one unbound
@@ -277,7 +293,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// mismatch. It runs before the ack is built so a loser's ack carries no
 	// workspace_root, the same ack an unknown token gets.
 	newlyBound := false
-	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
+	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" && threadRejectCode == "" {
 		switch binding := m.cfg.Devices.BindStaticKey(device.TokenHash, s.peerStatic); binding {
 		case devices.BindNewlyBound, devices.BindMatched:
 			newlyBound = binding == devices.BindNewlyBound
@@ -292,7 +308,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		}
 	}
 	root := ""
-	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" {
+	if tokenResult == devices.ValidateAccepted && versionReject.reason == "" && threadRejectCode == "" {
 		if m.cfg.WorkspaceBase == nil {
 			root = WorkspaceRoot()
 		} else if filepath.IsAbs(*m.cfg.WorkspaceBase) {
@@ -452,6 +468,24 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 			return
 		}
 		m.closeWith(ctx, s, StatusClientUpdateRequired, errFrame)
+		return
+	}
+
+	if threadRejectCode != "" {
+		errFrame, sealErr := m.sealError(s, threadRejectCode, threadRejectMessage, helloID)
+		m.cfg.Logger.Warn("relay: v2 handshake reject",
+			"event", "v2.handshake.reject.thread",
+			"conn_id", s.connID,
+			"close_code", int(threadRejectStatus),
+			"reason", threadRejectReason)
+		m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+		if sealErr != nil {
+			m.cfg.Logger.Warn("relay: v2 seal error failed; close-only",
+				"conn_id", s.connID, "err", sealErr)
+			m.closeWith(ctx, s, threadRejectStatus, nil)
+			return
+		}
+		m.closeWith(ctx, s, threadRejectStatus, errFrame)
 		return
 	}
 

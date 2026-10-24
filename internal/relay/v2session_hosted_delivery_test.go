@@ -28,7 +28,7 @@ func TestHostedDiscoveryRekeyOrdering(t *testing.T) {
 	p.waitEvent("v2.hosted.queued", "error")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := p.mgr.Push(ctx, p.conn, protocol.Envelope{ID: 1, Type: "message", TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}); err != nil {
+	if err := p.mgr.Push(ctx, p.conn, protocol.Envelope{ID: 1, Type: "workspace_updated", TS: time.Now().UTC(), Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.mgr.FlushPushes(ctx); err != nil {
@@ -50,7 +50,7 @@ func TestHostedDiscoveryRekeyOrdering(t *testing.T) {
 	other := p.sibling("rekey-progress")
 	testHostedPage(t, other, 12, nil)
 	release()
-	for _, typ := range []string{"app_cancelled", "error", "message", "rekey_request"} {
+	for _, typ := range []string{"app_cancelled", "error", "workspace_updated", "rekey_request"} {
 		e, _ := p.next()
 		if e.Type != typ {
 			t.Fatalf("old-key output: %+v", e)
@@ -124,7 +124,7 @@ func TestHostedDiscoveryOrderedDelivery(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	openModalConn(t, p.mgr, p.frames, p.rec, p.pub, "delivery-barrier", nil)
-	if err := p.mgr.Push(ctx, p.conn, protocol.Envelope{ID: 1, Type: "message", TS: time.Now().UTC(), Payload: json.RawMessage(`{"text":"legacy"}`)}); err != nil {
+	if err := p.mgr.Push(ctx, p.conn, protocol.Envelope{ID: 1, Type: "workspace_updated", TS: time.Now().UTC(), Payload: json.RawMessage(`{"text":"legacy"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.mgr.FlushPushes(ctx); err != nil {
@@ -133,7 +133,7 @@ func TestHostedDiscoveryOrderedDelivery(t *testing.T) {
 	// Release once; cleanup still owns the gate on assertion failures.
 	release <- struct{}{}
 	ids := map[uint64]bool{1: true}
-	for _, typ := range []string{"app_cancelled", "error", "message"} {
+	for _, typ := range []string{"app_cancelled", "error", "workspace_updated"} {
 		e, _ := p.next()
 		if e.Type != typ || ids[e.ID] || e.ID > hostedMaxID {
 			t.Fatalf("ordered fresh envelope: %+v", e)

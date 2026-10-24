@@ -120,8 +120,14 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 
 	// Written before the daemon starts: fakeclaude reads the file once at startup.
 	fragmentPath := filepath.Join(t.TempDir(), "thinking-progress.jsonl")
-	if err := os.WriteFile(fragmentPath, []byte(thinkingProgressFragment(thinkingLines)), 0o600); err != nil {
+	fragment := thinkingProgressFragment(thinkingLines)
+	last := strings.LastIndex(strings.TrimSuffix(fragment, "\n"), "\n") + 1
+	if err := os.WriteFile(fragmentPath, []byte(fragment[:last]), 0o600); err != nil {
 		t.Fatalf("write replay fragment: %v", err)
+	}
+	terminalPath, releasePath := fragmentPath+".terminal", fragmentPath+".release"
+	if err := os.WriteFile(terminalPath, []byte(fragment[last:]), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	home := shortHome(t)
@@ -149,7 +155,9 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 	seedBoundConversation(t, home, thinkingProgressConvID, thinkingProgressBootstrapUUID)
 
 	h := StartStreamInteractiveWithRelay(t, home, thinkingProgressBootstrapUUID, relayURL,
-		thinkingProgressReplayEnv+"="+fragmentPath)
+		thinkingProgressReplayEnv+"="+fragmentPath,
+		"PYRY_FAKE_CLAUDE_STREAM_REPLAY_SECOND="+terminalPath,
+		"PYRY_FAKE_CLAUDE_STREAM_REPLAY_RELEASE="+releasePath)
 	t.Cleanup(func() { h.Stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -180,7 +188,19 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 	})
 
 	var obs thinkingProgressObservation
+	released := false
+	wantProgress := thinkingDeltaSum(t, thinkingLines) >= thinkingProgressBound
 	deadline := time.Now().Add(30 * time.Second)
+	maybeRelease := func() {
+		// Source appends and app readings can arrive in either order. The receiver
+		// must release the producer at either observation, before waiting again.
+		if !released && obs.sawNeedle && (!wantProgress || len(obs.progress) != 0) {
+			if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			released = true
+		}
+	}
 	source.OnEntry = func(entry history.Entry) {
 		switch entry.Type {
 		case protocol.TypeAssistantDelta:
@@ -194,6 +214,7 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 		case protocol.TypeTurnEnd:
 			obs.sawTurnEnd = true
 		}
+		maybeRelease()
 	}
 
 	for !obs.sawTurnEnd {
@@ -207,7 +228,10 @@ func driveThinkingProgressTurn(t *testing.T, thinkingLines []string) thinkingPro
 		case protocol.TypeError:
 			t.Fatalf("unexpected error envelope: %s", string(env.Payload))
 		case protocol.TypeThinkingProgress:
-			obs.progress = append(obs.progress, append(json.RawMessage(nil), env.Payload...))
+			if !env.SessionStateCleared {
+				obs.progress = append(obs.progress, append(json.RawMessage(nil), env.Payload...))
+				maybeRelease()
+			}
 		case protocol.TypeUnrecognizedMessage:
 			obs.unrecognized++
 

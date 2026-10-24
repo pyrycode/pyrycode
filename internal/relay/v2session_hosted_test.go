@@ -138,7 +138,7 @@ func (p *testHostedPeer) open(caps []string) {
 	if err != nil {
 		p.t.Fatal(err)
 	}
-	msg, err := init.WriteInit(buildHelloEarlyDataCaps(p.t, v2TestToken, caps))
+	msg, err := init.WriteInit(buildHelloEarlyDataCaps(p.t, v2TestToken, supportedCaps(caps)))
 	if err != nil {
 		p.t.Fatal(err)
 	}

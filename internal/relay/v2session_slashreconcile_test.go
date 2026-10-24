@@ -68,6 +68,9 @@ func reconciledSlashCommandLists(t *testing.T, rec *v2Recorder, connID string, r
 	out := make(map[string]protocol.SlashCommandListPayload)
 	for _, env := range noiseMsgsForConn(t, rec, connID) {
 		inner := decryptAppFrame(t, env, recv)
+		if inner.SessionStateCleared {
+			continue
+		}
 		if inner.Type != protocol.TypeSlashCommandList {
 			t.Fatalf("conn %q: noise_msg Type = %q, want %q", connID, inner.Type, protocol.TypeSlashCommandList)
 		}
@@ -132,7 +135,7 @@ func TestV2Session_SlashCommandReconcile_Delivery(t *testing.T) {
 			reg := v2PairedRegistry(t, v2TestToken)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 				Frames:                    frames,
 				Outbound:                  rec.outbound,
 				StaticPriv:                respPriv,
@@ -147,7 +150,7 @@ func TestV2Session_SlashCommandReconcile_Delivery(t *testing.T) {
 
 			// noise_resp + one slash_command_list per retained list; exactly that many
 			// are ever emitted here, so the snapshot is final once they are recorded.
-			waitForEnvelopes(t, rec, 1+len(tt.payloads))
+			waitForEnvelopes(t, rec, testSnapshotCount(tt.payloads))
 
 			got := reconciledSlashCommandLists(t, rec, connA, aRecv)
 			if len(got) != len(tt.payloads) {
@@ -181,7 +184,7 @@ func TestV2Session_SlashCommandReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:     frames,
 		Outbound:   rec.outbound,
 		StaticPriv: respPriv,
@@ -201,7 +204,7 @@ func TestV2Session_SlashCommandReconcile_UnicastOnlyOpeningConn(t *testing.T) {
 	// correct (unicast) case. A fan-out on B's open would push a 5th (a second
 	// slash_command_list to A), which the count plus the helper's per-conn dup check
 	// below would catch.
-	waitForEnvelopes(t, rec, 4)
+	waitForEnvelopes(t, rec, 6)
 
 	gotA := reconciledSlashCommandLists(t, rec, connA, aRecv)
 	gotB := reconciledSlashCommandLists(t, rec, connB, bRecv)
@@ -268,7 +271,7 @@ func TestV2Session_SlashCommandReconcile_NoFrame(t *testing.T) {
 			reg := v2PairedRegistry(t, v2TestToken)
 			frames := make(chan protocol.RoutingEnvelope, 8)
 			rec := &v2Recorder{}
-			mgr, stop := startManager(t, V2SessionConfig{
+			mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 				Frames:                    frames,
 				Outbound:                  rec.outbound,
 				StaticPriv:                respPriv,
@@ -288,7 +291,7 @@ func TestV2Session_SlashCommandReconcile_NoFrame(t *testing.T) {
 			var ctlRecv *noise.CipherState
 			if tt.controlConn {
 				_, ctlRecv = openModalConn(t, mgr, frames, rec, respPub, connCtl, []string{protocol.CapabilityInteractive})
-				wantEnvelopes = 3 // + resp(CTL) + slash_command_list(CTL)
+				wantEnvelopes = 4 // + resp(CTL) + slash_command_list(CTL)
 			}
 			waitForEnvelopes(t, rec, wantEnvelopes)
 
@@ -345,7 +348,7 @@ func TestV2Session_SlashCommandReconcile_ContentFreeLogging(t *testing.T) {
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:                    frames,
 		Outbound:                  rec.outbound,
 		StaticPriv:                respPriv,
@@ -360,7 +363,7 @@ func TestV2Session_SlashCommandReconcile_ContentFreeLogging(t *testing.T) {
 
 	// noise_resp + the one reconciled slash_command_list: once both are recorded the
 	// open path (and any log line it would emit) has run.
-	waitForEnvelopes(t, rec, 2)
+	waitForEnvelopes(t, rec, 3)
 	if got := reconciledSlashCommandLists(t, rec, connA, aRecv); !reflect.DeepEqual(got[convID], payload) {
 		t.Fatalf("conn %q: reconcile did not send the sentinel payload (got %+v)", connA, got)
 	}
@@ -405,7 +408,7 @@ func TestV2Session_SlashCommandReconcile_ContextTeardownStopsBatch(t *testing.T)
 	reg := v2PairedRegistry(t, v2TestToken)
 	frames := make(chan protocol.RoutingEnvelope, 1)
 	rec := &v2Recorder{}
-	mgr, stop := startManager(t, V2SessionConfig{
+	mgr, stop := startRetainedReconcileManager(t, V2SessionConfig{
 		Frames:                    frames,
 		Outbound:                  rec.outbound,
 		StaticPriv:                respPriv,

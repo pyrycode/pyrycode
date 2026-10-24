@@ -81,6 +81,8 @@ func TestDaemonThreadCompactNegotiation(t *testing.T) {
 			})
 			if state == "stopped" {
 				stop()
+				w.rejectCapabilities("phone", []string{protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact}, protocol.CodeProtocolUnsupported, 4421)
+				return
 			}
 			w.open("phone", false, protocol.CapabilityThread, protocol.CapabilityThreadExpansion, protocol.CapabilityThreadCompact)
 			peers := mgr.ActiveThreadConns(t.Context(), testConvID)

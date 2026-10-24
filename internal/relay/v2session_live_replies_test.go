@@ -390,7 +390,7 @@ func TestSuppliedLiveReplyCompatibility(t *testing.T) {
 	t.Parallel()
 	for _, tc := range suppliedReplyCases {
 		tc.body = suppliedBody(t, tc.request, tc.body)
-		for _, mode := range []string{"absent", "non-thread", "dual"} {
+		for _, mode := range []string{"absent", "dual"} {
 			t.Run(tc.request+mode, func(t *testing.T) {
 				var legacy, optional atomic.Int64
 				updater := &fakeSettingsUpdater{}

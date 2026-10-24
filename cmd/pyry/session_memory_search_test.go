@@ -340,6 +340,7 @@ func TestMemorySearchFor_SettingsReplySurvivesDetectorError(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 4)
 	outbound := make(chan protocol.RoutingEnvelope, 8)
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
+		ThreadReady:     func() bool { return true },
 		Frames:          frames,
 		Outbound:        func(env protocol.RoutingEnvelope) error { outbound <- env; return nil },
 		StaticPriv:      serverKey.Bytes(),
@@ -364,7 +365,7 @@ func TestMemorySearchFor_SettingsReplySurvivesDetectorError(t *testing.T) {
 	helloPayload, err := json.Marshal(protocol.HelloClientPayload{
 		Role: "client", DeviceName: "test phone", ClientVersion: "v2-test",
 		ProtocolVersions: []string{"v2"}, Token: token,
-		Capabilities: []string{protocol.CapabilityInteractive},
+		Capabilities: []string{protocol.CapabilityInteractive, protocol.CapabilityThread},
 	})
 	if err != nil {
 		t.Fatal(err)

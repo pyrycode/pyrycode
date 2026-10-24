@@ -52,8 +52,8 @@ func TestV2Session_ThreadNegotiation(t *testing.T) {
 		caps  []string
 		want  bool
 	}{
-		{"absent", nil, threadCaps, false}, {"false", func() bool { return false }, threadCaps, false},
-		{"unadvertised", func() bool { return true }, []string{"thread_fake"}, false},
+		{"thread-only", func() bool { return true }, []string{"thread"}, true},
+		{"interactive", func() bool { return true }, threadCaps, true},
 		{"duplicates", func() bool { return true }, []string{"thread", "thread", "thread_fake"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,7 +76,7 @@ func TestV2Session_ThreadNegotiation(t *testing.T) {
 			if slices.Contains(p.Capabilities, "thread") != tc.want || slices.Contains(p.Capabilities, "thread_fake") {
 				t.Fatalf("ack capabilities %v", p.Capabilities)
 			}
-			if tc.want && len(p.Capabilities) != 1 {
+			if tc.name == "duplicates" && len(p.Capabilities) != 1 {
 				t.Fatalf("duplicates: %v", p.Capabilities)
 			}
 			check := func() {
@@ -114,7 +114,7 @@ func TestV2Session_ThreadSummaries(t *testing.T) {
 	const supplied = `{"id":"zero","name":null,"current_session_id":"stored","read_up_to":9,"extra":false,"last_shown_version":999}`
 	const legacy = `{"id":"zero","name":null,"current_session_id":"stored","read_up_to":9,"extra":false}`
 	const rows = `{"conversations":[` + supplied + `,{"id":"other","read_up_to":4},{"id":"unavailable","last_shown_version":999}],"extra":null}`
-	for _, caps := range [][]string{{"interactive"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
+	for _, caps := range [][]string{{"thread"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
 		t.Run(strings.Join(caps, "-"), func(t *testing.T) {
 			priv, pub := genV2Keypair(t)
 			initPriv, _ := genV2Keypair(t)
@@ -221,7 +221,7 @@ func TestV2Session_ThreadDelivery(t *testing.T) {
 	t.Parallel()
 	replaced := []string{"assistant_delta", "tool_use", "tool_result", "tool_denied", "turn_end", "session_transition", "message", "background_task_started", "background_task_updated", "background_task_roster", "banner", "compaction_boundary", "model_refusal_fallback", "model_refusal_no_fallback", "unrecognized_message"}
 	progress := []string{"turn_state", "tool_progress", "background_task_progress", "thinking_progress", "api_retry", "compacting"}
-	for _, caps := range [][]string{{"interactive"}, {"thread"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
+	for _, caps := range [][]string{{"thread"}, threadCaps, {"interactive", "thread", "multi_agent"}} {
 		t.Run(strings.Join(caps, "-"), func(t *testing.T) {
 			priv, pub := genV2Keypair(t)
 			initPriv, _ := genV2Keypair(t)

@@ -278,7 +278,7 @@ func TestHostedPushCapacityDelivery(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			for i := range 4 * hostedQueueLimit {
-				env := protocol.Envelope{Type: protocol.TypeMessage, Payload: []byte(fmt.Sprintf(`{"index":%d}`, i))}
+				env := protocol.Envelope{Type: protocol.TypeWorkspaceUpdated, Payload: []byte(fmt.Sprintf(`{"index":%d}`, i))}
 				if err := p.mgr.Push(ctx, p.conn, env); err != nil {
 					t.Fatal(err)
 				}
@@ -331,7 +331,7 @@ func TestHostedPushCapacityDelivery(t *testing.T) {
 			previous := env.ID
 			for i := range 4 * hostedQueueLimit {
 				env, _ = p.next()
-				if env.Type != protocol.TypeMessage || string(env.Payload) != fmt.Sprintf(`{"index":%d}`, i) || env.ID <= previous {
+				if env.Type != protocol.TypeWorkspaceUpdated || string(env.Payload) != fmt.Sprintf(`{"index":%d}`, i) || env.ID <= previous {
 					t.Fatalf("FIFO output %d: %+v", i, env)
 				}
 				previous = env.ID
@@ -342,7 +342,7 @@ func TestHostedPushCapacityDelivery(t *testing.T) {
 
 func TestHostedPushCapacityInlineEnvelope(t *testing.T) {
 	m, s, q := testHostedCapacityManager(t)
-	env := protocol.Envelope{Type: protocol.TypeMessage, Payload: []byte(`{"reply":true}`)}
+	env := protocol.Envelope{Type: protocol.TypeWorkspaceUpdated, Payload: []byte(`{"reply":true}`)}
 	m.hostedEnvelope(t.Context(), s, env)
 	if s.state != V2StateOpen || len(q.items) != 2 || q.bytes != len(env.Payload)+2 || s.hosted.inbox.used != hostedQueueLimit {
 		t.Fatal("ordinary inline output retired the full destination instead of waiting upstream")

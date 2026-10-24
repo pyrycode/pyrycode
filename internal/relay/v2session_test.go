@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -111,6 +112,15 @@ func v2PairedRegistry(t *testing.T, plain string) *devices.Registry {
 // closure terminates the Run loop and waits for the goroutine to exit.
 func startManager(t *testing.T, cfg V2SessionConfig) (*V2SessionManager, func()) {
 	t.Helper()
+	if cfg.ThreadReady == nil {
+		cfg.ThreadReady = func() bool { return true }
+	}
+	return startManagerExact(t, cfg)
+}
+
+// startManagerExact leaves readiness untouched for negative admission tests.
+func startManagerExact(t *testing.T, cfg V2SessionConfig) (*V2SessionManager, func()) {
+	t.Helper()
 	mgr, err := NewV2SessionManager(cfg)
 	if err != nil {
 		t.Fatalf("NewV2SessionManager: %v", err)
@@ -127,13 +137,18 @@ func startManager(t *testing.T, cfg V2SessionConfig) (*V2SessionManager, func())
 	}
 }
 
-// buildHelloEarlyData marshals a v2 hello envelope (with token, no advertised
-// capabilities) suitable for embedding in IK message 1 early-data. Thin
-// wrapper over buildHelloEarlyDataCaps so the no-caps shape (capabilities key
-// absent via omitempty) stays byte-identical for its existing callers.
+// buildHelloEarlyData advertises the mandatory thread route without optional capabilities.
 func buildHelloEarlyData(t *testing.T, token string) []byte {
 	t.Helper()
-	return buildHelloEarlyDataCaps(t, token, nil)
+	return buildHelloEarlyDataCaps(t, token, []string{protocol.CapabilityThread})
+}
+
+// supportedCaps adds the mandatory route while preserving optional advertisements.
+func supportedCaps(caps []string) []string {
+	if slices.Contains(caps, protocol.CapabilityThread) {
+		return caps
+	}
+	return append(append([]string(nil), caps...), protocol.CapabilityThread)
 }
 
 // buildHelloEarlyDataCaps is buildHelloEarlyData with an explicit advertised
@@ -402,7 +417,7 @@ func driveToOpenCaps(t *testing.T, cfg V2SessionConfig, frames chan protocol.Rou
 		stop()
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, token, caps))
+	initMsg, err := initiator.WriteInit(buildHelloEarlyDataCaps(t, token, supportedCaps(caps)))
 	if err != nil {
 		stop()
 		t.Fatalf("WriteInit: %v", err)
