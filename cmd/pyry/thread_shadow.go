@@ -210,14 +210,13 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 					}
 					s.quietMu.Unlock()
 					if quiet {
-						// Save the consumed boundary before retirement. A racing append exceeds
-						// it and reloads on the next pass, even if it committed during Unload.
-						s.mu.Lock()
-						w.version = snapshot.Version
-						s.mu.Unlock()
-						if err := s.store.Unload(id); err != nil {
+						unloaded, err := s.unloadIdle(ctx, id, w, snapshot)
+						if err != nil {
 							s.failure(id, "unload")
-						} else {
+						} else if unloaded {
+							s.mu.Lock()
+							w.version = snapshot.Version
+							s.mu.Unlock()
 							w.idleUnloaded = true
 						}
 						s.quietMu.Lock()
@@ -238,6 +237,24 @@ func (s *threadShadow) follow(ctx context.Context, id conversations.Conversation
 		}
 	}
 }
+
+// Idle retirement must certify exactly the boundary already published. Store
+// progress can advance during delivery or quiescence checks without a producer gap.
+func (s *threadShadow) unloadIdle(ctx context.Context, id conversations.ConversationID, w *shadowConversation, snapshot thread.Snapshot) (bool, error) {
+	if !w.lockPublication(ctx) {
+		return false, ctx.Err()
+	}
+	defer w.unlockPublication()
+	if w.publisher != nil && (w.threadEpoch != snapshot.Epoch || w.threadVersion != snapshot.Version) {
+		return false, nil
+	}
+	if store, ok := s.store.(*thread.Store); ok {
+		return store.UnloadIfCurrent(id, snapshot.Epoch, snapshot.Version)
+	}
+	err := s.store.Unload(id)
+	return err == nil, err
+}
+
 func (s *threadShadow) remove(id conversations.ConversationID) {
 	if s == nil || !conversations.ValidID(string(id)) {
 		return

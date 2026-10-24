@@ -186,9 +186,14 @@ func TestDaemonThreadRepeatedTurnRetirement(t *testing.T) {
 			testAcceptedDeliveryReplay(t, dir, current)
 			mu.Lock()
 			defer mu.Unlock()
+			rows := map[uint64]protocol.ThreadItem{}
+			for _, item := range base.Items {
+				rows[item.ID] = daemonThreadItem(item)
+			}
 			additions := 0
 			for _, frame := range frames {
-				if frame.Type == protocol.TypeThreadItemAdded {
+				switch frame.Type {
+				case protocol.TypeThreadItemAdded:
 					var a protocol.ThreadItemAddedPayload
 					if err := json.Unmarshal(frame.Payload, &a); err != nil {
 						t.Fatal(err)
@@ -196,10 +201,43 @@ func TestDaemonThreadRepeatedTurnRetirement(t *testing.T) {
 					if a.Item.Kind == "user_message" {
 						additions++
 					}
+					if a.Epoch != base.Epoch || rows[a.Item.ID].ID != 0 {
+						t.Fatal("replacement epoch or duplicate item")
+					}
+					rows[a.Item.ID] = a.Item
+				case protocol.TypeThreadItemChanged:
+					var c protocol.ThreadItemChangedPayload
+					if err := json.Unmarshal(frame.Payload, &c); err != nil {
+						t.Fatal(err)
+					}
+					prior := rows[c.ItemID]
+					if c.Epoch != base.Epoch || prior.Rev != c.BaseRev || c.Rev <= c.BaseRev {
+						t.Fatal("invented revision or lost patch")
+					}
+					raw, _ := json.Marshal(prior)
+					var fields map[string]json.RawMessage
+					_ = json.Unmarshal(raw, &fields)
+					for key, value := range c.Changes {
+						fields[key] = value
+					}
+					fields["rev"], _ = json.Marshal(c.Rev)
+					raw, _ = json.Marshal(fields)
+					if err := json.Unmarshal(raw, &prior); err != nil {
+						t.Fatal(err)
+					}
+					rows[c.ItemID] = prior
+				default:
+					t.Fatal("unexpected live frame", frame.Type)
 				}
 			}
 			if additions != 1 {
 				t.Fatalf("second user deliveries=%d", additions)
+			}
+			if len(rows) != len(current.Items) {
+				t.Fatal("live inventory differs from source")
+			}
+			for _, item := range current.Items {
+				testDaemonThreadJSONEqual(t, rows[item.ID], daemonThreadItem(item))
 			}
 		})
 	}
