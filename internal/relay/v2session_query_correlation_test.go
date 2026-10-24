@@ -77,6 +77,7 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 		p.mgr.hostedMu.Unlock()
 		queries <- q
 		if request.ConversationID != catchUpConversation || request.Epoch != "epoch" || n == 1 && request.Version != 0 || n > 1 && request.Version != 2 {
+			t.Errorf("provider scope: call=%d version=%d epoch=%t conversation=%t", n, request.Version, request.Epoch == "epoch", request.ConversationID == catchUpConversation)
 			return thread.QueryResult{}, errors.New("fixture query scope changed")
 		}
 		if n == 1 {
@@ -97,7 +98,9 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 			env, _ := p.next()
 			var items protocol.ThreadItemsPayload
 			if env.Type != protocol.TypeThreadItems || env.InReplyTo == nil || *env.InReplyTo != id || json.Unmarshal(env.Payload, &items) != nil || items.ConversationID != catchUpConversation || items.Projection != "" || items.Epoch != "epoch" || items.Version != version {
-				t.Fatal("missing scoped authenticated fixture reply")
+				var failure protocol.ErrorPayload
+				_ = json.Unmarshal(env.Payload, &failure)
+				t.Fatalf("fixture reply: type=%s correlated=%t version=%d conversation=%t epoch=%t projection=%q error=%s", env.Type, env.InReplyTo != nil && *env.InReplyTo == id, items.Version, items.ConversationID == catchUpConversation, items.Epoch == "epoch", items.Projection, failure.Code)
 			}
 			if index == 0 {
 				if items.Final || len(items.Items) != 1 {
