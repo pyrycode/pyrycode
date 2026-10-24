@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/pyrycode/pyrycode/internal/apps"
 )
 
 func TestHostedAppsFixtureCleanup(t *testing.T) {
@@ -33,9 +35,11 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 		})
 		hostedDisableRelay(t, home)
 		seed := hostedSeed(t, home, "cleanup generation")
-		seed.Records[3].Desired = "stopped"
-		b, _ := json.Marshal(seed)
-		if err := os.WriteFile(filepath.Join(hostedRoot(home), "registry.json"), b, 0600); err != nil {
+		registry, err := apps.Open(hostedRoot(home), seed.ServerID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := registry.UpdateLifecycle(seed.ServerID, seed.Records[3].AppID, apps.Lifecycle{Title: "cleanup sibling", Desired: "stopped", State: "stopped", ActiveRelease: "1.0.0", PendingRelease: "2.0.0"}); err != nil {
 			t.Fatal(err)
 		}
 		env := hostedNodeEnv(t)
@@ -56,6 +60,13 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 		h := StartInWithEnv(t, home, env, "-pyry-relay=")
+		t.Cleanup(func() {
+			if t.Failed() {
+				t.Log(h.Stderr.String())
+				_, b := hostedRead(t, home)
+				t.Log(string(b))
+			}
+		})
 		p := hostedProof(t, home, hostedAppID)
 		owned = p
 		hostedWait(t, func() bool { s, _ := hostedRead(t, home); return s.Records[0].State == "running" })
@@ -65,7 +76,7 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 			t.Fatalf("hosted group=%d daemon=%d: %v", pg, h.PID, err)
 		}
 		t.Logf("generation=%s/1.0.0 daemon=%d app=%+v app-group=%d home=%s", hostedAppID, h.PID, p, pg, home)
-		b, _ = json.Marshal(struct {
+		b, _ := json.Marshal(struct {
 			Process hostedProcess
 			Home    string
 		}{p, home})
@@ -99,13 +110,20 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
+			done := make(chan struct{})
+			var ownerErr error
+			go func() { ownerErr = cmd.Wait(); close(done) }()
+			t.Cleanup(func() { cancel(); <-done; t.Log(log.String()) })
 			var receipt struct {
 				Process hostedProcess
 				Home    string
 			}
 			hostedWait(t, func() bool {
+				select {
+				case <-done:
+					t.Fatalf("owner exited before receipt: %v\n%s", ownerErr, log.String())
+				default:
+				}
 				b, e := os.ReadFile(filepath.Join(root, "receipt"))
 				return e == nil && json.Unmarshal(b, &receipt) == nil
 			})
@@ -138,7 +156,8 @@ func TestHostedAppsFixtureCleanup(t *testing.T) {
 					}
 				}
 			}
-			err = <-done
+			<-done
+			err = ownerErr
 			t.Log(log.String())
 			if ctx.Err() != nil || (fatal == "0" && err != nil) || (fatal == "1" && (err == nil || !strings.Contains(log.String(), "controlled owner failure"))) {
 				t.Fatalf("owner outcome: %v %v", err, ctx.Err())
