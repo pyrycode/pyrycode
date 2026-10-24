@@ -57,5 +57,13 @@
     "recorder-red.json":"9d2cc7befad5ff7e97afa15dd6fc76efed3818f447f308c35e584a189864fa8b",
     "recorder-green.json":"ef04611e0b516aa2df0d3d6d3dc95a1b44a5246177e257aa6d1b92eca20d6625"
   },
-  "pending": "Original failure remains failed. No cause-specific repair is supported. Keep PR 3855 draft; causal diagnosis, supported repair and distinguishing regression remain incomplete. Ordinary review and complete configured Linux acceptance remain dispatcher/verifier-owned. No live Claude proof required; macOS outside scope. Do not repeat completed comparisons for another green result."
+  "pending": "Original failure remains failed. No cause-specific repair is supported. Keep PR 3855 draft; causal diagnosis, supported repair and distinguishing regression remain incomplete. Ordinary review and complete configured Linux acceptance remain dispatcher/verifier-owned. No live Claude proof required; macOS outside scope. Do not repeat completed comparisons for another green result.",
+  "next_assessment": {
+    "revision":"524f234159ba7d1d536ae3325c5a0cb2109290b6",
+    "source_relationship":"Only plan/evidence differ from measured e5679bde; no Go changes",
+    "request":"next-investigation.json; sha256 e5887674a72edde59e310faf508c89b6d184035f256220de9684f405fa5ad611",
+    "receipt":"next-investigation-receipt.json; sha256 f108fea21dfdf96c3b4a832b1efe08b1e7dbfc8417cb7ae4d82f1b600135e43d",
+    "response":{"status":"assessment-queued", "id":"82ed46ba109954aec4aa870a112fd94314ba0db4ccbe35fb3d275a42c97329f6", "executed":0},
+    "scope":"Assess bounded controlled overlap of the original existing selectors or another observation justified by the historical/current execution intervals. Assessment starts no diagnostic and grants no execution. Request/receipt retained in artifacts_directory."
+  }
 }

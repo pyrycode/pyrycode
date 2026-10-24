@@ -380,3 +380,10 @@ raw evidence and the original full failure survive under
 supported repair and distinguishing regression remain unresolved. Keep PR #3855
 draft and full configured Linux acceptance pending. Further diagnostic selection
 belongs to recovery assessment; no additional comparison was executed.
+
+At pushed evidence `524f234159ba7d1d536ae3325c5a0cb2109290b6`, the normal client
+queued assessment
+`82ed46ba109954aec4aa870a112fd94314ba0db4ccbe35fb3d275a42c97329f6`
+for the measured overlap gap (zero tests executed). The manifest retains the
+request/receipt hashes and durable paths. This is assessment only; it grants no
+additional execution and does not complete this ticket. Preserve draft #3855.
