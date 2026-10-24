@@ -1,0 +1,37 @@
+{
+  "alias_domain": "native-controlled-reproduction-20261024",
+  "core_diagnostic_source": "e5e0ace803e1ed70d8948ceb9ce7d75ad2e58f6a",
+  "production_base": "64ef0e0fba71a723b7fdc97141cfc144f6355664",
+  "mobile_source": "fde2ca234d278361c0f477f90eb1227149ee7b75",
+  "daemon_sha256": "fd3d503551caab8e21d903ef25162d5396d048f940f7879727cb793362e65a5b",
+  "native_manifest_sha256": "a1cb7b779d840de7c65e26dcd98d932f1b2456389b8cbfa79c6163ab67fe9696",
+  "initial_capture_manifest_sha256": "151be688822aeecd4a231b956ff78ed52c43898d2099b01665baa976dd7235e2",
+  "manifest_relationship": "3857-native-metadata/relationship.json",
+  "metadata_authentication": "3857-native-metadata/authentication.json",
+  "metadata_artifacts": {
+    "current-result.json": "44678aa32e01afadf3246f988f98f407cbff94aa71601ae6be9118698784127e",
+    "relationship.json": "05e90cfbc2a263a75e86ca0806ca4f9f01a619894b5ff5bb477623a3a097719e",
+    "authentication.json": "c8051eb959379d78ef1e9fbf575db680ddf5502d042048a3a303ddd02c4d3787",
+    "initial-result.json": "1417ad163a8bf7feb8817cacc78b662b813bdbf756bc7cdc2aeb1ede8761211e",
+    "current-manifest.txt": "a1cb7b779d840de7c65e26dcd98d932f1b2456389b8cbfa79c6163ab67fe9696",
+    "initial-manifest.txt": "151be688822aeecd4a231b956ff78ed52c43898d2099b01665baa976dd7235e2"
+  },
+  "diagnostic_patch_sha256": "5906eb40a47b83cf6aec4df3e59c9868e8bb85a252fba707e671e467168e6c49",
+  "counts": {
+    "executed": 2,
+    "passed": 1,
+    "failed": 1,
+    "skipped": 0
+  },
+  "observed": "The exact first synthetic peer connection has query 3 requesting checkpoint 2 cancelled by same-epoch live versions 237\u2013242 before selection. It closes gracefully after the final producer timeout; the later ping uses a distinct connection. The phone observer records query 3 refused and retains completed query/checkpoint 2, with no post or produced reply.",
+  "source_derived": "The successful cancellation guard checks matching conversation; the complete-view hosted gate logs only after excluding compact projection. These scope deductions are distinct from explicitly logged native fields.",
+  "unavailable_native_facts": {
+    "inbox_generation_token": "not recorded by the historical diagnostic patch",
+    "exact_conversation_alias": "not directly recorded in the diagnostic events",
+    "terminal_wire_packet_and_delivery_return": "not recorded; the phone observer state proves a received query_failed outcome but not its exact wire timestamp or the Core fail-call branch",
+    "additional_provider_or_delivery_cut": "not independently excluded in that native run",
+    "installed_apk_bytes": "not read back",
+    "original_authentication_file": "the separately named earlier authentication JSON was not located"
+  },
+  "limits": "Native observations corroborate preselection cancellation but are not a complete native inbox-to-terminal trace or proof of the original uninstrumented instruction path. The resolved causal Core cut is demonstrated separately by the new fully correlated Linux proof. Run-local aliases are not identities shared across these two executions."
+}

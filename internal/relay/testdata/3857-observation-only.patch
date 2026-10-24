@@ -1,0 +1,75 @@
+diff --git a/internal/relay/v2session_catchup.go b/internal/relay/v2session_catchup.go
+index 6f517187..9b1501af 100644
+--- a/internal/relay/v2session_catchup.go
++++ b/internal/relay/v2session_catchup.go
+@@ -48,7 +48,9 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
+ 		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
+ 		return
+ 	}
++	stage := "payload"
+ 	fail := func() {
++		m.cfg.Logger.Info("local query diagnostic", "event", "local.thread_query.admission_refused", "conn_id", s.connID, "query_id", *id, "stage", stage)
+ 		e := threadQueryError(*id)
+ 		if s.hosted == nil {
+ 			if err := m.forwardEnvelope(ctx, s.connID, e); err != nil {
+@@ -112,12 +114,14 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
+ 		fail()
+ 		return
+ 	}
++	stage = "eligibility"
+ 	limit, err := protocol.NormalizeThreadQueryLimit(limit)
+ 	providerMissing := body && m.cfg.ThreadToolBody == nil || children && m.cfg.ThreadChildren == nil || !expanding && (page && m.cfg.ThreadPage == nil || !page && m.cfg.ThreadCatchUp == nil)
+ 	if err != nil || !conversations.ValidID(*p.Conversation) || s.state != V2StateOpen || m.threadConversationWithheld(s, *p.Conversation) || expanding && (!s.threadExpansion || !s.interactive) || !m.hostedAuthorized(s) || providerMissing || m.hostedSender() == nil {
+ 		fail()
+ 		return
+ 	}
++	stage = "projection"
+ 	projection, ok := m.threadProjection(s, payload, page, &epoch)
+ 	if !expanding && !ok {
+ 		fail()
+@@ -130,6 +134,7 @@ func (m *V2SessionManager) admitThreadQuery(ctx context.Context, s *V2Session, r
+ 	m.hostedMu.Lock()
+ 	j, joined := in.threadJoins[*p.Conversation]
+ 	initializing := !page && !expanding && *version == 0
++	stage = "slot_or_join"
+ 	if in.query != nil || !expanding && !joined && len(in.threadJoins) >= maxThreadJoins || !expanding && joined && !initializing && j.projection != projection {
+ 		m.hostedMu.Unlock()
+ 		fail()
+@@ -186,6 +191,7 @@ func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *
+ 	defer q.cancel()
+ 	fail := func() { _ = m.deliverThread(ctx, s.connID, threadQueryError(q.id), q) } // best effort terminal refusal; retirement cannot receive it.
+ 	if q.ctx.Err() != nil {
++		m.cfg.Logger.Info("local query diagnostic", "event", "local.thread_query.pre_cancelled", "conn_id", s.connID, "query_id", q.id)
+ 		fail()
+ 		return
+ 	}
+@@ -201,6 +207,7 @@ func (m *V2SessionManager) runThreadQuery(ctx context.Context, s *V2Session, q *
+ 		result, err = m.cfg.ThreadCatchUp(q.ctx, q.request)
+ 	}
+ 	if err != nil || result.Err != nil || result.State != thread.StateUsable || q.ctx.Err() != nil || q.page != nil && result.ResetRequired {
++		m.cfg.Logger.Info("local query diagnostic", "event", "local.thread_query.provider_refused", "conn_id", s.connID, "query_id", q.id, "provider_error", err != nil, "result_error", result.Err != nil, "state", result.State, "cancelled", q.ctx.Err() != nil, "reset", result.ResetRequired, "version", result.Version, "from_version", q.request.Version)
+ 		fail()
+ 		return
+ 	}
+@@ -333,6 +340,13 @@ func (m *V2SessionManager) cancelThreadQuery(connID string, env protocol.Envelop
+ 		return
+ 	}
+ 	if compact && in.query.projection == protocol.ThreadProjectionCompact || !compact && in.query.projection == "" {
++		var update struct {
++			Epoch   string `json:"epoch"`
++			Version uint64 `json:"version"`
++		}
++		_ = json.Unmarshal(env.Payload, &update)
++		q := in.query
++		m.cfg.Logger.Info("local query diagnostic", "event", "local.thread_query.live_cancel", "conn_id", connID, "query_id", q.id, "request_version", q.request.Version, "update_version", update.Version, "request_same_epoch", update.Epoch == q.request.Epoch, "captured", q.captured != nil, "already_cancelled", q.ctx.Err() != nil)
+ 		in.query.cancel()
+ 	}
+ }
+@@ -389,6 +403,7 @@ func (m *V2SessionManager) threadQueryGate(s *V2Session, o *hostedOutput) error
+ 			if q.projection != "" {
+ 				return ErrThreadWithheld
+ 			}
++			m.cfg.Logger.Info("local query diagnostic", "event", "local.thread_query.gate_cancel", "conn_id", s.connID, "query_id", q.id, "request_version", q.request.Version, "update_version", p.Version, "request_same_epoch", p.Epoch == q.request.Epoch, "captured", q.captured != nil, "already_cancelled", q.ctx.Err() != nil)
+ 			q.cancel()
+ 		}
+ 		if j, ok := in.threadJoins[p.Conversation]; ok && (j.projection != "" || j.epoch == p.Epoch && p.Version <= j.version) {
