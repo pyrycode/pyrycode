@@ -123,3 +123,22 @@ subcase's unmodified JSON events are retained in
 `internal/thread/testdata/3854-original-reload-failure.jsonl`; its parent source
 and complete-file hash remain in Context. No timeout or recovery behavior has
 been repaired. Do not treat the diagnostic passes as reliability acceptance.
+
+### 2026-10-24 — preserved partial handoff
+
+Exact diagnostic candidate `5156e970e937bf9710f605979ddc523365689e54` passed
+6/6/0/0 race events (all five outcomes) after 941 seconds of shared admission
+waiting. It reports Go 1.26.9, Linux/amd64, GOMAXPROCS 6, load averages
+8.26/8.87/9.15 and `/tmp` on overlay with `fsync=volatile`. Actual reloads took
+11.322–14.801 ms while old queries remained held. This cannot establish durable
+I/O latency or identify the original timeout phase. Static checks and build passed.
+Counts, commands, hashes, limitations and retained paths are recorded in
+`internal/thread/testdata/3854-investigation.json`.
+
+Recovery assessment
+`a7c382d77587bb71528c392dcfad1a1f40fb5878c280bbeb96e891d57be7c675`
+is queued for matched Linux conditions with the original concurrent daemon/relay
+selection; it executed zero tests. Draft PR #3855 preserves the work. Both Open
+questions, diagnosis, repair and its controlled regression remain unresolved.
+No production change or reliability acceptance is claimed. Complete acceptance
+remains dispatcher-owned; macOS is outside this Linux ticket's verification scope.
