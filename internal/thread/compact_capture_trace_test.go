@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	runtimeTrace "runtime/trace"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 
 // testCompactTrace observes real fixture operations without replacing their I/O.
 type testCompactTrace struct {
+	ctx    context.Context
 	mu     sync.Mutex
 	start  time.Time
 	events []string
@@ -25,7 +27,9 @@ type testCompactTrace struct {
 
 func testTraceCompactStore(t *testing.T, s *Store) *testCompactTrace {
 	t.Helper()
-	x := &testCompactTrace{start: time.Now()}
+	ctx, task := runtimeTrace.NewTask(context.Background(), t.Name())
+	x := &testCompactTrace{ctx: ctx, start: time.Now()}
+	t.Cleanup(task.End)
 	dir, err := s.history.EnsureLogDir(testStoreA)
 	if err != nil {
 		t.Fatal(err)
@@ -96,15 +100,20 @@ func testTraceCompactStore(t *testing.T, s *Store) *testCompactTrace {
 }
 
 func (x *testCompactTrace) mark(event string) {
+	runtimeTrace.Log(x.ctx, "compact", event)
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	x.events = append(x.events, fmt.Sprintf("%s %s", time.Since(x.start), event))
 }
 
 func (x *testCompactTrace) begin(phase string) func() {
+	region := runtimeTrace.StartRegion(x.ctx, phase)
 	started := time.Now()
 	x.mark("begin " + phase)
-	return func() { x.mark(fmt.Sprintf("end %s elapsed=%s", phase, time.Since(started))) }
+	return func() {
+		x.mark(fmt.Sprintf("end %s elapsed=%s", phase, time.Since(started)))
+		region.End()
+	}
 }
 
 func (x *testCompactTrace) wait(t *testing.T, s *Store, id conversations.ConversationID, version uint64) Snapshot {

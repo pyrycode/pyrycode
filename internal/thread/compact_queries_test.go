@@ -401,6 +401,7 @@ func TestCompactCapture(t *testing.T) {
 			type requestKey struct{}
 			s.lookup = func(ctx context.Context, id conversations.ConversationID, ids []uint64) ([]history.Entry, error) {
 				if ctx.Value(requestKey{}) != nil && first.CompareAndSwap(false, true) {
+					defer trace.begin("held-query")()
 					trace.mark("query held")
 					close(entered)
 					<-release
@@ -429,12 +430,15 @@ func TestCompactCapture(t *testing.T) {
 			trace.wait(t, s, testStoreA, 3)
 			if !strings.HasPrefix(outcome, "current-") {
 				finished := trace.begin("unload")
-				if e := s.Unload(testStoreA); e != nil {
+				e := s.Unload(testStoreA)
+				finished()
+				if e != nil {
 					t.Fatal(e)
 				}
+				finished = trace.begin("reload-admission")
+				e = s.Load(context.Background(), testStoreA)
 				finished()
-				trace.mark("reload admission")
-				if e := s.Load(context.Background(), testStoreA); e != nil {
+				if e != nil {
 					t.Fatal(e)
 				}
 			}
