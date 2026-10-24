@@ -13,20 +13,20 @@ import (
 )
 
 type testQueryCorrelationEvent struct {
-	Sequence       int            `json:"sequence"`
-	Stage          string         `json:"stage"`
-	Peer           string         `json:"peer"`
-	Inbox          string         `json:"inbox_generation"`
-	Conversation   string         `json:"conversation"`
-	Projection     string         `json:"projection"`
-	Query          uint64         `json:"query_id"`
-	Requested      uint64         `json:"requested_checkpoint"`
-	Selected       *uint64        `json:"selected_checkpoint"`
-	Completed      uint64         `json:"completed_checkpoint"`
-	QueryCurrent   bool           `json:"query_is_current"`
-	QueryCancelled bool           `json:"query_context_done"`
-	InboxRetired   bool           `json:"inbox_retired"`
-	Facts          map[string]any `json:"facts,omitempty"`
+	Sequence         int            `json:"sequence"`
+	Stage            string         `json:"stage"`
+	Peer             string         `json:"peer"`
+	Inbox            string         `json:"inbox_generation"`
+	Conversation     string         `json:"conversation"`
+	Projection       string         `json:"projection"`
+	Query            uint64         `json:"query_id"`
+	Requested        uint64         `json:"requested_checkpoint"`
+	Selected         *uint64        `json:"selected_checkpoint"`
+	Completed        uint64         `json:"completed_checkpoint"`
+	QueryCurrent     bool           `json:"query_is_current"`
+	QueryContextDone bool           `json:"query_context_done"`
+	InboxRetired     bool           `json:"inbox_retired"`
+	Facts            map[string]any `json:"facts,omitempty"`
 }
 
 func TestProducerQueryRefusalCorrelation(t *testing.T) {
@@ -58,9 +58,13 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 	var calls atomic.Int32
 	var p *testHostedPeer
 	usable := func(version, from uint64) thread.QueryResult {
+		content, revision := json.RawMessage(`{"text":"fixture"}`), uint64(2)
+		if version > 2 {
+			content, revision = json.RawMessage(`{"text":"fixturenew"}`), 3
+		}
 		return thread.QueryResult{State: thread.StateUsable, Epoch: "epoch", Version: version, FromVersion: from,
 			LowerOrder: 1, UpperOrder: 2, Continuation: 1,
-			Items: []thread.Item{{ID: 1, Kind: "assistant_message", Order: 1, Rev: 2, Content: json.RawMessage(`{"text":"fixture"}`)}},
+			Items: []thread.Item{{ID: 1, Kind: "assistant_message", Order: 1, Rev: revision, Content: content}},
 		}
 	}
 	p = testCatchUpPeer(t, func(ctx context.Context, request protocol.ThreadCatchUpPayload) (thread.QueryResult, error) {
@@ -110,6 +114,14 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 				if items.Final || len(items.Items) != 1 {
 					t.Fatal("missing data before final marker")
 				}
+				var content struct{ Text string }
+				expected, revision := "fixture", uint64(2)
+				if version > 2 {
+					expected, revision = "fixturenew", 3
+				}
+				if items.Items[0].ID != 1 || items.Items[0].Rev != revision || json.Unmarshal(items.Items[0].Content, &content) != nil || content.Text != expected {
+					t.Fatal("provider snapshot did not retain the expected live state")
+				}
 			} else {
 				if !items.Final || len(items.Items) != 0 {
 					t.Fatal("missing independent final marker")
@@ -136,7 +148,7 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 			t.Fatal("query peer, inbox generation, conversation or projection changed")
 		}
 		event := testQueryCorrelationEvent{Sequence: len(events) + 1, Stage: stage, Peer: "producer-1", Inbox: "inbox-1", Conversation: "conversation-1", Projection: "complete", Query: q.id, Requested: q.request.Version,
-			Completed: generation.threadJoins[catchUpConversation].version, QueryCurrent: generation.query == q, QueryCancelled: q.ctx.Err() != nil, InboxRetired: generation.retired, Facts: facts}
+			Completed: generation.threadJoins[catchUpConversation].version, QueryCurrent: generation.query == q, QueryContextDone: q.ctx.Err() != nil, InboxRetired: generation.retired, Facts: facts}
 		if q.captured != nil {
 			version := q.captured.version
 			event.Selected = &version
@@ -157,7 +169,7 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 	testHostedAwait(t, entered)
 	cancelled := <-queries
 	admitted := record("query_admitted", cancelled, nil)
-	if admitted.Query != 3 || !admitted.QueryCurrent || admitted.QueryCancelled || admitted.Selected != nil || admitted.Requested != 2 {
+	if admitted.Query != 3 || !admitted.QueryCurrent || admitted.QueryContextDone || admitted.Selected != nil || admitted.Requested != 2 {
 		t.Fatal("query was not held before selection")
 	}
 	testCatchUpLive(t, p, 237)
@@ -190,7 +202,7 @@ func TestProducerQueryRefusalCorrelation(t *testing.T) {
 		}
 	}
 	state := record("refusal_did_not_complete", cancelled, nil)
-	if !refusal || !live || !state.QueryCancelled || state.QueryCurrent || state.Selected != nil || state.Completed != 2 {
+	if !refusal || !live || !state.QueryContextDone || state.QueryCurrent || state.Selected != nil || state.Completed != 2 {
 		t.Fatal("refusal certified state or retained the query slot")
 	}
 	testCatchUpRequest(p, 4, 2)
