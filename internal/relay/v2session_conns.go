@@ -152,7 +152,7 @@ func (m *V2SessionManager) handleConnSnapshot(req snapshotReq) []ActiveConn {
 	eligible := conns[:0]
 	for _, conn := range conns {
 		s := m.sessions[conn.ConnID]
-		if s.thread && !m.liveWithheld(s, *req.threadConversation) && !m.pushRetired(conn.ConnID) {
+		if !m.threadConversationWithheld(s, *req.threadConversation) && !m.pushRetired(conn.ConnID) {
 			conn.View, conn.PendingView = m.threadViews(s, *req.threadConversation)
 			conn.ThreadCompact = s.threadCompact
 			eligible = append(eligible, conn)

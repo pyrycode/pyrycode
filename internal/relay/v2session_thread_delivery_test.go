@@ -492,14 +492,14 @@ func TestThreadDeliveryActiveCancellation(t *testing.T) {
 }
 
 func TestThreadDeliveryCapabilityGates(t *testing.T) {
-	for _, caps := range [][]string{{protocol.CapabilityThread}} {
-		p := testHostedStartCaps(t, &testAppDiscovery{}, caps, func(c *V2SessionConfig) {
+	for _, known := range []bool{false, true} {
+		p := testHostedStartCaps(t, &testAppDiscovery{}, []string{protocol.CapabilityThread}, func(c *V2SessionConfig) {
 			c.ThreadReady = func() bool { return true }
-			c.KnownConversation = func(string) bool { return true }
+			c.KnownConversation = func(string) bool { return known }
 		})
 		err := p.mgr.DeliverThread(t.Context(), p.conn, protocol.Envelope{Type: protocol.TypeThreadReset, Payload: json.RawMessage(`{"conversation_id":"known"}`)})
-		if !errors.Is(err, ErrThreadWithheld) {
-			t.Fatalf("capabilities %v: %v", caps, err)
+		if known && err != nil || !known && !errors.Is(err, ErrThreadWithheld) {
+			t.Fatalf("thread-only known=%t: %v", known, err)
 		}
 	}
 }
