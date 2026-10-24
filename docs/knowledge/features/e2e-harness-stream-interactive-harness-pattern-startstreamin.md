@@ -127,6 +127,16 @@ unrelated clears preserve it. Never fabricate a terminal from history or tag an
 unowned runtime envelope from source data. `TestConsumerIdleBeforeHistory` and
 `TestSourceDelayedPredecessorOpening` exercise consumers and delayed append.
 
+`SourceObserver.Next` can return an empty envelope with `ok=true` after joining
+retained idle with a later source end. Check `SourceObserver.Ended` after every
+successful poll. `idleEvictionTurnClosed` is shared by the idle-eviction E2E and
+`TestIdleEvictionTurnClosed`: source-first coverage passes even with a fresh
+`turn_state` filter, so the regression also forces idle first, appends the matching
+end on a later empty poll, and supplies no further live frame. The real observer
+rejects source-only, idle-only, foreign conversation/session idle and mismatched
+source turn ends. An observer-only test misses the consumer defect (#3852); see
+[controlled regression proof](development-verification-prove-that-tests-distinguish-the-change.md).
+
 A parked question or permission continuation keeps the original valid opening:
 `QuestionBoundary` excludes earlier prose while retaining that execution anchor.
 Starting a new-send window after the modal would hide the continuation. Keep
